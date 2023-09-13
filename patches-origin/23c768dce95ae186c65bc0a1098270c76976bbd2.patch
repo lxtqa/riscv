@@ -1,0 +1,97 @@
+From 23c768dce95ae186c65bc0a1098270c76976bbd2 Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Tue, 2 Nov 2021 09:55:57 +0800
+Subject: [PATCH] [riscv64][wasm] Execution budget based dynamic tiering
+
+Port commit 7a93bd647cc82e7c96c9dea244e725beb22a6737
+Port commit afd1554963d2bcb5de8adaf3a5bda10a8223bb07
+
+Change-Id: I7b5d59d448d210d80ee656d81c8134c780586296
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3256981
+Reviewed-by: ji qiu <qiuji@iscas.ac.cn>
+Commit-Queue: ji qiu <qiuji@iscas.ac.cn>
+Auto-Submit: Yahan Lu <yahan@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#77636}
+---
+ .../backend/riscv64/instruction-selector-riscv64.cc |  4 ++++
+ .../baseline/riscv64/liftoff-assembler-riscv64.h    | 13 +++++++++++--
+ 2 files changed, 15 insertions(+), 2 deletions(-)
+
+diff --git a/src/compiler/backend/riscv64/instruction-selector-riscv64.cc b/src/compiler/backend/riscv64/instruction-selector-riscv64.cc
+index 6fc64256ec..03f849827f 100644
+--- a/src/compiler/backend/riscv64/instruction-selector-riscv64.cc
++++ b/src/compiler/backend/riscv64/instruction-selector-riscv64.cc
+@@ -485,6 +485,7 @@ void InstructionSelector::VisitLoad(Node* node) {
+ #else
+                                                  // Fall through.
+ #endif
++    case MachineRepresentation::kCagedPointer:
+     case MachineRepresentation::kMapWord:  // Fall through.
+     case MachineRepresentation::kNone:
+       UNREACHABLE();
+@@ -564,6 +565,7 @@ void InstructionSelector::VisitStore(Node* node) {
+ #else
+         UNREACHABLE();
+ #endif
++      case MachineRepresentation::kCagedPointer:
+       case MachineRepresentation::kMapWord:            // Fall through.
+       case MachineRepresentation::kNone:
+         UNREACHABLE();
+@@ -1636,6 +1638,7 @@ void InstructionSelector::VisitUnalignedLoad(Node* node) {
+     case MachineRepresentation::kBit:                // Fall through.
+     case MachineRepresentation::kCompressedPointer:  // Fall through.
+     case MachineRepresentation::kCompressed:         // Fall through.
++    case MachineRepresentation::kCagedPointer:
+     case MachineRepresentation::kMapWord:            // Fall through.
+     case MachineRepresentation::kNone:
+       UNREACHABLE();
+@@ -1690,6 +1693,7 @@ void InstructionSelector::VisitUnalignedStore(Node* node) {
+     case MachineRepresentation::kBit:                // Fall through.
+     case MachineRepresentation::kCompressedPointer:  // Fall through.
+     case MachineRepresentation::kCompressed:         // Fall through.
++    case MachineRepresentation::kCagedPointer:
+     case MachineRepresentation::kMapWord:            // Fall through.
+     case MachineRepresentation::kNone:
+       UNREACHABLE();
+diff --git a/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h b/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
+index 4ce38df037..0b47e8535f 100644
+--- a/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
++++ b/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
+@@ -58,9 +58,10 @@ inline constexpr Condition ToCondition(LiftoffCondition liftoff_cond) {
+ //  -1   | 0xa: WASM          |
+ //  -2   |     instance       |
+ //  -3   |     feedback vector|
++//  -4   |     tiering budget |
+ //  -----+--------------------+---------------------------
+-//  -4   |     slot 0         |   ^
+-//  -5   |     slot 1         |   |
++//  -5   |     slot 0         |   ^
++//  -6   |     slot 1         |   |
+ //       |                    | Frame slots
+ //       |                    |   |
+ //       |                    |   v
+@@ -71,6 +72,7 @@ inline constexpr Condition ToCondition(LiftoffCondition liftoff_cond) {
+ // fp-8 holds the stack marker, fp-16 is the instance parameter.
+ constexpr int kInstanceOffset = 2 * kSystemPointerSize;
+ constexpr int kFeedbackVectorOffset = 3 * kSystemPointerSize;
++constexpr int kTierupBudgetOffset = 4 * kSystemPointerSize;
+ 
+ inline MemOperand GetStackSlot(int offset) { return MemOperand(fp, -offset); }
+ 
+@@ -1605,6 +1607,13 @@ void LiftoffAssembler::emit_i32_cond_jumpi(LiftoffCondition liftoff_cond,
+   TurboAssembler::Branch(label, cond, lhs, Operand(imm));
+ }
+ 
++void LiftoffAssembler::emit_i32_subi_jump_negative(Register value,
++                                                   int subtrahend,
++                                                   Label* result_negative) {
++  Sub64(value, value, Operand(subtrahend));
++  TurboAssembler::Branch(result_negative, lt, value, Operand(zero_reg));
++}
++
+ void LiftoffAssembler::emit_i32_eqz(Register dst, Register src) {
+   TurboAssembler::Sltu(dst, src, 1);
+ }
+-- 
+2.35.1
+

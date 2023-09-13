@@ -1,0 +1,420 @@
+From 5348e9b155e4766809d8a700aacdfda86331eb1f Mon Sep 17 00:00:00 2001
+From: Andreas Haas <ahaas@chromium.org>
+Date: Tue, 16 Feb 2021 15:08:08 +0100
+Subject: [PATCH] [cleanup] Remove dead parameter in DefineSafepoint
+
+Bug: v8:11384
+Change-Id: I08bf27af977e94e6d441a83a62cae49eeaf856e8
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/2697198
+Reviewed-by: Georg Neis <neis@chromium.org>
+Commit-Queue: Andreas Haas <ahaas@chromium.org>
+Cr-Commit-Position: refs/heads/master@{#72776}
+---
+ src/codegen/safepoint-table.cc                         | 3 +--
+ src/codegen/safepoint-table.h                          | 4 +---
+ src/compiler/backend/arm/code-generator-arm.cc         | 6 +++---
+ src/compiler/backend/arm64/code-generator-arm64.cc     | 6 +++---
+ src/compiler/backend/code-generator.cc                 | 9 +++------
+ src/compiler/backend/code-generator.h                  | 3 +--
+ src/compiler/backend/ia32/code-generator-ia32.cc       | 6 +++---
+ src/compiler/backend/mips/code-generator-mips.cc       | 6 +++---
+ src/compiler/backend/mips64/code-generator-mips64.cc   | 6 +++---
+ src/compiler/backend/ppc/code-generator-ppc.cc         | 6 +++---
+ src/compiler/backend/riscv64/code-generator-riscv64.cc | 6 +++---
+ src/compiler/backend/s390/code-generator-s390.cc       | 6 +++---
+ src/compiler/backend/x64/code-generator-x64.cc         | 6 +++---
+ src/wasm/baseline/liftoff-compiler.cc                  | 8 +++-----
+ 14 files changed, 36 insertions(+), 45 deletions(-)
+
+diff --git a/src/codegen/safepoint-table.cc b/src/codegen/safepoint-table.cc
+index 644931e0ea..dd379e0535 100644
+--- a/src/codegen/safepoint-table.cc
++++ b/src/codegen/safepoint-table.cc
+@@ -88,8 +88,7 @@ void SafepointTable::PrintBits(std::ostream& os,  // NOLINT
+   }
+ }
+ 
+-Safepoint SafepointTableBuilder::DefineSafepoint(
+-    Assembler* assembler, Safepoint::DeoptMode deopt_mode) {
++Safepoint SafepointTableBuilder::DefineSafepoint(Assembler* assembler) {
+   deoptimization_info_.push_back(
+       DeoptimizationInfo(zone_, assembler->pc_offset_for_safepoint()));
+   DeoptimizationInfo& new_info = deoptimization_info_.back();
+diff --git a/src/codegen/safepoint-table.h b/src/codegen/safepoint-table.h
+index a7046b6477..9efdbfa784 100644
+--- a/src/codegen/safepoint-table.h
++++ b/src/codegen/safepoint-table.h
+@@ -168,8 +168,6 @@ class SafepointTable {
+ 
+ class Safepoint {
+  public:
+-  enum DeoptMode { kNoLazyDeopt, kLazyDeopt };
+-
+   static const int kNoDeoptimizationIndex = SafepointEntry::kNoDeoptIndex;
+ 
+   void DefinePointerSlot(int index) { indexes_->push_back(index); }
+@@ -195,7 +193,7 @@ class SafepointTableBuilder {
+   unsigned GetCodeOffset() const;
+ 
+   // Define a new safepoint for the current position in the body.
+-  Safepoint DefineSafepoint(Assembler* assembler, Safepoint::DeoptMode mode);
++  Safepoint DefineSafepoint(Assembler* assembler);
+ 
+   // Emit the safepoint table after the body. The number of bits per
+   // entry must be enough to hold all the pointer indexes.
+diff --git a/src/compiler/backend/arm/code-generator-arm.cc b/src/compiler/backend/arm/code-generator-arm.cc
+index 1ed294ea3f..435418f791 100644
+--- a/src/compiler/backend/arm/code-generator-arm.cc
++++ b/src/compiler/backend/arm/code-generator-arm.cc
+@@ -869,7 +869,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+         __ CallCFunction(func, num_parameters);
+       }
+       if (linkage()->GetIncomingDescriptor()->IsWasmCapiFunction()) {
+-        RecordSafepoint(instr->reference_map(), Safepoint::kNoLazyDeopt);
++        RecordSafepoint(instr->reference_map());
+       }
+       frame_access_state()->SetFrameAccessToDefault();
+       // Ideally, we should decrement SP delta to match the change of stack
+@@ -3686,7 +3686,7 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
+         __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
+         ReferenceMap* reference_map =
+             gen_->zone()->New<ReferenceMap>(gen_->zone());
+-        gen_->RecordSafepoint(reference_map, Safepoint::kNoLazyDeopt);
++        gen_->RecordSafepoint(reference_map);
+         if (FLAG_debug_code) {
+           __ stop();
+         }
+@@ -3853,7 +3853,7 @@ void CodeGenerator::AssembleConstructFrame() {
+       __ Call(wasm::WasmCode::kWasmStackOverflow, RelocInfo::WASM_STUB_CALL);
+       // We come from WebAssembly, there are no references for the GC.
+       ReferenceMap* reference_map = zone()->New<ReferenceMap>(zone());
+-      RecordSafepoint(reference_map, Safepoint::kNoLazyDeopt);
++      RecordSafepoint(reference_map);
+       if (FLAG_debug_code) {
+         __ stop();
+       }
+diff --git a/src/compiler/backend/arm64/code-generator-arm64.cc b/src/compiler/backend/arm64/code-generator-arm64.cc
+index 3286f5c32a..64667a34b6 100644
+--- a/src/compiler/backend/arm64/code-generator-arm64.cc
++++ b/src/compiler/backend/arm64/code-generator-arm64.cc
+@@ -412,7 +412,7 @@ class WasmOutOfLineTrap : public OutOfLineCode {
+       __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
+       ReferenceMap* reference_map =
+           gen_->zone()->New<ReferenceMap>(gen_->zone());
+-      gen_->RecordSafepoint(reference_map, Safepoint::kNoLazyDeopt);
++      gen_->RecordSafepoint(reference_map);
+       __ AssertUnreachable(AbortReason::kUnexpectedReturnFromWasmTrap);
+     }
+   }
+@@ -881,7 +881,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       }
+       __ Bind(&return_location);
+       if (linkage()->GetIncomingDescriptor()->IsWasmCapiFunction()) {
+-        RecordSafepoint(instr->reference_map(), Safepoint::kNoLazyDeopt);
++        RecordSafepoint(instr->reference_map());
+       }
+       frame_access_state()->SetFrameAccessToDefault();
+       // Ideally, we should decrement SP delta to match the change of stack
+@@ -3161,7 +3161,7 @@ void CodeGenerator::AssembleConstructFrame() {
+       __ Call(wasm::WasmCode::kWasmStackOverflow, RelocInfo::WASM_STUB_CALL);
+       // We come from WebAssembly, there are no references for the GC.
+       ReferenceMap* reference_map = zone()->New<ReferenceMap>(zone());
+-      RecordSafepoint(reference_map, Safepoint::kNoLazyDeopt);
++      RecordSafepoint(reference_map);
+       if (FLAG_debug_code) {
+         __ Brk(0);
+       }
+diff --git a/src/compiler/backend/code-generator.cc b/src/compiler/backend/code-generator.cc
+index b68aec7772..e9a39f74a9 100644
+--- a/src/compiler/backend/code-generator.cc
++++ b/src/compiler/backend/code-generator.cc
+@@ -606,9 +606,8 @@ bool CodeGenerator::IsNextInAssemblyOrder(RpoNumber block) const {
+       .IsNext(instructions()->InstructionBlockAt(block)->ao_number());
+ }
+ 
+-void CodeGenerator::RecordSafepoint(ReferenceMap* references,
+-                                    Safepoint::DeoptMode deopt_mode) {
+-  Safepoint safepoint = safepoints()->DefineSafepoint(tasm(), deopt_mode);
++void CodeGenerator::RecordSafepoint(ReferenceMap* references) {
++  Safepoint safepoint = safepoints()->DefineSafepoint(tasm());
+   int frame_header_offset = frame()->GetFixedSlotCount();
+   for (const InstructionOperand& operand : references->reference_operands()) {
+     if (operand.IsStackSlot()) {
+@@ -1051,9 +1050,7 @@ Label* CodeGenerator::AddJumpTable(Label** targets, size_t target_count) {
+ void CodeGenerator::RecordCallPosition(Instruction* instr) {
+   const bool needs_frame_state =
+       instr->HasCallDescriptorFlag(CallDescriptor::kNeedsFrameState);
+-  RecordSafepoint(instr->reference_map(), needs_frame_state
+-                                              ? Safepoint::kLazyDeopt
+-                                              : Safepoint::kNoLazyDeopt);
++  RecordSafepoint(instr->reference_map());
+ 
+   if (instr->HasCallDescriptorFlag(CallDescriptor::kHasExceptionHandler)) {
+     InstructionOperandConverter i(this, instr);
+diff --git a/src/compiler/backend/code-generator.h b/src/compiler/backend/code-generator.h
+index 965fbd8296..7cead5dbde 100644
+--- a/src/compiler/backend/code-generator.h
++++ b/src/compiler/backend/code-generator.h
+@@ -160,8 +160,7 @@ class V8_EXPORT_PRIVATE CodeGenerator final : public GapResolver::Assembler {
+   void AssembleSourcePosition(SourcePosition source_position);
+ 
+   // Record a safepoint with the given pointer map.
+-  void RecordSafepoint(ReferenceMap* references,
+-                       Safepoint::DeoptMode deopt_mode);
++  void RecordSafepoint(ReferenceMap* references);
+ 
+   Zone* zone() const { return zone_; }
+   TurboAssembler* tasm() { return &tasm_; }
+diff --git a/src/compiler/backend/ia32/code-generator-ia32.cc b/src/compiler/backend/ia32/code-generator-ia32.cc
+index d891a5298f..2160a72914 100644
+--- a/src/compiler/backend/ia32/code-generator-ia32.cc
++++ b/src/compiler/backend/ia32/code-generator-ia32.cc
+@@ -883,7 +883,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       }
+       __ bind(&return_location);
+       if (linkage()->GetIncomingDescriptor()->IsWasmCapiFunction()) {
+-        RecordSafepoint(instr->reference_map(), Safepoint::kNoLazyDeopt);
++        RecordSafepoint(instr->reference_map());
+       }
+       frame_access_state()->SetFrameAccessToDefault();
+       // Ideally, we should decrement SP delta to match the change of stack
+@@ -4616,7 +4616,7 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
+         __ wasm_call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
+         ReferenceMap* reference_map =
+             gen_->zone()->New<ReferenceMap>(gen_->zone());
+-        gen_->RecordSafepoint(reference_map, Safepoint::kNoLazyDeopt);
++        gen_->RecordSafepoint(reference_map);
+         __ AssertUnreachable(AbortReason::kUnexpectedReturnFromWasmTrap);
+       }
+     }
+@@ -4923,7 +4923,7 @@ void CodeGenerator::AssembleConstructFrame() {
+       __ wasm_call(wasm::WasmCode::kWasmStackOverflow,
+                    RelocInfo::WASM_STUB_CALL);
+       ReferenceMap* reference_map = zone()->New<ReferenceMap>(zone());
+-      RecordSafepoint(reference_map, Safepoint::kNoLazyDeopt);
++      RecordSafepoint(reference_map);
+       __ AssertUnreachable(AbortReason::kUnexpectedReturnFromWasmTrap);
+       __ bind(&done);
+     }
+diff --git a/src/compiler/backend/mips/code-generator-mips.cc b/src/compiler/backend/mips/code-generator-mips.cc
+index a8a34dfa3b..2415641957 100644
+--- a/src/compiler/backend/mips/code-generator-mips.cc
++++ b/src/compiler/backend/mips/code-generator-mips.cc
+@@ -790,7 +790,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       }
+       if (isWasmCapiFunction) {
+         CHECK_EQ(offset, __ SizeOfCodeGeneratedSince(&start_call));
+-        RecordSafepoint(instr->reference_map(), Safepoint::kNoLazyDeopt);
++        RecordSafepoint(instr->reference_map());
+       }
+ 
+       frame_access_state()->SetFrameAccessToDefault();
+@@ -3773,7 +3773,7 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
+         __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
+         ReferenceMap* reference_map =
+             gen_->zone()->New<ReferenceMap>(gen_->zone());
+-        gen_->RecordSafepoint(reference_map, Safepoint::kNoLazyDeopt);
++        gen_->RecordSafepoint(reference_map);
+         if (FLAG_debug_code) {
+           __ stop();
+         }
+@@ -4063,7 +4063,7 @@ void CodeGenerator::AssembleConstructFrame() {
+       __ Call(wasm::WasmCode::kWasmStackOverflow, RelocInfo::WASM_STUB_CALL);
+       // We come from WebAssembly, there are no references for the GC.
+       ReferenceMap* reference_map = zone()->New<ReferenceMap>(zone());
+-      RecordSafepoint(reference_map, Safepoint::kNoLazyDeopt);
++      RecordSafepoint(reference_map);
+       if (FLAG_debug_code) {
+         __ stop();
+       }
+diff --git a/src/compiler/backend/mips64/code-generator-mips64.cc b/src/compiler/backend/mips64/code-generator-mips64.cc
+index d3e1c368ca..516a18cfa6 100644
+--- a/src/compiler/backend/mips64/code-generator-mips64.cc
++++ b/src/compiler/backend/mips64/code-generator-mips64.cc
+@@ -755,7 +755,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       }
+       if (isWasmCapiFunction) {
+         CHECK_EQ(offset, __ SizeOfCodeGeneratedSince(&start_call));
+-        RecordSafepoint(instr->reference_map(), Safepoint::kNoLazyDeopt);
++        RecordSafepoint(instr->reference_map());
+       }
+ 
+       frame_access_state()->SetFrameAccessToDefault();
+@@ -4011,7 +4011,7 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
+         __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
+         ReferenceMap* reference_map =
+             gen_->zone()->New<ReferenceMap>(gen_->zone());
+-        gen_->RecordSafepoint(reference_map, Safepoint::kNoLazyDeopt);
++        gen_->RecordSafepoint(reference_map);
+         if (FLAG_debug_code) {
+           __ stop();
+         }
+@@ -4313,7 +4313,7 @@ void CodeGenerator::AssembleConstructFrame() {
+       __ Call(wasm::WasmCode::kWasmStackOverflow, RelocInfo::WASM_STUB_CALL);
+       // We come from WebAssembly, there are no references for the GC.
+       ReferenceMap* reference_map = zone()->New<ReferenceMap>(zone());
+-      RecordSafepoint(reference_map, Safepoint::kNoLazyDeopt);
++      RecordSafepoint(reference_map);
+       if (FLAG_debug_code) {
+         __ stop();
+       }
+diff --git a/src/compiler/backend/ppc/code-generator-ppc.cc b/src/compiler/backend/ppc/code-generator-ppc.cc
+index 84756a715a..4e5393bd22 100644
+--- a/src/compiler/backend/ppc/code-generator-ppc.cc
++++ b/src/compiler/backend/ppc/code-generator-ppc.cc
+@@ -1045,7 +1045,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       // f5ab7d3.
+       if (isWasmCapiFunction) {
+         CHECK_EQ(offset, __ SizeOfCodeGeneratedSince(&start_call));
+-        RecordSafepoint(instr->reference_map(), Safepoint::kNoLazyDeopt);
++        RecordSafepoint(instr->reference_map());
+       }
+       frame_access_state()->SetFrameAccessToDefault();
+       // Ideally, we should decrement SP delta to match the change of stack
+@@ -3861,7 +3861,7 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
+         __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
+         ReferenceMap* reference_map =
+             gen_->zone()->New<ReferenceMap>(gen_->zone());
+-        gen_->RecordSafepoint(reference_map, Safepoint::kNoLazyDeopt);
++        gen_->RecordSafepoint(reference_map);
+         if (FLAG_debug_code) {
+           __ stop();
+         }
+@@ -4101,7 +4101,7 @@ void CodeGenerator::AssembleConstructFrame() {
+       __ Call(wasm::WasmCode::kWasmStackOverflow, RelocInfo::WASM_STUB_CALL);
+       // We come from WebAssembly, there are no references for the GC.
+       ReferenceMap* reference_map = zone()->New<ReferenceMap>(zone());
+-      RecordSafepoint(reference_map, Safepoint::kNoLazyDeopt);
++      RecordSafepoint(reference_map);
+       if (FLAG_debug_code) {
+         __ stop();
+       }
+diff --git a/src/compiler/backend/riscv64/code-generator-riscv64.cc b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+index d6320b350d..cc83f22c65 100644
+--- a/src/compiler/backend/riscv64/code-generator-riscv64.cc
++++ b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+@@ -721,7 +721,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       }
+       __ bind(&after_call);
+       if (isWasmCapiFunction) {
+-        RecordSafepoint(instr->reference_map(), Safepoint::kNoLazyDeopt);
++        RecordSafepoint(instr->reference_map());
+       }
+ 
+       frame_access_state()->SetFrameAccessToDefault();
+@@ -2087,7 +2087,7 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
+         __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
+         ReferenceMap* reference_map =
+             gen_->zone()->New<ReferenceMap>(gen_->zone());
+-        gen_->RecordSafepoint(reference_map, Safepoint::kNoLazyDeopt);
++        gen_->RecordSafepoint(reference_map);
+         if (FLAG_debug_code) {
+           __ stop();
+         }
+@@ -2382,7 +2382,7 @@ void CodeGenerator::AssembleConstructFrame() {
+       __ Call(wasm::WasmCode::kWasmStackOverflow, RelocInfo::WASM_STUB_CALL);
+       // We come from WebAssembly, there are no references for the GC.
+       ReferenceMap* reference_map = zone()->New<ReferenceMap>(zone());
+-      RecordSafepoint(reference_map, Safepoint::kNoLazyDeopt);
++      RecordSafepoint(reference_map);
+       if (FLAG_debug_code) {
+         __ stop();
+       }
+diff --git a/src/compiler/backend/s390/code-generator-s390.cc b/src/compiler/backend/s390/code-generator-s390.cc
+index 08c1710249..fdc8a5f7a9 100644
+--- a/src/compiler/backend/s390/code-generator-s390.cc
++++ b/src/compiler/backend/s390/code-generator-s390.cc
+@@ -1327,7 +1327,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       }
+       __ bind(&return_location);
+       if (linkage()->GetIncomingDescriptor()->IsWasmCapiFunction()) {
+-        RecordSafepoint(instr->reference_map(), Safepoint::kNoLazyDeopt);
++        RecordSafepoint(instr->reference_map());
+       }
+       frame_access_state()->SetFrameAccessToDefault();
+       // Ideally, we should decrement SP delta to match the change of stack
+@@ -4230,7 +4230,7 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
+         __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
+         ReferenceMap* reference_map =
+             gen_->zone()->New<ReferenceMap>(gen_->zone());
+-        gen_->RecordSafepoint(reference_map, Safepoint::kNoLazyDeopt);
++        gen_->RecordSafepoint(reference_map);
+         if (FLAG_debug_code) {
+           __ stop();
+         }
+@@ -4430,7 +4430,7 @@ void CodeGenerator::AssembleConstructFrame() {
+       __ Call(wasm::WasmCode::kWasmStackOverflow, RelocInfo::WASM_STUB_CALL);
+       // We come from WebAssembly, there are no references for the GC.
+       ReferenceMap* reference_map = zone()->New<ReferenceMap>(zone());
+-      RecordSafepoint(reference_map, Safepoint::kNoLazyDeopt);
++      RecordSafepoint(reference_map);
+       if (FLAG_debug_code) {
+         __ stop();
+       }
+diff --git a/src/compiler/backend/x64/code-generator-x64.cc b/src/compiler/backend/x64/code-generator-x64.cc
+index d16404dcb2..d321652515 100644
+--- a/src/compiler/backend/x64/code-generator-x64.cc
++++ b/src/compiler/backend/x64/code-generator-x64.cc
+@@ -340,7 +340,7 @@ class WasmOutOfLineTrap : public OutOfLineCode {
+       __ near_call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
+       ReferenceMap* reference_map =
+           gen_->zone()->New<ReferenceMap>(gen_->zone());
+-      gen_->RecordSafepoint(reference_map, Safepoint::kNoLazyDeopt);
++      gen_->RecordSafepoint(reference_map);
+       __ AssertUnreachable(AbortReason::kUnexpectedReturnFromWasmTrap);
+     }
+   }
+@@ -1028,7 +1028,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       }
+       __ bind(&return_location);
+       if (linkage()->GetIncomingDescriptor()->IsWasmCapiFunction()) {
+-        RecordSafepoint(instr->reference_map(), Safepoint::kNoLazyDeopt);
++        RecordSafepoint(instr->reference_map());
+       }
+       frame_access_state()->SetFrameAccessToDefault();
+       // Ideally, we should decrement SP delta to match the change of stack
+@@ -4756,7 +4756,7 @@ void CodeGenerator::AssembleConstructFrame() {
+       __ near_call(wasm::WasmCode::kWasmStackOverflow,
+                    RelocInfo::WASM_STUB_CALL);
+       ReferenceMap* reference_map = zone()->New<ReferenceMap>(zone());
+-      RecordSafepoint(reference_map, Safepoint::kNoLazyDeopt);
++      RecordSafepoint(reference_map);
+       __ AssertUnreachable(AbortReason::kUnexpectedReturnFromWasmTrap);
+       __ bind(&done);
+     }
+diff --git a/src/wasm/baseline/liftoff-compiler.cc b/src/wasm/baseline/liftoff-compiler.cc
+index 62dc3bab62..de91fa8d57 100644
+--- a/src/wasm/baseline/liftoff-compiler.cc
++++ b/src/wasm/baseline/liftoff-compiler.cc
+@@ -870,8 +870,7 @@ class LiftoffCompiler {
+     source_position_table_builder_.AddPosition(
+         __ pc_offset(), SourcePosition(ool->position), true);
+     __ CallRuntimeStub(ool->stub);
+-    Safepoint safepoint = safepoint_table_builder_.DefineSafepoint(
+-        &asm_, Safepoint::kNoLazyDeopt);
++    Safepoint safepoint = safepoint_table_builder_.DefineSafepoint(&asm_);
+ 
+     if (ool->safepoint_info) {
+       for (auto index : ool->safepoint_info->slots) {
+@@ -1019,7 +1018,7 @@ class LiftoffCompiler {
+         __ pc_offset(), SourcePosition(decoder->position()), true);
+     __ CallRuntimeStub(WasmCode::kWasmDebugBreak);
+     // TODO(ahaas): Define a proper safepoint here.
+-    safepoint_table_builder_.DefineSafepoint(&asm_, Safepoint::kNoLazyDeopt);
++    safepoint_table_builder_.DefineSafepoint(&asm_);
+     RegisterDebugSideTableEntry(DebugSideTableBuilder::kAllowRegisters);
+   }
+ 
+@@ -5369,8 +5368,7 @@ class LiftoffCompiler {
+   }
+ 
+   void DefineSafepoint() {
+-    Safepoint safepoint = safepoint_table_builder_.DefineSafepoint(
+-        &asm_, Safepoint::kNoLazyDeopt);
++    Safepoint safepoint = safepoint_table_builder_.DefineSafepoint(&asm_);
+     __ cache_state()->DefineSafepoint(safepoint);
+   }
+ 
+-- 
+2.35.1
+

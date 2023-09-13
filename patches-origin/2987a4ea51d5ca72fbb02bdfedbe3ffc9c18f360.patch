@@ -1,0 +1,57 @@
+From 2987a4ea51d5ca72fbb02bdfedbe3ffc9c18f360 Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Fri, 9 Sep 2022 10:55:42 +0800
+Subject: [PATCH] [riscv] Port [log][compiler] Enable first-execution logging
+
+Port commit b257641833f41bf41ae514bd5d09533ea8e376c1
+
+
+Bug: v8:13146
+Change-Id: Ie3727e873614f6e3e0749cb8cc10b287cd9643c2
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3885380
+Reviewed-by: ji qiu <qiuji@iscas.ac.cn>
+Commit-Queue: Yahan Lu <yahan@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#83120}
+---
+ src/codegen/riscv/macro-assembler-riscv.cc | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/src/codegen/riscv/macro-assembler-riscv.cc b/src/codegen/riscv/macro-assembler-riscv.cc
+index b403b8eb9c..4f4b443c51 100644
+--- a/src/codegen/riscv/macro-assembler-riscv.cc
++++ b/src/codegen/riscv/macro-assembler-riscv.cc
+@@ -213,18 +213,29 @@ void MacroAssembler::MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
+   DCHECK(!AreAliased(flags, feedback_vector));
+   UseScratchRegisterScope temps(this);
+   temps.Include(t0, t1);
+-  Label maybe_has_optimized_code;
++  Label maybe_has_optimized_code, maybe_needs_logging;
+   // Check if optimized code is available.
+   {
+     UseScratchRegisterScope temps(this);
+     Register scratch = temps.Acquire();
+     And(scratch, flags,
+         Operand(FeedbackVector::kFlagsTieringStateIsAnyRequested));
+-    Branch(&maybe_has_optimized_code, eq, scratch, Operand(zero_reg),
++    Branch(&maybe_needs_logging, eq, scratch, Operand(zero_reg),
+            Label::Distance::kNear);
+   }
+   GenerateTailCallToReturnedCode(Runtime::kCompileOptimized);
+ 
++  bind(&maybe_needs_logging);
++  {
++    UseScratchRegisterScope temps(this);
++    Register scratch = temps.Acquire();
++    And(scratch, flags, Operand(FeedbackVector::LogNextExecutionBit::kMask));
++    Branch(&maybe_has_optimized_code, eq, scratch, Operand(zero_reg),
++           Label::Distance::kNear);
++  }
++
++  GenerateTailCallToReturnedCode(Runtime::kFunctionLogNextExecution);
++
+   bind(&maybe_has_optimized_code);
+   Register optimized_code_entry = flags;
+   LoadAnyTaggedField(
+-- 
+2.35.1
+

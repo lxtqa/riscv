@@ -1,0 +1,2042 @@
+From 0aff573bbc43e525f17285decd5e6380e5551cb3 Mon Sep 17 00:00:00 2001
+From: Igor Sheludko <ishell@chromium.org>
+Date: Thu, 17 May 2018 13:56:28 +0200
+Subject: [PATCH] [csa] Typify Smi arithmetic and comparison operations.
+
+Bug: v8:7754
+Change-Id: Id22020984e10bd2ddb22119c50b490419c897174
+Reviewed-on: https://chromium-review.googlesource.com/1062272
+Reviewed-by: Leszek Swirski <leszeks@chromium.org>
+Reviewed-by: Jakob Gruber <jgruber@chromium.org>
+Commit-Queue: Igor Sheludko <ishell@chromium.org>
+Cr-Commit-Position: refs/heads/master@{#53232}
+---
+ src/builtins/builtins-array-gen.cc           |  69 +++++-----
+ src/builtins/builtins-async-function-gen.cc  |   6 +-
+ src/builtins/builtins-async-generator-gen.cc |  29 ++--
+ src/builtins/builtins-collections-gen.cc     |  42 +++---
+ src/builtins/builtins-generator-gen.cc       |  12 +-
+ src/builtins/builtins-math-gen.cc            |  10 +-
+ src/builtins/builtins-number-gen.cc          |  10 +-
+ src/builtins/builtins-promise-gen.cc         |  43 +++---
+ src/builtins/builtins-promise-gen.h          |   2 +-
+ src/builtins/builtins-proxy-gen.cc           |   2 +-
+ src/builtins/builtins-regexp-gen.cc          | 135 +++++++++----------
+ src/builtins/builtins-regexp-gen.h           |   3 +-
+ src/builtins/builtins-string-gen.cc          |  95 ++++++-------
+ src/builtins/builtins-string-gen.h           |   4 +-
+ src/builtins/builtins-typed-array-gen.cc     |  16 ++-
+ src/code-stub-assembler.cc                   | 110 ++++++++-------
+ src/code-stub-assembler.h                    |  38 +++---
+ src/code-stubs.cc                            |   4 +-
+ src/ic/accessor-assembler.cc                 |   2 +-
+ src/ic/binary-op-assembler.cc                |   6 +-
+ src/interpreter/interpreter-generator.cc     |  69 +++++-----
+ test/cctest/test-code-stub-assembler.cc      |   9 +-
+ 22 files changed, 367 insertions(+), 349 deletions(-)
+
+diff --git a/src/builtins/builtins-array-gen.cc b/src/builtins/builtins-array-gen.cc
+index bdee41665e..7cd360281a 100644
+--- a/src/builtins/builtins-array-gen.cc
++++ b/src/builtins/builtins-array-gen.cc
+@@ -150,7 +150,7 @@ Node* ArrayBuiltinsAssembler::FindProcessor(Node* k_value, Node* k) {
+ 
+       BIND(&fast);
+       {
+-        GotoIf(SmiNotEqual(LoadJSArrayLength(a()), to_.value()), &runtime);
++        GotoIf(WordNotEqual(LoadJSArrayLength(a()), to_.value()), &runtime);
+         kind = EnsureArrayPushable(LoadMap(a()), &runtime);
+         GotoIf(IsElementsKindGreaterThan(kind, HOLEY_SMI_ELEMENTS),
+                &object_push_pre);
+@@ -211,9 +211,10 @@ Node* ArrayBuiltinsAssembler::FindProcessor(Node* k_value, Node* k) {
+         context(), original_array, length, method_name);
+     // In the Spec and our current implementation, the length check is already
+     // performed in TypedArraySpeciesCreate.
+-    CSA_ASSERT(this,
+-               SmiLessThanOrEqual(
+-                   len_, LoadObjectField(a, JSTypedArray::kLengthOffset)));
++    CSA_ASSERT(
++        this,
++        SmiLessThanOrEqual(
++            CAST(len_), CAST(LoadObjectField(a, JSTypedArray::kLengthOffset))));
+     fast_typed_array_target_ =
+         Word32Equal(LoadInstanceType(LoadElements(original_array)),
+                     LoadInstanceType(LoadElements(a)));
+@@ -706,7 +707,8 @@ Node* ArrayBuiltinsAssembler::FindProcessor(Node* k_value, Node* k) {
+           TNode<JSArray> o_array = CAST(o());
+           // Check if o's length has changed during the callback and if the
+           // index is now out of range of the new length.
+-          GotoIf(SmiGreaterThanOrEqual(k_.value(), LoadJSArrayLength(o_array)),
++          GotoIf(SmiGreaterThanOrEqual(CAST(k_.value()),
++                                       CAST(LoadJSArrayLength(o_array))),
+                  array_changed);
+ 
+           // Re-load the elements array. If may have been resized.
+@@ -868,8 +870,9 @@ Node* ArrayBuiltinsAssembler::FindProcessor(Node* k_value, Node* k) {
+     GotoIf(WordEqual(value, protector_invalid), &runtime);
+ 
+     GotoIfNot(TaggedIsPositiveSmi(len), &runtime);
+-    GotoIf(SmiAbove(len, SmiConstant(JSArray::kInitialMaxFastElementArray)),
+-           &runtime);
++    GotoIf(
++        SmiAbove(CAST(len), SmiConstant(JSArray::kInitialMaxFastElementArray)),
++        &runtime);
+ 
+     // We need to be conservative and start with holey because the builtins
+     // that create output arrays aren't guaranteed to be called for every
+@@ -1163,9 +1166,9 @@ class ArrayPrototypeSliceCodeStubAssembler : public CodeStubAssembler {
+     // Make sure that the length hasn't been changed by side-effect.
+     Node* array_length = LoadJSArrayLength(array);
+     GotoIf(TaggedIsNotSmi(array_length), slow);
+-    GotoIf(SmiAbove(SmiAdd(from, count), array_length), slow);
++    GotoIf(SmiAbove(SmiAdd(CAST(from), CAST(count)), CAST(array_length)), slow);
+ 
+-    CSA_ASSERT(this, SmiGreaterThanOrEqual(from, SmiConstant(0)));
++    CSA_ASSERT(this, SmiGreaterThanOrEqual(CAST(from), SmiConstant(0)));
+ 
+     result.Bind(CallStub(CodeFactory::ExtractFastJSArray(isolate()), context,
+                          array, from, count));
+@@ -1179,8 +1182,9 @@ class ArrayPrototypeSliceCodeStubAssembler : public CodeStubAssembler {
+     GotoIf(WordNotEqual(map, fast_aliasted_arguments_map), &try_simple_slice);
+ 
+     Node* sloppy_elements = LoadElements(array);
+-    Node* sloppy_elements_length = LoadFixedArrayBaseLength(sloppy_elements);
+-    Node* parameter_map_length =
++    TNode<Smi> sloppy_elements_length =
++        LoadFixedArrayBaseLength(sloppy_elements);
++    TNode<Smi> parameter_map_length =
+         SmiSub(sloppy_elements_length,
+                SmiConstant(SloppyArgumentsElements::kParameterMapStart));
+     VARIABLE(index_out, MachineType::PointerRepresentation());
+@@ -1189,16 +1193,16 @@ class ArrayPrototypeSliceCodeStubAssembler : public CodeStubAssembler {
+         (kMaxRegularHeapObjectSize - FixedArray::kHeaderSize - JSArray::kSize -
+          AllocationMemento::kSize) /
+         kPointerSize;
+-    GotoIf(SmiAboveOrEqual(count, SmiConstant(max_fast_elements)),
++    GotoIf(SmiAboveOrEqual(CAST(count), SmiConstant(max_fast_elements)),
+            &try_simple_slice);
+ 
+-    GotoIf(SmiLessThan(from, SmiConstant(0)), slow);
++    GotoIf(SmiLessThan(CAST(from), SmiConstant(0)), slow);
+ 
+-    Node* end = SmiAdd(from, count);
++    TNode<Smi> end = SmiAdd(CAST(from), CAST(count));
+ 
+     Node* unmapped_elements = LoadFixedArrayElement(
+         sloppy_elements, SloppyArgumentsElements::kArgumentsIndex);
+-    Node* unmapped_elements_length =
++    TNode<Smi> unmapped_elements_length =
+         LoadFixedArrayBaseLength(unmapped_elements);
+ 
+     GotoIf(SmiAbove(end, unmapped_elements_length), slow);
+@@ -1209,8 +1213,8 @@ class ArrayPrototypeSliceCodeStubAssembler : public CodeStubAssembler {
+ 
+     index_out.Bind(IntPtrConstant(0));
+     Node* result_elements = LoadElements(result.value());
+-    Node* from_mapped = SmiMin(parameter_map_length, from);
+-    Node* to = SmiMin(parameter_map_length, end);
++    TNode<Smi> from_mapped = SmiMin(parameter_map_length, CAST(from));
++    TNode<Smi> to = SmiMin(parameter_map_length, end);
+     Node* arguments_context = LoadFixedArrayElement(
+         sloppy_elements, SloppyArgumentsElements::kContextIndex);
+     VariableList var_list({&index_out}, zone());
+@@ -1240,7 +1244,8 @@ class ArrayPrototypeSliceCodeStubAssembler : public CodeStubAssembler {
+         },
+         1, SMI_PARAMETERS, IndexAdvanceMode::kPost);
+ 
+-    Node* unmapped_from = SmiMin(SmiMax(parameter_map_length, from), end);
++    TNode<Smi> unmapped_from =
++        SmiMin(SmiMax(parameter_map_length, CAST(from)), end);
+ 
+     BuildFastLoop(
+         var_list, unmapped_from, end,
+@@ -2132,7 +2137,7 @@ TF_BUILTIN(ArrayFrom, ArrayPopulatorAssembler) {
+ 
+     TVARIABLE(Number, index, SmiConstant(0));
+ 
+-    GotoIf(SmiEqual(length.value(), SmiConstant(0)), &finished);
++    GotoIf(SmiEqual(CAST(length.value()), SmiConstant(0)), &finished);
+ 
+     // Loop from 0 to length-1.
+     {
+@@ -3508,17 +3513,14 @@ TF_BUILTIN(ArrayIteratorPrototypeNext, CodeStubAssembler) {
+     Node* elements_kind = LoadMapElementsKind(array_map);
+     GotoIfNot(IsFastElementsKind(elements_kind), &if_other);
+ 
+-    Node* length = LoadJSArrayLength(array);
++    TNode<Smi> length = CAST(LoadJSArrayLength(array));
+ 
+-    CSA_ASSERT(this, TaggedIsSmi(length));
+-    CSA_ASSERT(this, TaggedIsSmi(index));
+-
+-    GotoIfNot(SmiBelow(index, length), &set_done);
++    GotoIfNot(SmiBelow(CAST(index), length), &set_done);
+ 
+     var_value.Bind(index);
+-    Node* one = SmiConstant(1);
++    TNode<Smi> one = SmiConstant(1);
+     StoreObjectFieldNoWriteBarrier(iterator, JSArrayIterator::kNextIndexOffset,
+-                                   SmiAdd(index, one));
++                                   SmiAdd(CAST(index), one));
+     var_done.Bind(FalseConstant());
+ 
+     GotoIf(Word32Equal(LoadAndUntagToWord32ObjectField(
+@@ -3623,17 +3625,15 @@ TF_BUILTIN(ArrayIteratorPrototypeNext, CodeStubAssembler) {
+     Node* buffer = LoadObjectField(array, JSTypedArray::kBufferOffset);
+     GotoIf(IsDetachedBuffer(buffer), &if_detached);
+ 
+-    Node* length = LoadObjectField(array, JSTypedArray::kLengthOffset);
+-
+-    CSA_ASSERT(this, TaggedIsSmi(length));
+-    CSA_ASSERT(this, TaggedIsSmi(index));
++    TNode<Smi> length =
++        CAST(LoadObjectField(array, JSTypedArray::kLengthOffset));
+ 
+-    GotoIfNot(SmiBelow(index, length), &set_done);
++    GotoIfNot(SmiBelow(CAST(index), length), &set_done);
+ 
+     var_value.Bind(index);
+-    Node* one = SmiConstant(1);
++    TNode<Smi> one = SmiConstant(1);
+     StoreObjectFieldNoWriteBarrier(iterator, JSArrayIterator::kNextIndexOffset,
+-                                   SmiAdd(index, one));
++                                   SmiAdd(CAST(index), one));
+     var_done.Bind(FalseConstant());
+ 
+     GotoIf(Word32Equal(LoadAndUntagToWord32ObjectField(
+@@ -3784,7 +3784,8 @@ class ArrayFlattenAssembler : public CodeStubAssembler {
+ 
+       // a. Let P be ! ToString(sourceIndex).
+       // b. Let exists be ? HasProperty(source, P).
+-      CSA_ASSERT(this, SmiGreaterThanOrEqual(source_index, SmiConstant(0)));
++      CSA_ASSERT(this,
++                 SmiGreaterThanOrEqual(CAST(source_index), SmiConstant(0)));
+       Node* const exists =
+           HasProperty(source, source_index, context, kHasProperty);
+ 
+diff --git a/src/builtins/builtins-async-function-gen.cc b/src/builtins/builtins-async-function-gen.cc
+index 0d0e34ee0d..1f29cbfefd 100644
+--- a/src/builtins/builtins-async-function-gen.cc
++++ b/src/builtins/builtins-async-function-gen.cc
+@@ -55,9 +55,9 @@ void AsyncFunctionBuiltinsAssembler::AsyncFunctionAwaitResumeClosure(
+   // Ensure that the generator is neither closed nor running.
+   CSA_SLOW_ASSERT(
+       this,
+-      SmiGreaterThan(
+-          LoadObjectField(generator, JSGeneratorObject::kContinuationOffset),
+-          SmiConstant(JSGeneratorObject::kGeneratorClosed)));
++      SmiGreaterThan(CAST(LoadObjectField(
++                         generator, JSGeneratorObject::kContinuationOffset)),
++                     SmiConstant(JSGeneratorObject::kGeneratorClosed)));
+ 
+   // Remember the {resume_mode} for the {generator}.
+   StoreObjectFieldNoWriteBarrier(generator,
+diff --git a/src/builtins/builtins-async-generator-gen.cc b/src/builtins/builtins-async-generator-gen.cc
+index dd6c644196..929522a83b 100644
+--- a/src/builtins/builtins-async-generator-gen.cc
++++ b/src/builtins/builtins-async-generator-gen.cc
+@@ -41,37 +41,39 @@ class AsyncGeneratorBuiltinsAssembler : public AsyncBuiltinsAssembler {
+     return LoadObjectField(generator, JSGeneratorObject::kContinuationOffset);
+   }
+ 
+-  inline Node* IsGeneratorStateClosed(Node* const state) {
++  inline TNode<BoolT> IsGeneratorStateClosed(SloppyTNode<Smi> const state) {
+     return SmiEqual(state, SmiConstant(JSGeneratorObject::kGeneratorClosed));
+   }
+-  inline Node* IsGeneratorClosed(Node* const generator) {
++  inline TNode<BoolT> IsGeneratorClosed(Node* const generator) {
+     return IsGeneratorStateClosed(LoadGeneratorState(generator));
+   }
+ 
+-  inline Node* IsGeneratorStateSuspended(Node* const state) {
++  inline TNode<BoolT> IsGeneratorStateSuspended(SloppyTNode<Smi> const state) {
+     return SmiGreaterThanOrEqual(state, SmiConstant(0));
+   }
+ 
+-  inline Node* IsGeneratorSuspended(Node* const generator) {
++  inline TNode<BoolT> IsGeneratorSuspended(Node* const generator) {
+     return IsGeneratorStateSuspended(LoadGeneratorState(generator));
+   }
+ 
+-  inline Node* IsGeneratorStateSuspendedAtStart(Node* const state) {
++  inline TNode<BoolT> IsGeneratorStateSuspendedAtStart(
++      SloppyTNode<Smi> const state) {
+     return SmiEqual(state, SmiConstant(0));
+   }
+ 
+-  inline Node* IsGeneratorStateNotExecuting(Node* const state) {
++  inline TNode<BoolT> IsGeneratorStateNotExecuting(
++      SloppyTNode<Smi> const state) {
+     return SmiNotEqual(state,
+                        SmiConstant(JSGeneratorObject::kGeneratorExecuting));
+   }
+-  inline Node* IsGeneratorNotExecuting(Node* const generator) {
++  inline TNode<BoolT> IsGeneratorNotExecuting(Node* const generator) {
+     return IsGeneratorStateNotExecuting(LoadGeneratorState(generator));
+   }
+ 
+-  inline Node* IsGeneratorAwaiting(Node* const generator) {
+-    Node* is_generator_awaiting =
++  inline TNode<BoolT> IsGeneratorAwaiting(Node* const generator) {
++    TNode<Object> is_generator_awaiting =
+         LoadObjectField(generator, JSAsyncGeneratorObject::kIsAwaitingOffset);
+-    return SmiEqual(is_generator_awaiting, SmiConstant(1));
++    return WordEqual(is_generator_awaiting, SmiConstant(1));
+   }
+ 
+   inline void SetGeneratorAwaiting(Node* const generator) {
+@@ -118,7 +120,7 @@ class AsyncGeneratorBuiltinsAssembler : public AsyncBuiltinsAssembler {
+     return LoadObjectField(request, AsyncGeneratorRequest::kValueOffset);
+   }
+ 
+-  inline Node* IsAbruptResumeType(Node* const resume_type) {
++  inline TNode<BoolT> IsAbruptResumeType(SloppyTNode<Smi> const resume_type) {
+     return SmiNotEqual(resume_type, SmiConstant(JSGeneratorObject::kNext));
+   }
+ 
+@@ -174,7 +176,7 @@ void AsyncGeneratorBuiltinsAssembler::AsyncGeneratorEnqueue(
+     // If state is not "executing", then
+     //     Perform AsyncGeneratorResumeNext(Generator)
+     // Check if the {receiver} is running or already closed.
+-    Node* continuation = LoadGeneratorState(generator);
++    TNode<Smi> continuation = CAST(LoadGeneratorState(generator));
+ 
+     GotoIf(SmiEqual(continuation,
+                     SmiConstant(JSAsyncGeneratorObject::kGeneratorExecuting)),
+@@ -430,7 +432,8 @@ TF_BUILTIN(AsyncGeneratorResumeNext, AsyncGeneratorBuiltinsAssembler) {
+   ReturnIf(IsUndefined(var_next.value()), UndefinedConstant());
+ 
+   Node* const next = var_next.value();
+-  Node* const resume_type = LoadResumeTypeFromAsyncGeneratorRequest(next);
++  TNode<Smi> const resume_type =
++      CAST(LoadResumeTypeFromAsyncGeneratorRequest(next));
+ 
+   Label if_abrupt(this), if_normal(this), resume_generator(this);
+   Branch(IsAbruptResumeType(resume_type), &if_abrupt, &if_normal);
+diff --git a/src/builtins/builtins-collections-gen.cc b/src/builtins/builtins-collections-gen.cc
+index 69622f882e..4be967786d 100644
+--- a/src/builtins/builtins-collections-gen.cc
++++ b/src/builtins/builtins-collections-gen.cc
+@@ -983,10 +983,8 @@ void CollectionsBuiltinsAssembler::SameValueZeroHeapNumber(Node* key_float,
+ }
+ 
+ TF_BUILTIN(OrderedHashTableHealIndex, CollectionsBuiltinsAssembler) {
+-  Node* table = Parameter(Descriptor::kTable);
+-  Node* index = Parameter(Descriptor::kIndex);
+-  CSA_ASSERT(this, TaggedIsNotSmi(table));
+-  CSA_ASSERT(this, TaggedIsSmi(index));
++  TNode<HeapObject> table = CAST(Parameter(Descriptor::kTable));
++  TNode<Smi> index = CAST(Parameter(Descriptor::kIndex));
+   Label return_index(this), return_zero(this);
+ 
+   // Check if we need to update the {index}.
+@@ -1007,8 +1005,8 @@ TF_BUILTIN(OrderedHashTableHealIndex, CollectionsBuiltinsAssembler) {
+   {
+     Node* i = var_i.value();
+     GotoIfNot(IntPtrLessThan(i, number_of_deleted_elements), &return_index);
+-    Node* removed_index = LoadFixedArrayElement(
+-        table, i, OrderedHashTableBase::kRemovedHolesIndex * kPointerSize);
++    TNode<Smi> removed_index = CAST(LoadFixedArrayElement(
++        table, i, OrderedHashTableBase::kRemovedHolesIndex * kPointerSize));
+     GotoIf(SmiGreaterThanOrEqual(removed_index, index), &return_index);
+     Decrement(&var_index, 1, SMI_PARAMETERS);
+     Increment(&var_i);
+@@ -1120,8 +1118,8 @@ TF_BUILTIN(MapPrototypeGet, CollectionsBuiltinsAssembler) {
+   ThrowIfNotInstanceType(context, receiver, JS_MAP_TYPE, "Map.prototype.get");
+ 
+   Node* const table = LoadObjectField(receiver, JSMap::kTableOffset);
+-  Node* index =
+-      CallBuiltin(Builtins::kFindOrderedHashMapEntry, context, table, key);
++  TNode<Smi> index = CAST(
++      CallBuiltin(Builtins::kFindOrderedHashMapEntry, context, table, key));
+ 
+   Label if_found(this), if_not_found(this);
+   Branch(SmiGreaterThanOrEqual(index, SmiConstant(0)), &if_found,
+@@ -1145,8 +1143,8 @@ TF_BUILTIN(MapPrototypeHas, CollectionsBuiltinsAssembler) {
+   ThrowIfNotInstanceType(context, receiver, JS_MAP_TYPE, "Map.prototype.has");
+ 
+   Node* const table = LoadObjectField(receiver, JSMap::kTableOffset);
+-  Node* index =
+-      CallBuiltin(Builtins::kFindOrderedHashMapEntry, context, table, key);
++  TNode<Smi> index = CAST(
++      CallBuiltin(Builtins::kFindOrderedHashMapEntry, context, table, key));
+ 
+   Label if_found(this), if_not_found(this);
+   Branch(SmiGreaterThanOrEqual(index, SmiConstant(0)), &if_found,
+@@ -1282,8 +1280,8 @@ void CollectionsBuiltinsAssembler::StoreOrderedHashMapNewEntry(
+                          OrderedHashMap::kHashTableStartIndex * kPointerSize);
+ 
+   // Bump the elements count.
+-  Node* const number_of_elements =
+-      LoadObjectField(table, OrderedHashMap::kNumberOfElementsOffset);
++  TNode<Smi> const number_of_elements =
++      CAST(LoadObjectField(table, OrderedHashMap::kNumberOfElementsOffset));
+   StoreObjectFieldNoWriteBarrier(table, OrderedHashMap::kNumberOfElementsOffset,
+                                  SmiAdd(number_of_elements, SmiConstant(1)));
+ }
+@@ -1320,20 +1318,20 @@ TF_BUILTIN(MapPrototypeDelete, CollectionsBuiltinsAssembler) {
+                                          OrderedHashMap::kValueOffset));
+ 
+   // Decrement the number of elements, increment the number of deleted elements.
+-  Node* const number_of_elements = SmiSub(
++  TNode<Smi> const number_of_elements = SmiSub(
+       CAST(LoadObjectField(table, OrderedHashMap::kNumberOfElementsOffset)),
+       SmiConstant(1));
+   StoreObjectFieldNoWriteBarrier(table, OrderedHashMap::kNumberOfElementsOffset,
+                                  number_of_elements);
+-  Node* const number_of_deleted =
++  TNode<Smi> const number_of_deleted =
+       SmiAdd(CAST(LoadObjectField(
+                  table, OrderedHashMap::kNumberOfDeletedElementsOffset)),
+              SmiConstant(1));
+   StoreObjectFieldNoWriteBarrier(
+       table, OrderedHashMap::kNumberOfDeletedElementsOffset, number_of_deleted);
+ 
+-  Node* const number_of_buckets =
+-      LoadFixedArrayElement(table, OrderedHashMap::kNumberOfBucketsIndex);
++  TNode<Smi> const number_of_buckets =
++      CAST(LoadFixedArrayElement(table, OrderedHashMap::kNumberOfBucketsIndex));
+ 
+   // If there fewer elements than #buckets / 2, shrink the table.
+   Label shrink(this);
+@@ -1445,8 +1443,8 @@ void CollectionsBuiltinsAssembler::StoreOrderedHashSetNewEntry(
+                          OrderedHashSet::kHashTableStartIndex * kPointerSize);
+ 
+   // Bump the elements count.
+-  Node* const number_of_elements =
+-      LoadObjectField(table, OrderedHashSet::kNumberOfElementsOffset);
++  TNode<Smi> const number_of_elements =
++      CAST(LoadObjectField(table, OrderedHashSet::kNumberOfElementsOffset));
+   StoreObjectFieldNoWriteBarrier(table, OrderedHashSet::kNumberOfElementsOffset,
+                                  SmiAdd(number_of_elements, SmiConstant(1)));
+ }
+@@ -1479,20 +1477,20 @@ TF_BUILTIN(SetPrototypeDelete, CollectionsBuiltinsAssembler) {
+                          kPointerSize * OrderedHashSet::kHashTableStartIndex);
+ 
+   // Decrement the number of elements, increment the number of deleted elements.
+-  Node* const number_of_elements = SmiSub(
++  TNode<Smi> const number_of_elements = SmiSub(
+       CAST(LoadObjectField(table, OrderedHashSet::kNumberOfElementsOffset)),
+       SmiConstant(1));
+   StoreObjectFieldNoWriteBarrier(table, OrderedHashSet::kNumberOfElementsOffset,
+                                  number_of_elements);
+-  Node* const number_of_deleted =
++  TNode<Smi> const number_of_deleted =
+       SmiAdd(CAST(LoadObjectField(
+                  table, OrderedHashSet::kNumberOfDeletedElementsOffset)),
+              SmiConstant(1));
+   StoreObjectFieldNoWriteBarrier(
+       table, OrderedHashSet::kNumberOfDeletedElementsOffset, number_of_deleted);
+ 
+-  Node* const number_of_buckets =
+-      LoadFixedArrayElement(table, OrderedHashSet::kNumberOfBucketsIndex);
++  TNode<Smi> const number_of_buckets =
++      CAST(LoadFixedArrayElement(table, OrderedHashSet::kNumberOfBucketsIndex));
+ 
+   // If there fewer elements than #buckets / 2, shrink the table.
+   Label shrink(this);
+diff --git a/src/builtins/builtins-generator-gen.cc b/src/builtins/builtins-generator-gen.cc
+index 07a56c86ed..769238ccea 100644
+--- a/src/builtins/builtins-generator-gen.cc
++++ b/src/builtins/builtins-generator-gen.cc
+@@ -35,11 +35,11 @@ void GeneratorBuiltinsAssembler::GeneratorPrototypeResume(
+             &if_receiverisincompatible);
+ 
+   // Check if the {receiver} is running or already closed.
+-  Node* receiver_continuation =
+-      LoadObjectField(receiver, JSGeneratorObject::kContinuationOffset);
++  TNode<Smi> receiver_continuation =
++      CAST(LoadObjectField(receiver, JSGeneratorObject::kContinuationOffset));
+   Label if_receiverisclosed(this, Label::kDeferred),
+       if_receiverisrunning(this, Label::kDeferred);
+-  Node* closed = SmiConstant(JSGeneratorObject::kGeneratorClosed);
++  TNode<Smi> closed = SmiConstant(JSGeneratorObject::kGeneratorClosed);
+   GotoIf(SmiEqual(receiver_continuation, closed), &if_receiverisclosed);
+   DCHECK_LT(JSGeneratorObject::kGeneratorExecuting,
+             JSGeneratorObject::kGeneratorClosed);
+@@ -59,14 +59,14 @@ void GeneratorBuiltinsAssembler::GeneratorPrototypeResume(
+ 
+   // If the generator is not suspended (i.e., its state is 'executing'),
+   // close it and wrap the return value in IteratorResult.
+-  Node* result_continuation =
+-      LoadObjectField(receiver, JSGeneratorObject::kContinuationOffset);
++  TNode<Smi> result_continuation =
++      CAST(LoadObjectField(receiver, JSGeneratorObject::kContinuationOffset));
+ 
+   // The generator function should not close the generator by itself, let's
+   // check it is indeed not closed yet.
+   CSA_ASSERT(this, SmiNotEqual(result_continuation, closed));
+ 
+-  Node* executing = SmiConstant(JSGeneratorObject::kGeneratorExecuting);
++  TNode<Smi> executing = SmiConstant(JSGeneratorObject::kGeneratorExecuting);
+   GotoIf(SmiEqual(result_continuation, executing), &if_final_return);
+ 
+   args->PopAndReturn(result);
+diff --git a/src/builtins/builtins-math-gen.cc b/src/builtins/builtins-math-gen.cc
+index 80e1156787..ca59db0972 100644
+--- a/src/builtins/builtins-math-gen.cc
++++ b/src/builtins/builtins-math-gen.cc
+@@ -50,7 +50,7 @@ TF_BUILTIN(MathAbs, CodeStubAssembler) {
+       } else {
+         // Check if {x} is already positive.
+         Label if_xispositive(this), if_xisnotpositive(this);
+-        BranchIfSmiLessThanOrEqual(SmiConstant(0), x, &if_xispositive,
++        BranchIfSmiLessThanOrEqual(SmiConstant(0), CAST(x), &if_xispositive,
+                                    &if_xisnotpositive);
+ 
+         BIND(&if_xispositive);
+@@ -404,8 +404,8 @@ TF_BUILTIN(MathRandom, CodeStubAssembler) {
+   Node* native_context = LoadNativeContext(context);
+ 
+   // Load cache index.
+-  VARIABLE(smi_index, MachineRepresentation::kTagged);
+-  smi_index.Bind(
++  TVARIABLE(Smi, smi_index);
++  smi_index = CAST(
+       LoadContextElement(native_context, Context::MATH_RANDOM_INDEX_INDEX));
+ 
+   // Cached random numbers are exhausted if index is 0. Go to slow path.
+@@ -413,12 +413,12 @@ TF_BUILTIN(MathRandom, CodeStubAssembler) {
+   GotoIf(SmiAbove(smi_index.value(), SmiConstant(0)), &if_cached);
+ 
+   // Cache exhausted, populate the cache. Return value is the new index.
+-  smi_index.Bind(CallRuntime(Runtime::kGenerateRandomNumbers, context));
++  smi_index = CAST(CallRuntime(Runtime::kGenerateRandomNumbers, context));
+   Goto(&if_cached);
+ 
+   // Compute next index by decrement.
+   BIND(&if_cached);
+-  Node* new_smi_index = SmiSub(smi_index.value(), SmiConstant(1));
++  TNode<Smi> new_smi_index = SmiSub(smi_index.value(), SmiConstant(1));
+   StoreContextElement(native_context, Context::MATH_RANDOM_INDEX_INDEX,
+                       new_smi_index);
+ 
+diff --git a/src/builtins/builtins-number-gen.cc b/src/builtins/builtins-number-gen.cc
+index cf513733ef..360ddd1091 100644
+--- a/src/builtins/builtins-number-gen.cc
++++ b/src/builtins/builtins-number-gen.cc
+@@ -830,7 +830,7 @@ TF_BUILTIN(Negate, NumberBuiltinsAssembler) {
+                       &do_bigint);
+ 
+   BIND(&do_smi);
+-  { Return(SmiMul(var_input.value(), SmiConstant(-1))); }
++  { Return(SmiMul(CAST(var_input.value()), SmiConstant(-1))); }
+ 
+   BIND(&do_double);
+   {
+@@ -858,7 +858,7 @@ TF_BUILTIN(Multiply, NumberBuiltinsAssembler) {
+ 
+   BIND(&do_smi_mul);
+   // The result is not necessarily a smi, in case of overflow.
+-  Return(SmiMul(var_left.value(), var_right.value()));
++  Return(SmiMul(CAST(var_left.value()), CAST(var_right.value())));
+ 
+   BIND(&do_double_mul);
+   Node* value = Float64Mul(var_left_double.value(), var_right_double.value());
+@@ -886,8 +886,8 @@ TF_BUILTIN(Divide, NumberBuiltinsAssembler) {
+   {
+     // TODO(jkummerow): Consider just always doing a double division.
+     Label bailout(this);
+-    Node* dividend = var_left.value();
+-    Node* divisor = var_right.value();
++    TNode<Smi> dividend = CAST(var_left.value());
++    TNode<Smi> divisor = CAST(var_right.value());
+ 
+     // Do floating point division if {divisor} is zero.
+     GotoIf(SmiEqual(divisor, SmiConstant(0)), &bailout);
+@@ -967,7 +967,7 @@ TF_BUILTIN(Modulus, NumberBuiltinsAssembler) {
+                        &var_left_double, &var_right_double, &do_bigint_mod);
+ 
+   BIND(&do_smi_mod);
+-  Return(SmiMod(var_left.value(), var_right.value()));
++  Return(SmiMod(CAST(var_left.value()), CAST(var_right.value())));
+ 
+   BIND(&do_double_mod);
+   Node* value = Float64Mod(var_left_double.value(), var_right_double.value());
+diff --git a/src/builtins/builtins-promise-gen.cc b/src/builtins/builtins-promise-gen.cc
+index 868b45a831..6dcf9f5372 100644
+--- a/src/builtins/builtins-promise-gen.cc
++++ b/src/builtins/builtins-promise-gen.cc
+@@ -221,8 +221,7 @@ Node* PromiseBuiltinsAssembler::CreatePromiseAllResolveElementContext(
+ }
+ 
+ Node* PromiseBuiltinsAssembler::CreatePromiseAllResolveElementFunction(
+-    Node* context, Node* index, Node* native_context) {
+-  CSA_ASSERT(this, TaggedIsSmi(index));
++    Node* context, TNode<Smi> index, Node* native_context) {
+   CSA_ASSERT(this, SmiGreaterThan(index, SmiConstant(0)));
+   CSA_ASSERT(this, SmiLessThanOrEqual(
+                        index, SmiConstant(PropertyArray::HashField::kMax)));
+@@ -266,8 +265,9 @@ Node* PromiseBuiltinsAssembler::PromiseHasHandler(Node* promise) {
+ }
+ 
+ void PromiseBuiltinsAssembler::PromiseSetHasHandler(Node* promise) {
+-  Node* const flags = LoadObjectField(promise, JSPromise::kFlagsOffset);
+-  Node* const new_flags =
++  TNode<Smi> const flags =
++      CAST(LoadObjectField(promise, JSPromise::kFlagsOffset));
++  TNode<Smi> const new_flags =
+       SmiOr(flags, SmiConstant(1 << JSPromise::kHasHandlerBit));
+   StoreObjectFieldNoWriteBarrier(promise, JSPromise::kFlagsOffset, new_flags);
+ }
+@@ -279,7 +279,8 @@ Node* PromiseBuiltinsAssembler::IsPromiseStatus(
+ 
+ Node* PromiseBuiltinsAssembler::PromiseStatus(Node* promise) {
+   STATIC_ASSERT(JSPromise::kStatusShift == 0);
+-  Node* const flags = LoadObjectField(promise, JSPromise::kFlagsOffset);
++  TNode<Smi> const flags =
++      CAST(LoadObjectField(promise, JSPromise::kFlagsOffset));
+   return Word32And(SmiToInt32(flags), Int32Constant(JSPromise::kStatusMask));
+ }
+ 
+@@ -289,15 +290,17 @@ void PromiseBuiltinsAssembler::PromiseSetStatus(
+              IsPromiseStatus(PromiseStatus(promise), v8::Promise::kPending));
+   CHECK_NE(status, v8::Promise::kPending);
+ 
+-  Node* mask = SmiConstant(status);
+-  Node* const flags = LoadObjectField(promise, JSPromise::kFlagsOffset);
++  TNode<Smi> mask = SmiConstant(status);
++  TNode<Smi> const flags =
++      CAST(LoadObjectField(promise, JSPromise::kFlagsOffset));
+   StoreObjectFieldNoWriteBarrier(promise, JSPromise::kFlagsOffset,
+                                  SmiOr(flags, mask));
+ }
+ 
+ void PromiseBuiltinsAssembler::PromiseSetHandledHint(Node* promise) {
+-  Node* const flags = LoadObjectField(promise, JSPromise::kFlagsOffset);
+-  Node* const new_flags =
++  TNode<Smi> const flags =
++      CAST(LoadObjectField(promise, JSPromise::kFlagsOffset));
++  TNode<Smi> const new_flags =
+       SmiOr(flags, SmiConstant(1 << JSPromise::kHandledHintBit));
+   StoreObjectFieldNoWriteBarrier(promise, JSPromise::kFlagsOffset, new_flags);
+ }
+@@ -1801,7 +1804,7 @@ Node* PromiseBuiltinsAssembler::PerformPromiseAll(
+   Node* const resolve_element_context =
+       CreatePromiseAllResolveElementContext(capability, native_context);
+ 
+-  VARIABLE(var_index, MachineRepresentation::kTagged, SmiConstant(1));
++  TVARIABLE(Smi, var_index, SmiConstant(1));
+   Label loop(this, &var_index), done_loop(this),
+       too_many_elements(this, Label::kDeferred),
+       close_iterator(this, Label::kDeferred);
+@@ -1831,14 +1834,14 @@ Node* PromiseBuiltinsAssembler::PerformPromiseAll(
+                       var_exception);
+ 
+     // Check if we reached the limit.
+-    Node* const index = var_index.value();
++    TNode<Smi> const index = var_index.value();
+     GotoIf(SmiEqual(index, SmiConstant(PropertyArray::HashField::kMax)),
+            &too_many_elements);
+ 
+     // Set remainingElementsCount.[[Value]] to
+     //     remainingElementsCount.[[Value]] + 1.
+-    Node* const remaining_elements_count = LoadContextElement(
+-        resolve_element_context, kPromiseAllResolveElementRemainingSlot);
++    TNode<Smi> const remaining_elements_count = CAST(LoadContextElement(
++        resolve_element_context, kPromiseAllResolveElementRemainingSlot));
+     StoreContextElementNoWriteBarrier(
+         resolve_element_context, kPromiseAllResolveElementRemainingSlot,
+         SmiAdd(remaining_elements_count, SmiConstant(1)));
+@@ -1877,7 +1880,7 @@ Node* PromiseBuiltinsAssembler::PerformPromiseAll(
+     });
+ 
+     // Set index to index + 1.
+-    var_index.Bind(SmiAdd(index, SmiConstant(1)));
++    var_index = SmiAdd(index, SmiConstant(1));
+     Goto(&loop);
+   }
+ 
+@@ -1911,8 +1914,8 @@ Node* PromiseBuiltinsAssembler::PerformPromiseAll(
+     // Set iteratorRecord.[[Done]] to true.
+     // Set remainingElementsCount.[[Value]] to
+     //    remainingElementsCount.[[Value]] - 1.
+-    Node* remaining_elements_count = LoadContextElement(
+-        resolve_element_context, kPromiseAllResolveElementRemainingSlot);
++    TNode<Smi> remaining_elements_count = CAST(LoadContextElement(
++        resolve_element_context, kPromiseAllResolveElementRemainingSlot));
+     remaining_elements_count = SmiSub(remaining_elements_count, SmiConstant(1));
+     StoreContextElementNoWriteBarrier(resolve_element_context,
+                                       kPromiseAllResolveElementRemainingSlot,
+@@ -1927,8 +1930,8 @@ Node* PromiseBuiltinsAssembler::PerformPromiseAll(
+     Node* const values_array = LoadContextElement(
+         resolve_element_context, kPromiseAllResolveElementValuesArraySlot);
+     Node* const old_elements = LoadElements(values_array);
+-    Node* const old_capacity = LoadFixedArrayBaseLength(old_elements);
+-    Node* const new_capacity = var_index.value();
++    TNode<Smi> const old_capacity = LoadFixedArrayBaseLength(old_elements);
++    TNode<Smi> const new_capacity = var_index.value();
+     GotoIf(SmiGreaterThanOrEqual(old_capacity, new_capacity), &return_promise);
+     Node* const new_elements =
+         AllocateFixedArray(PACKED_ELEMENTS, new_capacity, SMI_PARAMETERS,
+@@ -2105,8 +2108,8 @@ TF_BUILTIN(PromiseAllResolveElementClosure, PromiseBuiltinsAssembler) {
+   }
+ 
+   BIND(&done);
+-  Node* remaining_elements_count =
+-      LoadContextElement(context, kPromiseAllResolveElementRemainingSlot);
++  TNode<Smi> remaining_elements_count =
++      CAST(LoadContextElement(context, kPromiseAllResolveElementRemainingSlot));
+   remaining_elements_count = SmiSub(remaining_elements_count, SmiConstant(1));
+   StoreContextElement(context, kPromiseAllResolveElementRemainingSlot,
+                       remaining_elements_count);
+diff --git a/src/builtins/builtins-promise-gen.h b/src/builtins/builtins-promise-gen.h
+index 694cea28c0..46fb9338b4 100644
+--- a/src/builtins/builtins-promise-gen.h
++++ b/src/builtins/builtins-promise-gen.h
+@@ -113,7 +113,7 @@ class PromiseBuiltinsAssembler : public CodeStubAssembler {
+   // case to mark it's done).
+   Node* CreatePromiseAllResolveElementContext(Node* promise_capability,
+                                               Node* native_context);
+-  Node* CreatePromiseAllResolveElementFunction(Node* context, Node* index,
++  Node* CreatePromiseAllResolveElementFunction(Node* context, TNode<Smi> index,
+                                                Node* native_context);
+ 
+   Node* CreatePromiseResolvingFunctionsContext(Node* promise, Node* debug_event,
+diff --git a/src/builtins/builtins-proxy-gen.cc b/src/builtins/builtins-proxy-gen.cc
+index 1b9a143ed7..680d1c8d9f 100644
+--- a/src/builtins/builtins-proxy-gen.cc
++++ b/src/builtins/builtins-proxy-gen.cc
+@@ -544,7 +544,7 @@ TF_BUILTIN(ProxySetProperty, ProxiesCodeStubAssembler) {
+   Node* name = Parameter(Descriptor::kName);
+   Node* value = Parameter(Descriptor::kValue);
+   Node* receiver = Parameter(Descriptor::kReceiverValue);
+-  Node* language_mode = Parameter(Descriptor::kLanguageMode);
++  TNode<Smi> language_mode = CAST(Parameter(Descriptor::kLanguageMode));
+ 
+   CSA_ASSERT(this, IsJSProxy(proxy));
+ 
+diff --git a/src/builtins/builtins-regexp-gen.cc b/src/builtins/builtins-regexp-gen.cc
+index d0b090b8b8..5b086e01b5 100644
+--- a/src/builtins/builtins-regexp-gen.cc
++++ b/src/builtins/builtins-regexp-gen.cc
+@@ -35,8 +35,9 @@ Node* RegExpBuiltinsAssembler::AllocateRegExpResult(Node* context, Node* length,
+   CSA_ASSERT(this, IsString(input));
+ 
+ #ifdef DEBUG
+-  Node* const max_length = SmiConstant(JSArray::kInitialMaxFastElementArray);
+-  CSA_ASSERT(this, SmiLessThanOrEqual(length, max_length));
++  TNode<Smi> const max_length =
++      SmiConstant(JSArray::kInitialMaxFastElementArray);
++  CSA_ASSERT(this, SmiLessThanOrEqual(CAST(length), max_length));
+ #endif  // DEBUG
+ 
+   // Allocate the JSRegExpResult together with its elements fixed array.
+@@ -169,7 +170,7 @@ Node* RegExpBuiltinsAssembler::ConstructNewResultFromMatchInfo(
+ 
+   TNode<IntPtrT> num_indices = SmiUntag(CAST(LoadFixedArrayElement(
+       match_info, RegExpMatchInfo::kNumberOfCapturesIndex)));
+-  Node* const num_results = SmiTag(WordShr(num_indices, 1));
++  TNode<Smi> const num_results = SmiTag(WordShr(num_indices, 1));
+   Node* const start =
+       LoadFixedArrayElement(match_info, RegExpMatchInfo::kFirstCaptureIndex);
+   Node* const end = LoadFixedArrayElement(
+@@ -206,7 +207,8 @@ Node* RegExpBuiltinsAssembler::ConstructNewResultFromMatchInfo(
+   {
+     Node* const from_cursor = var_from_cursor.value();
+     Node* const to_cursor = var_to_cursor.value();
+-    Node* const start = LoadFixedArrayElement(match_info, from_cursor);
++    TNode<Smi> const start =
++        CAST(LoadFixedArrayElement(match_info, from_cursor));
+ 
+     Label next_iter(this);
+     GotoIf(SmiEqual(start, SmiConstant(-1)), &next_iter);
+@@ -238,14 +240,15 @@ Node* RegExpBuiltinsAssembler::ConstructNewResultFromMatchInfo(
+     // not have any named captures to minimize performance impact.
+ 
+     Node* const data = LoadObjectField(regexp, JSRegExp::kDataOffset);
+-    CSA_ASSERT(this, SmiEqual(LoadFixedArrayElement(data, JSRegExp::kTagIndex),
+-                              SmiConstant(JSRegExp::IRREGEXP)));
++    CSA_ASSERT(this,
++               SmiEqual(CAST(LoadFixedArrayElement(data, JSRegExp::kTagIndex)),
++                        SmiConstant(JSRegExp::IRREGEXP)));
+ 
+     // The names fixed array associates names at even indices with a capture
+     // index at odd indices.
+-    Node* const names =
++    TNode<Object> const maybe_names =
+         LoadFixedArrayElement(data, JSRegExp::kIrregexpCaptureNameMapIndex);
+-    GotoIf(SmiEqual(names, SmiConstant(0)), &out);
++    GotoIf(WordEqual(maybe_names, SmiConstant(0)), &out);
+ 
+     // Allocate a new object to store the named capture properties.
+     // TODO(jgruber): Could be optimized by adding the object map to the heap
+@@ -262,8 +265,8 @@ Node* RegExpBuiltinsAssembler::ConstructNewResultFromMatchInfo(
+ 
+     // One or more named captures exist, add a property for each one.
+ 
+-    CSA_ASSERT(this, HasInstanceType(names, FIXED_ARRAY_TYPE));
+-    Node* const names_length = LoadAndUntagFixedArrayBaseLength(names);
++    TNode<FixedArray> names = CAST(maybe_names);
++    TNode<IntPtrT> const names_length = LoadAndUntagFixedArrayBaseLength(names);
+     CSA_ASSERT(this, IntPtrGreaterThan(names_length, IntPtrConstant(0)));
+ 
+     VARIABLE(var_i, MachineType::PointerRepresentation());
+@@ -403,9 +406,8 @@ Node* RegExpBuiltinsAssembler::RegExpExecInternal(Node* const context,
+ 
+     // Check (number_of_captures + 1) * 2 <= offsets vector size
+     // Or              number_of_captures <= offsets vector size / 2 - 1
+-    Node* const capture_count =
+-        LoadFixedArrayElement(data, JSRegExp::kIrregexpCaptureCountIndex);
+-    CSA_ASSERT(this, TaggedIsSmi(capture_count));
++    TNode<Smi> const capture_count =
++        CAST(LoadFixedArrayElement(data, JSRegExp::kIrregexpCaptureCountIndex));
+ 
+     STATIC_ASSERT(Isolate::kJSRegexpStaticOffsetsVectorSize >= 2);
+     GotoIf(SmiAbove(
+@@ -470,7 +472,7 @@ Node* RegExpBuiltinsAssembler::RegExpExecInternal(Node* const context,
+   Node* const code = var_code.value();
+   CSA_ASSERT_BRANCH(this, [=](Label* ok, Label* not_ok) {
+     GotoIfNot(TaggedIsSmi(code), ok);
+-    Branch(SmiEqual(code, SmiConstant(JSRegExp::kUninitializedValue)), ok,
++    Branch(SmiEqual(CAST(code), SmiConstant(JSRegExp::kUninitializedValue)), ok,
+            not_ok);
+   });
+   GotoIf(TaggedIsSmi(code), &runtime);
+@@ -567,13 +569,13 @@ Node* RegExpBuiltinsAssembler::RegExpExecInternal(Node* const context,
+     // Check that the last match info has space for the capture registers and
+     // the additional information. Ensure no overflow in add.
+     STATIC_ASSERT(FixedArray::kMaxLength < kMaxInt - FixedArray::kLengthOffset);
+-    Node* const available_slots =
++    TNode<Smi> const available_slots =
+         SmiSub(LoadFixedArrayBaseLength(match_info),
+                SmiConstant(RegExpMatchInfo::kLastMatchOverhead));
+-    Node* const capture_count =
+-        LoadFixedArrayElement(data, JSRegExp::kIrregexpCaptureCountIndex);
++    TNode<Smi> const capture_count =
++        CAST(LoadFixedArrayElement(data, JSRegExp::kIrregexpCaptureCountIndex));
+     // Calculate number of register_count = (capture_count + 1) * 2.
+-    Node* const register_count =
++    TNode<Smi> const register_count =
+         SmiShl(SmiAdd(capture_count, SmiConstant(1)), 1);
+     GotoIf(SmiGreaterThan(register_count, available_slots), &runtime);
+ 
+@@ -727,7 +729,7 @@ Node* RegExpBuiltinsAssembler::RegExpPrototypeExecBodyWithoutResult(
+       Label if_isoob(this, Label::kDeferred);
+       GotoIfNot(TaggedIsSmi(lastindex), &if_isoob);
+       TNode<Smi> const string_length = LoadStringLengthAsSmi(string);
+-      GotoIfNot(SmiLessThanOrEqual(lastindex, string_length), &if_isoob);
++      GotoIfNot(SmiLessThanOrEqual(CAST(lastindex), string_length), &if_isoob);
+       Goto(&run_exec);
+ 
+       BIND(&if_isoob);
+@@ -987,8 +989,9 @@ TF_BUILTIN(RegExpExecAtom, RegExpBuiltinsAssembler) {
+ 
+   Node* const data = LoadObjectField(regexp, JSRegExp::kDataOffset);
+   CSA_ASSERT(this, IsFixedArray(data));
+-  CSA_ASSERT(this, SmiEqual(LoadFixedArrayElement(data, JSRegExp::kTagIndex),
+-                            SmiConstant(JSRegExp::ATOM)));
++  CSA_ASSERT(this,
++             SmiEqual(CAST(LoadFixedArrayElement(data, JSRegExp::kTagIndex)),
++                      SmiConstant(JSRegExp::ATOM)));
+ 
+   // Callers ensure that last_index is in-bounds.
+   CSA_ASSERT(this,
+@@ -999,10 +1002,9 @@ TF_BUILTIN(RegExpExecAtom, RegExpBuiltinsAssembler) {
+       LoadFixedArrayElement(data, JSRegExp::kAtomPatternIndex);
+   CSA_ASSERT(this, IsString(needle_string));
+ 
+-  Node* const match_from =
+-      CallBuiltin(Builtins::kStringIndexOf, context, subject_string,
+-                  needle_string, last_index);
+-  CSA_ASSERT(this, TaggedIsSmi(match_from));
++  TNode<Smi> const match_from =
++      CAST(CallBuiltin(Builtins::kStringIndexOf, context, subject_string,
++                       needle_string, last_index));
+ 
+   Label if_failure(this), if_success(this);
+   Branch(SmiEqual(match_from, SmiConstant(-1)), &if_failure, &if_success);
+@@ -1016,7 +1018,7 @@ TF_BUILTIN(RegExpExecAtom, RegExpBuiltinsAssembler) {
+     const int kNumRegisters = 2;
+     STATIC_ASSERT(RegExpMatchInfo::kInitialCaptureIndices >= kNumRegisters);
+ 
+-    Node* const match_to =
++    TNode<Smi> const match_to =
+         SmiAdd(match_from, LoadStringLengthAsSmi(needle_string));
+ 
+     StoreFixedArrayElement(match_info, RegExpMatchInfo::kNumberOfCapturesIndex,
+@@ -1476,8 +1478,9 @@ TF_BUILTIN(RegExpPrototypeSourceGetter, RegExpBuiltinsAssembler) {
+ // Fast-path implementation for flag checks on an unmodified JSRegExp instance.
+ Node* RegExpBuiltinsAssembler::FastFlagGetter(Node* const regexp,
+                                               JSRegExp::Flag flag) {
+-  Node* const flags = LoadObjectField(regexp, JSRegExp::kFlagsOffset);
+-  Node* const mask = SmiConstant(flag);
++  TNode<Smi> const flags =
++      CAST(LoadObjectField(regexp, JSRegExp::kFlagsOffset));
++  TNode<Smi> const mask = SmiConstant(flag);
+   return SmiToInt32(SmiAnd(flags, mask));
+ }
+ 
+@@ -2059,7 +2062,7 @@ TNode<Object> RegExpBuiltinsAssembler::MatchAllIterator(
+       // exception.
+       TNode<Object> last_index =
+           CAST(LoadLastIndex(context, var_matcher.value(), false));
+-      Branch(SmiEqual(SmiConstant(0), last_index), &create_iterator,
++      Branch(WordEqual(SmiConstant(0), last_index), &create_iterator,
+              &throw_type_error);
+     }
+   }
+@@ -2300,10 +2303,9 @@ TF_BUILTIN(RegExpSearchFast, RegExpBuiltinsAssembler) {
+ void RegExpBuiltinsAssembler::RegExpPrototypeSplitBody(Node* const context,
+                                                        Node* const regexp,
+                                                        TNode<String> string,
+-                                                       Node* const limit) {
++                                                       TNode<Smi> const limit) {
+   CSA_ASSERT(this, IsFastRegExp(context, regexp));
+   CSA_ASSERT(this, Word32BinaryNot(FastFlagGetter(regexp, JSRegExp::kSticky)));
+-  CSA_ASSERT(this, TaggedIsSmi(limit));
+ 
+   TNode<Smi> const smi_zero = SmiConstant(0);
+   TNode<IntPtrT> const int_zero = IntPtrConstant(0);
+@@ -2366,11 +2368,8 @@ void RegExpBuiltinsAssembler::RegExpPrototypeSplitBody(Node* const context,
+ 
+   GrowableFixedArray array(state());
+ 
+-  VARIABLE(var_last_matched_until, MachineRepresentation::kTagged);
+-  VARIABLE(var_next_search_from, MachineRepresentation::kTagged);
+-
+-  var_last_matched_until.Bind(smi_zero);
+-  var_next_search_from.Bind(smi_zero);
++  TVARIABLE(Smi, var_last_matched_until, smi_zero);
++  TVARIABLE(Smi, var_next_search_from, smi_zero);
+ 
+   Variable* vars[] = {array.var_array(), array.var_length(),
+                       array.var_capacity(), &var_last_matched_until,
+@@ -2381,11 +2380,8 @@ void RegExpBuiltinsAssembler::RegExpPrototypeSplitBody(Node* const context,
+ 
+   BIND(&loop);
+   {
+-    Node* const next_search_from = var_next_search_from.value();
+-    Node* const last_matched_until = var_last_matched_until.value();
+-
+-    CSA_ASSERT(this, TaggedIsSmi(next_search_from));
+-    CSA_ASSERT(this, TaggedIsSmi(last_matched_until));
++    TNode<Smi> const next_search_from = var_next_search_from.value();
++    TNode<Smi> const last_matched_until = var_last_matched_until.value();
+ 
+     // We're done if we've reached the end of the string.
+     {
+@@ -2410,8 +2406,8 @@ void RegExpBuiltinsAssembler::RegExpPrototypeSplitBody(Node* const context,
+       BIND(&next);
+     }
+ 
+-    Node* const match_from = LoadFixedArrayElement(
+-        match_indices, RegExpMatchInfo::kFirstCaptureIndex);
++    TNode<Smi> const match_from = CAST(LoadFixedArrayElement(
++        match_indices, RegExpMatchInfo::kFirstCaptureIndex));
+ 
+     // We're done if the match starts beyond the string.
+     {
+@@ -2420,8 +2416,8 @@ void RegExpBuiltinsAssembler::RegExpPrototypeSplitBody(Node* const context,
+       BIND(&next);
+     }
+ 
+-    Node* const match_to = LoadFixedArrayElement(
+-        match_indices, RegExpMatchInfo::kFirstCaptureIndex + 1);
++    TNode<Smi> const match_to = CAST(LoadFixedArrayElement(
++        match_indices, RegExpMatchInfo::kFirstCaptureIndex + 1));
+ 
+     // Advance index and continue if the match is empty.
+     {
+@@ -2433,7 +2429,7 @@ void RegExpBuiltinsAssembler::RegExpPrototypeSplitBody(Node* const context,
+       Node* const is_unicode = FastFlagGetter(regexp, JSRegExp::kUnicode);
+       Node* const new_next_search_from =
+           AdvanceStringIndex(string, next_search_from, is_unicode, true);
+-      var_next_search_from.Bind(new_next_search_from);
++      var_next_search_from = CAST(new_next_search_from);
+       Goto(&loop);
+ 
+       BIND(&next);
+@@ -2441,8 +2437,8 @@ void RegExpBuiltinsAssembler::RegExpPrototypeSplitBody(Node* const context,
+ 
+     // A valid match was found, add the new substring to the array.
+     {
+-      Node* const from = last_matched_until;
+-      Node* const to = match_from;
++      TNode<Smi> const from = last_matched_until;
++      TNode<Smi> const to = match_from;
+       array.Push(SubString(string, SmiUntag(from), SmiUntag(to)));
+       GotoIf(WordEqual(array.length(), int_limit), &out);
+     }
+@@ -2469,9 +2465,9 @@ void RegExpBuiltinsAssembler::RegExpPrototypeSplitBody(Node* const context,
+         Node* const from = LoadFixedArrayElement(
+             match_indices, reg,
+             RegExpMatchInfo::kFirstCaptureIndex * kPointerSize, mode);
+-        Node* const to = LoadFixedArrayElement(
++        TNode<Smi> const to = CAST(LoadFixedArrayElement(
+             match_indices, reg,
+-            (RegExpMatchInfo::kFirstCaptureIndex + 1) * kPointerSize, mode);
++            (RegExpMatchInfo::kFirstCaptureIndex + 1) * kPointerSize, mode));
+ 
+         Label select_capture(this), select_undefined(this), store_value(this);
+         VARIABLE(var_value, MachineRepresentation::kTagged);
+@@ -2506,8 +2502,8 @@ void RegExpBuiltinsAssembler::RegExpPrototypeSplitBody(Node* const context,
+       BIND(&nested_loop_out);
+     }
+ 
+-    var_last_matched_until.Bind(match_to);
+-    var_next_search_from.Bind(match_to);
++    var_last_matched_until = match_to;
++    var_next_search_from = match_to;
+     Goto(&loop);
+   }
+ 
+@@ -2583,7 +2579,7 @@ TF_BUILTIN(RegExpSplit, RegExpBuiltinsAssembler) {
+ 
+   // We're good to go on the fast path, which is inlined here.
+ 
+-  RegExpPrototypeSplitBody(context, regexp, string, var_limit.value());
++  RegExpPrototypeSplitBody(context, regexp, string, CAST(var_limit.value()));
+ 
+   BIND(&runtime);
+   Return(CallRuntime(Runtime::kRegExpSplit, context, regexp, string,
+@@ -2685,8 +2681,8 @@ Node* RegExpBuiltinsAssembler::ReplaceGlobalCallableFastPath(
+   Node* const res_elems = LoadElements(res);
+   CSA_ASSERT(this, HasInstanceType(res_elems, FIXED_ARRAY_TYPE));
+ 
+-  Node* const num_capture_registers = LoadFixedArrayElement(
+-      last_match_info, RegExpMatchInfo::kNumberOfCapturesIndex);
++  TNode<Smi> const num_capture_registers = CAST(LoadFixedArrayElement(
++      last_match_info, RegExpMatchInfo::kNumberOfCapturesIndex));
+ 
+   Label if_hasexplicitcaptures(this), if_noexplicitcaptures(this),
+       create_result(this);
+@@ -2721,14 +2717,15 @@ Node* RegExpBuiltinsAssembler::ReplaceGlobalCallableFastPath(
+ 
+       BIND(&if_issmi);
+       {
++        TNode<Smi> smi_elem = CAST(elem);
+         // Integers represent slices of the original string.
+         Label if_isnegativeorzero(this), if_ispositive(this);
+-        BranchIfSmiLessThanOrEqual(elem, smi_zero, &if_isnegativeorzero,
++        BranchIfSmiLessThanOrEqual(smi_elem, smi_zero, &if_isnegativeorzero,
+                                    &if_ispositive);
+ 
+         BIND(&if_ispositive);
+         {
+-          TNode<IntPtrT> int_elem = SmiUntag(elem);
++          TNode<IntPtrT> int_elem = SmiUntag(smi_elem);
+           TNode<IntPtrT> new_match_start =
+               Signed(IntPtrAdd(WordShr(int_elem, IntPtrConstant(11)),
+                                WordAnd(int_elem, IntPtrConstant(0x7FF))));
+@@ -2740,10 +2737,10 @@ Node* RegExpBuiltinsAssembler::ReplaceGlobalCallableFastPath(
+         {
+           var_i = IntPtrAdd(var_i.value(), int_one);
+ 
+-          Node* const next_elem =
+-              LoadFixedArrayElement(res_elems, var_i.value());
++          TNode<Smi> const next_elem =
++              CAST(LoadFixedArrayElement(res_elems, var_i.value()));
+ 
+-          var_match_start = SmiSub(next_elem, elem);
++          var_match_start = SmiSub(next_elem, smi_elem);
+           Goto(&loop_epilogue);
+         }
+       }
+@@ -2844,7 +2841,7 @@ Node* RegExpBuiltinsAssembler::ReplaceSimpleStringFastPath(
+ 
+   CSA_ASSERT(this, IsFastRegExp(context, regexp));
+ 
+-  Node* const smi_zero = SmiConstant(0);
++  TNode<Smi> const smi_zero = SmiConstant(0);
+   const bool kIsFastPath = true;
+ 
+   TVARIABLE(String, var_result, EmptyStringConstant());
+@@ -2870,10 +2867,10 @@ Node* RegExpBuiltinsAssembler::ReplaceSimpleStringFastPath(
+ 
+     // Successful match.
+     {
+-      Node* const match_start = LoadFixedArrayElement(
+-          var_match_indices.value(), RegExpMatchInfo::kFirstCaptureIndex);
+-      Node* const match_end = LoadFixedArrayElement(
+-          var_match_indices.value(), RegExpMatchInfo::kFirstCaptureIndex + 1);
++      TNode<Smi> const match_start = CAST(LoadFixedArrayElement(
++          var_match_indices.value(), RegExpMatchInfo::kFirstCaptureIndex));
++      TNode<Smi> const match_end = CAST(LoadFixedArrayElement(
++          var_match_indices.value(), RegExpMatchInfo::kFirstCaptureIndex + 1));
+ 
+       Label if_replaceisempty(this), if_replaceisnotempty(this);
+       TNode<Smi> const replace_length = LoadStringLengthAsSmi(replace_string);
+@@ -2964,11 +2961,11 @@ TF_BUILTIN(RegExpReplace, RegExpBuiltinsAssembler) {
+       BIND(&next);
+     }
+ 
+-    Node* const dollar_string = HeapConstant(
++    TNode<String> const dollar_string = HeapConstant(
+         isolate()->factory()->LookupSingleCharacterStringFromCode('$'));
+-    Node* const dollar_ix =
+-        CallBuiltin(Builtins::kStringIndexOf, context, replace_string,
+-                    dollar_string, SmiConstant(0));
++    TNode<Smi> const dollar_ix =
++        CAST(CallBuiltin(Builtins::kStringIndexOf, context, replace_string,
++                         dollar_string, SmiConstant(0)));
+     GotoIfNot(SmiEqual(dollar_ix, SmiConstant(-1)), &runtime);
+ 
+     Return(
+diff --git a/src/builtins/builtins-regexp-gen.h b/src/builtins/builtins-regexp-gen.h
+index a93345fb0d..5616769dd9 100644
+--- a/src/builtins/builtins-regexp-gen.h
++++ b/src/builtins/builtins-regexp-gen.h
+@@ -125,7 +125,8 @@ class RegExpBuiltinsAssembler : public CodeStubAssembler {
+                                      Node* const string);
+ 
+   void RegExpPrototypeSplitBody(Node* const context, Node* const regexp,
+-                                TNode<String> const string, Node* const limit);
++                                TNode<String> const string,
++                                TNode<Smi> const limit);
+ 
+   Node* ReplaceGlobalCallableFastPath(Node* context, Node* regexp, Node* string,
+                                       Node* replace_callable);
+diff --git a/src/builtins/builtins-string-gen.cc b/src/builtins/builtins-string-gen.cc
+index e61789bb17..6d52ab0544 100644
+--- a/src/builtins/builtins-string-gen.cc
++++ b/src/builtins/builtins-string-gen.cc
+@@ -1054,7 +1054,7 @@ void StringIncludesIndexOfAssembler::Generate(SearchVariant variant) {
+       arguments.PopAndReturn((variant == kIndexOf)
+                                  ? result
+                                  : SelectBooleanConstant(SmiGreaterThanOrEqual(
+-                                       result, SmiConstant(0))));
++                                       CAST(result), SmiConstant(0))));
+     });
+   }
+   BIND(&call_runtime);
+@@ -1156,16 +1156,15 @@ void StringBuiltinsAssembler::MaybeCallFunctionAtSymbol(
+   BIND(&out);
+ }
+ 
+-compiler::Node* StringBuiltinsAssembler::IndexOfDollarChar(Node* const context,
+-                                                           Node* const string) {
++TNode<Smi> StringBuiltinsAssembler::IndexOfDollarChar(Node* const context,
++                                                      Node* const string) {
+   CSA_ASSERT(this, IsString(string));
+ 
+-  Node* const dollar_string = HeapConstant(
++  TNode<String> const dollar_string = HeapConstant(
+       isolate()->factory()->LookupSingleCharacterStringFromCode('$'));
+-  Node* const dollar_ix = CallBuiltin(Builtins::kStringIndexOf, context, string,
+-                                      dollar_string, SmiConstant(0));
+-
+-  CSA_ASSERT(this, TaggedIsSmi(dollar_ix));
++  TNode<Smi> const dollar_ix =
++      CAST(CallBuiltin(Builtins::kStringIndexOf, context, string, dollar_string,
++                       SmiConstant(0)));
+   return dollar_ix;
+ }
+ 
+@@ -1188,7 +1187,7 @@ compiler::Node* StringBuiltinsAssembler::GetSubstitution(
+   // TODO(jgruber): Possibly extend this in the future to handle more complex
+   // cases without runtime calls.
+ 
+-  Node* const dollar_index = IndexOfDollarChar(context, replace_string);
++  TNode<Smi> const dollar_index = IndexOfDollarChar(context, replace_string);
+   Branch(SmiIsNegative(dollar_index), &out, &runtime);
+ 
+   BIND(&runtime);
+@@ -1233,16 +1232,17 @@ TF_BUILTIN(StringPrototypeRepeat, StringBuiltinsAssembler) {
+     Label if_count_isheapnumber(this, Label::kDeferred);
+ 
+     GotoIfNot(TaggedIsSmi(var_count.value()), &if_count_isheapnumber);
+-
+-    // If count is a SMI, throw a RangeError if less than 0 or greater than
+-    // the maximum string length.
+-    GotoIf(SmiLessThan(var_count.value(), SmiConstant(0)), &invalid_count);
+-    GotoIf(SmiEqual(var_count.value(), SmiConstant(0)), &return_emptystring);
+-    GotoIf(is_stringempty, &return_emptystring);
+-    GotoIf(SmiGreaterThan(var_count.value(), SmiConstant(String::kMaxLength)),
+-           &invalid_string_length);
+-    Return(CallBuiltin(Builtins::kStringRepeat, context, string,
+-                       var_count.value()));
++    {
++      // If count is a SMI, throw a RangeError if less than 0 or greater than
++      // the maximum string length.
++      TNode<Smi> smi_count = CAST(var_count.value());
++      GotoIf(SmiLessThan(smi_count, SmiConstant(0)), &invalid_count);
++      GotoIf(SmiEqual(smi_count, SmiConstant(0)), &return_emptystring);
++      GotoIf(is_stringempty, &return_emptystring);
++      GotoIf(SmiGreaterThan(smi_count, SmiConstant(String::kMaxLength)),
++             &invalid_string_length);
++      Return(CallBuiltin(Builtins::kStringRepeat, context, string, smi_count));
++    }
+ 
+     // If count is a Heap Number...
+     // 1) If count is Infinity, throw a RangeError exception
+@@ -1280,7 +1280,7 @@ TF_BUILTIN(StringPrototypeRepeat, StringBuiltinsAssembler) {
+ TF_BUILTIN(StringRepeat, StringBuiltinsAssembler) {
+   Node* const context = Parameter(Descriptor::kContext);
+   Node* const string = Parameter(Descriptor::kString);
+-  Node* const count = Parameter(Descriptor::kCount);
++  TNode<Smi> const count = CAST(Parameter(Descriptor::kCount));
+ 
+   CSA_ASSERT(this, IsString(string));
+   CSA_ASSERT(this, Word32BinaryNot(IsEmptyString(string)));
+@@ -1299,7 +1299,7 @@ TF_BUILTIN(StringRepeat, StringBuiltinsAssembler) {
+   //   }
+   VARIABLE(var_result, MachineRepresentation::kTagged, EmptyStringConstant());
+   VARIABLE(var_temp, MachineRepresentation::kTagged, string);
+-  VARIABLE(var_count, MachineRepresentation::kTagged, count);
++  TVARIABLE(Smi, var_count, count);
+ 
+   Callable stringadd_callable =
+       CodeFactory::StringAdd(isolate(), STRING_ADD_CHECK_NONE, NOT_TENURED);
+@@ -1317,7 +1317,7 @@ TF_BUILTIN(StringRepeat, StringBuiltinsAssembler) {
+       BIND(&next);
+     }
+ 
+-    var_count.Bind(SmiShr(var_count.value(), 1));
++    var_count = SmiShr(var_count.value(), 1);
+     GotoIf(SmiEqual(var_count.value(), SmiConstant(0)), &return_result);
+     var_temp.Bind(CallStub(stringadd_callable, context, var_temp.value(),
+                            var_temp.value()));
+@@ -1337,7 +1337,7 @@ TF_BUILTIN(StringPrototypeReplace, StringBuiltinsAssembler) {
+   Node* const replace = Parameter(Descriptor::kReplace);
+   Node* const context = Parameter(Descriptor::kContext);
+ 
+-  Node* const smi_zero = SmiConstant(0);
++  TNode<Smi> const smi_zero = SmiConstant(0);
+ 
+   RequireObjectCoercible(context, receiver, "String.prototype.replace");
+ 
+@@ -1392,10 +1392,9 @@ TF_BUILTIN(StringPrototypeReplace, StringBuiltinsAssembler) {
+   // longer substrings - we can handle up to 8 chars (one-byte) / 4 chars
+   // (2-byte).
+ 
+-  Node* const match_start_index =
+-      CallBuiltin(Builtins::kStringIndexOf, context, subject_string,
+-                  search_string, smi_zero);
+-  CSA_ASSERT(this, TaggedIsSmi(match_start_index));
++  TNode<Smi> const match_start_index =
++      CAST(CallBuiltin(Builtins::kStringIndexOf, context, subject_string,
++                       search_string, smi_zero));
+ 
+   // Early exit if no match found.
+   {
+@@ -1421,7 +1420,7 @@ TF_BUILTIN(StringPrototypeReplace, StringBuiltinsAssembler) {
+     BIND(&next);
+   }
+ 
+-  Node* const match_end_index = SmiAdd(match_start_index, search_length);
++  TNode<Smi> const match_end_index = SmiAdd(match_start_index, search_length);
+ 
+   Callable stringadd_callable =
+       CodeFactory::StringAdd(isolate(), STRING_ADD_CHECK_NONE, NOT_TENURED);
+@@ -1638,18 +1637,20 @@ class StringPadAssembler : public StringBuiltinsAssembler {
+     // If no max_length was provided, return the string.
+     GotoIf(IntPtrEqual(argc, IntPtrConstant(0)), &dont_pad);
+ 
+-    Node* const max_length = ToLength_Inline(context, arguments.AtIndex(0));
++    TNode<Number> const max_length =
++        ToLength_Inline(context, arguments.AtIndex(0));
+     CSA_ASSERT(this, IsNumberNormalized(max_length));
+ 
+     // Throw if max_length is not a smi or greater than the max string length.
+-    GotoIfNot(Word32And(TaggedIsSmi(max_length),
+-                        SmiLessThanOrEqual(max_length,
+-                                           SmiConstant(String::kMaxLength))),
+-              &invalid_string_length);
++    GotoIfNot(TaggedIsSmi(max_length), &invalid_string_length);
++    TNode<Smi> smi_max_length = CAST(max_length);
++    GotoIfNot(
++        SmiLessThanOrEqual(smi_max_length, SmiConstant(String::kMaxLength)),
++        &invalid_string_length);
+ 
+     // If the max_length is less than length of the string, return the string.
+-    CSA_ASSERT(this, TaggedIsPositiveSmi(max_length));
+-    GotoIf(SmiLessThanOrEqual(max_length, string_length), &dont_pad);
++    CSA_ASSERT(this, TaggedIsPositiveSmi(smi_max_length));
++    GotoIf(SmiLessThanOrEqual(smi_max_length, string_length), &dont_pad);
+ 
+     Branch(IntPtrEqual(argc, IntPtrConstant(1)), &pad, &argc_2);
+     BIND(&argc_2);
+@@ -1667,11 +1668,11 @@ class StringPadAssembler : public StringBuiltinsAssembler {
+     {
+       CSA_ASSERT(this,
+                  IntPtrGreaterThan(var_fill_length.value(), IntPtrConstant(0)));
+-      CSA_ASSERT(this, SmiGreaterThan(max_length, string_length));
++      CSA_ASSERT(this, SmiGreaterThan(smi_max_length, string_length));
+ 
+       Callable stringadd_callable =
+           CodeFactory::StringAdd(isolate(), STRING_ADD_CHECK_NONE, NOT_TENURED);
+-      TNode<Smi> const pad_length = SmiSub(max_length, string_length);
++      TNode<Smi> const pad_length = SmiSub(smi_max_length, string_length);
+ 
+       VARIABLE(var_pad, MachineRepresentation::kTagged);
+ 
+@@ -1841,7 +1842,7 @@ TF_BUILTIN(StringPrototypeSplit, StringBuiltinsAssembler) {
+   // Shortcut for {limit} == 0.
+   {
+     Label next(this);
+-    GotoIfNot(SmiEqual(limit_number, smi_zero), &next);
++    GotoIfNot(WordEqual(limit_number, smi_zero), &next);
+ 
+     const ElementsKind kind = PACKED_ELEMENTS;
+     Node* const native_context = LoadNativeContext(context);
+@@ -2069,24 +2070,24 @@ TF_BUILTIN(StringPrototypeSubstring, StringBuiltinsAssembler) {
+ 
+   Label out(this);
+ 
+-  VARIABLE(var_start, MachineRepresentation::kTagged);
+-  VARIABLE(var_end, MachineRepresentation::kTagged);
++  TVARIABLE(Smi, var_start);
++  TVARIABLE(Smi, var_end);
+ 
+   // Check that {receiver} is coercible to Object and convert it to a String.
+   TNode<String> const string =
+       ToThisString(context, receiver, "String.prototype.substring");
+ 
+-  Node* const length = LoadStringLengthAsSmi(string);
++  TNode<Smi> const length = LoadStringLengthAsSmi(string);
+ 
+   // Conversion and bounds-checks for {start}.
+-  var_start.Bind(ToSmiBetweenZeroAnd(context, start, length));
++  var_start = ToSmiBetweenZeroAnd(context, start, length);
+ 
+   // Conversion and bounds-checks for {end}.
+   {
+-    var_end.Bind(length);
++    var_end = length;
+     GotoIf(IsUndefined(end), &out);
+ 
+-    var_end.Bind(ToSmiBetweenZeroAnd(context, end, length));
++    var_end = ToSmiBetweenZeroAnd(context, end, length);
+ 
+     Label if_endislessthanstart(this);
+     Branch(SmiLessThan(var_end.value(), var_start.value()),
+@@ -2094,9 +2095,9 @@ TF_BUILTIN(StringPrototypeSubstring, StringBuiltinsAssembler) {
+ 
+     BIND(&if_endislessthanstart);
+     {
+-      Node* const tmp = var_end.value();
+-      var_end.Bind(var_start.value());
+-      var_start.Bind(tmp);
++      TNode<Smi> const tmp = var_end.value();
++      var_end = var_start.value();
++      var_start = tmp;
+       Goto(&out);
+     }
+   }
+diff --git a/src/builtins/builtins-string-gen.h b/src/builtins/builtins-string-gen.h
+index 00c2bc0dad..d1b0765bd2 100644
+--- a/src/builtins/builtins-string-gen.h
++++ b/src/builtins/builtins-string-gen.h
+@@ -74,12 +74,12 @@ class StringBuiltinsAssembler : public CodeStubAssembler {
+   void StringIndexOf(Node* const subject_string, Node* const search_string,
+                      Node* const position, std::function<void(Node*)> f_return);
+ 
+-  Node* IndexOfDollarChar(Node* const context, Node* const string);
++  TNode<Smi> IndexOfDollarChar(Node* const context, Node* const string);
+ 
+   void RequireObjectCoercible(Node* const context, Node* const value,
+                               const char* method_name);
+ 
+-  Node* SmiIsNegative(Node* const value) {
++  TNode<BoolT> SmiIsNegative(TNode<Smi> value) {
+     return SmiLessThan(value, SmiConstant(0));
+   }
+ 
+diff --git a/src/builtins/builtins-typed-array-gen.cc b/src/builtins/builtins-typed-array-gen.cc
+index 7df3a8b1b8..991def7be3 100644
+--- a/src/builtins/builtins-typed-array-gen.cc
++++ b/src/builtins/builtins-typed-array-gen.cc
+@@ -205,8 +205,10 @@ TF_BUILTIN(TypedArrayInitialize, TypedArrayBuiltinsAssembler) {
+     StoreObjectField(holder, JSArrayBufferView::kBufferOffset, buffer);
+ 
+     // Check the alignment.
+-    GotoIf(SmiEqual(SmiMod(element_size, SmiConstant(kObjectAlignment)),
+-                    SmiConstant(0)),
++    // TODO(ishell): remove <Object, Object>
++    GotoIf(WordEqual<Object, Object>(
++               SmiMod(element_size, SmiConstant(kObjectAlignment)),
++               SmiConstant(0)),
+            &aligned);
+ 
+     // Fix alignment if needed.
+@@ -367,10 +369,12 @@ void TypedArrayBuiltinsAssembler::ConstructByArrayBuffer(
+   // Check that the offset is a multiple of the element size.
+   BIND(&offset_is_smi);
+   {
+-    GotoIf(SmiEqual(offset.value(), SmiConstant(0)), &check_length);
+-    GotoIf(SmiLessThan(offset.value(), SmiConstant(0)), &invalid_length);
+-    Node* remainder = SmiMod(offset.value(), element_size);
+-    Branch(SmiEqual(remainder, SmiConstant(0)), &check_length,
++    TNode<Smi> smi_offset = CAST(offset.value());
++    GotoIf(SmiEqual(smi_offset, SmiConstant(0)), &check_length);
++    GotoIf(SmiLessThan(smi_offset, SmiConstant(0)), &invalid_length);
++    TNode<Number> remainder = SmiMod(smi_offset, element_size);
++    // TODO(ishell): remove <Object, Object>
++    Branch(WordEqual<Object, Object>(remainder, SmiConstant(0)), &check_length,
+            &start_offset_error);
+   }
+   BIND(&offset_not_smi);
+diff --git a/src/code-stub-assembler.cc b/src/code-stub-assembler.cc
+index ba0a9bfd72..b60a80cfcb 100644
+--- a/src/code-stub-assembler.cc
++++ b/src/code-stub-assembler.cc
+@@ -558,11 +558,11 @@ TNode<Float64T> CodeStubAssembler::SmiToFloat64(SloppyTNode<Smi> value) {
+   return ChangeInt32ToFloat64(SmiToInt32(value));
+ }
+ 
+-TNode<Smi> CodeStubAssembler::SmiMax(SloppyTNode<Smi> a, SloppyTNode<Smi> b) {
++TNode<Smi> CodeStubAssembler::SmiMax(TNode<Smi> a, TNode<Smi> b) {
+   return SelectConstant<Smi>(SmiLessThan(a, b), b, a);
+ }
+ 
+-TNode<Smi> CodeStubAssembler::SmiMin(SloppyTNode<Smi> a, SloppyTNode<Smi> b) {
++TNode<Smi> CodeStubAssembler::SmiMin(TNode<Smi> a, TNode<Smi> b) {
+   return SelectConstant<Smi>(SmiLessThan(a, b), a, b);
+ }
+ 
+@@ -662,8 +662,7 @@ TNode<IntPtrT> CodeStubAssembler::ConvertToRelativeIndex(
+   return result.value();
+ }
+ 
+-TNode<Number> CodeStubAssembler::SmiMod(SloppyTNode<Smi> a,
+-                                        SloppyTNode<Smi> b) {
++TNode<Number> CodeStubAssembler::SmiMod(TNode<Smi> a, TNode<Smi> b) {
+   TVARIABLE(Number, var_result);
+   Label return_result(this, &var_result),
+       return_minuszero(this, Label::kDeferred),
+@@ -726,8 +725,7 @@ TNode<Number> CodeStubAssembler::SmiMod(SloppyTNode<Smi> a,
+   return var_result.value();
+ }
+ 
+-TNode<Number> CodeStubAssembler::SmiMul(SloppyTNode<Smi> a,
+-                                        SloppyTNode<Smi> b) {
++TNode<Number> CodeStubAssembler::SmiMul(TNode<Smi> a, TNode<Smi> b) {
+   TVARIABLE(Number, var_result);
+   VARIABLE(var_lhs_float64, MachineRepresentation::kFloat64);
+   VARIABLE(var_rhs_float64, MachineRepresentation::kFloat64);
+@@ -787,8 +785,8 @@ TNode<Number> CodeStubAssembler::SmiMul(SloppyTNode<Smi> a,
+   return var_result.value();
+ }
+ 
+-Node* CodeStubAssembler::TrySmiDiv(Node* dividend, Node* divisor,
+-                                   Label* bailout) {
++TNode<Smi> CodeStubAssembler::TrySmiDiv(TNode<Smi> dividend, TNode<Smi> divisor,
++                                        Label* bailout) {
+   // Both {a} and {b} are Smis. Bailout to floating point division if {divisor}
+   // is zero.
+   GotoIf(WordEqual(divisor, SmiConstant(0)), bailout);
+@@ -806,8 +804,8 @@ Node* CodeStubAssembler::TrySmiDiv(Node* dividend, Node* divisor,
+   }
+   BIND(&dividend_is_not_zero);
+ 
+-  Node* untagged_divisor = SmiToInt32(divisor);
+-  Node* untagged_dividend = SmiToInt32(dividend);
++  TNode<Int32T> untagged_divisor = SmiToInt32(divisor);
++  TNode<Int32T> untagged_dividend = SmiToInt32(dividend);
+ 
+   // Do floating point division if {dividend} is kMinInt (or kMinInt - 1
+   // if the Smi size is 31) and {divisor} is -1.
+@@ -825,8 +823,8 @@ Node* CodeStubAssembler::TrySmiDiv(Node* dividend, Node* divisor,
+   }
+   BIND(&divisor_is_not_minus_one);
+ 
+-  Node* untagged_result = Int32Div(untagged_dividend, untagged_divisor);
+-  Node* truncated = Int32Mul(untagged_result, untagged_divisor);
++  TNode<Int32T> untagged_result = Int32Div(untagged_dividend, untagged_divisor);
++  TNode<Int32T> truncated = Signed(Int32Mul(untagged_result, untagged_divisor));
+ 
+   // Do floating point division if the remainder is not 0.
+   GotoIf(Word32NotEqual(untagged_dividend, truncated), bailout);
+@@ -1217,7 +1215,7 @@ void CodeStubAssembler::BranchIfToBooleanIsTrue(Node* value, Label* if_true,
+   BIND(&if_smi);
+   {
+     // The {value} is a Smi, only need to check against zero.
+-    BranchIfSmiEqual(value, SmiConstant(0), if_false, if_true);
++    BranchIfSmiEqual(CAST(value), SmiConstant(0), if_false, if_true);
+   }
+ 
+   BIND(&if_notsmi);
+@@ -3402,7 +3400,7 @@ CodeStubAssembler::AllocateUninitializedJSArrayWithElements(
+                                  : Heap::kFixedArrayMapRootIndex;
+   DCHECK(Heap::RootIsImmortalImmovable(elements_map_index));
+   StoreMapNoWriteBarrier(elements, elements_map_index);
+-  Node* capacity_smi = ParameterToTagged(capacity, capacity_mode);
++  TNode<Smi> capacity_smi = ParameterToTagged(capacity, capacity_mode);
+   CSA_ASSERT(this, SmiGreaterThan(capacity_smi, SmiConstant(0)));
+   StoreObjectFieldNoWriteBarrier(elements, FixedArray::kLengthOffset,
+                                  capacity_smi);
+@@ -4168,9 +4166,9 @@ void CodeStubAssembler::InitializeAllocationMemento(Node* base,
+   StoreObjectFieldNoWriteBarrier(
+       memento, AllocationMemento::kAllocationSiteOffset, allocation_site);
+   if (FLAG_allocation_site_pretenuring) {
+-    Node* count = LoadObjectField(allocation_site,
+-                                  AllocationSite::kPretenureCreateCountOffset);
+-    Node* incremented_count = SmiAdd(count, SmiConstant(1));
++    TNode<Smi> count = CAST(LoadObjectField(
++        allocation_site, AllocationSite::kPretenureCreateCountOffset));
++    TNode<Smi> incremented_count = SmiAdd(count, SmiConstant(1));
+     StoreObjectFieldNoWriteBarrier(allocation_site,
+                                    AllocationSite::kPretenureCreateCountOffset,
+                                    incremented_count);
+@@ -4317,7 +4315,7 @@ void CodeStubAssembler::TaggedToWord32OrBigIntImpl(
+         // We do not require an Or with earlier feedback here because once we
+         // convert the value to a Numeric, we cannot reach this path. We can
+         // only reach this path on the first pass when the feedback is kNone.
+-        CSA_ASSERT(this, SmiEqual(var_feedback->value(),
++        CSA_ASSERT(this, SmiEqual(CAST(var_feedback->value()),
+                                   SmiConstant(BinaryOperationFeedback::kNone)));
+       }
+       GotoIf(InstanceTypeEqual(instance_type, ODDBALL_TYPE), &is_oddball);
+@@ -5093,7 +5091,7 @@ TNode<BoolT> CodeStubAssembler::IsFixedArrayWithKindOrEmpty(
+ 
+   GotoIf(IsFixedArrayWithKind(object, kind), &out);
+ 
+-  Node* const length = LoadFixedArrayBaseLength(CAST(object));
++  TNode<Smi> const length = LoadFixedArrayBaseLength(CAST(object));
+   GotoIf(SmiEqual(length, SmiConstant(0)), &out);
+ 
+   var_result = Int32FalseConstant();
+@@ -8415,7 +8413,7 @@ void CodeStubAssembler::UpdateFeedback(Node* feedback, Node* feedback_vector,
+       LoadFeedbackVectorSlot(feedback_vector, slot_id);
+   CSA_ASSERT(this, IsObject(feedback_element));
+   TNode<Smi> previous_feedback = CAST(ToObject(feedback_element));
+-  TNode<Smi> combined_feedback = SmiOr(previous_feedback, feedback);
++  TNode<Smi> combined_feedback = SmiOr(previous_feedback, CAST(feedback));
+   Label end(this);
+ 
+   GotoIf(SmiEqual(previous_feedback, combined_feedback), &end);
+@@ -8455,13 +8453,14 @@ void CodeStubAssembler::CombineFeedback(Variable* existing_feedback,
+                                         int feedback) {
+   if (existing_feedback == nullptr) return;
+   existing_feedback->Bind(
+-      SmiOr(existing_feedback->value(), SmiConstant(feedback)));
++      SmiOr(CAST(existing_feedback->value()), SmiConstant(feedback)));
+ }
+ 
+ void CodeStubAssembler::CombineFeedback(Variable* existing_feedback,
+                                         Node* feedback) {
+   if (existing_feedback == nullptr) return;
+-  existing_feedback->Bind(SmiOr(existing_feedback->value(), feedback));
++  existing_feedback->Bind(
++      SmiOr(CAST(existing_feedback->value()), CAST(feedback)));
+ }
+ 
+ void CodeStubAssembler::CheckForAssociatedProtector(Node* name,
+@@ -9338,31 +9337,35 @@ void CodeStubAssembler::BranchIfNumberRelationalComparison(
+ 
+   BIND(&if_left_smi);
+   {
++    TNode<Smi> smi_left = CAST(left);
++
+     Label if_right_not_smi(this);
+     GotoIfNot(TaggedIsSmi(right), &if_right_not_smi);
++    {
++      TNode<Smi> smi_right = CAST(right);
+ 
+-    // Both {left} and {right} are Smi, so just perform a fast Smi comparison.
+-    switch (op) {
+-      case Operation::kLessThan:
+-        BranchIfSmiLessThan(left, right, if_true, if_false);
+-        break;
+-      case Operation::kLessThanOrEqual:
+-        BranchIfSmiLessThanOrEqual(left, right, if_true, if_false);
+-        break;
+-      case Operation::kGreaterThan:
+-        BranchIfSmiLessThan(right, left, if_true, if_false);
+-        break;
+-      case Operation::kGreaterThanOrEqual:
+-        BranchIfSmiLessThanOrEqual(right, left, if_true, if_false);
+-        break;
+-      default:
+-        UNREACHABLE();
++      // Both {left} and {right} are Smi, so just perform a fast Smi comparison.
++      switch (op) {
++        case Operation::kLessThan:
++          BranchIfSmiLessThan(smi_left, smi_right, if_true, if_false);
++          break;
++        case Operation::kLessThanOrEqual:
++          BranchIfSmiLessThanOrEqual(smi_left, smi_right, if_true, if_false);
++          break;
++        case Operation::kGreaterThan:
++          BranchIfSmiLessThan(smi_right, smi_left, if_true, if_false);
++          break;
++        case Operation::kGreaterThanOrEqual:
++          BranchIfSmiLessThanOrEqual(smi_right, smi_left, if_true, if_false);
++          break;
++        default:
++          UNREACHABLE();
++      }
+     }
+-
+     BIND(&if_right_not_smi);
+     {
+       CSA_ASSERT(this, IsHeapNumber(right));
+-      var_left_float = SmiToFloat64(left);
++      var_left_float = SmiToFloat64(smi_left);
+       var_right_float = LoadHeapNumberValue(right);
+       Goto(&do_float_comparison);
+     }
+@@ -9472,6 +9475,7 @@ Node* CodeStubAssembler::RelationalComparison(Operation op, Node* left,
+ 
+     BIND(&if_left_smi);
+     {
++      TNode<Smi> smi_left = CAST(left);
+       Label if_right_smi(this), if_right_heapnumber(this),
+           if_right_bigint(this, Label::kDeferred),
+           if_right_not_numeric(this, Label::kDeferred);
+@@ -9484,21 +9488,24 @@ Node* CodeStubAssembler::RelationalComparison(Operation op, Node* left,
+ 
+       BIND(&if_right_smi);
+       {
++        TNode<Smi> smi_right = CAST(right);
+         CombineFeedback(var_type_feedback,
+                         CompareOperationFeedback::kSignedSmall);
+         switch (op) {
+           case Operation::kLessThan:
+-            BranchIfSmiLessThan(left, right, &return_true, &return_false);
++            BranchIfSmiLessThan(smi_left, smi_right, &return_true,
++                                &return_false);
+             break;
+           case Operation::kLessThanOrEqual:
+-            BranchIfSmiLessThanOrEqual(left, right, &return_true,
++            BranchIfSmiLessThanOrEqual(smi_left, smi_right, &return_true,
+                                        &return_false);
+             break;
+           case Operation::kGreaterThan:
+-            BranchIfSmiLessThan(right, left, &return_true, &return_false);
++            BranchIfSmiLessThan(smi_right, smi_left, &return_true,
++                                &return_false);
+             break;
+           case Operation::kGreaterThanOrEqual:
+-            BranchIfSmiLessThanOrEqual(right, left, &return_true,
++            BranchIfSmiLessThanOrEqual(smi_right, smi_left, &return_true,
+                                        &return_false);
+             break;
+           default:
+@@ -9509,7 +9516,7 @@ Node* CodeStubAssembler::RelationalComparison(Operation op, Node* left,
+       BIND(&if_right_heapnumber);
+       {
+         CombineFeedback(var_type_feedback, CompareOperationFeedback::kNumber);
+-        var_left_float = SmiToFloat64(left);
++        var_left_float = SmiToFloat64(smi_left);
+         var_right_float = LoadHeapNumberValue(right);
+         Goto(&do_float_comparison);
+       }
+@@ -9861,8 +9868,9 @@ Node* CodeStubAssembler::RelationalComparison(Operation op, Node* left,
+   return var_result.value();
+ }
+ 
+-Node* CodeStubAssembler::CollectFeedbackForString(Node* instance_type) {
+-  Node* feedback = SelectSmiConstant(
++TNode<Smi> CodeStubAssembler::CollectFeedbackForString(
++    SloppyTNode<Int32T> instance_type) {
++  TNode<Smi> feedback = SelectSmiConstant(
+       Word32Equal(
+           Word32And(instance_type, Int32Constant(kIsNotInternalizedMask)),
+           Int32Constant(kInternalizedTag)),
+@@ -10459,9 +10467,9 @@ Node* CodeStubAssembler::StrictEqual(Node* lhs, Node* rhs,
+             BIND(&if_rhsisstring);
+             {
+               if (var_type_feedback != nullptr) {
+-                Node* lhs_feedback =
++                TNode<Smi> lhs_feedback =
+                     CollectFeedbackForString(lhs_instance_type);
+-                Node* rhs_feedback =
++                TNode<Smi> rhs_feedback =
+                     CollectFeedbackForString(rhs_instance_type);
+                 var_type_feedback->Bind(SmiOr(lhs_feedback, rhs_feedback));
+               }
+@@ -11179,8 +11187,8 @@ void CodeStubAssembler::GotoIfNumber(Node* input, Label* is_number) {
+   GotoIf(IsHeapNumber(input), is_number);
+ }
+ 
+-Node* CodeStubAssembler::BitwiseOp(Node* left32, Node* right32,
+-                                   Operation bitwise_op) {
++TNode<Number> CodeStubAssembler::BitwiseOp(Node* left32, Node* right32,
++                                           Operation bitwise_op) {
+   switch (bitwise_op) {
+     case Operation::kBitwiseAnd:
+       return ChangeInt32ToTagged(Signed(Word32And(left32, right32)));
+diff --git a/src/code-stub-assembler.h b/src/code-stub-assembler.h
+index 762de4c72b..4dd37bff59 100644
+--- a/src/code-stub-assembler.h
++++ b/src/code-stub-assembler.h
+@@ -187,7 +187,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
+ #define PARAMETER_BINOP(OpName, IntPtrOpName, SmiOpName) \
+   Node* OpName(Node* a, Node* b, ParameterMode mode) {   \
+     if (mode == SMI_PARAMETERS) {                        \
+-      return SmiOpName(a, b);                            \
++      return SmiOpName(CAST(a), CAST(b));                \
+     } else {                                             \
+       DCHECK_EQ(INTPTR_PARAMETERS, mode);                \
+       return IntPtrOpName(a, b);                         \
+@@ -275,7 +275,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
+ 
+   // Smi operations.
+ #define SMI_ARITHMETIC_BINOP(SmiOpName, IntPtrOpName)                  \
+-  TNode<Smi> SmiOpName(SloppyTNode<Smi> a, SloppyTNode<Smi> b) {       \
++  TNode<Smi> SmiOpName(TNode<Smi> a, TNode<Smi> b) {                   \
+     return BitcastWordToTaggedSigned(                                  \
+         IntPtrOpName(BitcastTaggedToWord(a), BitcastTaggedToWord(b))); \
+   }
+@@ -288,11 +288,11 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
+   TNode<Smi> TrySmiAdd(TNode<Smi> a, TNode<Smi> b, Label* if_overflow);
+   TNode<Smi> TrySmiSub(TNode<Smi> a, TNode<Smi> b, Label* if_overflow);
+ 
+-  TNode<Smi> SmiShl(SloppyTNode<Smi> a, int shift) {
++  TNode<Smi> SmiShl(TNode<Smi> a, int shift) {
+     return BitcastWordToTaggedSigned(WordShl(BitcastTaggedToWord(a), shift));
+   }
+ 
+-  TNode<Smi> SmiShr(SloppyTNode<Smi> a, int shift) {
++  TNode<Smi> SmiShr(TNode<Smi> a, int shift) {
+     return BitcastWordToTaggedSigned(
+         WordAnd(WordShr(BitcastTaggedToWord(a), shift),
+                 BitcastTaggedToWord(SmiConstant(-1))));
+@@ -300,7 +300,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
+ 
+   Node* WordOrSmiShl(Node* a, int shift, ParameterMode mode) {
+     if (mode == SMI_PARAMETERS) {
+-      return SmiShl(a, shift);
++      return SmiShl(CAST(a), shift);
+     } else {
+       DCHECK_EQ(INTPTR_PARAMETERS, mode);
+       return WordShl(a, shift);
+@@ -309,7 +309,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
+ 
+   Node* WordOrSmiShr(Node* a, int shift, ParameterMode mode) {
+     if (mode == SMI_PARAMETERS) {
+-      return SmiShr(a, shift);
++      return SmiShr(CAST(a), shift);
+     } else {
+       DCHECK_EQ(INTPTR_PARAMETERS, mode);
+       return WordShr(a, shift);
+@@ -317,7 +317,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
+   }
+ 
+ #define SMI_COMPARISON_OP(SmiOpName, IntPtrOpName)                       \
+-  TNode<BoolT> SmiOpName(Node* a, Node* b) {                             \
++  TNode<BoolT> SmiOpName(TNode<Smi> a, TNode<Smi> b) {                   \
+     return IntPtrOpName(BitcastTaggedToWord(a), BitcastTaggedToWord(b)); \
+   }
+   SMI_COMPARISON_OP(SmiEqual, WordEqual)
+@@ -330,15 +330,15 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
+   SMI_COMPARISON_OP(SmiGreaterThan, IntPtrGreaterThan)
+   SMI_COMPARISON_OP(SmiGreaterThanOrEqual, IntPtrGreaterThanOrEqual)
+ #undef SMI_COMPARISON_OP
+-  TNode<Smi> SmiMax(SloppyTNode<Smi> a, SloppyTNode<Smi> b);
+-  TNode<Smi> SmiMin(SloppyTNode<Smi> a, SloppyTNode<Smi> b);
++  TNode<Smi> SmiMax(TNode<Smi> a, TNode<Smi> b);
++  TNode<Smi> SmiMin(TNode<Smi> a, TNode<Smi> b);
+   // Computes a % b for Smi inputs a and b; result is not necessarily a Smi.
+-  TNode<Number> SmiMod(SloppyTNode<Smi> a, SloppyTNode<Smi> b);
++  TNode<Number> SmiMod(TNode<Smi> a, TNode<Smi> b);
+   // Computes a * b for Smi inputs a and b; result is not necessarily a Smi.
+-  TNode<Number> SmiMul(SloppyTNode<Smi> a, SloppyTNode<Smi> b);
+-  // Tries to computes dividend / divisor for Smi inputs; branching to bailout
++  TNode<Number> SmiMul(TNode<Smi> a, TNode<Smi> b);
++  // Tries to compute dividend / divisor for Smi inputs; branching to bailout
+   // if the division needs to be performed as a floating point operation.
+-  Node* TrySmiDiv(Node* dividend, Node* divisor, Label* bailout);
++  TNode<Smi> TrySmiDiv(TNode<Smi> dividend, TNode<Smi> divisor, Label* bailout);
+ 
+   // Smi | HeapNumber operations.
+   TNode<Number> NumberInc(SloppyTNode<Number> value);
+@@ -349,7 +349,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
+   void GotoIfNumber(Node* value, Label* is_number);
+   TNode<Number> SmiToNumber(TNode<Smi> v) { return v; }
+ 
+-  Node* BitwiseOp(Node* left32, Node* right32, Operation bitwise_op);
++  TNode<Number> BitwiseOp(Node* left32, Node* right32, Operation bitwise_op);
+ 
+   // Allocate an object of the given size.
+   Node* AllocateInNewSpace(Node* size, AllocationFlags flags = kNone);
+@@ -471,15 +471,17 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
+   void Bind(Label* label);
+ #endif  // DEBUG
+ 
+-  void BranchIfSmiEqual(Node* a, Node* b, Label* if_true, Label* if_false) {
++  void BranchIfSmiEqual(TNode<Smi> a, TNode<Smi> b, Label* if_true,
++                        Label* if_false) {
+     Branch(SmiEqual(a, b), if_true, if_false);
+   }
+ 
+-  void BranchIfSmiLessThan(Node* a, Node* b, Label* if_true, Label* if_false) {
++  void BranchIfSmiLessThan(TNode<Smi> a, TNode<Smi> b, Label* if_true,
++                           Label* if_false) {
+     Branch(SmiLessThan(a, b), if_true, if_false);
+   }
+ 
+-  void BranchIfSmiLessThanOrEqual(Node* a, Node* b, Label* if_true,
++  void BranchIfSmiLessThanOrEqual(TNode<Smi> a, TNode<Smi> b, Label* if_true,
+                                   Label* if_false) {
+     Branch(SmiLessThanOrEqual(a, b), if_true, if_false);
+   }
+@@ -2465,7 +2467,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
+   TNode<Uint32T> GetSortedKeyIndex(TNode<Array> descriptors,
+                                    TNode<Uint32T> entry_index);
+ 
+-  Node* CollectFeedbackForString(Node* instance_type);
++  TNode<Smi> CollectFeedbackForString(SloppyTNode<Int32T> instance_type);
+   void GenerateEqual_Same(Node* value, Label* if_equal, Label* if_notequal,
+                           Variable* var_type_feedback = nullptr);
+   TNode<String> AllocAndCopyStringCharacters(Node* from,
+diff --git a/src/code-stubs.cc b/src/code-stubs.cc
+index 6514c2bab0..210ee479c2 100644
+--- a/src/code-stubs.cc
++++ b/src/code-stubs.cc
+@@ -527,7 +527,7 @@ void ArrayConstructorAssembler::GenerateConstructor(
+ 
+   if (IsFastPackedElementsKind(elements_kind)) {
+     Label abort(this, Label::kDeferred);
+-    Branch(SmiEqual(array_size, SmiConstant(0)), &small_smi_size, &abort);
++    Branch(SmiEqual(CAST(array_size), SmiConstant(0)), &small_smi_size, &abort);
+ 
+     BIND(&abort);
+     Node* reason = SmiConstant(AbortReason::kAllocatingNonEmptyPackedArray);
+@@ -539,7 +539,7 @@ void ArrayConstructorAssembler::GenerateConstructor(
+         (kMaxRegularHeapObjectSize - FixedArray::kHeaderSize - JSArray::kSize -
+          AllocationMemento::kSize) /
+         element_size;
+-    Branch(SmiAboveOrEqual(array_size, SmiConstant(max_fast_elements)),
++    Branch(SmiAboveOrEqual(CAST(array_size), SmiConstant(max_fast_elements)),
+            &call_runtime, &small_smi_size);
+   }
+ 
+diff --git a/src/ic/accessor-assembler.cc b/src/ic/accessor-assembler.cc
+index 7599823451..a40ec297a6 100644
+--- a/src/ic/accessor-assembler.cc
++++ b/src/ic/accessor-assembler.cc
+@@ -123,7 +123,7 @@ void AccessorAssembler::HandlePolymorphicCase(
+ 
+     if (i >= min_feedback_capacity) {
+       if (length == nullptr) length = LoadWeakFixedArrayLength(feedback);
+-      GotoIf(SmiGreaterThanOrEqual(SmiConstant(handler_index), length),
++      GotoIf(SmiGreaterThanOrEqual(SmiConstant(handler_index), CAST(length)),
+              if_miss);
+     }
+ 
+diff --git a/src/ic/binary-op-assembler.cc b/src/ic/binary-op-assembler.cc
+index 59c6a461fc..9016e9ba18 100644
+--- a/src/ic/binary-op-assembler.cc
++++ b/src/ic/binary-op-assembler.cc
+@@ -443,7 +443,7 @@ Node* BinaryOpAssembler::Generate_MultiplyWithFeedback(Node* context, Node* lhs,
+                                                        Node* feedback_vector,
+                                                        bool rhs_is_smi) {
+   auto smiFunction = [=](Node* lhs, Node* rhs, Variable* var_type_feedback) {
+-    Node* result = SmiMul(lhs, rhs);
++    TNode<Number> result = SmiMul(CAST(lhs), CAST(rhs));
+     var_type_feedback->Bind(SelectSmiConstant(
+         TaggedIsSmi(result), BinaryOperationFeedback::kSignedSmall,
+         BinaryOperationFeedback::kNumber));
+@@ -467,7 +467,7 @@ Node* BinaryOpAssembler::Generate_DivideWithFeedback(
+     // Smi and Number operations, so this path should not be marked as Deferred.
+     Label bailout(this, rhs_is_smi ? Label::kDeferred : Label::kNonDeferred),
+         end(this);
+-    var_result.Bind(TrySmiDiv(lhs, rhs, &bailout));
++    var_result.Bind(TrySmiDiv(CAST(lhs), CAST(rhs), &bailout));
+     var_type_feedback->Bind(SmiConstant(BinaryOperationFeedback::kSignedSmall));
+     Goto(&end);
+ 
+@@ -495,7 +495,7 @@ Node* BinaryOpAssembler::Generate_ModulusWithFeedback(
+     Node* context, Node* dividend, Node* divisor, Node* slot_id,
+     Node* feedback_vector, bool rhs_is_smi) {
+   auto smiFunction = [=](Node* lhs, Node* rhs, Variable* var_type_feedback) {
+-    Node* result = SmiMod(lhs, rhs);
++    TNode<Number> result = SmiMod(CAST(lhs), CAST(rhs));
+     var_type_feedback->Bind(SelectSmiConstant(
+         TaggedIsSmi(result), BinaryOperationFeedback::kSignedSmall,
+         BinaryOperationFeedback::kNumber));
+diff --git a/src/interpreter/interpreter-generator.cc b/src/interpreter/interpreter-generator.cc
+index 2d6ef22d52..0689b8a032 100644
+--- a/src/interpreter/interpreter-generator.cc
++++ b/src/interpreter/interpreter-generator.cc
+@@ -902,8 +902,8 @@ class InterpreterBitwiseBinaryOpAssembler : public InterpreterAssembler {
+     Node* slot_index = BytecodeOperandIdx(1);
+     Node* feedback_vector = LoadFeedbackVector();
+ 
+-    VARIABLE(var_left_feedback, MachineRepresentation::kTaggedSigned);
+-    VARIABLE(var_right_feedback, MachineRepresentation::kTaggedSigned);
++    TVARIABLE(Smi, var_left_feedback);
++    TVARIABLE(Smi, var_right_feedback);
+     VARIABLE(var_left_word32, MachineRepresentation::kWord32);
+     VARIABLE(var_right_word32, MachineRepresentation::kWord32);
+     VARIABLE(var_left_bigint, MachineRepresentation::kTagged, left);
+@@ -919,12 +919,12 @@ class InterpreterBitwiseBinaryOpAssembler : public InterpreterAssembler {
+                                        &var_right_word32, &do_bigint_op,
+                                        &var_right_bigint, &var_right_feedback);
+     BIND(&do_number_op);
+-    Node* result = BitwiseOp(var_left_word32.value(), var_right_word32.value(),
+-                             bitwise_op);
+-    Node* result_type = SelectSmiConstant(TaggedIsSmi(result),
+-                                          BinaryOperationFeedback::kSignedSmall,
+-                                          BinaryOperationFeedback::kNumber);
+-    Node* input_feedback =
++    TNode<Number> result = BitwiseOp(var_left_word32.value(),
++                                     var_right_word32.value(), bitwise_op);
++    TNode<Smi> result_type = SelectSmiConstant(
++        TaggedIsSmi(result), BinaryOperationFeedback::kSignedSmall,
++        BinaryOperationFeedback::kNumber);
++    TNode<Smi> input_feedback =
+         SmiOr(var_left_feedback.value(), var_right_feedback.value());
+     UpdateFeedback(SmiOr(result_type, input_feedback), feedback_vector,
+                    slot_index);
+@@ -952,7 +952,7 @@ class InterpreterBitwiseBinaryOpAssembler : public InterpreterAssembler {
+     Node* feedback_vector = LoadFeedbackVector();
+     Node* context = GetContext();
+ 
+-    VARIABLE(var_left_feedback, MachineRepresentation::kTaggedSigned);
++    TVARIABLE(Smi, var_left_feedback);
+     VARIABLE(var_left_word32, MachineRepresentation::kWord32);
+     VARIABLE(var_left_bigint, MachineRepresentation::kTagged);
+     Label do_smi_op(this), if_bigint_mix(this);
+@@ -961,11 +961,11 @@ class InterpreterBitwiseBinaryOpAssembler : public InterpreterAssembler {
+                                        &var_left_word32, &if_bigint_mix,
+                                        &var_left_bigint, &var_left_feedback);
+     BIND(&do_smi_op);
+-    Node* result =
++    TNode<Number> result =
+         BitwiseOp(var_left_word32.value(), SmiToInt32(right), bitwise_op);
+-    Node* result_type = SelectSmiConstant(TaggedIsSmi(result),
+-                                          BinaryOperationFeedback::kSignedSmall,
+-                                          BinaryOperationFeedback::kNumber);
++    TNode<Smi> result_type = SelectSmiConstant(
++        TaggedIsSmi(result), BinaryOperationFeedback::kSignedSmall,
++        BinaryOperationFeedback::kNumber);
+     UpdateFeedback(SmiOr(result_type, var_left_feedback.value()),
+                    feedback_vector, slot_index);
+     SetAccumulator(result);
+@@ -1059,7 +1059,7 @@ IGNITION_HANDLER(BitwiseNot, InterpreterAssembler) {
+   Node* context = GetContext();
+ 
+   VARIABLE(var_word32, MachineRepresentation::kWord32);
+-  VARIABLE(var_feedback, MachineRepresentation::kTaggedSigned);
++  TVARIABLE(Smi, var_feedback);
+   VARIABLE(var_bigint, MachineRepresentation::kTagged);
+   Label if_number(this), if_bigint(this);
+   TaggedToWord32OrBigIntWithFeedback(context, operand, &if_number, &var_word32,
+@@ -1067,10 +1067,11 @@ IGNITION_HANDLER(BitwiseNot, InterpreterAssembler) {
+ 
+   // Number case.
+   BIND(&if_number);
+-  Node* result = ChangeInt32ToTagged(Signed(Word32Not(var_word32.value())));
+-  Node* result_type = SelectSmiConstant(TaggedIsSmi(result),
+-                                        BinaryOperationFeedback::kSignedSmall,
+-                                        BinaryOperationFeedback::kNumber);
++  TNode<Number> result =
++      ChangeInt32ToTagged(Signed(Word32Not(var_word32.value())));
++  TNode<Smi> result_type = SelectSmiConstant(
++      TaggedIsSmi(result), BinaryOperationFeedback::kSignedSmall,
++      BinaryOperationFeedback::kNumber);
+   UpdateFeedback(SmiOr(result_type, var_feedback.value()), feedback_vector,
+                  slot_index);
+   SetAccumulator(result);
+@@ -1122,8 +1123,8 @@ class UnaryNumericOpAssembler : public InterpreterAssembler {
+   virtual ~UnaryNumericOpAssembler() {}
+ 
+   // Must return a tagged value.
+-  virtual Node* SmiOp(Node* smi_value, Variable* var_feedback,
+-                      Label* do_float_op, Variable* var_float) = 0;
++  virtual TNode<Number> SmiOp(TNode<Smi> smi_value, Variable* var_feedback,
++                              Label* do_float_op, Variable* var_float) = 0;
+   // Must return a Float64 value.
+   virtual Node* FloatOp(Node* float_value) = 0;
+   // Must return a tagged value.
+@@ -1136,8 +1137,7 @@ class UnaryNumericOpAssembler : public InterpreterAssembler {
+ 
+     VARIABLE(var_result, MachineRepresentation::kTagged);
+     VARIABLE(var_float_value, MachineRepresentation::kFloat64);
+-    VARIABLE(var_feedback, MachineRepresentation::kTaggedSigned,
+-             SmiConstant(BinaryOperationFeedback::kNone));
++    TVARIABLE(Smi, var_feedback, SmiConstant(BinaryOperationFeedback::kNone));
+     Variable* loop_vars[] = {&var_value, &var_feedback};
+     Label start(this, arraysize(loop_vars), loop_vars), end(this);
+     Label do_float_op(this, &var_float_value);
+@@ -1159,7 +1159,7 @@ class UnaryNumericOpAssembler : public InterpreterAssembler {
+       BIND(&if_smi);
+       {
+         var_result.Bind(
+-            SmiOp(value, &var_feedback, &do_float_op, &var_float_value));
++            SmiOp(CAST(value), &var_feedback, &do_float_op, &var_float_value));
+         Goto(&end);
+       }
+ 
+@@ -1224,9 +1224,9 @@ class NegateAssemblerImpl : public UnaryNumericOpAssembler {
+                                OperandScale operand_scale)
+       : UnaryNumericOpAssembler(state, bytecode, operand_scale) {}
+ 
+-  Node* SmiOp(Node* smi_value, Variable* var_feedback, Label* do_float_op,
+-              Variable* var_float) override {
+-    VARIABLE(var_result, MachineRepresentation::kTagged);
++  TNode<Number> SmiOp(TNode<Smi> smi_value, Variable* var_feedback,
++                      Label* do_float_op, Variable* var_float) override {
++    TVARIABLE(Number, var_result);
+     Label if_zero(this), if_min_smi(this), end(this);
+     // Return -0 if operand is 0.
+     GotoIf(SmiEqual(smi_value, SmiConstant(0)), &if_zero);
+@@ -1236,12 +1236,12 @@ class NegateAssemblerImpl : public UnaryNumericOpAssembler {
+ 
+     // Else simply subtract operand from 0.
+     CombineFeedback(var_feedback, BinaryOperationFeedback::kSignedSmall);
+-    var_result.Bind(SmiSub(SmiConstant(0), smi_value));
++    var_result = SmiSub(SmiConstant(0), smi_value);
+     Goto(&end);
+ 
+     BIND(&if_zero);
+     CombineFeedback(var_feedback, BinaryOperationFeedback::kNumber);
+-    var_result.Bind(MinusZeroConstant());
++    var_result = MinusZeroConstant();
+     Goto(&end);
+ 
+     BIND(&if_min_smi);
+@@ -1320,9 +1320,8 @@ class IncDecAssembler : public UnaryNumericOpAssembler {
+     return op_;
+   }
+ 
+-  Node* SmiOp(Node* smi_value, Variable* var_feedback, Label* do_float_op,
+-              Variable* var_float) override {
+-    TNode<Smi> value = CAST(smi_value);
++  TNode<Number> SmiOp(TNode<Smi> value, Variable* var_feedback,
++                      Label* do_float_op, Variable* var_float) override {
+     TNode<Smi> one = SmiConstant(1);
+     Label if_overflow(this), if_notoverflow(this);
+     TNode<Smi> result = op() == Operation::kIncrement
+@@ -1332,7 +1331,7 @@ class IncDecAssembler : public UnaryNumericOpAssembler {
+ 
+     BIND(&if_overflow);
+     {
+-      var_float->Bind(SmiToFloat64(smi_value));
++      var_float->Bind(SmiToFloat64(value));
+       Goto(do_float_op);
+     }
+ 
+@@ -2966,9 +2965,9 @@ IGNITION_HANDLER(ForInContinue, InterpreterAssembler) {
+ // Increments the loop counter in register |index| and stores the result
+ // in the accumulator.
+ IGNITION_HANDLER(ForInStep, InterpreterAssembler) {
+-  Node* index = LoadRegisterAtOperandIndex(0);
+-  Node* one = SmiConstant(1);
+-  Node* result = SmiAdd(index, one);
++  TNode<Smi> index = CAST(LoadRegisterAtOperandIndex(0));
++  TNode<Smi> one = SmiConstant(1);
++  TNode<Smi> result = SmiAdd(index, one);
+   SetAccumulator(result);
+   Dispatch();
+ }
+diff --git a/test/cctest/test-code-stub-assembler.cc b/test/cctest/test-code-stub-assembler.cc
+index e0ee2d4214..0ad033634e 100644
+--- a/test/cctest/test-code-stub-assembler.cc
++++ b/test/cctest/test-code-stub-assembler.cc
+@@ -1959,13 +1959,14 @@ TEST(ArgumentsForEach) {
+ 
+   CodeStubArguments arguments(&m, m.IntPtrConstant(3));
+ 
+-  Variable sum(&m, MachineRepresentation::kTagged);
++  TVariable<Smi> sum(&m);
+   CodeAssemblerVariableList list({&sum}, m.zone());
+ 
+-  sum.Bind(m.SmiConstant(0));
++  sum = m.SmiConstant(0);
+ 
+-  arguments.ForEach(
+-      list, [&m, &sum](Node* arg) { sum.Bind(m.SmiAdd(sum.value(), arg)); });
++  arguments.ForEach(list, [&m, &sum](Node* arg) {
++    sum = m.SmiAdd(sum.value(), m.CAST(arg));
++  });
+ 
+   arguments.PopAndReturn(sum.value());
+ 
+-- 
+2.35.1
+

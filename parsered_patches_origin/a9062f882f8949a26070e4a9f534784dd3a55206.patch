@@ -1,0 +1,101 @@
+From a9062f882f8949a26070e4a9f534784dd3a55206 Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Tue, 31 Aug 2021 11:25:29 +0800
+Subject: [PATCH] [riscv64] Optimize RiscvCmpzero emit extra instruction
+
+Bug: v8:12151
+
+Change-Id: I97d15e9089164c05715b3121839d4bd6ba08cb70
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3131782
+Reviewed-by: Ji Qiu <qiuji@iscas.ac.cn>
+Commit-Queue: Ji Qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#76594}
+---
+ .../backend/riscv64/code-generator-riscv64.cc | 19 ++++++++++++++++++-
+ .../riscv64/instruction-selector-riscv64.cc   | 12 ++++++++----
+ 2 files changed, 26 insertions(+), 5 deletions(-)
+
+diff --git a/src/compiler/backend/riscv64/code-generator-riscv64.cc b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+index e55fe125f4..d2a941811b 100644
+--- a/src/compiler/backend/riscv64/code-generator-riscv64.cc
++++ b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+@@ -1882,6 +1882,19 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+                  << "\"";                                                      \
+   UNIMPLEMENTED();
+ 
++bool IsInludeEqual(Condition cc) {
++  switch (cc) {
++    case equal:
++    case greater_equal:
++    case less_equal:
++    case Uless_equal:
++    case Ugreater_equal:
++      return true;
++    default:
++      return false;
++  }
++}
++
+ void AssembleBranchToLabels(CodeGenerator* gen, TurboAssembler* tasm,
+                             Instruction* instr, FlagsCondition condition,
+                             Label* tlabel, Label* flabel, bool fallthru) {
+@@ -1936,7 +1949,11 @@ void AssembleBranchToLabels(CodeGenerator* gen, TurboAssembler* tasm,
+     __ Branch(tlabel, cc, i.InputRegister(0), i.InputOperand(1));
+   } else if (instr->arch_opcode() == kRiscvCmpZero) {
+     cc = FlagsConditionToConditionCmp(condition);
+-    __ Branch(tlabel, cc, i.InputRegister(0), Operand(zero_reg));
++    if (i.InputOrZeroRegister(0) == zero_reg && IsInludeEqual(cc)) {
++      __ Branch(tlabel);
++    } else {
++      __ Branch(tlabel, cc, i.InputRegister(0), Operand(zero_reg));
++    }
+   } else if (instr->arch_opcode() == kArchStackPointerGreaterThan) {
+     cc = FlagsConditionToConditionCmp(condition);
+     Register lhs_register = sp;
+diff --git a/src/compiler/backend/riscv64/instruction-selector-riscv64.cc b/src/compiler/backend/riscv64/instruction-selector-riscv64.cc
+index 445898be13..a55aa6667f 100644
+--- a/src/compiler/backend/riscv64/instruction-selector-riscv64.cc
++++ b/src/compiler/backend/riscv64/instruction-selector-riscv64.cc
+@@ -1782,7 +1782,8 @@ void VisitWordCompare(InstructionSelector* selector, Node* node,
+             Int32BinopMatcher m(node, true);
+             NumberBinopMatcher n(node, true);
+             if (m.right().Is(0) || n.right().IsZero()) {
+-              VisitWordCompareZero(selector, g.UseRegister(left), cont);
++              VisitWordCompareZero(selector, g.UseRegisterOrImmediateZero(left),
++                                   cont);
+             } else {
+               VisitCompare(selector, opcode, g.UseRegister(left),
+                            g.UseRegister(right), cont);
+@@ -1795,7 +1796,8 @@ void VisitWordCompare(InstructionSelector* selector, Node* node,
+         case kUnsignedGreaterThanOrEqual: {
+           Int32BinopMatcher m(node, true);
+           if (m.right().Is(0)) {
+-            VisitWordCompareZero(selector, g.UseRegister(left), cont);
++            VisitWordCompareZero(selector, g.UseRegisterOrImmediateZero(left),
++                                 cont);
+           } else {
+             VisitCompare(selector, opcode, g.UseRegister(left),
+                          g.UseImmediate(right), cont);
+@@ -1804,7 +1806,8 @@ void VisitWordCompare(InstructionSelector* selector, Node* node,
+         default:
+           Int32BinopMatcher m(node, true);
+           if (m.right().Is(0)) {
+-            VisitWordCompareZero(selector, g.UseRegister(left), cont);
++            VisitWordCompareZero(selector, g.UseRegisterOrImmediateZero(left),
++                                 cont);
+           } else {
+             VisitCompare(selector, opcode, g.UseRegister(left),
+                          g.UseRegister(right), cont);
+@@ -1926,7 +1929,8 @@ void VisitWord64Compare(InstructionSelector* selector, Node* node,
+ void EmitWordCompareZero(InstructionSelector* selector, Node* value,
+                          FlagsContinuation* cont) {
+   RiscvOperandGenerator g(selector);
+-  selector->EmitWithContinuation(kRiscvCmpZero, g.UseRegister(value), cont);
++  selector->EmitWithContinuation(kRiscvCmpZero,
++                                 g.UseRegisterOrImmediateZero(value), cont);
+ }
+ 
+ void VisitAtomicLoad(InstructionSelector* selector, Node* node,
+-- 
+2.35.1
+

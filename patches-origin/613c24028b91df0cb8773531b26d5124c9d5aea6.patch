@@ -1,0 +1,699 @@
+From 613c24028b91df0cb8773531b26d5124c9d5aea6 Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Thu, 11 Aug 2022 18:06:17 +0800
+Subject: [PATCH] [riscv][masm] Move tiering logic to macro-assembler
+
+Port commit ca33c73e7c56c7d88d9592ad996d26d8bdc125e5
+Port commit 8b4272c2cac4bc6eb8ba9bfc3f7da23828be699e
+
+Also [compiler] Remove delayed string constants
+Port commit de04959f17336b087b7f93824df2102ad91686be
+
+Bug: v8:7700
+
+Change-Id: I28e876231e580710354876a6841e15ca2b35e372
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3826517
+Reviewed-by: ji qiu <qiuji@iscas.ac.cn>
+Commit-Queue: ji qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#82415}
+---
+ src/builtins/riscv/builtins-riscv.cc          | 218 ++----------------
+ src/codegen/riscv/assembler-riscv.cc          |  32 +--
+ src/codegen/riscv/assembler-riscv.h           |  23 +-
+ src/codegen/riscv/macro-assembler-riscv.cc    | 150 +++++++++++-
+ src/codegen/riscv/macro-assembler-riscv.h     |  14 +-
+ .../backend/riscv/code-generator-riscv.cc     |   6 -
+ 6 files changed, 188 insertions(+), 255 deletions(-)
+
+diff --git a/src/builtins/riscv/builtins-riscv.cc b/src/builtins/riscv/builtins-riscv.cc
+index a7ca305985..8c817ba985 100644
+--- a/src/builtins/riscv/builtins-riscv.cc
++++ b/src/builtins/riscv/builtins-riscv.cc
+@@ -36,35 +36,6 @@ void Builtins::Generate_Adaptor(MacroAssembler* masm, Address address) {
+           RelocInfo::CODE_TARGET);
+ }
+ 
+-static void GenerateTailCallToReturnedCode(MacroAssembler* masm,
+-                                           Runtime::FunctionId function_id) {
+-  // ----------- S t a t e -------------
+-  //  -- a0 : actual argument count
+-  //  -- a1 : target function (preserved for callee)
+-  //  -- a3 : new target (preserved for callee)
+-  // -----------------------------------
+-  {
+-    FrameScope scope(masm, StackFrame::INTERNAL);
+-    // Push a copy of the target function, the new target and the actual
+-    // argument count.
+-    // Push function as parameter to the runtime call.
+-    __ SmiTag(kJavaScriptCallArgCountRegister);
+-    __ Push(kJavaScriptCallTargetRegister, kJavaScriptCallNewTargetRegister,
+-            kJavaScriptCallArgCountRegister, kJavaScriptCallTargetRegister);
+-
+-    __ CallRuntime(function_id, 1);
+-    // Use the return value before restoring a0
+-    __ AddWord(a2, a0, Operand(Code::kHeaderSize - kHeapObjectTag));
+-    // Restore target function, new target and actual argument count.
+-    __ Pop(kJavaScriptCallTargetRegister, kJavaScriptCallNewTargetRegister,
+-           kJavaScriptCallArgCountRegister);
+-    __ SmiUntag(kJavaScriptCallArgCountRegister);
+-  }
+-
+-  static_assert(kJavaScriptCallCodeStartRegister == a2, "ABI mismatch");
+-  __ Jump(a2);
+-}
+-
+ namespace {
+ 
+ enum class ArgumentsElementType {
+@@ -844,22 +815,6 @@ void Builtins::Generate_RunMicrotasksTrampoline(MacroAssembler* masm) {
+   __ Jump(BUILTIN_CODE(masm->isolate(), RunMicrotasks), RelocInfo::CODE_TARGET);
+ }
+ 
+-static void ReplaceClosureCodeWithOptimizedCode(MacroAssembler* masm,
+-                                                Register optimized_code,
+-                                                Register closure,
+-                                                Register scratch1,
+-                                                Register scratch2) {
+-  ASM_CODE_COMMENT(masm);
+-  DCHECK(!AreAliased(optimized_code, closure));
+-  // Store code entry in the closure.
+-  __ StoreTaggedField(optimized_code,
+-                      FieldMemOperand(closure, JSFunction::kCodeOffset));
+-  __ Move(scratch1, optimized_code);  // Write barrier clobbers scratch1 below.
+-  __ RecordWriteField(closure, JSFunction::kCodeOffset, scratch1,
+-                      kRAHasNotBeenSaved, SaveFPRegsMode::kIgnore,
+-                      SmiCheck::kOmit);
+-}
+-
+ static void LeaveInterpreterFrame(MacroAssembler* masm, Register scratch1,
+                                   Register scratch2) {
+   ASM_CODE_COMMENT(masm);
+@@ -892,87 +847,6 @@ static void LeaveInterpreterFrame(MacroAssembler* masm, Register scratch1,
+                    MacroAssembler::kCountIncludesReceiver);
+ }
+ 
+-// Tail-call |function_id| if |actual_state| == |expected_state|
+-static void TailCallRuntimeIfStateEquals(MacroAssembler* masm,
+-                                         Register actual_state,
+-                                         TieringState expected_state,
+-                                         Runtime::FunctionId function_id) {
+-  ASM_CODE_COMMENT(masm);
+-  Label no_match;
+-  __ Branch(&no_match, ne, actual_state,
+-            Operand(static_cast<int>(expected_state)), Label::Distance::kNear);
+-  GenerateTailCallToReturnedCode(masm, function_id);
+-  __ bind(&no_match);
+-}
+-
+-static void TailCallOptimizedCodeSlot(MacroAssembler* masm,
+-                                      Register optimized_code_entry,
+-                                      Register scratch1, Register scratch2) {
+-  // ----------- S t a t e -------------
+-  //  -- a0 : actual argument count
+-  //  -- a3 : new target (preserved for callee if needed, and caller)
+-  //  -- a1 : target function (preserved for callee if needed, and caller)
+-  // -----------------------------------
+-  ASM_CODE_COMMENT(masm);
+-  DCHECK(!AreAliased(optimized_code_entry, a1, a3, scratch1, scratch2));
+-
+-  Register closure = a1;
+-  Label heal_optimized_code_slot;
+-
+-  // If the optimized code is cleared, go to runtime to update the optimization
+-  // marker field.
+-  __ LoadWeakValue(optimized_code_entry, optimized_code_entry,
+-                   &heal_optimized_code_slot);
+-
+-  // Check if the optimized code is marked for deopt. If it is, call the
+-  // runtime to clear it.
+-  __ JumpIfCodeTIsMarkedForDeoptimization(optimized_code_entry, scratch1,
+-                                          &heal_optimized_code_slot);
+-
+-  // Optimized code is good, get it into the closure and link the closure into
+-  // the optimized functions list, then tail call the optimized code.
+-  // The feedback vector is no longer used, so re-use it as a scratch
+-  // register.
+-  ReplaceClosureCodeWithOptimizedCode(masm, optimized_code_entry, closure,
+-                                      scratch1, scratch2);
+-
+-  static_assert(kJavaScriptCallCodeStartRegister == a2, "ABI mismatch");
+-  __ LoadCodeObjectEntry(a2, optimized_code_entry);
+-  __ Jump(a2);
+-
+-  // Optimized code slot contains deoptimized code or code is cleared and
+-  // optimized code marker isn't updated. Evict the code, update the marker
+-  // and re-enter the closure's code.
+-  __ bind(&heal_optimized_code_slot);
+-  GenerateTailCallToReturnedCode(masm, Runtime::kHealOptimizedCodeSlot);
+-}
+-
+-static void MaybeOptimizeCode(MacroAssembler* masm, Register feedback_vector,
+-                              Register tiering_state) {
+-  // ----------- S t a t e -------------
+-  //  -- a0 : actual argument count
+-  //  -- a3 : new target (preserved for callee if needed, and caller)
+-  //  -- a1 : target function (preserved for callee if needed, and caller)
+-  //  -- feedback vector (preserved for caller if needed)
+-  //  -- tiering_state : a int32 containing a non-zero optimization
+-  //  marker.
+-  // -----------------------------------
+-  ASM_CODE_COMMENT(masm);
+-  DCHECK(!AreAliased(feedback_vector, a1, a3, tiering_state));
+-
+-  // TODO(v8:8394): The logging of first execution will break if
+-  // feedback vectors are not allocated. We need to find a different way of
+-  // logging these events if required.
+-  TailCallRuntimeIfStateEquals(masm, tiering_state,
+-                               TieringState::kRequestTurbofan_Synchronous,
+-                               Runtime::kCompileTurbofan_Synchronous);
+-  TailCallRuntimeIfStateEquals(masm, tiering_state,
+-                               TieringState::kRequestTurbofan_Concurrent,
+-                               Runtime::kCompileTurbofan_Concurrent);
+-
+-  __ stop();
+-}
+-
+ // Advance the current bytecode offset. This simulates what all bytecode
+ // handlers do upon completion of the underlying operation. Will bail out to a
+ // label if the bytecode (without prefix) is a return bytecode. Will not advance
+@@ -1055,54 +929,6 @@ static void AdvanceBytecodeOffsetOrReturn(MacroAssembler* masm,
+   __ bind(&end);
+ }
+ 
+-// Read off the optimization state in the feedback vector and check if there
+-// is optimized code or a tiering state that needs to be processed.
+-static void LoadTieringStateAndJumpIfNeedsProcessing(
+-    MacroAssembler* masm, Register optimization_state, Register feedback_vector,
+-    Label* has_optimized_code_or_state) {
+-  ASM_CODE_COMMENT(masm);
+-  DCHECK(!AreAliased(optimization_state, feedback_vector));
+-  UseScratchRegisterScope temps(masm);
+-  Register scratch = temps.Acquire();
+-  __ Lhu(optimization_state,
+-         FieldMemOperand(feedback_vector, FeedbackVector::kFlagsOffset));
+-  __ And(
+-      scratch, optimization_state,
+-      Operand(FeedbackVector::kHasOptimizedCodeOrTieringStateIsAnyRequestMask));
+-  __ Branch(has_optimized_code_or_state, ne, scratch, Operand(zero_reg));
+-}
+-
+-static void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
+-    MacroAssembler* masm, Register optimization_state,
+-    Register feedback_vector) {
+-  ASM_CODE_COMMENT(masm);
+-  DCHECK(!AreAliased(optimization_state, feedback_vector));
+-  UseScratchRegisterScope temps(masm);
+-  temps.Include(t0, t1);
+-  Label maybe_has_optimized_code;
+-  // Check if optimized code marker is available
+-  {
+-    UseScratchRegisterScope temps(masm);
+-    Register scratch = temps.Acquire();
+-    __ And(scratch, optimization_state,
+-           Operand(FeedbackVector::kTieringStateIsAnyRequestMask));
+-    __ Branch(&maybe_has_optimized_code, eq, scratch, Operand(zero_reg),
+-              Label::Distance::kNear);
+-  }
+-  Register tiering_state = optimization_state;
+-  __ DecodeField<FeedbackVector::TieringStateBits>(tiering_state);
+-  MaybeOptimizeCode(masm, feedback_vector, tiering_state);
+-
+-  __ bind(&maybe_has_optimized_code);
+-  Register optimized_code_entry = optimization_state;
+-  __ LoadAnyTaggedField(
+-      tiering_state,
+-      FieldMemOperand(feedback_vector,
+-                      FeedbackVector::kMaybeOptimizedCodeOffset));
+-  TailCallOptimizedCodeSlot(masm, optimized_code_entry, temps.Acquire(),
+-                            temps.Acquire());
+-}
+-
+ namespace {
+ void ResetBytecodeAge(MacroAssembler* masm, Register bytecode_array) {
+   __ Sh(zero_reg,
+@@ -1136,19 +962,13 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+               FieldMemOperand(closure, JSFunction::kFeedbackCellOffset));
+   __ LoadWord(feedback_vector,
+               FieldMemOperand(feedback_vector, Cell::kValueOffset));
+-  if (FLAG_debug_code) {
+-    UseScratchRegisterScope temps(masm);
+-    Register type = temps.Acquire();
+-    __ GetObjectType(feedback_vector, type, type);
+-    __ Assert(eq, AbortReason::kExpectedFeedbackVector, type,
+-              Operand(FEEDBACK_VECTOR_TYPE));
+-  }
++  __ AssertFeedbackVector(feedback_vector, kScratchReg);
+ 
+   // Check for an tiering state.
+   Label has_optimized_code_or_state;
+   Register optimization_state = temps.Acquire();
+-  LoadTieringStateAndJumpIfNeedsProcessing(
+-      masm, optimization_state, feedback_vector, &has_optimized_code_or_state);
++  __ LoadTieringStateAndJumpIfNeedsProcessing(
++      optimization_state, feedback_vector, &has_optimized_code_or_state);
+   {
+     UseScratchRegisterScope temps(masm);
+     ResetFeedbackVectorOsrUrgency(masm, feedback_vector, temps.Acquire());
+@@ -1189,16 +1009,9 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+         BaselineOutOfLinePrologueDescriptor::kInterpreterBytecodeArray);
+     ResetBytecodeAge(masm, bytecode_array);
+     __ Push(argc, bytecode_array);
+-
+     // Baseline code frames store the feedback vector where interpreter would
+     // store the bytecode offset.
+-    if (FLAG_debug_code) {
+-      UseScratchRegisterScope temps(masm);
+-      Register invocation_count = temps.Acquire();
+-      __ GetObjectType(feedback_vector, invocation_count, invocation_count);
+-      __ Assert(eq, AbortReason::kExpectedFeedbackVector, invocation_count,
+-                Operand(FEEDBACK_VECTOR_TYPE));
+-    }
++    __ AssertFeedbackVector(feedback_vector, kScratchReg);
+     // Our stack is currently aligned. We have have to push something along with
+     // the feedback vector to keep it that way -- we may as well start
+     // initialising the register frame.
+@@ -1237,8 +1050,8 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+     ASM_CODE_COMMENT_STRING(masm, "Optimized marker check");
+     // Drop the frame created by the baseline call.
+     __ Pop(ra, fp);
+-    MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(masm, optimization_state,
+-                                                 feedback_vector);
++    __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(optimization_state,
++                                                    feedback_vector);
+     __ Trap();
+   }
+ 
+@@ -1317,8 +1130,8 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+   // Check the tiering state.
+   Label has_optimized_code_or_state;
+   Register optimization_state = a4;
+-  LoadTieringStateAndJumpIfNeedsProcessing(
+-      masm, optimization_state, feedback_vector, &has_optimized_code_or_state);
++  __ LoadTieringStateAndJumpIfNeedsProcessing(
++      optimization_state, feedback_vector, &has_optimized_code_or_state);
+   {
+     UseScratchRegisterScope temps(masm);
+     ResetFeedbackVectorOsrUrgency(masm, feedback_vector, temps.Acquire());
+@@ -1478,8 +1291,8 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+   __ Branch(&after_stack_check_interrupt);
+ 
+   __ bind(&has_optimized_code_or_state);
+-  MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(masm, optimization_state,
+-                                               feedback_vector);
++  __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(optimization_state,
++                                                  feedback_vector);
+   __ bind(&is_baseline);
+   {
+     // Load the feedback vector from the closure.
+@@ -1499,22 +1312,21 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+               Operand(FEEDBACK_VECTOR_TYPE));
+ 
+     // Check for an tiering state.
+-    LoadTieringStateAndJumpIfNeedsProcessing(masm, optimization_state,
+-                                             feedback_vector,
+-                                             &has_optimized_code_or_state);
++    __ LoadTieringStateAndJumpIfNeedsProcessing(
++        optimization_state, feedback_vector, &has_optimized_code_or_state);
+ 
+     // Load the baseline code into the closure.
+     __ Move(a2, kInterpreterBytecodeArrayRegister);
+     static_assert(kJavaScriptCallCodeStartRegister == a2, "ABI mismatch");
+-    ReplaceClosureCodeWithOptimizedCode(masm, a2, closure, scratch, scratch2);
++    __ ReplaceClosureCodeWithOptimizedCode(a2, closure);
+     __ JumpCodeObject(a2);
+ 
+     __ bind(&install_baseline_code);
+-    GenerateTailCallToReturnedCode(masm, Runtime::kInstallBaselineCode);
++    __ GenerateTailCallToReturnedCode(Runtime::kInstallBaselineCode);
+   }
+ 
+   __ bind(&compile_lazy);
+-  GenerateTailCallToReturnedCode(masm, Runtime::kCompileLazy);
++  __ GenerateTailCallToReturnedCode(Runtime::kCompileLazy);
+   // Unreachable code.
+   __ break_(0xCC);
+ 
+diff --git a/src/codegen/riscv/assembler-riscv.cc b/src/codegen/riscv/assembler-riscv.cc
+index f8ac0dba8c..bd729bf776 100644
+--- a/src/codegen/riscv/assembler-riscv.cc
++++ b/src/codegen/riscv/assembler-riscv.cc
+@@ -163,15 +163,8 @@ Operand Operand::EmbeddedNumber(double value) {
+   int32_t smi;
+   if (DoubleToSmiInteger(value, &smi)) return Operand(Smi::FromInt(smi));
+   Operand result(0, RelocInfo::FULL_EMBEDDED_OBJECT);
+-  result.is_heap_object_request_ = true;
+-  result.value_.heap_object_request = HeapObjectRequest(value);
+-  return result;
+-}
+-
+-Operand Operand::EmbeddedStringConstant(const StringConstantBase* str) {
+-  Operand result(0, RelocInfo::FULL_EMBEDDED_OBJECT);
+-  result.is_heap_object_request_ = true;
+-  result.value_.heap_object_request = HeapObjectRequest(str);
++  result.is_heap_number_request_ = true;
++  result.value_.heap_number_request = HeapNumberRequest(value);
+   return result;
+ }
+ 
+@@ -185,21 +178,12 @@ MemOperand::MemOperand(Register rm, int32_t unit, int32_t multiplier,
+   offset_ = unit * multiplier + offset_addend;
+ }
+ 
+-void Assembler::AllocateAndInstallRequestedHeapObjects(Isolate* isolate) {
+-  DCHECK_IMPLIES(isolate == nullptr, heap_object_requests_.empty());
+-  for (auto& request : heap_object_requests_) {
+-    Handle<HeapObject> object;
+-    switch (request.kind()) {
+-      case HeapObjectRequest::kHeapNumber:
+-        object = isolate->factory()->NewHeapNumber<AllocationType::kOld>(
++void Assembler::AllocateAndInstallRequestedHeapNumbers(Isolate* isolate) {
++  DCHECK_IMPLIES(isolate == nullptr, heap_number_requests_.empty());
++  for (auto& request : heap_number_requests_) {
++    Handle<HeapObject> object =
++        isolate->factory()->NewHeapNumber<AllocationType::kOld>(
+             request.heap_number());
+-        break;
+-      case HeapObjectRequest::kStringConstant:
+-        const StringConstantBase* str = request.string();
+-        CHECK_NOT_NULL(str);
+-        object = str->AllocateStringConstant(isolate);
+-        break;
+-    }
+     Address pc = reinterpret_cast<Address>(buffer_start_) + request.offset();
+     set_target_value_at(pc, reinterpret_cast<uintptr_t>(object.location()));
+   }
+@@ -253,7 +237,7 @@ void Assembler::GetCode(Isolate* isolate, CodeDesc* desc,
+ 
+   DCHECK(pc_ <= reloc_info_writer.pos());  // No overlap.
+ 
+-  AllocateAndInstallRequestedHeapObjects(isolate);
++  AllocateAndInstallRequestedHeapNumbers(isolate);
+ 
+   // Set up code descriptor.
+   // TODO(jgruber): Reconsider how these offsets and sizes are maintained up to
+diff --git a/src/codegen/riscv/assembler-riscv.h b/src/codegen/riscv/assembler-riscv.h
+index 5a5df7dfae..452c0b16ea 100644
+--- a/src/codegen/riscv/assembler-riscv.h
++++ b/src/codegen/riscv/assembler-riscv.h
+@@ -95,7 +95,6 @@ class Operand {
+   }
+ 
+   static Operand EmbeddedNumber(double number);  // Smi or HeapNumber.
+-  static Operand EmbeddedStringConstant(const StringConstantBase* str);
+ 
+   // Register.
+   V8_INLINE explicit Operand(Register rm) : rm_(rm) {}
+@@ -104,23 +103,23 @@ class Operand {
+   V8_INLINE bool is_reg() const { return rm_.is_valid(); }
+   inline intptr_t immediate() const {
+     DCHECK(!is_reg());
+-    DCHECK(!IsHeapObjectRequest());
++    DCHECK(!IsHeapNumberRequest());
+     return value_.immediate;
+   }
+ 
+   bool IsImmediate() const { return !rm_.is_valid(); }
+ 
+-  HeapObjectRequest heap_object_request() const {
+-    DCHECK(IsHeapObjectRequest());
+-    return value_.heap_object_request;
++  HeapNumberRequest heap_number_request() const {
++    DCHECK(IsHeapNumberRequest());
++    return value_.heap_number_request;
+   }
+ 
+-  bool IsHeapObjectRequest() const {
+-    DCHECK_IMPLIES(is_heap_object_request_, IsImmediate());
+-    DCHECK_IMPLIES(is_heap_object_request_,
++  bool IsHeapNumberRequest() const {
++    DCHECK_IMPLIES(is_heap_number_request_, IsImmediate());
++    DCHECK_IMPLIES(is_heap_number_request_,
+                    rmode_ == RelocInfo::FULL_EMBEDDED_OBJECT ||
+                        rmode_ == RelocInfo::CODE_TARGET);
+-    return is_heap_object_request_;
++    return is_heap_number_request_;
+   }
+ 
+   Register rm() const { return rm_; }
+@@ -131,10 +130,10 @@ class Operand {
+   Register rm_;
+   union Value {
+     Value() {}
+-    HeapObjectRequest heap_object_request;  // if is_heap_object_request_
++    HeapNumberRequest heap_number_request;  // if is_heap_number_request_
+     intptr_t immediate;                     // otherwise
+   } value_;                                 // valid if rm_ == no_reg
+-  bool is_heap_object_request_ = false;
++  bool is_heap_number_request_ = false;
+   RelocInfo::Mode rmode_;
+ 
+   friend class Assembler;
+@@ -801,7 +800,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase,
+  private:
+   ConstantPool constpool_;
+ 
+-  void AllocateAndInstallRequestedHeapObjects(Isolate* isolate);
++  void AllocateAndInstallRequestedHeapNumbers(Isolate* isolate);
+ 
+   int WriteCodeComments();
+ 
+diff --git a/src/codegen/riscv/macro-assembler-riscv.cc b/src/codegen/riscv/macro-assembler-riscv.cc
+index c2cf0884e5..59115e21cc 100644
+--- a/src/codegen/riscv/macro-assembler-riscv.cc
++++ b/src/codegen/riscv/macro-assembler-riscv.cc
+@@ -91,6 +91,145 @@ int TurboAssembler::PopCallerSaved(SaveFPRegsMode fp_mode, Register exclusion1,
+   return bytes;
+ }
+ 
++#define __ ACCESS_MASM(masm)
++namespace {
++static void TailCallOptimizedCodeSlot(MacroAssembler* masm,
++                                      Register optimized_code_entry,
++                                      Register scratch1, Register scratch2) {
++  // ----------- S t a t e -------------
++  //  -- a0 : actual argument count
++  //  -- a3 : new target (preserved for callee if needed, and caller)
++  //  -- a1 : target function (preserved for callee if needed, and caller)
++  // -----------------------------------
++  ASM_CODE_COMMENT(masm);
++  DCHECK(!AreAliased(optimized_code_entry, a1, a3, scratch1, scratch2));
++
++  Register closure = a1;
++  Label heal_optimized_code_slot;
++
++  // If the optimized code is cleared, go to runtime to update the optimization
++  // marker field.
++  __ LoadWeakValue(optimized_code_entry, optimized_code_entry,
++                   &heal_optimized_code_slot);
++
++  // Check if the optimized code is marked for deopt. If it is, call the
++  // runtime to clear it.
++  __ JumpIfCodeTIsMarkedForDeoptimization(optimized_code_entry, scratch1,
++                                          &heal_optimized_code_slot);
++
++  // Optimized code is good, get it into the closure and link the closure into
++  // the optimized functions list, then tail call the optimized code.
++  // The feedback vector is no longer used, so re-use it as a scratch
++  // register.
++  __ ReplaceClosureCodeWithOptimizedCode(optimized_code_entry, closure);
++
++  static_assert(kJavaScriptCallCodeStartRegister == a2, "ABI mismatch");
++  __ LoadCodeObjectEntry(a2, optimized_code_entry);
++  __ Jump(a2);
++
++  // Optimized code slot contains deoptimized code or code is cleared and
++  // optimized code marker isn't updated. Evict the code, update the marker
++  // and re-enter the closure's code.
++  __ bind(&heal_optimized_code_slot);
++  __ GenerateTailCallToReturnedCode(Runtime::kHealOptimizedCodeSlot);
++}
++
++}  // namespace
++#ifdef V8_ENABLE_DEBUG_CODE
++void MacroAssembler::AssertFeedbackVector(Register object, Register scratch) {
++  if (FLAG_debug_code) {
++    GetObjectType(object, scratch, scratch);
++    Assert(eq, AbortReason::kExpectedFeedbackVector, scratch,
++           Operand(FEEDBACK_VECTOR_TYPE));
++  }
++}
++#endif  // V8_ENABLE_DEBUG_CODE
++
++void MacroAssembler::ReplaceClosureCodeWithOptimizedCode(
++    Register optimized_code, Register closure) {
++  ASM_CODE_COMMENT(this);
++  DCHECK(!AreAliased(optimized_code, closure));
++  // Store code entry in the closure.
++  StoreTaggedField(optimized_code,
++                   FieldMemOperand(closure, JSFunction::kCodeOffset));
++  RecordWriteField(closure, JSFunction::kCodeOffset, optimized_code,
++                   kRAHasNotBeenSaved, SaveFPRegsMode::kIgnore,
++                   SmiCheck::kOmit);
++}
++
++void MacroAssembler::GenerateTailCallToReturnedCode(
++    Runtime::FunctionId function_id) {
++  // ----------- S t a t e -------------
++  //  -- a0 : actual argument count
++  //  -- a1 : target function (preserved for callee)
++  //  -- a3 : new target (preserved for callee)
++  // -----------------------------------
++  {
++    FrameScope scope(this, StackFrame::INTERNAL);
++    // Push a copy of the target function, the new target and the actual
++    // argument count.
++    // Push function as parameter to the runtime call.
++    SmiTag(kJavaScriptCallArgCountRegister);
++    Push(kJavaScriptCallTargetRegister, kJavaScriptCallNewTargetRegister,
++         kJavaScriptCallArgCountRegister, kJavaScriptCallTargetRegister);
++
++    CallRuntime(function_id, 1);
++    // Use the return value before restoring a0
++    AddWord(a2, a0, Operand(Code::kHeaderSize - kHeapObjectTag));
++    // Restore target function, new target and actual argument count.
++    Pop(kJavaScriptCallTargetRegister, kJavaScriptCallNewTargetRegister,
++        kJavaScriptCallArgCountRegister);
++    SmiUntag(kJavaScriptCallArgCountRegister);
++  }
++
++  static_assert(kJavaScriptCallCodeStartRegister == a2, "ABI mismatch");
++  Jump(a2);
++}
++
++// Read off the optimization state in the feedback vector and check if there
++// is optimized code or a tiering state that needs to be processed.
++void MacroAssembler::LoadTieringStateAndJumpIfNeedsProcessing(
++    Register optimization_state, Register feedback_vector,
++    Label* has_optimized_code_or_state) {
++  ASM_CODE_COMMENT(this);
++  DCHECK(!AreAliased(optimization_state, feedback_vector));
++  UseScratchRegisterScope temps(this);
++  Register scratch = temps.Acquire();
++  Lhu(optimization_state,
++      FieldMemOperand(feedback_vector, FeedbackVector::kFlagsOffset));
++  And(scratch, optimization_state,
++      Operand(FeedbackVector::kHasOptimizedCodeOrTieringStateIsAnyRequestMask));
++  Branch(has_optimized_code_or_state, ne, scratch, Operand(zero_reg));
++}
++
++void MacroAssembler::MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
++    Register optimization_state, Register feedback_vector) {
++  ASM_CODE_COMMENT(this);
++  DCHECK(!AreAliased(optimization_state, feedback_vector));
++  UseScratchRegisterScope temps(this);
++  temps.Include(t0, t1);
++  Label maybe_has_optimized_code;
++  // Check if optimized code is available.
++  {
++    UseScratchRegisterScope temps(this);
++    Register scratch = temps.Acquire();
++    And(scratch, optimization_state,
++        Operand(FeedbackVector::kTieringStateIsAnyRequestMask));
++    Branch(&maybe_has_optimized_code, eq, scratch, Operand(zero_reg),
++           Label::Distance::kNear);
++  }
++  GenerateTailCallToReturnedCode(Runtime::kCompileOptimized);
++
++  bind(&maybe_has_optimized_code);
++  Register optimized_code_entry = optimization_state;
++  LoadAnyTaggedField(
++      optimized_code_entry,
++      FieldMemOperand(feedback_vector,
++                      FeedbackVector::kMaybeOptimizedCodeOffset));
++  TailCallOptimizedCodeSlot(this, optimized_code_entry, temps.Acquire(),
++                            temps.Acquire());
++}
++
+ void TurboAssembler::LoadRoot(Register destination, RootIndex index) {
+   LoadWord(destination,
+            MemOperand(kRootRegister, RootRegisterOffsetForRootIndex(index)));
+@@ -1946,11 +2085,6 @@ void TurboAssembler::li(Register dst, ExternalReference value, LiFlags mode) {
+   li(dst, Operand(value), mode);
+ }
+ 
+-void TurboAssembler::li(Register dst, const StringConstantBase* string,
+-                        LiFlags mode) {
+-  li(dst, Operand::EmbeddedStringConstant(string), mode);
+-}
+-
+ static inline int InstrCountForLiLower32Bit(int64_t value) {
+   int64_t Hi20 = ((value + 0x800) >> 12);
+   int64_t Lo12 = value << 52 >> 52;
+@@ -2000,8 +2134,8 @@ void TurboAssembler::li(Register rd, Operand j, LiFlags mode) {
+     }
+   } else if (MustUseReg(j.rmode())) {
+     int64_t immediate;
+-    if (j.IsHeapObjectRequest()) {
+-      RequestHeapObject(j.heap_object_request());
++    if (j.IsHeapNumberRequest()) {
++      RequestHeapNumber(j.heap_number_request());
+       immediate = 0;
+     } else {
+       immediate = j.immediate();
+@@ -6183,6 +6317,6 @@ void MacroAssembler::DropArgumentsAndPushNewReceiver(Register argc,
+     push(receiver);
+   }
+ }
+-
++#undef __
+ }  // namespace internal
+ }  // namespace v8
+diff --git a/src/codegen/riscv/macro-assembler-riscv.h b/src/codegen/riscv/macro-assembler-riscv.h
+index 796e5affe3..ef4b13e88f 100644
+--- a/src/codegen/riscv/macro-assembler-riscv.h
++++ b/src/codegen/riscv/macro-assembler-riscv.h
+@@ -206,8 +206,6 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   void li(Register dst, Handle<HeapObject> value,
+           RelocInfo::Mode rmode = RelocInfo::FULL_EMBEDDED_OBJECT);
+   void li(Register dst, ExternalReference value, LiFlags mode = OPTIMIZE_SIZE);
+-  void li(Register dst, const StringConstantBase* string,
+-          LiFlags mode = OPTIMIZE_SIZE);
+ 
+   void LoadFromConstantsTable(Register destination, int constant_index) final;
+   void LoadRootRegisterOffset(Register destination, intptr_t offset) final;
+@@ -1337,6 +1335,18 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   // Must preserve the result register.
+   void PopStackHandler();
+ 
++  // Tiering support.
++  void AssertFeedbackVector(Register object,
++                            Register scratch) NOOP_UNLESS_DEBUG_CODE;
++  void ReplaceClosureCodeWithOptimizedCode(Register optimized_code,
++                                           Register closure);
++  void GenerateTailCallToReturnedCode(Runtime::FunctionId function_id);
++  void LoadTieringStateAndJumpIfNeedsProcessing(
++      Register optimization_state, Register feedback_vector,
++      Label* has_optimized_code_or_state);
++  void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(Register optimization_state,
++                                                    Register feedback_vector);
++
+   // -------------------------------------------------------------------------
+   // Support functions.
+ 
+diff --git a/src/compiler/backend/riscv/code-generator-riscv.cc b/src/compiler/backend/riscv/code-generator-riscv.cc
+index 23ab456b99..1466128e1e 100644
+--- a/src/compiler/backend/riscv/code-generator-riscv.cc
++++ b/src/compiler/backend/riscv/code-generator-riscv.cc
+@@ -101,9 +101,6 @@ class RiscvOperandConverter final : public InstructionOperandConverter {
+         // TODO(plind): Maybe we should handle ExtRef & HeapObj here?
+         //    maybe not done on arm due to const pool ??
+         break;
+-      case Constant::kDelayedStringConstant:
+-        return Operand::EmbeddedStringConstant(
+-            constant.ToDelayedStringConstant());
+       case Constant::kRpoNumber:
+         UNREACHABLE();  // TODO(titzer): RPO immediates
+     }
+@@ -4501,9 +4498,6 @@ void CodeGenerator::AssembleMove(InstructionOperand* source,
+         case Constant::kExternalReference:
+           __ li(dst, src.ToExternalReference());
+           break;
+-        case Constant::kDelayedStringConstant:
+-          __ li(dst, src.ToDelayedStringConstant());
+-          break;
+         case Constant::kHeapObject: {
+           Handle<HeapObject> src_object = src.ToHeapObject();
+           RootIndex index;
+-- 
+2.35.1
+

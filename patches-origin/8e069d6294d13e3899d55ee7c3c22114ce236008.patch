@@ -1,0 +1,201 @@
+From 8e069d6294d13e3899d55ee7c3c22114ce236008 Mon Sep 17 00:00:00 2001
+From: Jakob Kummerow <jkummerow@chromium.org>
+Date: Tue, 30 Aug 2022 12:11:15 +0200
+Subject: [PATCH] [wasm][simd] Fix SpillAdjacentFpRegisters...
+
+...to honor the {pinned} list under all circumstances.
+
+Drive-by: DEBUG-mode helpers to print FunctionSig and LiftoffRegList
+objects to stdout.
+
+Fixed: chromium:1356718
+Change-Id: I487db12294f687790cec1d658d7a7d754f3c2f99
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3859752
+Reviewed-by: Clemens Backes <clemensb@chromium.org>
+Auto-Submit: Jakob Kummerow <jkummerow@chromium.org>
+Commit-Queue: Jakob Kummerow <jkummerow@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#82815}
+---
+ src/wasm/baseline/liftoff-assembler.cc        | 12 ++++++++
+ src/wasm/baseline/liftoff-register.h          | 17 ++++++++++-
+ src/wasm/value-type.cc                        | 15 ++++++++++
+ .../regress/wasm/regress-crbug-1356718.js     | 14 +++++++++
+ .../wasm/liftoff-register-unittests.cc        | 29 ++++++++++++++++++-
+ 5 files changed, 85 insertions(+), 2 deletions(-)
+ create mode 100644 test/mjsunit/regress/wasm/regress-crbug-1356718.js
+
+diff --git a/src/wasm/baseline/liftoff-assembler.cc b/src/wasm/baseline/liftoff-assembler.cc
+index cbfd40c0c4..924ac6e8f4 100644
+--- a/src/wasm/baseline/liftoff-assembler.cc
++++ b/src/wasm/baseline/liftoff-assembler.cc
+@@ -1274,6 +1274,14 @@ void LiftoffAssembler::MoveToReturnLocations(
+ #endif
+ }
+ 
++#if DEBUG
++void LiftoffRegList::Print() const {
++  std::ostringstream os;
++  os << *this << "\n";
++  PrintF("%s", os.str().c_str());
++}
++#endif
++
+ #ifdef ENABLE_SLOW_DCHECKS
+ bool LiftoffAssembler::ValidateCacheState() const {
+   uint32_t register_use_count[kAfterMaxLiftoffRegCode] = {0};
+@@ -1337,6 +1345,10 @@ LiftoffRegister LiftoffAssembler::SpillAdjacentFpRegisters(
+   if (last_fp.fp().code() % 2 == 0) {
+     pinned.set(last_fp);
+   }
++  // If half of an adjacent pair is pinned, consider the whole pair pinned.
++  // Otherwise the code below would potentially spill the pinned register
++  // (after first spilling the unpinned half of the pair).
++  pinned = pinned.SpreadSetBitsToAdjacentFpRegs();
+ 
+   // We can try to optimize the spilling here:
+   // 1. Try to get a free fp register, either:
+diff --git a/src/wasm/baseline/liftoff-register.h b/src/wasm/baseline/liftoff-register.h
+index 0849220349..97701ac3fc 100644
+--- a/src/wasm/baseline/liftoff-register.h
++++ b/src/wasm/baseline/liftoff-register.h
+@@ -344,6 +344,8 @@ class LiftoffRegList {
+   // Sets all even numbered fp registers.
+   static constexpr uint64_t kEvenFpSetMask = uint64_t{0x5555555555555555}
+                                              << kAfterMaxLiftoffGpRegCode;
++  static constexpr uint64_t kOddFpSetMask = uint64_t{0xAAAAAAAAAAAAAAAA}
++                                            << kAfterMaxLiftoffGpRegCode;
+ 
+   constexpr LiftoffRegList() = default;
+ 
+@@ -426,6 +428,15 @@ class LiftoffRegList {
+     return !GetAdjacentFpRegsSet().is_empty();
+   }
+ 
++  // Returns a list where if any part of an adjacent pair of FP regs was set,
++  // both are set in the result. For example, [1, 4] is turned into [0, 1, 4, 5]
++  // because (0, 1) and (4, 5) are adjacent pairs.
++  constexpr LiftoffRegList SpreadSetBitsToAdjacentFpRegs() const {
++    storage_t odd_regs = regs_ & kOddFpSetMask;
++    storage_t even_regs = regs_ & kEvenFpSetMask;
++    return FromBits(regs_ | (odd_regs >> 1) | ((even_regs << 1) & kFpMask));
++  }
++
+   constexpr bool operator==(const LiftoffRegList other) const {
+     return regs_ == other.regs_;
+   }
+@@ -461,7 +472,7 @@ class LiftoffRegList {
+   inline Iterator begin() const;
+   inline Iterator end() const;
+ 
+-  static LiftoffRegList FromBits(storage_t bits) {
++  static constexpr LiftoffRegList FromBits(storage_t bits) {
+     DCHECK_EQ(bits, bits & (kGpMask | kFpMask));
+     return LiftoffRegList(bits);
+   }
+@@ -472,6 +483,10 @@ class LiftoffRegList {
+     return LiftoffRegList{bits};
+   }
+ 
++#if DEBUG
++  void Print() const;
++#endif
++
+  private:
+   // Unchecked constructor. Only use for valid bits.
+   explicit constexpr LiftoffRegList(storage_t bits) : regs_(bits) {}
+diff --git a/src/wasm/value-type.cc b/src/wasm/value-type.cc
+index 609d5c19f3..da184941a6 100644
+--- a/src/wasm/value-type.cc
++++ b/src/wasm/value-type.cc
+@@ -29,6 +29,21 @@ base::Optional<wasm::ValueKind> WasmReturnTypeFromSignature(
+   }
+ }
+ 
++#if DEBUG
++V8_EXPORT_PRIVATE extern void PrintFunctionSig(const wasm::FunctionSig* sig) {
++  std::ostringstream os;
++  os << sig->parameter_count() << " parameters:\n";
++  for (size_t i = 0; i < sig->parameter_count(); i++) {
++    os << "  " << i << ": " << sig->GetParam(i) << "\n";
++  }
++  os << sig->return_count() << " returns:\n";
++  for (size_t i = 0; i < sig->return_count(); i++) {
++    os << "  " << i << ": " << sig->GetReturn() << "\n";
++  }
++  PrintF("%s", os.str().c_str());
++}
++#endif
++
+ }  // namespace wasm
+ }  // namespace internal
+ }  // namespace v8
+diff --git a/test/mjsunit/regress/wasm/regress-crbug-1356718.js b/test/mjsunit/regress/wasm/regress-crbug-1356718.js
+new file mode 100644
+index 0000000000..500d845e40
+--- /dev/null
++++ b/test/mjsunit/regress/wasm/regress-crbug-1356718.js
+@@ -0,0 +1,14 @@
++// Copyright 2022 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
++
++let builder = new WasmModuleBuilder();
++
++builder.addFunction('crash', makeSig([
++    kWasmF64, kWasmS128, kWasmS128, kWasmS128, kWasmS128, kWasmS128, kWasmS128,
++    kWasmF64, kWasmI32
++  ], [])).addBody([kExprNop]);
++
++builder.instantiate();
+diff --git a/test/unittests/wasm/liftoff-register-unittests.cc b/test/unittests/wasm/liftoff-register-unittests.cc
+index 065491e831..8c3ba92146 100644
+--- a/test/unittests/wasm/liftoff-register-unittests.cc
++++ b/test/unittests/wasm/liftoff-register-unittests.cc
+@@ -25,7 +25,8 @@
+ #include "src/execution/riscv/frame-constants-riscv.h"
+ #endif
+ 
+-#include "src/base/macros.h"
++#include "src/wasm/baseline/liftoff-register.h"
++#include "testing/gtest/include/gtest/gtest.h"
+ 
+ namespace v8 {
+ namespace internal {
+@@ -38,6 +39,32 @@ static_assert(kLiftoffAssemblerGpCacheRegs ==
+ 
+ static_assert(kLiftoffAssemblerFpCacheRegs ==
+               WasmDebugBreakFrameConstants::kPushedFpRegs);
++
++class WasmRegisterTest : public ::testing::Test {};
++
++TEST_F(WasmRegisterTest, SpreadSetBitsToAdjacentFpRegs) {
++  LiftoffRegList input(
++  // GP reg selection criteria: an even and an odd register belonging to
++  // separate adjacent pairs, and contained in kLiftoffAssemblerGpCacheRegs
++  // for the given platform.
++#if V8_TARGET_ARCH_S390X || V8_TARGET_ARCH_PPC64
++      LiftoffRegister::from_code(kGpReg, 4),
++      LiftoffRegister::from_code(kGpReg, 7),
++#else
++      LiftoffRegister::from_code(kGpReg, 1),
++      LiftoffRegister::from_code(kGpReg, 2),
++#endif
++      LiftoffRegister::from_code(kFpReg, 1),
++      LiftoffRegister::from_code(kFpReg, 4));
++  // GP regs are left alone, FP regs are spread to adjacent pairs starting
++  // at an even index: 1 → (0, 1) and 4 → (4, 5).
++  LiftoffRegList expected =
++      input | LiftoffRegList(LiftoffRegister::from_code(kFpReg, 0),
++                             LiftoffRegister::from_code(kFpReg, 5));
++  LiftoffRegList actual = input.SpreadSetBitsToAdjacentFpRegs();
++  EXPECT_EQ(expected, actual);
++}
++
+ }  // namespace wasm
+ }  // namespace internal
+ }  // namespace v8
+-- 
+2.35.1
+

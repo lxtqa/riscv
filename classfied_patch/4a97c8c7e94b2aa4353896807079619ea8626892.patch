@@ -1,0 +1,545 @@
+From 4a97c8c7e94b2aa4353896807079619ea8626892 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=9D=A8=E6=96=87=E6=98=8E?= <yangwenming@bytedance.com>
+Date: Fri, 10 Mar 2023 08:15:33 +0800
+Subject: [PATCH] [wasm-simd] enable memory64 for StoreLane & LoadLane.
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+With this CL, wasm instructions related to storing/loading lanes of
+a v128 are enabled when the module is actually memory64.
+
+Bug: v8:13779
+Change-Id: I27d36d5c944a6b108172c45a57d2b9753cf1a989
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4313902
+Auto-Submit: 杨文明 <yangwenming@bytedance.com>
+Reviewed-by: Clemens Backes <clemensb@chromium.org>
+Commit-Queue: Clemens Backes <clemensb@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#86346}
+---
+ src/wasm/baseline/arm/liftoff-assembler-arm.h |  6 +-
+ .../baseline/arm64/liftoff-assembler-arm64.h  | 20 ++--
+ .../baseline/ia32/liftoff-assembler-ia32.h    |  6 +-
+ src/wasm/baseline/liftoff-assembler.h         |  5 +-
+ src/wasm/baseline/liftoff-compiler.cc         | 11 ++-
+ .../loong64/liftoff-assembler-loong64.h       |  6 +-
+ .../mips64/liftoff-assembler-mips64.h         | 12 ++-
+ src/wasm/baseline/ppc/liftoff-assembler-ppc.h | 14 ++-
+ .../riscv/liftoff-assembler-riscv32.h         |  6 +-
+ .../riscv/liftoff-assembler-riscv64.h         | 12 ++-
+ .../baseline/s390/liftoff-assembler-s390.h    | 28 +++---
+ src/wasm/baseline/x64/liftoff-assembler-x64.h |  8 +-
+ src/wasm/function-body-decoder-impl.h         |  6 +-
+ test/mjsunit/mjsunit.status                   |  1 +
+ test/mjsunit/wasm/simd-lane-memory64.js       | 93 +++++++++++++++++++
+ 15 files changed, 187 insertions(+), 47 deletions(-)
+ create mode 100644 test/mjsunit/wasm/simd-lane-memory64.js
+
+diff --git a/src/wasm/baseline/arm/liftoff-assembler-arm.h b/src/wasm/baseline/arm/liftoff-assembler-arm.h
+index 71fa2212c8..68cdeb4144 100644
+--- a/src/wasm/baseline/arm/liftoff-assembler-arm.h
++++ b/src/wasm/baseline/arm/liftoff-assembler-arm.h
+@@ -2474,7 +2474,8 @@ void LiftoffAssembler::LoadTransform(LiftoffRegister dst, Register src_addr,
+ void LiftoffAssembler::LoadLane(LiftoffRegister dst, LiftoffRegister src,
+                                 Register addr, Register offset_reg,
+                                 uintptr_t offset_imm, LoadType type,
+-                                uint8_t laneidx, uint32_t* protected_load_pc) {
++                                uint8_t laneidx, uint32_t* protected_load_pc,
++                                bool /* i64_offset */) {
+   UseScratchRegisterScope temps(this);
+   Register actual_src_addr = liftoff::CalculateActualAddress(
+       this, &temps, addr, offset_reg, offset_imm);
+@@ -2491,7 +2492,8 @@ void LiftoffAssembler::LoadLane(LiftoffRegister dst, LiftoffRegister src,
+ void LiftoffAssembler::StoreLane(Register dst, Register offset,
+                                  uintptr_t offset_imm, LiftoffRegister src,
+                                  StoreType type, uint8_t laneidx,
+-                                 uint32_t* protected_store_pc) {
++                                 uint32_t* protected_store_pc,
++                                 bool /* i64_offset */) {
+   UseScratchRegisterScope temps(this);
+   Register actual_dst_addr =
+       liftoff::CalculateActualAddress(this, &temps, dst, offset, offset_imm);
+diff --git a/src/wasm/baseline/arm64/liftoff-assembler-arm64.h b/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
+index 1f6685cb29..b620a30751 100644
+--- a/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
++++ b/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
+@@ -123,12 +123,12 @@ inline MemOperand GetMemOp(LiftoffAssembler* assm,
+ inline Register GetEffectiveAddress(LiftoffAssembler* assm,
+                                     UseScratchRegisterScope* temps,
+                                     Register addr, Register offset,
+-                                    uintptr_t offset_imm) {
++                                    uintptr_t offset_imm,
++                                    bool i64_offset = false) {
+   if (!offset.is_valid() && offset_imm == 0) return addr;
+   Register tmp = temps->AcquireX();
+   if (offset.is_valid()) {
+-    // TODO(clemensb): This needs adaption for memory64.
+-    assm->Add(tmp, addr, Operand(offset, UXTW));
++    assm->Add(tmp, addr, i64_offset ? Operand(offset) : Operand(offset, UXTW));
+     addr = tmp;
+   }
+   if (offset_imm != 0) assm->Add(tmp, addr, offset_imm);
+@@ -1858,10 +1858,11 @@ void LiftoffAssembler::LoadTransform(LiftoffRegister dst, Register src_addr,
+ void LiftoffAssembler::LoadLane(LiftoffRegister dst, LiftoffRegister src,
+                                 Register addr, Register offset_reg,
+                                 uintptr_t offset_imm, LoadType type,
+-                                uint8_t laneidx, uint32_t* protected_load_pc) {
++                                uint8_t laneidx, uint32_t* protected_load_pc,
++                                bool i64_offset) {
+   UseScratchRegisterScope temps(this);
+-  MemOperand src_op{
+-      liftoff::GetEffectiveAddress(this, &temps, addr, offset_reg, offset_imm)};
++  MemOperand src_op{liftoff::GetEffectiveAddress(this, &temps, addr, offset_reg,
++                                                 offset_imm, i64_offset)};
+ 
+   MachineType mem_type = type.mem_type();
+   if (dst != src) {
+@@ -1885,10 +1886,11 @@ void LiftoffAssembler::LoadLane(LiftoffRegister dst, LiftoffRegister src,
+ void LiftoffAssembler::StoreLane(Register dst, Register offset,
+                                  uintptr_t offset_imm, LiftoffRegister src,
+                                  StoreType type, uint8_t lane,
+-                                 uint32_t* protected_store_pc) {
++                                 uint32_t* protected_store_pc,
++                                 bool i64_offset) {
+   UseScratchRegisterScope temps(this);
+-  MemOperand dst_op{
+-      liftoff::GetEffectiveAddress(this, &temps, dst, offset, offset_imm)};
++  MemOperand dst_op{liftoff::GetEffectiveAddress(this, &temps, dst, offset,
++                                                 offset_imm, i64_offset)};
+   if (protected_store_pc) *protected_store_pc = pc_offset();
+ 
+   MachineRepresentation rep = type.mem_rep();
+diff --git a/src/wasm/baseline/ia32/liftoff-assembler-ia32.h b/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
+index 1272e0daa0..31432d6e59 100644
+--- a/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
++++ b/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
+@@ -2802,7 +2802,8 @@ void LiftoffAssembler::LoadTransform(LiftoffRegister dst, Register src_addr,
+ void LiftoffAssembler::LoadLane(LiftoffRegister dst, LiftoffRegister src,
+                                 Register addr, Register offset_reg,
+                                 uintptr_t offset_imm, LoadType type,
+-                                uint8_t laneidx, uint32_t* protected_load_pc) {
++                                uint8_t laneidx, uint32_t* protected_load_pc,
++                                bool /* i64_offset */) {
+   DCHECK_LE(offset_imm, std::numeric_limits<int32_t>::max());
+   Operand src_op{addr, offset_reg, times_1, static_cast<int32_t>(offset_imm)};
+   *protected_load_pc = pc_offset();
+@@ -2828,7 +2829,8 @@ void LiftoffAssembler::LoadLane(LiftoffRegister dst, LiftoffRegister src,
+ void LiftoffAssembler::StoreLane(Register dst, Register offset,
+                                  uintptr_t offset_imm, LiftoffRegister src,
+                                  StoreType type, uint8_t lane,
+-                                 uint32_t* protected_store_pc) {
++                                 uint32_t* protected_store_pc,
++                                 bool /* i64_offset */) {
+   DCHECK_LE(offset_imm, std::numeric_limits<int32_t>::max());
+   Operand dst_op = Operand(dst, offset, times_1, offset_imm);
+   if (protected_store_pc) *protected_store_pc = pc_offset();
+diff --git a/src/wasm/baseline/liftoff-assembler.h b/src/wasm/baseline/liftoff-assembler.h
+index 5b27e15859..b1e1e2cb89 100644
+--- a/src/wasm/baseline/liftoff-assembler.h
++++ b/src/wasm/baseline/liftoff-assembler.h
+@@ -1133,10 +1133,11 @@ class LiftoffAssembler : public MacroAssembler {
+                             uint32_t* protected_load_pc);
+   inline void LoadLane(LiftoffRegister dst, LiftoffRegister src, Register addr,
+                        Register offset_reg, uintptr_t offset_imm, LoadType type,
+-                       uint8_t lane, uint32_t* protected_load_pc);
++                       uint8_t lane, uint32_t* protected_load_pc,
++                       bool i64_offset);
+   inline void StoreLane(Register dst, Register offset, uintptr_t offset_imm,
+                         LiftoffRegister src, StoreType type, uint8_t lane,
+-                        uint32_t* protected_store_pc);
++                        uint32_t* protected_store_pc, bool i64_offset);
+   inline void emit_i8x16_shuffle(LiftoffRegister dst, LiftoffRegister lhs,
+                                  LiftoffRegister rhs, const uint8_t shuffle[16],
+                                  bool is_swizzle);
+diff --git a/src/wasm/baseline/liftoff-compiler.cc b/src/wasm/baseline/liftoff-compiler.cc
+index 1e3edf1ae9..d695b978a9 100644
+--- a/src/wasm/baseline/liftoff-compiler.cc
++++ b/src/wasm/baseline/liftoff-compiler.cc
+@@ -3318,6 +3318,9 @@ class LiftoffCompiler {
+     Register index = BoundsCheckMem(decoder, type.size(), imm.offset,
+                                     full_index, pinned, kDontForceCheck);
+ 
++    DCHECK(_index.type.kind() == kI32 || _index.type.kind() == kI64);
++    bool i64_offset = _index.type.kind() == kI64;
++
+     uintptr_t offset = imm.offset;
+     pinned.set(index);
+     CODE_COMMENT("load lane");
+@@ -3326,7 +3329,7 @@ class LiftoffCompiler {
+     uint32_t protected_load_pc = 0;
+ 
+     __ LoadLane(result, value, addr, index, offset, type, laneidx,
+-                &protected_load_pc);
++                &protected_load_pc, i64_offset);
+     if (env_->bounds_checks == kTrapHandler) {
+       AddOutOfLineTrap(decoder, WasmCode::kThrowWasmTrapMemOutOfBounds,
+                        protected_load_pc);
+@@ -3400,12 +3403,16 @@ class LiftoffCompiler {
+     Register index = BoundsCheckMem(decoder, type.size(), imm.offset,
+                                     full_index, pinned, kDontForceCheck);
+ 
++    DCHECK(_index.type.kind() == kI32 || _index.type.kind() == kI64);
++    bool i64_offset = _index.type.kind() == kI64;
++
+     uintptr_t offset = imm.offset;
+     pinned.set(index);
+     CODE_COMMENT("store lane to memory");
+     Register addr = pinned.set(GetMemoryStart(pinned));
+     uint32_t protected_store_pc = 0;
+-    __ StoreLane(addr, index, offset, value, type, lane, &protected_store_pc);
++    __ StoreLane(addr, index, offset, value, type, lane, &protected_store_pc,
++                 i64_offset);
+     if (env_->bounds_checks == kTrapHandler) {
+       AddOutOfLineTrap(decoder, WasmCode::kThrowWasmTrapMemOutOfBounds,
+                        protected_store_pc);
+diff --git a/src/wasm/baseline/loong64/liftoff-assembler-loong64.h b/src/wasm/baseline/loong64/liftoff-assembler-loong64.h
+index 6a8cfd31a2..67cbbf0e57 100644
+--- a/src/wasm/baseline/loong64/liftoff-assembler-loong64.h
++++ b/src/wasm/baseline/loong64/liftoff-assembler-loong64.h
+@@ -1840,14 +1840,16 @@ void LiftoffAssembler::LoadTransform(LiftoffRegister dst, Register src_addr,
+ void LiftoffAssembler::LoadLane(LiftoffRegister dst, LiftoffRegister src,
+                                 Register addr, Register offset_reg,
+                                 uintptr_t offset_imm, LoadType type,
+-                                uint8_t laneidx, uint32_t* protected_load_pc) {
++                                uint8_t laneidx, uint32_t* protected_load_pc,
++                                bool i64_offset) {
+   bailout(kSimd, "loadlane");
+ }
+ 
+ void LiftoffAssembler::StoreLane(Register dst, Register offset,
+                                  uintptr_t offset_imm, LiftoffRegister src,
+                                  StoreType type, uint8_t lane,
+-                                 uint32_t* protected_store_pc) {
++                                 uint32_t* protected_store_pc,
++                                 bool i64_offset) {
+   bailout(kSimd, "storelane");
+ }
+ 
+diff --git a/src/wasm/baseline/mips64/liftoff-assembler-mips64.h b/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
+index 127004dcfd..bcf3eceb0f 100644
+--- a/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
++++ b/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
+@@ -2101,8 +2101,10 @@ void LiftoffAssembler::LoadTransform(LiftoffRegister dst, Register src_addr,
+ void LiftoffAssembler::LoadLane(LiftoffRegister dst, LiftoffRegister src,
+                                 Register addr, Register offset_reg,
+                                 uintptr_t offset_imm, LoadType type,
+-                                uint8_t laneidx, uint32_t* protected_load_pc) {
+-  MemOperand src_op = liftoff::GetMemOp(this, addr, offset_reg, offset_imm);
++                                uint8_t laneidx, uint32_t* protected_load_pc,
++                                bool i64_offset) {
++  MemOperand src_op =
++      liftoff::GetMemOp(this, addr, offset_reg, offset_imm, i64_offset);
+   *protected_load_pc = pc_offset();
+   LoadStoreLaneParams load_params(type.mem_type().representation(), laneidx);
+   MacroAssembler::LoadLane(load_params.sz, dst.fp().toW(), laneidx, src_op);
+@@ -2111,8 +2113,10 @@ void LiftoffAssembler::LoadLane(LiftoffRegister dst, LiftoffRegister src,
+ void LiftoffAssembler::StoreLane(Register dst, Register offset,
+                                  uintptr_t offset_imm, LiftoffRegister src,
+                                  StoreType type, uint8_t lane,
+-                                 uint32_t* protected_store_pc) {
+-  MemOperand dst_op = liftoff::GetMemOp(this, dst, offset, offset_imm);
++                                 uint32_t* protected_store_pc,
++                                 bool i64_offset) {
++  MemOperand dst_op =
++      liftoff::GetMemOp(this, dst, offset, offset_imm, i64_offset);
+   if (protected_store_pc) *protected_store_pc = pc_offset();
+   LoadStoreLaneParams store_params(type.mem_rep(), lane);
+   MacroAssembler::StoreLane(store_params.sz, src.fp().toW(), lane, dst_op);
+diff --git a/src/wasm/baseline/ppc/liftoff-assembler-ppc.h b/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
+index 36457aab00..73c35ded4f 100644
+--- a/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
++++ b/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
+@@ -2255,7 +2255,12 @@ void LiftoffAssembler::emit_smi_check(Register obj, Label* target,
+ void LiftoffAssembler::LoadLane(LiftoffRegister dst, LiftoffRegister src,
+                                 Register addr, Register offset_reg,
+                                 uintptr_t offset_imm, LoadType type,
+-                                uint8_t laneidx, uint32_t* protected_load_pc) {
++                                uint8_t laneidx, uint32_t* protected_load_pc,
++                                bool i64_offset) {
++  if (!i64_offset && offset_reg != no_reg) {
++    ZeroExtWord32(r0, offset_reg);
++    offset_reg = r0;
++  }
+   MemOperand src_op = MemOperand(addr, offset_reg, offset_imm);
+ 
+   MachineType mem_type = type.mem_type();
+@@ -2279,7 +2284,12 @@ void LiftoffAssembler::LoadLane(LiftoffRegister dst, LiftoffRegister src,
+ void LiftoffAssembler::StoreLane(Register dst, Register offset,
+                                  uintptr_t offset_imm, LiftoffRegister src,
+                                  StoreType type, uint8_t lane,
+-                                 uint32_t* protected_store_pc) {
++                                 uint32_t* protected_store_pc,
++                                 bool i64_offset) {
++  if (!i64_offset && offset != no_reg) {
++    ZeroExtWord32(r0, offset);
++    offset = r0;
++  }
+   MemOperand dst_op = MemOperand(dst, offset, offset_imm);
+ 
+   if (protected_store_pc) *protected_store_pc = pc_offset();
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h
+index bced4579a8..00fd61cc22 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h
+@@ -1787,7 +1787,8 @@ void LiftoffAssembler::LoadTransform(LiftoffRegister dst, Register src_addr,
+ void LiftoffAssembler::LoadLane(LiftoffRegister dst, LiftoffRegister src,
+                                 Register addr, Register offset_reg,
+                                 uintptr_t offset_imm, LoadType type,
+-                                uint8_t laneidx, uint32_t* protected_load_pc) {
++                                uint8_t laneidx, uint32_t* protected_load_pc,
++                                bool /* i64_offfset */) {
+   UseScratchRegisterScope temps(this);
+   Register scratch = temps.Acquire();
+   MemOperand src_op =
+@@ -1827,7 +1828,8 @@ void LiftoffAssembler::LoadLane(LiftoffRegister dst, LiftoffRegister src,
+ void LiftoffAssembler::StoreLane(Register dst, Register offset,
+                                  uintptr_t offset_imm, LiftoffRegister src,
+                                  StoreType type, uint8_t lane,
+-                                 uint32_t* protected_store_pc) {
++                                 uint32_t* protected_store_pc,
++                                 bool /* i64_offfset */) {
+   UseScratchRegisterScope temps(this);
+   Register scratch = temps.Acquire();
+   MemOperand dst_op = liftoff::GetMemOp(this, dst, offset, offset_imm, scratch);
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
+index 722ccdfd29..1d6ae09e8b 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
+@@ -1430,8 +1430,10 @@ void LiftoffAssembler::LoadTransform(LiftoffRegister dst, Register src_addr,
+ void LiftoffAssembler::LoadLane(LiftoffRegister dst, LiftoffRegister src,
+                                 Register addr, Register offset_reg,
+                                 uintptr_t offset_imm, LoadType type,
+-                                uint8_t laneidx, uint32_t* protected_load_pc) {
+-  MemOperand src_op = liftoff::GetMemOp(this, addr, offset_reg, offset_imm);
++                                uint8_t laneidx, uint32_t* protected_load_pc,
++                                bool i64_offset) {
++  MemOperand src_op =
++      liftoff::GetMemOp(this, addr, offset_reg, offset_imm, i64_offset);
+   MachineType mem_type = type.mem_type();
+   UseScratchRegisterScope temps(this);
+   Register scratch = temps.Acquire();
+@@ -1469,8 +1471,10 @@ void LiftoffAssembler::LoadLane(LiftoffRegister dst, LiftoffRegister src,
+ void LiftoffAssembler::StoreLane(Register dst, Register offset,
+                                  uintptr_t offset_imm, LiftoffRegister src,
+                                  StoreType type, uint8_t lane,
+-                                 uint32_t* protected_store_pc) {
+-  MemOperand dst_op = liftoff::GetMemOp(this, dst, offset, offset_imm);
++                                 uint32_t* protected_store_pc,
++                                 bool i64_offset) {
++  MemOperand dst_op =
++      liftoff::GetMemOp(this, dst, offset, offset_imm, i64_offset);
+   if (protected_store_pc) *protected_store_pc = pc_offset();
+   MachineRepresentation rep = type.mem_rep();
+   if (rep == MachineRepresentation::kWord8) {
+diff --git a/src/wasm/baseline/s390/liftoff-assembler-s390.h b/src/wasm/baseline/s390/liftoff-assembler-s390.h
+index ef51ed7d74..f26929777a 100644
+--- a/src/wasm/baseline/s390/liftoff-assembler-s390.h
++++ b/src/wasm/baseline/s390/liftoff-assembler-s390.h
+@@ -2645,11 +2645,21 @@ void LiftoffAssembler::LoadTransform(LiftoffRegister dst, Register src_addr,
+ void LiftoffAssembler::LoadLane(LiftoffRegister dst, LiftoffRegister src,
+                                 Register addr, Register offset_reg,
+                                 uintptr_t offset_imm, LoadType type,
+-                                uint8_t laneidx, uint32_t* protected_load_pc) {
++                                uint8_t laneidx, uint32_t* protected_load_pc,
++                                bool i64_offset) {
++  UseScratchRegisterScope temps(this);
++  if (offset_reg != no_reg && !i64_offset) {
++    // Clear the upper 32 bits of the 64 bit offset register.
++    llgfr(ip, offset_reg);
++    offset_reg = ip;
++  }
+   if (!is_int20(offset_imm)) {
+-    mov(ip, Operand(offset_imm));
+     if (offset_reg != no_reg) {
+-      AddS64(ip, offset_reg);
++      mov(r0, Operand(offset_imm));
++      AddS64(r0, offset_reg);
++      mov(ip, r0);
++    } else {
++      mov(ip, Operand(offset_imm));
+     }
+     offset_reg = ip;
+     offset_imm = 0;
+@@ -2678,15 +2688,9 @@ void LiftoffAssembler::LoadLane(LiftoffRegister dst, LiftoffRegister src,
+ void LiftoffAssembler::StoreLane(Register dst, Register offset,
+                                  uintptr_t offset_imm, LiftoffRegister src,
+                                  StoreType type, uint8_t lane,
+-                                 uint32_t* protected_store_pc) {
+-  if (!is_int20(offset_imm)) {
+-    mov(ip, Operand(offset_imm));
+-    if (offset != no_reg) {
+-      AddS64(ip, offset);
+-    }
+-    offset = ip;
+-    offset_imm = 0;
+-  }
++                                 uint32_t* protected_store_pc,
++                                 bool i64_offset) {
++  PREP_MEM_OPERAND(offset, offset_imm, ip)
+   MemOperand dst_op =
+       MemOperand(dst, offset == no_reg ? r0 : offset, offset_imm);
+ 
+diff --git a/src/wasm/baseline/x64/liftoff-assembler-x64.h b/src/wasm/baseline/x64/liftoff-assembler-x64.h
+index c8b812d967..b843e4a81a 100644
+--- a/src/wasm/baseline/x64/liftoff-assembler-x64.h
++++ b/src/wasm/baseline/x64/liftoff-assembler-x64.h
+@@ -2447,7 +2447,9 @@ void LiftoffAssembler::LoadTransform(LiftoffRegister dst, Register src_addr,
+ void LiftoffAssembler::LoadLane(LiftoffRegister dst, LiftoffRegister src,
+                                 Register addr, Register offset_reg,
+                                 uintptr_t offset_imm, LoadType type,
+-                                uint8_t laneidx, uint32_t* protected_load_pc) {
++                                uint8_t laneidx, uint32_t* protected_load_pc,
++                                bool i64_offset) {
++  if (offset_reg != no_reg && !i64_offset) AssertZeroExtended(offset_reg);
+   Operand src_op = liftoff::GetMemOp(this, addr, offset_reg, offset_imm);
+ 
+   MachineType mem_type = type.mem_type();
+@@ -2466,7 +2468,9 @@ void LiftoffAssembler::LoadLane(LiftoffRegister dst, LiftoffRegister src,
+ void LiftoffAssembler::StoreLane(Register dst, Register offset,
+                                  uintptr_t offset_imm, LiftoffRegister src,
+                                  StoreType type, uint8_t lane,
+-                                 uint32_t* protected_store_pc) {
++                                 uint32_t* protected_store_pc,
++                                 bool i64_offset) {
++  if (offset != no_reg && !i64_offset) AssertZeroExtended(offset);
+   Operand dst_op = liftoff::GetMemOp(this, dst, offset, offset_imm);
+   if (protected_store_pc) *protected_store_pc = pc_offset();
+   MachineRepresentation rep = type.mem_rep();
+diff --git a/src/wasm/function-body-decoder-impl.h b/src/wasm/function-body-decoder-impl.h
+index 0c33ff96f2..3c0ab92695 100644
+--- a/src/wasm/function-body-decoder-impl.h
++++ b/src/wasm/function-body-decoder-impl.h
+@@ -4245,7 +4245,8 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
+                                validate);
+     if (!this->Validate(this->pc_ + opcode_length, opcode, lane_imm)) return 0;
+     Value v128 = Peek(0, 1, kWasmS128);
+-    Value index = Peek(1, 0, kWasmI32);
++    ValueType index_type = this->module_->is_memory64 ? kWasmI64 : kWasmI32;
++    Value index = Peek(1, 0, index_type);
+ 
+     Value result = CreateValue(kWasmS128);
+     if (V8_LIKELY(!CheckStaticallyOutOfBounds(type.size(), mem_imm.offset))) {
+@@ -4266,7 +4267,8 @@ class WasmFullDecoder : public WasmDecoder<ValidationTag, decoding_mode> {
+                                validate);
+     if (!this->Validate(this->pc_ + opcode_length, opcode, lane_imm)) return 0;
+     Value v128 = Peek(0, 1, kWasmS128);
+-    Value index = Peek(1, 0, kWasmI32);
++    ValueType index_type = this->module_->is_memory64 ? kWasmI64 : kWasmI32;
++    Value index = Peek(1, 0, index_type);
+ 
+     if (V8_LIKELY(!CheckStaticallyOutOfBounds(type.size(), mem_imm.offset))) {
+       CALL_INTERFACE_IF_OK_AND_REACHABLE(StoreLane, type, mem_imm, index, v128,
+diff --git a/test/mjsunit/mjsunit.status b/test/mjsunit/mjsunit.status
+index 414a14a43c..5211797ce2 100644
+--- a/test/mjsunit/mjsunit.status
++++ b/test/mjsunit/mjsunit.status
+@@ -562,6 +562,7 @@
+   'wasm/huge-memory': [SKIP],
+   'wasm/huge-typedarray': [SKIP],
+   'wasm/bigint-opt': [SKIP],
++  'wasm/simd-lane-memory64': [SKIP],
+   'regress/regress-1320641': [SKIP],
+ }],  # 'arch in (ia32, arm, riscv32)'
+ 
+diff --git a/test/mjsunit/wasm/simd-lane-memory64.js b/test/mjsunit/wasm/simd-lane-memory64.js
+new file mode 100644
+index 0000000000..77c81206e8
+--- /dev/null
++++ b/test/mjsunit/wasm/simd-lane-memory64.js
+@@ -0,0 +1,93 @@
++// Copyright 2023 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Flags: --experimental-wasm-memory64
++
++d8.file.execute("test/mjsunit/wasm/wasm-module-builder.js");
++
++const GB = 1024 * 1024 * 1024;
++const SRC_OFFSET = 4294970000n; // 0x100000a90n
++const SRC_OFFSET_LEB = [0x90, 0x95, 0x80, 0x80, 0x10];
++const DST_OFFSET = 4294970160n;
++const DST_OFFSET_LEB = [0xb0, 0x96, 0x80, 0x80, 0x10];
++
++var builder = new WasmModuleBuilder();
++builder.addMemory64(5 * GB / kPageSize).exportMemoryAs("memory");
++
++// Here we make a global of type v128 to be the target
++// for loading lanes and the source for storing lanes.
++var g = builder.addGlobal(
++  kWasmS128, true,
++  [kSimdPrefix, kExprS128Const,
++   1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0]);
++
++for (let i = 0; i < 4; ++i) {
++  builder.addFunction(`load_lane_${i}`, kSig_v_l)
++      .addBody([kExprLocalGet, 0,
++                kExprGlobalGet, g.index,
++                kSimdPrefix, kExprS128Load32Lane, 0, 0, i,
++                kExprGlobalSet, g.index])
++      .exportFunc();
++
++  builder.addFunction(`store_lane_${i}`, kSig_v_l)
++      .addBody([kExprLocalGet, 0,
++                kExprGlobalGet, g.index,
++                kSimdPrefix, kExprS128Store32Lane, 0, 0, i])
++      .exportFunc();
++
++  builder.addFunction(`Load_Lane_${i}`, kSig_v_l)
++      .addBody([kExprLocalGet, 0,
++                kExprGlobalGet, g.index,
++                kSimdPrefix, kExprS128Load32Lane, 0, ...SRC_OFFSET_LEB, i,
++                kExprGlobalSet, g.index])
++      .exportFunc();
++
++  builder.addFunction(`Store_Lane_${i}`, kSig_v_l)
++      .addBody([kExprLocalGet, 0,
++                kExprGlobalGet, g.index,
++                kSimdPrefix, kExprS128Store32Lane, 0, ...DST_OFFSET_LEB, i])
++      .exportFunc();
++}
++
++(function TestLoadStoreLaneExternalOffset(){
++  print(arguments.callee.name);
++
++  var instance = builder.instantiate({});
++  var buffer = instance.exports.memory.buffer;
++
++  var src_view = new Uint32Array(buffer, Number(SRC_OFFSET), 4);
++  var dst_view = new Uint32Array(buffer, Number(DST_OFFSET), 4);
++  var values = [ 0x01234567, 0x89abcdef, 0x76543210, 0xfedcba98 ];
++  var expected_values = [ 0, 0, 0, 0 ];
++  src_view.set(values, 0);
++
++  for (let i = 0n; i < 4n; ++i) {
++    expected_values[i] = values[i];
++    const offset = 4n * i;
++    instance.exports[`load_lane_${i}`](SRC_OFFSET + offset);
++    instance.exports[`store_lane_${i}`](DST_OFFSET + offset);
++    assertEquals(expected_values, Array.from(dst_view.values()));
++  }
++})();
++
++(function TestLoadStoreLaneInternalOffset(){
++  print(arguments.callee.name);
++
++  var instance = builder.instantiate({});
++  var buffer = instance.exports.memory.buffer;
++
++  var src_view = new Uint32Array(buffer, Number(SRC_OFFSET), 4);
++  var dst_view = new Uint32Array(buffer, Number(DST_OFFSET), 4);
++  var values = [ 0x01234567, 0x89abcdef, 0x76543210, 0xfedcba98 ];
++  var expected_values = [ 0, 0, 0, 0 ];
++  src_view.set(values, 0);
++
++  for (let i = 0n; i < 4n; ++i) {
++    expected_values[i] = values[i];
++    const offset = 4n * i;
++    instance.exports[`Load_Lane_${i}`](offset);
++    instance.exports[`Store_Lane_${i}`](offset);
++    assertEquals(expected_values, Array.from(dst_view.values()));
++  }
++})();
+-- 
+2.35.1
+

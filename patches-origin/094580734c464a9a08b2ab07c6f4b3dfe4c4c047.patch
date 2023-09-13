@@ -1,0 +1,116 @@
+From 094580734c464a9a08b2ab07c6f4b3dfe4c4c047 Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Tue, 4 Apr 2023 11:40:35 +0800
+Subject: [PATCH] [riscv][builtins] Streamline API calls
+
+Port commit 1e5c03c78e1510740bed179093ff512731970e7b
+
+Original message:
+This CL simplifies the API calls by removing some instructions from
+the most common path.
+
+Bug: v8:11880
+
+Change-Id: Ic33a1223aa3eb698a9989a983344bc182048fb26
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4397342
+Auto-Submit: Yahan Lu <yahan@iscas.ac.cn>
+Reviewed-by: Ji Qiu <qiuji@iscas.ac.cn>
+Commit-Queue: Ji Qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#86893}
+---
+ src/builtins/riscv/builtins-riscv.cc | 60 ++++++++++++++--------------
+ 1 file changed, 29 insertions(+), 31 deletions(-)
+
+diff --git a/src/builtins/riscv/builtins-riscv.cc b/src/builtins/riscv/builtins-riscv.cc
+index 5be166fb02..c6dde48d5b 100644
+--- a/src/builtins/riscv/builtins-riscv.cc
++++ b/src/builtins/riscv/builtins-riscv.cc
+@@ -3119,36 +3119,10 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+ 
+   DCHECK(function_address == a1 || function_address == a2);
+ 
+-  Label profiler_enabled, end_profiler_check;
++  Label profiler_enabled, done_api_call;
+   {
+     UseScratchRegisterScope temp(masm);
+     Register scratch = temp.Acquire();
+-    __ RecordComment("Check if profiler is enabled");
+-    __ Lb(scratch,
+-          __ ExternalReferenceAsOperand(
+-              ExternalReference::is_profiling_address(isolate), scratch));
+-    __ Branch(&profiler_enabled, ne, scratch, Operand(zero_reg),
+-              Label::Distance::kNear);
+-#ifdef V8_RUNTIME_CALL_STATS
+-    __ RecordComment("Check if RCS is enabled");
+-    __ li(scratch, ExternalReference::address_of_runtime_stats_flag());
+-    __ Lw(scratch, MemOperand(scratch, 0));
+-    __ Branch(&profiler_enabled, ne, scratch, Operand(zero_reg),
+-              Label::Distance::kNear);
+-#endif
+-    {
+-      __ RecordComment("Call the api function directly.");
+-      __ Move(scratch, function_address);
+-      __ BranchShort(&end_profiler_check);
+-    }
+-
+-    __ bind(&profiler_enabled);
+-    {
+-      // Additional parameter is the address of the actual callback.
+-      __ li(scratch, thunk_ref);
+-    }
+-    __ bind(&end_profiler_check);
+-
+     {
+       ASM_CODE_COMMENT_STRING(masm,
+                               "Allocate HandleScope in callee-save registers.");
+@@ -3159,7 +3133,22 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+       __ Add32(s2, s2, Operand(1));
+       __ Sw(s2, MemOperand(s5, kLevelOffset));
+     }
++    __ RecordComment("Check if profiler is enabled");
++    __ Lb(scratch,
++          __ ExternalReferenceAsOperand(
++              ExternalReference::is_profiling_address(isolate), scratch));
++    __ Branch(&profiler_enabled, ne, scratch, Operand(zero_reg));
++#ifdef V8_RUNTIME_CALL_STATS
++    __ RecordComment("Check if RCS is enabled");
++    __ li(scratch, ExternalReference::address_of_runtime_stats_flag());
++    __ Lw(scratch, MemOperand(scratch, 0));
++    __ Branch(&profiler_enabled, ne, scratch, Operand(zero_reg));
++#endif  // V8_RUNTIME_CALL_STATS
++
++    // Call the api function directly.
++    __ mv(scratch, function_address);
+     __ StoreReturnAddressAndCall(scratch);
++    __ bind(&done_api_call);
+   }
+ 
+   Label promote_scheduled_exception;
+@@ -3217,11 +3206,20 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+     __ bind(&finish_return);
+   }
+   __ Ret();
++  {
++    UseScratchRegisterScope temp(masm);
++    Register scratch = temp.Acquire();
++    // Call the api function via thunk wrapper.
++    __ bind(&profiler_enabled);
++    // Additional parameter is the address of the actual callback.
++    __ li(scratch, thunk_ref);
++    __ StoreReturnAddressAndCall(scratch);
++    __ Branch(&done_api_call);
+ 
+-  __ RecordComment("Re-throw by promoting a scheduled exception.");
+-  __ bind(&promote_scheduled_exception);
+-  __ TailCallRuntime(Runtime::kPromoteScheduledException);
+-
++    __ RecordComment("Re-throw by promoting a scheduled exception.");
++    __ bind(&promote_scheduled_exception);
++    __ TailCallRuntime(Runtime::kPromoteScheduledException);
++  }
+   {
+     ASM_CODE_COMMENT_STRING(
+         masm, "HandleScope limit has changed. Delete allocated extensions.");
+-- 
+2.35.1
+

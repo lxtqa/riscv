@@ -1,0 +1,529 @@
+From 8039e2715ad82c678952c6fbbcf39b10c1985d3a Mon Sep 17 00:00:00 2001
+From: Jakob Gruber <jgruber@chromium.org>
+Date: Wed, 23 Feb 2022 08:52:00 +0100
+Subject: [PATCH] [tiering] Move feedback allocation and SP tiering into
+ TieringManager
+
+- Move feedback / SP into TieringManager.
+- Rename OnInterruptTickFromBytecode to OnInterruptTick (it's called
+  from both Code and Bytecode).
+- Remove the SealHandleScope / HandleScope dance.
+
+Bug: v8:7700
+Change-Id: I800542deb3805097a589b7766907efb6f40c7dae
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3467875
+Reviewed-by: Leszek Swirski <leszeks@chromium.org>
+Commit-Queue: Jakob Gruber <jgruber@chromium.org>
+Auto-Submit: Jakob Gruber <jgruber@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#79220}
+---
+ src/baseline/arm/baseline-assembler-arm-inl.h |   2 +-
+ .../arm64/baseline-assembler-arm64-inl.h      |   2 +-
+ src/baseline/baseline-compiler.cc             |   2 +-
+ .../ia32/baseline-assembler-ia32-inl.h        |   2 +-
+ .../loong64/baseline-assembler-loong64-inl.h  |   2 +-
+ .../mips/baseline-assembler-mips-inl.h        |   2 +-
+ .../mips64/baseline-assembler-mips64-inl.h    |   2 +-
+ .../riscv64/baseline-assembler-riscv64-inl.h  |   2 +-
+ .../s390/baseline-assembler-s390-inl.h        |   2 +-
+ src/baseline/x64/baseline-assembler-x64-inl.h |   2 +-
+ src/execution/tiering-manager.cc              |  78 ++++++++++---
+ src/execution/tiering-manager.h               |   6 +-
+ src/interpreter/interpreter-assembler.cc      |   9 +-
+ src/runtime/runtime-internal.cc               |  46 +-------
+ src/runtime/runtime.h                         | 108 +++++++++---------
+ 15 files changed, 135 insertions(+), 132 deletions(-)
+
+diff --git a/src/baseline/arm/baseline-assembler-arm-inl.h b/src/baseline/arm/baseline-assembler-arm-inl.h
+index eb37eaebcb..07188218ff 100644
+--- a/src/baseline/arm/baseline-assembler-arm-inl.h
++++ b/src/baseline/arm/baseline-assembler-arm-inl.h
+@@ -474,7 +474,7 @@ void BaselineAssembler::EmitReturn(MacroAssembler* masm) {
+       __ LoadContext(kContextRegister);
+       __ LoadFunction(kJSFunctionRegister);
+       __ Push(kJSFunctionRegister);
+-      __ CallRuntime(Runtime::kBytecodeBudgetInterruptFromBytecode, 1);
++      __ CallRuntime(Runtime::kBytecodeBudgetInterrupt, 1);
+ 
+       __ Pop(kInterpreterAccumulatorRegister, params_size);
+       __ masm()->SmiUntag(params_size);
+diff --git a/src/baseline/arm64/baseline-assembler-arm64-inl.h b/src/baseline/arm64/baseline-assembler-arm64-inl.h
+index 0a820d5de3..896f965d1a 100644
+--- a/src/baseline/arm64/baseline-assembler-arm64-inl.h
++++ b/src/baseline/arm64/baseline-assembler-arm64-inl.h
+@@ -557,7 +557,7 @@ void BaselineAssembler::EmitReturn(MacroAssembler* masm) {
+     __ LoadContext(kContextRegister);
+     __ LoadFunction(kJSFunctionRegister);
+     __ masm()->PushArgument(kJSFunctionRegister);
+-    __ CallRuntime(Runtime::kBytecodeBudgetInterruptFromBytecode, 1);
++    __ CallRuntime(Runtime::kBytecodeBudgetInterrupt, 1);
+ 
+     __ masm()->Pop(kInterpreterAccumulatorRegister, params_size);
+     __ masm()->SmiUntag(params_size);
+diff --git a/src/baseline/baseline-compiler.cc b/src/baseline/baseline-compiler.cc
+index d192ff3b3c..475697e288 100644
+--- a/src/baseline/baseline-compiler.cc
++++ b/src/baseline/baseline-compiler.cc
+@@ -586,7 +586,7 @@ void BaselineCompiler::UpdateInterruptBudgetAndJumpToLabel(
+ 
+     if (weight < 0) {
+       SaveAccumulatorScope accumulator_scope(&basm_);
+-      CallRuntime(Runtime::kBytecodeBudgetInterruptWithStackCheckFromBytecode,
++      CallRuntime(Runtime::kBytecodeBudgetInterruptWithStackCheck,
+                   __ FunctionOperand());
+     }
+   }
+diff --git a/src/baseline/ia32/baseline-assembler-ia32-inl.h b/src/baseline/ia32/baseline-assembler-ia32-inl.h
+index 841bd47a74..9b1215ca91 100644
+--- a/src/baseline/ia32/baseline-assembler-ia32-inl.h
++++ b/src/baseline/ia32/baseline-assembler-ia32-inl.h
+@@ -428,7 +428,7 @@ void BaselineAssembler::EmitReturn(MacroAssembler* masm) {
+ 
+     __ LoadContext(kContextRegister);
+     __ Push(MemOperand(ebp, InterpreterFrameConstants::kFunctionOffset));
+-    __ CallRuntime(Runtime::kBytecodeBudgetInterruptFromBytecode, 1);
++    __ CallRuntime(Runtime::kBytecodeBudgetInterrupt, 1);
+ 
+     __ Pop(kInterpreterAccumulatorRegister, params_size);
+     __ masm()->SmiUntag(params_size);
+diff --git a/src/baseline/loong64/baseline-assembler-loong64-inl.h b/src/baseline/loong64/baseline-assembler-loong64-inl.h
+index 39eb55eb3d..0447d3e1ef 100644
+--- a/src/baseline/loong64/baseline-assembler-loong64-inl.h
++++ b/src/baseline/loong64/baseline-assembler-loong64-inl.h
+@@ -449,7 +449,7 @@ void BaselineAssembler::EmitReturn(MacroAssembler* masm) {
+     __ LoadContext(kContextRegister);
+     __ LoadFunction(kJSFunctionRegister);
+     __ masm()->Push(kJSFunctionRegister);
+-    __ CallRuntime(Runtime::kBytecodeBudgetInterruptFromBytecode, 1);
++    __ CallRuntime(Runtime::kBytecodeBudgetInterrupt, 1);
+ 
+     __ masm()->Pop(params_size, kInterpreterAccumulatorRegister);
+     __ masm()->SmiUntag(params_size);
+diff --git a/src/baseline/mips/baseline-assembler-mips-inl.h b/src/baseline/mips/baseline-assembler-mips-inl.h
+index e8bab77533..332701edb7 100644
+--- a/src/baseline/mips/baseline-assembler-mips-inl.h
++++ b/src/baseline/mips/baseline-assembler-mips-inl.h
+@@ -461,7 +461,7 @@ void BaselineAssembler::EmitReturn(MacroAssembler* masm) {
+     __ LoadContext(kContextRegister);
+     __ LoadFunction(kJSFunctionRegister);
+     __ masm()->Push(kJSFunctionRegister);
+-    __ CallRuntime(Runtime::kBytecodeBudgetInterruptFromBytecode, 1);
++    __ CallRuntime(Runtime::kBytecodeBudgetInterrupt, 1);
+ 
+     __ masm()->Pop(params_size, kInterpreterAccumulatorRegister);
+     __ masm()->SmiUntag(params_size);
+diff --git a/src/baseline/mips64/baseline-assembler-mips64-inl.h b/src/baseline/mips64/baseline-assembler-mips64-inl.h
+index e78d937148..14202c9fe6 100644
+--- a/src/baseline/mips64/baseline-assembler-mips64-inl.h
++++ b/src/baseline/mips64/baseline-assembler-mips64-inl.h
+@@ -459,7 +459,7 @@ void BaselineAssembler::EmitReturn(MacroAssembler* masm) {
+     __ LoadContext(kContextRegister);
+     __ LoadFunction(kJSFunctionRegister);
+     __ masm()->Push(kJSFunctionRegister);
+-    __ CallRuntime(Runtime::kBytecodeBudgetInterruptFromBytecode, 1);
++    __ CallRuntime(Runtime::kBytecodeBudgetInterrupt, 1);
+ 
+     __ masm()->Pop(params_size, kInterpreterAccumulatorRegister);
+     __ masm()->SmiUntag(params_size);
+diff --git a/src/baseline/riscv64/baseline-assembler-riscv64-inl.h b/src/baseline/riscv64/baseline-assembler-riscv64-inl.h
+index 671de94167..24f63dde92 100644
+--- a/src/baseline/riscv64/baseline-assembler-riscv64-inl.h
++++ b/src/baseline/riscv64/baseline-assembler-riscv64-inl.h
+@@ -478,7 +478,7 @@ void BaselineAssembler::EmitReturn(MacroAssembler* masm) {
+     __ LoadContext(kContextRegister);
+     __ LoadFunction(kJSFunctionRegister);
+     __ masm()->Push(kJSFunctionRegister);
+-    __ CallRuntime(Runtime::kBytecodeBudgetInterruptFromBytecode, 1);
++    __ CallRuntime(Runtime::kBytecodeBudgetInterrupt, 1);
+ 
+     __ masm()->Pop(params_size, kInterpreterAccumulatorRegister);
+     __ masm()->SmiUntag(params_size);
+diff --git a/src/baseline/s390/baseline-assembler-s390-inl.h b/src/baseline/s390/baseline-assembler-s390-inl.h
+index f235adcec3..52e827dec3 100644
+--- a/src/baseline/s390/baseline-assembler-s390-inl.h
++++ b/src/baseline/s390/baseline-assembler-s390-inl.h
+@@ -568,7 +568,7 @@ void BaselineAssembler::EmitReturn(MacroAssembler* masm) {
+       __ LoadContext(kContextRegister);
+       __ LoadFunction(kJSFunctionRegister);
+       __ Push(kJSFunctionRegister);
+-      __ CallRuntime(Runtime::kBytecodeBudgetInterruptFromBytecode, 1);
++      __ CallRuntime(Runtime::kBytecodeBudgetInterrupt, 1);
+ 
+       __ Pop(kInterpreterAccumulatorRegister, params_size);
+       __ masm()->SmiUntag(params_size);
+diff --git a/src/baseline/x64/baseline-assembler-x64-inl.h b/src/baseline/x64/baseline-assembler-x64-inl.h
+index 79e43e033c..46c9ceb0f9 100644
+--- a/src/baseline/x64/baseline-assembler-x64-inl.h
++++ b/src/baseline/x64/baseline-assembler-x64-inl.h
+@@ -440,7 +440,7 @@ void BaselineAssembler::EmitReturn(MacroAssembler* masm) {
+ 
+       __ LoadContext(kContextRegister);
+       __ Push(MemOperand(rbp, InterpreterFrameConstants::kFunctionOffset));
+-      __ CallRuntime(Runtime::kBytecodeBudgetInterruptFromBytecode, 1);
++      __ CallRuntime(Runtime::kBytecodeBudgetInterrupt, 1);
+ 
+       __ Pop(kInterpreterAccumulatorRegister, params_size);
+       __ masm()->SmiUntag(params_size);
+diff --git a/src/execution/tiering-manager.cc b/src/execution/tiering-manager.cc
+index aca50d70aa..e7ab10a839 100644
+--- a/src/execution/tiering-manager.cc
++++ b/src/execution/tiering-manager.cc
+@@ -5,6 +5,8 @@
+ #include "src/execution/tiering-manager.h"
+ 
+ #include "src/base/platform/platform.h"
++#include "src/baseline/baseline-batch-compiler.h"
++#include "src/baseline/baseline.h"
+ #include "src/codegen/assembler.h"
+ #include "src/codegen/compilation-cache.h"
+ #include "src/codegen/compiler.h"
+@@ -236,7 +238,7 @@ OptimizationReason TieringManager::ShouldOptimize(JSFunction function,
+ 
+ TieringManager::OnInterruptTickScope::OnInterruptTickScope(
+     TieringManager* profiler)
+-    : handle_scope_(profiler->isolate_), profiler_(profiler) {
++    : profiler_(profiler) {
+   TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
+                "V8.MarkCandidatesForOptimization");
+ }
+@@ -245,28 +247,72 @@ TieringManager::OnInterruptTickScope::~OnInterruptTickScope() {
+   profiler_->any_ic_changed_ = false;
+ }
+ 
+-void TieringManager::OnInterruptTick(JavaScriptFrame* frame) {
+-  if (!isolate_->use_optimizer()) return;
+-  OnInterruptTickScope scope(this);
++void TieringManager::OnInterruptTick(Handle<JSFunction> function) {
++  IsCompiledScope is_compiled_scope(
++      function->shared().is_compiled_scope(isolate_));
++
++  // Remember whether the function had a vector at this point. This is relevant
++  // later since the configuration 'Ignition without a vector' can be
++  // considered a tier on its own. We begin tiering up to tiers higher than
++  // Sparkplug only when reaching this point *with* a feedback vector.
++  const bool had_feedback_vector = function->has_feedback_vector();
++
++  // Ensure that the feedback vector has been allocated, and reset the
++  // interrupt budget in preparation for the next tick.
++  if (had_feedback_vector) {
++    function->SetInterruptBudget();
++  } else {
++    JSFunction::EnsureFeedbackVector(function, &is_compiled_scope);
++    DCHECK(is_compiled_scope.is_compiled());
++    // Also initialize the invocation count here. This is only really needed for
++    // OSR. When we OSR functions with lazy feedback allocation we want to have
++    // a non zero invocation count so we can inline functions.
++    function->feedback_vector().set_invocation_count(1, kRelaxedStore);
++  }
+ 
+-  JSFunction function = frame->function();
+-  CodeKind code_kind = function.GetActiveTier().value();
++  DCHECK(function->has_feedback_vector());
++  DCHECK(function->shared().is_compiled());
++  DCHECK(function->shared().HasBytecodeArray());
++
++  // TODO(jgruber): Consider integrating this into a linear tiering system
++  // controlled by OptimizationMarker in which the order is always
++  // Ignition-Sparkplug-Turbofan, and only a single tierup is requested at
++  // once.
++  // It's unclear whether this is possible and/or makes sense - for example,
++  // batching compilation can introduce arbitrary latency between the SP
++  // compile request and fulfillment, which doesn't work with strictly linear
++  // tiering.
++  if (CanCompileWithBaseline(isolate_, function->shared()) &&
++      !function->ActiveTierIsBaseline()) {
++    if (FLAG_baseline_batch_compilation) {
++      isolate_->baseline_batch_compiler()->EnqueueFunction(function);
++    } else {
++      IsCompiledScope is_compiled_scope(
++          function->shared().is_compiled_scope(isolate_));
++      Compiler::CompileBaseline(isolate_, function, Compiler::CLEAR_EXCEPTION,
++                                &is_compiled_scope);
++    }
++  }
+ 
+-  DCHECK(function.shared().is_compiled());
+-  DCHECK(function.shared().HasBytecodeArray());
++  // We only tier up beyond sparkplug if we already had a feedback vector.
++  if (!had_feedback_vector) return;
+ 
+-  DCHECK_IMPLIES(CodeKindIsOptimizedJSFunction(code_kind),
+-                 function.has_feedback_vector());
+-  if (!function.has_feedback_vector()) return;
++  // Don't tier up if Turbofan is disabled.
++  // TODO(jgruber): Update this for a multi-tier world.
++  if (V8_UNLIKELY(!isolate_->use_optimizer())) return;
+ 
+-  function.feedback_vector().SaturatingIncrementProfilerTicks();
+-  MaybeOptimizeFrame(function, frame, code_kind);
+-}
++  // --- We've decided to proceed for now. ---
++
++  DisallowGarbageCollection no_gc;
++  OnInterruptTickScope scope(this);
++  JSFunction function_obj = *function;
++
++  function_obj.feedback_vector().SaturatingIncrementProfilerTicks();
+ 
+-void TieringManager::OnInterruptTickFromBytecode() {
+   JavaScriptFrameIterator it(isolate_);
+   DCHECK(it.frame()->is_unoptimized());
+-  OnInterruptTick(it.frame());
++  const CodeKind code_kind = function_obj.GetActiveTier().value();
++  MaybeOptimizeFrame(function_obj, it.frame(), code_kind);
+ }
+ 
+ }  // namespace internal
+diff --git a/src/execution/tiering-manager.h b/src/execution/tiering-manager.h
+index 6eed8ea8b1..c4cbca120f 100644
+--- a/src/execution/tiering-manager.h
++++ b/src/execution/tiering-manager.h
+@@ -24,7 +24,7 @@ class TieringManager {
+  public:
+   explicit TieringManager(Isolate* isolate) : isolate_(isolate) {}
+ 
+-  void OnInterruptTickFromBytecode();
++  void OnInterruptTick(Handle<JSFunction> function);
+ 
+   void NotifyICChanged() { any_ic_changed_ = true; }
+ 
+@@ -32,9 +32,6 @@ class TieringManager {
+                                  int nesting_levels = 1);
+ 
+  private:
+-  // Helper function called from OnInterruptTick*
+-  void OnInterruptTick(JavaScriptFrame* frame);
+-
+   // Make the decision whether to optimize the given function, and mark it for
+   // optimization if the decision was 'yes'.
+   void MaybeOptimizeFrame(JSFunction function, JavaScriptFrame* frame,
+@@ -56,7 +53,6 @@ class TieringManager {
+     ~OnInterruptTickScope();
+ 
+    private:
+-    HandleScope handle_scope_;
+     TieringManager* const profiler_;
+     DisallowGarbageCollection no_gc;
+   };
+diff --git a/src/interpreter/interpreter-assembler.cc b/src/interpreter/interpreter-assembler.cc
+index 30a67ec3d3..e06053b628 100644
+--- a/src/interpreter/interpreter-assembler.cc
++++ b/src/interpreter/interpreter-assembler.cc
+@@ -1028,11 +1028,10 @@ void InterpreterAssembler::UpdateInterruptBudget(TNode<Int32T> weight,
+ 
+     BIND(&interrupt_check);
+     // JumpLoop should do a stack check as part of the interrupt.
+-    CallRuntime(
+-        bytecode() == Bytecode::kJumpLoop
+-            ? Runtime::kBytecodeBudgetInterruptWithStackCheckFromBytecode
+-            : Runtime::kBytecodeBudgetInterruptFromBytecode,
+-        GetContext(), function);
++    CallRuntime(bytecode() == Bytecode::kJumpLoop
++                    ? Runtime::kBytecodeBudgetInterruptWithStackCheck
++                    : Runtime::kBytecodeBudgetInterrupt,
++                GetContext(), function);
+     Goto(&done);
+ 
+     BIND(&ok);
+diff --git a/src/runtime/runtime-internal.cc b/src/runtime/runtime-internal.cc
+index 61642291ae..c96bac0475 100644
+--- a/src/runtime/runtime-internal.cc
++++ b/src/runtime/runtime-internal.cc
+@@ -7,10 +7,7 @@
+ #include "src/api/api.h"
+ #include "src/ast/ast-traversal-visitor.h"
+ #include "src/ast/prettyprinter.h"
+-#include "src/baseline/baseline-batch-compiler.h"
+-#include "src/baseline/baseline.h"
+ #include "src/builtins/builtins.h"
+-#include "src/codegen/compiler.h"
+ #include "src/common/message-template.h"
+ #include "src/debug/debug.h"
+ #include "src/execution/arguments-inl.h"
+@@ -342,42 +339,7 @@ RUNTIME_FUNCTION(Runtime_StackGuardWithGap) {
+   return isolate->stack_guard()->HandleInterrupts();
+ }
+ 
+-namespace {
+-
+-void BytecodeBudgetInterruptFromBytecode(Isolate* isolate,
+-                                         Handle<JSFunction> function) {
+-  bool should_mark_for_optimization = function->has_feedback_vector();
+-  if (!function->has_feedback_vector()) {
+-    IsCompiledScope is_compiled_scope(
+-        function->shared().is_compiled_scope(isolate));
+-    JSFunction::EnsureFeedbackVector(function, &is_compiled_scope);
+-    DCHECK(is_compiled_scope.is_compiled());
+-    // Also initialize the invocation count here. This is only really needed for
+-    // OSR. When we OSR functions with lazy feedback allocation we want to have
+-    // a non zero invocation count so we can inline functions.
+-    function->feedback_vector().set_invocation_count(1, kRelaxedStore);
+-  } else {
+-    function->SetInterruptBudget();
+-  }
+-  if (CanCompileWithBaseline(isolate, function->shared()) &&
+-      !function->ActiveTierIsBaseline()) {
+-    if (FLAG_baseline_batch_compilation) {
+-      isolate->baseline_batch_compiler()->EnqueueFunction(function);
+-    } else {
+-      IsCompiledScope is_compiled_scope(
+-          function->shared().is_compiled_scope(isolate));
+-      Compiler::CompileBaseline(isolate, function, Compiler::CLEAR_EXCEPTION,
+-                                &is_compiled_scope);
+-    }
+-  }
+-  if (should_mark_for_optimization) {
+-    SealHandleScope shs(isolate);
+-    isolate->tiering_manager()->OnInterruptTickFromBytecode();
+-  }
+-}
+-}  // namespace
+-
+-RUNTIME_FUNCTION(Runtime_BytecodeBudgetInterruptWithStackCheckFromBytecode) {
++RUNTIME_FUNCTION(Runtime_BytecodeBudgetInterruptWithStackCheck) {
+   HandleScope scope(isolate);
+   DCHECK_EQ(1, args.length());
+   CONVERT_ARG_HANDLE_CHECKED(JSFunction, function, 0);
+@@ -399,17 +361,17 @@ RUNTIME_FUNCTION(Runtime_BytecodeBudgetInterruptWithStackCheckFromBytecode) {
+     }
+   }
+ 
+-  BytecodeBudgetInterruptFromBytecode(isolate, function);
++  isolate->tiering_manager()->OnInterruptTick(function);
+   return ReadOnlyRoots(isolate).undefined_value();
+ }
+ 
+-RUNTIME_FUNCTION(Runtime_BytecodeBudgetInterruptFromBytecode) {
++RUNTIME_FUNCTION(Runtime_BytecodeBudgetInterrupt) {
+   HandleScope scope(isolate);
+   DCHECK_EQ(1, args.length());
+   CONVERT_ARG_HANDLE_CHECKED(JSFunction, function, 0);
+   TRACE_EVENT0("v8.execute", "V8.BytecodeBudgetInterrupt");
+ 
+-  BytecodeBudgetInterruptFromBytecode(isolate, function);
++  isolate->tiering_manager()->OnInterruptTick(function);
+   return ReadOnlyRoots(isolate).undefined_value();
+ }
+ 
+diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
+index 8088a6499e..db98548003 100644
+--- a/src/runtime/runtime.h
++++ b/src/runtime/runtime.h
+@@ -206,60 +206,60 @@ namespace internal {
+ #define FOR_EACH_INTRINSIC_INTL(F, I)
+ #endif  // V8_INTL_SUPPORT
+ 
+-#define FOR_EACH_INTRINSIC_INTERNAL(F, I)                    \
+-  F(AccessCheck, 1, 1)                                       \
+-  F(AllocateByteArray, 1, 1)                                 \
+-  F(AllocateInYoungGeneration, 2, 1)                         \
+-  F(AllocateInOldGeneration, 2, 1)                           \
+-  F(AllocateSeqOneByteString, 1, 1)                          \
+-  F(AllocateSeqTwoByteString, 1, 1)                          \
+-  F(AllowDynamicFunction, 1, 1)                              \
+-  I(CreateAsyncFromSyncIterator, 1, 1)                       \
+-  F(CreateListFromArrayLike, 1, 1)                           \
+-  F(DoubleToStringWithRadix, 2, 1)                           \
+-  F(FatalProcessOutOfMemoryInAllocateRaw, 0, 1)              \
+-  F(FatalProcessOutOfMemoryInvalidArrayLength, 0, 1)         \
+-  F(GetAndResetRuntimeCallStats, -1 /* <= 2 */, 1)           \
+-  F(GetTemplateObject, 3, 1)                                 \
+-  F(IncrementUseCounter, 1, 1)                               \
+-  F(BytecodeBudgetInterruptFromBytecode, 1, 1)               \
+-  F(BytecodeBudgetInterruptWithStackCheckFromBytecode, 1, 1) \
+-  F(NewError, 2, 1)                                          \
+-  F(NewReferenceError, 2, 1)                                 \
+-  F(NewSyntaxError, 2, 1)                                    \
+-  F(NewTypeError, -1 /* [1, 4] */, 1)                        \
+-  F(OrdinaryHasInstance, 2, 1)                               \
+-  F(PromoteScheduledException, 0, 1)                         \
+-  F(ReportMessageFromMicrotask, 1, 1)                        \
+-  F(ReThrow, 1, 1)                                           \
+-  F(ReThrowWithMessage, 2, 1)                                \
+-  F(RunMicrotaskCallback, 2, 1)                              \
+-  F(PerformMicrotaskCheckpoint, 0, 1)                        \
+-  F(SharedValueBarrierSlow, 1, 1)                            \
+-  F(StackGuard, 0, 1)                                        \
+-  F(StackGuardWithGap, 1, 1)                                 \
+-  F(Throw, 1, 1)                                             \
+-  F(ThrowApplyNonFunction, 1, 1)                             \
+-  F(ThrowCalledNonCallable, 1, 1)                            \
+-  F(ThrowConstructedNonConstructable, 1, 1)                  \
+-  F(ThrowConstructorReturnedNonObject, 0, 1)                 \
+-  F(ThrowInvalidStringLength, 0, 1)                          \
+-  F(ThrowInvalidTypedArrayAlignment, 2, 1)                   \
+-  F(ThrowIteratorError, 1, 1)                                \
+-  F(ThrowSpreadArgError, 2, 1)                               \
+-  F(ThrowIteratorResultNotAnObject, 1, 1)                    \
+-  F(ThrowNotConstructor, 1, 1)                               \
+-  F(ThrowPatternAssignmentNonCoercible, 1, 1)                \
+-  F(ThrowRangeError, -1 /* >= 1 */, 1)                       \
+-  F(ThrowReferenceError, 1, 1)                               \
+-  F(ThrowAccessedUninitializedVariable, 1, 1)                \
+-  F(ThrowStackOverflow, 0, 1)                                \
+-  F(ThrowSymbolAsyncIteratorInvalid, 0, 1)                   \
+-  F(ThrowSymbolIteratorInvalid, 0, 1)                        \
+-  F(ThrowThrowMethodMissing, 0, 1)                           \
+-  F(ThrowTypeError, -1 /* >= 1 */, 1)                        \
+-  F(ThrowTypeErrorIfStrict, -1 /* >= 1 */, 1)                \
+-  F(Typeof, 1, 1)                                            \
++#define FOR_EACH_INTRINSIC_INTERNAL(F, I)            \
++  F(AccessCheck, 1, 1)                               \
++  F(AllocateByteArray, 1, 1)                         \
++  F(AllocateInYoungGeneration, 2, 1)                 \
++  F(AllocateInOldGeneration, 2, 1)                   \
++  F(AllocateSeqOneByteString, 1, 1)                  \
++  F(AllocateSeqTwoByteString, 1, 1)                  \
++  F(AllowDynamicFunction, 1, 1)                      \
++  I(CreateAsyncFromSyncIterator, 1, 1)               \
++  F(CreateListFromArrayLike, 1, 1)                   \
++  F(DoubleToStringWithRadix, 2, 1)                   \
++  F(FatalProcessOutOfMemoryInAllocateRaw, 0, 1)      \
++  F(FatalProcessOutOfMemoryInvalidArrayLength, 0, 1) \
++  F(GetAndResetRuntimeCallStats, -1 /* <= 2 */, 1)   \
++  F(GetTemplateObject, 3, 1)                         \
++  F(IncrementUseCounter, 1, 1)                       \
++  F(BytecodeBudgetInterrupt, 1, 1)                   \
++  F(BytecodeBudgetInterruptWithStackCheck, 1, 1)     \
++  F(NewError, 2, 1)                                  \
++  F(NewReferenceError, 2, 1)                         \
++  F(NewSyntaxError, 2, 1)                            \
++  F(NewTypeError, -1 /* [1, 4] */, 1)                \
++  F(OrdinaryHasInstance, 2, 1)                       \
++  F(PromoteScheduledException, 0, 1)                 \
++  F(ReportMessageFromMicrotask, 1, 1)                \
++  F(ReThrow, 1, 1)                                   \
++  F(ReThrowWithMessage, 2, 1)                        \
++  F(RunMicrotaskCallback, 2, 1)                      \
++  F(PerformMicrotaskCheckpoint, 0, 1)                \
++  F(SharedValueBarrierSlow, 1, 1)                    \
++  F(StackGuard, 0, 1)                                \
++  F(StackGuardWithGap, 1, 1)                         \
++  F(Throw, 1, 1)                                     \
++  F(ThrowApplyNonFunction, 1, 1)                     \
++  F(ThrowCalledNonCallable, 1, 1)                    \
++  F(ThrowConstructedNonConstructable, 1, 1)          \
++  F(ThrowConstructorReturnedNonObject, 0, 1)         \
++  F(ThrowInvalidStringLength, 0, 1)                  \
++  F(ThrowInvalidTypedArrayAlignment, 2, 1)           \
++  F(ThrowIteratorError, 1, 1)                        \
++  F(ThrowSpreadArgError, 2, 1)                       \
++  F(ThrowIteratorResultNotAnObject, 1, 1)            \
++  F(ThrowNotConstructor, 1, 1)                       \
++  F(ThrowPatternAssignmentNonCoercible, 1, 1)        \
++  F(ThrowRangeError, -1 /* >= 1 */, 1)               \
++  F(ThrowReferenceError, 1, 1)                       \
++  F(ThrowAccessedUninitializedVariable, 1, 1)        \
++  F(ThrowStackOverflow, 0, 1)                        \
++  F(ThrowSymbolAsyncIteratorInvalid, 0, 1)           \
++  F(ThrowSymbolIteratorInvalid, 0, 1)                \
++  F(ThrowThrowMethodMissing, 0, 1)                   \
++  F(ThrowTypeError, -1 /* >= 1 */, 1)                \
++  F(ThrowTypeErrorIfStrict, -1 /* >= 1 */, 1)        \
++  F(Typeof, 1, 1)                                    \
+   F(UnwindAndFindExceptionHandler, 0, 1)
+ 
+ #define FOR_EACH_INTRINSIC_LITERALS(F, I)           \
+-- 
+2.35.1
+

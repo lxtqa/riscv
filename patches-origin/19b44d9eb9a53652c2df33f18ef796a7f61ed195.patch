@@ -1,0 +1,1141 @@
+From 19b44d9eb9a53652c2df33f18ef796a7f61ed195 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Olivier=20Fl=C3=BCckiger?= <olivf@chromium.org>
+Date: Tue, 2 May 2023 09:56:28 +0200
+Subject: [PATCH] [backend][arm64] Pair some stores
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Pair trivially pairable stores on arm64 using stp.
+
+Bug: v8:13878
+Change-Id: I31ee28df18afd119ef567453e7ed0ec1351b99b0
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4381641
+Reviewed-by: Tobias Tebbi <tebbi@chromium.org>
+Commit-Queue: Olivier Flückiger <olivf@chromium.org>
+Auto-Submit: Olivier Flückiger <olivf@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#87364}
+---
+ BUILD.bazel                                   |   2 +
+ BUILD.gn                                      |   2 +
+ src/codegen/arm64/macro-assembler-arm64.cc    |  10 +-
+ .../backend/arm/instruction-selector-arm.cc   |   2 +
+ .../backend/arm64/code-generator-arm64.cc     |  10 +
+ .../backend/arm64/instruction-codes-arm64.h   |   2 +
+ .../arm64/instruction-scheduler-arm64.cc      |   2 +
+ .../arm64/instruction-selector-arm64.cc       | 189 ++++++++++++------
+ .../backend/ia32/instruction-selector-ia32.cc |   2 +
+ src/compiler/backend/instruction-selector.cc  |   2 +
+ .../loong64/instruction-selector-loong64.cc   |   2 +
+ .../mips64/instruction-selector-mips64.cc     |   2 +
+ .../backend/ppc/instruction-selector-ppc.cc   |   2 +
+ .../riscv/instruction-selector-riscv32.cc     |   2 +
+ .../riscv/instruction-selector-riscv64.cc     |   2 +
+ .../backend/s390/instruction-selector-s390.cc |   2 +
+ .../backend/x64/instruction-selector-x64.cc   |   2 +
+ src/compiler/decompression-optimizer.cc       |  29 ++-
+ src/compiler/machine-operator.cc              | 132 ++++++++++++
+ src/compiler/machine-operator.h               |  24 ++-
+ src/compiler/memory-optimizer.cc              |   3 +
+ src/compiler/opcodes.h                        |   1 +
+ src/compiler/pair-load-store-reducer.cc       |  92 +++++++++
+ src/compiler/pair-load-store-reducer.h        |  46 +++++
+ src/compiler/pipeline.cc                      |  11 +
+ src/compiler/simplified-lowering-verifier.cc  |   1 +
+ src/compiler/typer.cc                         |   1 +
+ src/compiler/verifier.cc                      |   1 +
+ src/logging/runtime-call-stats.h              |   1 +
+ 29 files changed, 511 insertions(+), 68 deletions(-)
+ create mode 100644 src/compiler/pair-load-store-reducer.cc
+ create mode 100644 src/compiler/pair-load-store-reducer.h
+
+diff --git a/BUILD.bazel b/BUILD.bazel
+index 0ad3e5d32d..babb378c68 100644
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -2859,6 +2859,8 @@ filegroup(
+         "src/compiler/operator-properties.h",
+         "src/compiler/osr.cc",
+         "src/compiler/osr.h",
++        "src/compiler/pair-load-store-reducer.cc",
++        "src/compiler/pair-load-store-reducer.h",
+         "src/compiler/per-isolate-compiler-cache.h",
+         "src/compiler/persistent-map.h",
+         "src/compiler/phase.h",
+diff --git a/BUILD.gn b/BUILD.gn
+index 9010bccc73..0755610e0b 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -3070,6 +3070,7 @@ v8_header_set("v8_internal_headers") {
+     "src/compiler/operator-properties.h",
+     "src/compiler/operator.h",
+     "src/compiler/osr.h",
++    "src/compiler/pair-load-store-reducer.h",
+     "src/compiler/per-isolate-compiler-cache.h",
+     "src/compiler/persistent-map.h",
+     "src/compiler/phase.h",
+@@ -4359,6 +4360,7 @@ v8_compiler_sources = [
+   "src/compiler/operator-properties.cc",
+   "src/compiler/operator.cc",
+   "src/compiler/osr.cc",
++  "src/compiler/pair-load-store-reducer.cc",
+   "src/compiler/pipeline-statistics.cc",
+   "src/compiler/pipeline.cc",
+   "src/compiler/property-access-builder.cc",
+diff --git a/src/codegen/arm64/macro-assembler-arm64.cc b/src/codegen/arm64/macro-assembler-arm64.cc
+index c7015971e7..a37d0c6b77 100644
+--- a/src/codegen/arm64/macro-assembler-arm64.cc
++++ b/src/codegen/arm64/macro-assembler-arm64.cc
+@@ -936,8 +936,14 @@ void MacroAssembler::LoadStorePairMacro(const CPURegister& rt,
+                                         const CPURegister& rt2,
+                                         const MemOperand& addr,
+                                         LoadStorePairOp op) {
+-  // TODO(all): Should we support register offset for load-store-pair?
+-  DCHECK(!addr.IsRegisterOffset());
++  if (addr.IsRegisterOffset()) {
++    UseScratchRegisterScope temps(this);
++    Register base = addr.base();
++    Register temp = temps.AcquireSameSizeAs(base);
++    Add(temp, base, addr.regoffset());
++    LoadStorePair(rt, rt2, MemOperand(temp), op);
++    return;
++  }
+ 
+   int64_t offset = addr.offset();
+   unsigned size = CalcLSPairDataSize(op);
+diff --git a/src/compiler/backend/arm/instruction-selector-arm.cc b/src/compiler/backend/arm/instruction-selector-arm.cc
+index 1a19523d02..1a6b14a2d1 100644
+--- a/src/compiler/backend/arm/instruction-selector-arm.cc
++++ b/src/compiler/backend/arm/instruction-selector-arm.cc
+@@ -794,6 +794,8 @@ void VisitStoreCommon(InstructionSelector* selector, Node* node,
+ 
+ }  // namespace
+ 
++void InstructionSelector::VisitStorePair(Node* node) { UNREACHABLE(); }
++
+ void InstructionSelector::VisitStore(Node* node) {
+   VisitStoreCommon(this, node, StoreRepresentationOf(node->op()),
+                    base::nullopt);
+diff --git a/src/compiler/backend/arm64/code-generator-arm64.cc b/src/compiler/backend/arm64/code-generator-arm64.cc
+index 4f0394605a..b21232ba95 100644
+--- a/src/compiler/backend/arm64/code-generator-arm64.cc
++++ b/src/compiler/backend/arm64/code-generator-arm64.cc
+@@ -1977,6 +1977,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Str(i.InputOrZeroRegister32(0), i.MemoryOperand(1));
+       break;
++    case kArm64StrWPair:
++      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      __ Stp(i.InputOrZeroRegister32(0), i.InputOrZeroRegister32(1),
++             i.MemoryOperand(2));
++      break;
+     case kArm64Ldr:
+       EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Ldr(i.OutputRegister(), i.MemoryOperand());
+@@ -2004,6 +2009,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Str(i.InputOrZeroRegister64(0), i.MemoryOperand(1));
+       break;
++    case kArm64StrPair:
++      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      __ Stp(i.InputOrZeroRegister64(0), i.InputOrZeroRegister64(1),
++             i.MemoryOperand(2));
++      break;
+     case kArm64StrCompressTagged:
+       EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ StoreTaggedField(i.InputOrZeroRegister64(0), i.MemoryOperand(1));
+diff --git a/src/compiler/backend/arm64/instruction-codes-arm64.h b/src/compiler/backend/arm64/instruction-codes-arm64.h
+index 855a5cedcd..1d5e007eb1 100644
+--- a/src/compiler/backend/arm64/instruction-codes-arm64.h
++++ b/src/compiler/backend/arm64/instruction-codes-arm64.h
+@@ -36,12 +36,14 @@ namespace compiler {
+   V(Arm64S128Load8x8U)                                     \
+   V(Arm64StoreLane)                                        \
+   V(Arm64Str)                                              \
++  V(Arm64StrPair)                                          \
+   V(Arm64Strb)                                             \
+   V(Arm64StrD)                                             \
+   V(Arm64Strh)                                             \
+   V(Arm64StrQ)                                             \
+   V(Arm64StrS)                                             \
+   V(Arm64StrW)                                             \
++  V(Arm64StrWPair)                                         \
+   V(Arm64LdrDecompressTaggedSigned)                        \
+   V(Arm64LdrDecompressTagged)                              \
+   V(Arm64StrCompressTagged)                                \
+diff --git a/src/compiler/backend/arm64/instruction-scheduler-arm64.cc b/src/compiler/backend/arm64/instruction-scheduler-arm64.cc
+index dcfb0151f3..ee48e39501 100644
+--- a/src/compiler/backend/arm64/instruction-scheduler-arm64.cc
++++ b/src/compiler/backend/arm64/instruction-scheduler-arm64.cc
+@@ -339,7 +339,9 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kArm64Strb:
+     case kArm64Strh:
+     case kArm64StrW:
++    case kArm64StrWPair:
+     case kArm64Str:
++    case kArm64StrPair:
+     case kArm64StrCompressTagged:
+     case kArm64StlrCompressTagged:
+     case kArm64StrEncodeSandboxedPointer:
+diff --git a/src/compiler/backend/arm64/instruction-selector-arm64.cc b/src/compiler/backend/arm64/instruction-selector-arm64.cc
+index d0d6955ed1..5f92341c4f 100644
+--- a/src/compiler/backend/arm64/instruction-selector-arm64.cc
++++ b/src/compiler/backend/arm64/instruction-selector-arm64.cc
+@@ -907,25 +907,32 @@ void InstructionSelector::VisitLoad(Node* node) {
+ 
+ void InstructionSelector::VisitProtectedLoad(Node* node) { VisitLoad(node); }
+ 
++void InstructionSelector::VisitStorePair(Node* node) { VisitStore(node); }
++
+ void InstructionSelector::VisitStore(Node* node) {
++  const bool kStorePair = node->opcode() == IrOpcode::kStorePair;
++
+   Arm64OperandGenerator g(this);
+   Node* base = node->InputAt(0);
+   Node* index = node->InputAt(1);
+   Node* value = node->InputAt(2);
+ 
+-  StoreRepresentation store_rep = StoreRepresentationOf(node->op());
+-  WriteBarrierKind write_barrier_kind = store_rep.write_barrier_kind();
+-  MachineRepresentation rep = store_rep.representation();
+-
+-  if (v8_flags.enable_unconditional_write_barriers &&
+-      CanBeTaggedOrCompressedPointer(rep)) {
+-    write_barrier_kind = kFullWriteBarrier;
++  WriteBarrierKind write_barrier_kind;
++  if (kStorePair) {
++    auto store_rep = StorePairRepresentationOf(node->op());
++    write_barrier_kind = store_rep.first.write_barrier_kind();
++    CHECK_EQ(write_barrier_kind, kNoWriteBarrier);
++    CHECK_EQ(store_rep.second.write_barrier_kind(), write_barrier_kind);
++  } else {
++    write_barrier_kind = StoreRepresentationOf(node->op()).write_barrier_kind();
+   }
+ 
+   // TODO(arm64): I guess this could be done in a better way.
+   if (write_barrier_kind != kNoWriteBarrier &&
+       !v8_flags.disable_write_barriers) {
+-    DCHECK(CanBeTaggedOrCompressedPointer(rep));
++    CHECK(!kStorePair);
++    DCHECK(CanBeTaggedOrCompressedPointer(
++        StoreRepresentationOf(node->op()).representation()));
+     AddressingMode addressing_mode;
+     InstructionOperand inputs[3];
+     size_t input_count = 0;
+@@ -951,37 +958,42 @@ void InstructionSelector::VisitStore(Node* node) {
+       code |= AccessModeField::encode(kMemoryAccessProtectedNullDereference);
+     }
+     Emit(code, 0, nullptr, input_count, inputs);
+-  } else {
+-    InstructionOperand inputs[4];
+-    size_t input_count = 0;
++    return;
++  }
++
++  auto GetOpcodeAndImmediate = [](MachineRepresentation rep, bool paired) {
+     InstructionCode opcode = kArchNop;
+     ImmediateMode immediate_mode = kNoImmediate;
+     switch (rep) {
+       case MachineRepresentation::kFloat32:
++        CHECK(!paired);
+         opcode = kArm64StrS;
+         immediate_mode = kLoadStoreImm32;
+         break;
+       case MachineRepresentation::kFloat64:
++        CHECK(!paired);
+         opcode = kArm64StrD;
+         immediate_mode = kLoadStoreImm64;
+         break;
+       case MachineRepresentation::kBit:  // Fall through.
+       case MachineRepresentation::kWord8:
++        CHECK(!paired);
+         opcode = kArm64Strb;
+         immediate_mode = kLoadStoreImm8;
+         break;
+       case MachineRepresentation::kWord16:
++        CHECK(!paired);
+         opcode = kArm64Strh;
+         immediate_mode = kLoadStoreImm16;
+         break;
+       case MachineRepresentation::kWord32:
+-        opcode = kArm64StrW;
++        opcode = paired ? kArm64StrWPair : kArm64StrW;
+         immediate_mode = kLoadStoreImm32;
+         break;
+       case MachineRepresentation::kCompressedPointer:  // Fall through.
+       case MachineRepresentation::kCompressed:
+ #ifdef V8_COMPRESS_POINTERS
+-        opcode = kArm64StrCompressTagged;
++        opcode = paired ? kArm64StrWPair : kArm64StrCompressTagged;
+         immediate_mode = kLoadStoreImm32;
+         break;
+ #else
+@@ -990,19 +1002,38 @@ void InstructionSelector::VisitStore(Node* node) {
+       case MachineRepresentation::kTaggedSigned:   // Fall through.
+       case MachineRepresentation::kTaggedPointer:  // Fall through.
+       case MachineRepresentation::kTagged:
+-        opcode = kArm64StrCompressTagged;
++        if (paired) {
++          // There is an inconsistency here on how we treat stores vs. paired
++          // stores. In the normal store case we have special opcodes for
++          // compressed fields and the backend decides whether to write 32 or 64
++          // bits. However, for pairs this does not make sense, since the
++          // paired values could have different representations (e.g.,
++          // compressed paired with word32). Therefore, we decide on the actual
++          // machine representation already in instruction selection.
++#ifdef V8_COMPRESS_POINTERS
++          static_assert(ElementSizeLog2Of(MachineRepresentation::kTagged) == 2);
++          opcode = kArm64StrWPair;
++#else
++          static_assert(ElementSizeLog2Of(MachineRepresentation::kTagged) == 3);
++          opcode = kArm64StrPair;
++#endif
++        } else {
++          opcode = kArm64StrCompressTagged;
++        }
+         immediate_mode =
+             COMPRESS_POINTERS_BOOL ? kLoadStoreImm32 : kLoadStoreImm64;
+         break;
+       case MachineRepresentation::kSandboxedPointer:
++        CHECK(!paired);
+         opcode = kArm64StrEncodeSandboxedPointer;
+         immediate_mode = kLoadStoreImm64;
+         break;
+       case MachineRepresentation::kWord64:
+-        opcode = kArm64Str;
++        opcode = paired ? kArm64StrPair : kArm64Str;
+         immediate_mode = kLoadStoreImm64;
+         break;
+       case MachineRepresentation::kSimd128:
++        CHECK(!paired);
+         opcode = kArm64StrQ;
+         immediate_mode = kNoImmediate;
+         break;
+@@ -1011,60 +1042,105 @@ void InstructionSelector::VisitStore(Node* node) {
+       case MachineRepresentation::kNone:
+         UNREACHABLE();
+     }
++    return std::tuple{opcode, immediate_mode};
++  };
+ 
+-    ExternalReferenceMatcher m(base);
+-    if (m.HasResolvedValue() && g.IsIntegerConstant(index) &&
+-        CanAddressRelativeToRootsRegister(m.ResolvedValue())) {
+-      ptrdiff_t const delta =
+-          g.GetIntegerConstantValue(index) +
+-          MacroAssemblerBase::RootRegisterOffsetForExternalReference(
+-              isolate(), m.ResolvedValue());
+-      if (is_int32(delta)) {
+-        input_count = 2;
+-        InstructionOperand inputs[2];
+-        inputs[0] = g.UseRegister(value);
+-        inputs[1] = g.UseImmediate(static_cast<int32_t>(delta));
+-        opcode |= AddressingModeField::encode(kMode_Root);
+-        Emit(opcode, 0, nullptr, input_count, inputs);
+-        return;
+-      }
++  InstructionOperand inputs[4];
++  size_t input_count = 0;
++
++  InstructionCode opcode = kArchNop;
++  ImmediateMode immediate_mode = kNoImmediate;
++  MachineRepresentation approx_rep;
++  if (kStorePair) {
++    auto rep_pair = StorePairRepresentationOf(node->op());
++    auto info1 = GetOpcodeAndImmediate(rep_pair.first.representation(), true);
++    auto info2 = GetOpcodeAndImmediate(rep_pair.second.representation(), true);
++    CHECK_EQ(ElementSizeLog2Of(rep_pair.first.representation()),
++             ElementSizeLog2Of(rep_pair.second.representation()));
++    switch (ElementSizeLog2Of(rep_pair.first.representation())) {
++      case 2:
++        approx_rep = MachineRepresentation::kWord32;
++        break;
++      case 3:
++        approx_rep = MachineRepresentation::kWord64;
++        break;
++      default:
++        UNREACHABLE();
+     }
++    opcode = std::get<InstructionCode>(info1);
++    immediate_mode = std::get<ImmediateMode>(info1);
++    CHECK_EQ(opcode, std::get<InstructionCode>(info2));
++    CHECK_EQ(immediate_mode, std::get<ImmediateMode>(info2));
++  } else {
++    approx_rep = StoreRepresentationOf(node->op()).representation();
++    auto info = GetOpcodeAndImmediate(approx_rep, false);
++    opcode = std::get<InstructionCode>(info);
++    immediate_mode = std::get<ImmediateMode>(info);
++  }
+ 
+-    inputs[0] = g.UseRegisterOrImmediateZero(value);
++  if (v8_flags.enable_unconditional_write_barriers) {
++    CHECK(!kStorePair);
++    if (CanBeTaggedOrCompressedPointer(
++            StoreRepresentationOf(node->op()).representation())) {
++      write_barrier_kind = kFullWriteBarrier;
++    }
++  }
+ 
+-    if (base != nullptr && base->opcode() == IrOpcode::kLoadRootRegister) {
++  ExternalReferenceMatcher m(base);
++  if (m.HasResolvedValue() && g.IsIntegerConstant(index) &&
++      CanAddressRelativeToRootsRegister(m.ResolvedValue())) {
++    CHECK(!kStorePair);
++    ptrdiff_t const delta =
++        g.GetIntegerConstantValue(index) +
++        MacroAssemblerBase::RootRegisterOffsetForExternalReference(
++            isolate(), m.ResolvedValue());
++    if (is_int32(delta)) {
+       input_count = 2;
+-      // This will only work if {index} is a constant.
+-      inputs[1] = g.UseImmediate(index);
++      InstructionOperand inputs[2];
++      inputs[0] = g.UseRegister(value);
++      inputs[1] = g.UseImmediate(static_cast<int32_t>(delta));
+       opcode |= AddressingModeField::encode(kMode_Root);
+       Emit(opcode, 0, nullptr, input_count, inputs);
+       return;
+     }
++  }
+ 
+-    inputs[1] = g.UseRegister(base);
+-
+-    if (g.CanBeImmediate(index, immediate_mode)) {
+-      input_count = 3;
+-      inputs[2] = g.UseImmediate(index);
+-      opcode |= AddressingModeField::encode(kMode_MRI);
+-    } else if (TryMatchLoadStoreShift(&g, this, rep, node, index, &inputs[2],
+-                                      &inputs[3])) {
+-      input_count = 4;
+-      opcode |= AddressingModeField::encode(kMode_Operand2_R_LSL_I);
+-    } else {
+-      input_count = 3;
+-      inputs[2] = g.UseRegister(index);
+-      opcode |= AddressingModeField::encode(kMode_MRR);
+-    }
++  inputs[input_count++] = g.UseRegisterOrImmediateZero(value);
+ 
+-    if (node->opcode() == IrOpcode::kProtectedStore) {
+-      opcode |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
+-    } else if (node->opcode() == IrOpcode::kStoreTrapOnNull) {
+-      opcode |= AccessModeField::encode(kMemoryAccessProtectedNullDereference);
+-    }
++  if (kStorePair) {
++    inputs[input_count++] = g.UseRegisterOrImmediateZero(node->InputAt(3));
++  }
+ 
++  if (base != nullptr && base->opcode() == IrOpcode::kLoadRootRegister) {
++    // This will only work if {index} is a constant.
++    inputs[input_count++] = g.UseImmediate(index);
++    opcode |= AddressingModeField::encode(kMode_Root);
+     Emit(opcode, 0, nullptr, input_count, inputs);
++    return;
+   }
++
++  inputs[input_count++] = g.UseRegister(base);
++
++  if (g.CanBeImmediate(index, immediate_mode)) {
++    inputs[input_count++] = g.UseImmediate(index);
++    opcode |= AddressingModeField::encode(kMode_MRI);
++  } else if (TryMatchLoadStoreShift(&g, this, approx_rep, node, index,
++                                    &inputs[input_count],
++                                    &inputs[input_count + 1])) {
++    input_count += 2;
++    opcode |= AddressingModeField::encode(kMode_Operand2_R_LSL_I);
++  } else {
++    inputs[input_count++] = g.UseRegister(index);
++    opcode |= AddressingModeField::encode(kMode_MRR);
++  }
++
++  if (node->opcode() == IrOpcode::kProtectedStore) {
++    opcode |= AccessModeField::encode(kMemoryAccessProtectedMemOutOfBounds);
++  } else if (node->opcode() == IrOpcode::kStoreTrapOnNull) {
++    opcode |= AccessModeField::encode(kMemoryAccessProtectedNullDereference);
++  }
++
++  Emit(opcode, 0, nullptr, input_count, inputs);
+ }
+ 
+ void InstructionSelector::VisitProtectedStore(Node* node) { VisitStore(node); }
+@@ -4710,7 +4786,8 @@ InstructionSelector::SupportedMachineOperatorFlags() {
+          MachineOperatorBuilder::kFloat32Select |
+          MachineOperatorBuilder::kFloat64Select |
+          MachineOperatorBuilder::kWord32Select |
+-         MachineOperatorBuilder::kWord64Select;
++         MachineOperatorBuilder::kWord64Select |
++         MachineOperatorBuilder::kLoadStorePairs;
+ }
+ 
+ // static
+diff --git a/src/compiler/backend/ia32/instruction-selector-ia32.cc b/src/compiler/backend/ia32/instruction-selector-ia32.cc
+index eb9195b0d1..36256d40d1 100644
+--- a/src/compiler/backend/ia32/instruction-selector-ia32.cc
++++ b/src/compiler/backend/ia32/instruction-selector-ia32.cc
+@@ -754,6 +754,8 @@ void VisitStoreCommon(InstructionSelector* selector, Node* node,
+ 
+ }  // namespace
+ 
++void InstructionSelector::VisitStorePair(Node* node) { UNREACHABLE(); }
++
+ void InstructionSelector::VisitStore(Node* node) {
+   VisitStoreCommon(this, node, StoreRepresentationOf(node->op()),
+                    base::nullopt);
+diff --git a/src/compiler/backend/instruction-selector.cc b/src/compiler/backend/instruction-selector.cc
+index 3c485b77e3..b834bb0a5f 100644
+--- a/src/compiler/backend/instruction-selector.cc
++++ b/src/compiler/backend/instruction-selector.cc
+@@ -1483,6 +1483,8 @@ void InstructionSelector::VisitNode(Node* node) {
+     }
+     case IrOpcode::kStore:
+       return VisitStore(node);
++    case IrOpcode::kStorePair:
++      return VisitStorePair(node);
+     case IrOpcode::kProtectedStore:
+     case IrOpcode::kStoreTrapOnNull:
+       return VisitProtectedStore(node);
+diff --git a/src/compiler/backend/loong64/instruction-selector-loong64.cc b/src/compiler/backend/loong64/instruction-selector-loong64.cc
+index 02693d3cf4..a1b8fdc515 100644
+--- a/src/compiler/backend/loong64/instruction-selector-loong64.cc
++++ b/src/compiler/backend/loong64/instruction-selector-loong64.cc
+@@ -514,6 +514,8 @@ void InstructionSelector::VisitProtectedLoad(Node* node) {
+   UNIMPLEMENTED();
+ }
+ 
++void InstructionSelector::VisitStorePair(Node* node) { UNREACHABLE(); }
++
+ void InstructionSelector::VisitStore(Node* node) {
+   Loong64OperandGenerator g(this);
+   Node* base = node->InputAt(0);
+diff --git a/src/compiler/backend/mips64/instruction-selector-mips64.cc b/src/compiler/backend/mips64/instruction-selector-mips64.cc
+index 35e6d43795..f56ad1e2c2 100644
+--- a/src/compiler/backend/mips64/instruction-selector-mips64.cc
++++ b/src/compiler/backend/mips64/instruction-selector-mips64.cc
+@@ -525,6 +525,8 @@ void InstructionSelector::VisitProtectedLoad(Node* node) {
+   UNIMPLEMENTED();
+ }
+ 
++void InstructionSelector::VisitStorePair(Node* node) { UNREACHABLE(); }
++
+ void InstructionSelector::VisitStore(Node* node) {
+   Mips64OperandGenerator g(this);
+   Node* base = node->InputAt(0);
+diff --git a/src/compiler/backend/ppc/instruction-selector-ppc.cc b/src/compiler/backend/ppc/instruction-selector-ppc.cc
+index 87be6d6c52..37d01f2047 100644
+--- a/src/compiler/backend/ppc/instruction-selector-ppc.cc
++++ b/src/compiler/backend/ppc/instruction-selector-ppc.cc
+@@ -411,6 +411,8 @@ void VisitStoreCommon(InstructionSelector* selector, Node* node,
+   }
+ }
+ 
++void InstructionSelector::VisitStorePair(Node* node) { UNREACHABLE(); }
++
+ void InstructionSelector::VisitStore(Node* node) {
+   VisitStoreCommon(this, node, StoreRepresentationOf(node->op()),
+                    base::nullopt);
+diff --git a/src/compiler/backend/riscv/instruction-selector-riscv32.cc b/src/compiler/backend/riscv/instruction-selector-riscv32.cc
+index 5e494aa3ab..d0b4681c93 100644
+--- a/src/compiler/backend/riscv/instruction-selector-riscv32.cc
++++ b/src/compiler/backend/riscv/instruction-selector-riscv32.cc
+@@ -199,6 +199,8 @@ void InstructionSelector::VisitLoad(Node* node) {
+   EmitLoad(this, node, opcode);
+ }
+ 
++void InstructionSelector::VisitStorePair(Node* node) { UNREACHABLE(); }
++
+ void InstructionSelector::VisitStore(Node* node) {
+   RiscvOperandGenerator g(this);
+   Node* base = node->InputAt(0);
+diff --git a/src/compiler/backend/riscv/instruction-selector-riscv64.cc b/src/compiler/backend/riscv/instruction-selector-riscv64.cc
+index ba6c851dfe..6e234bea3a 100644
+--- a/src/compiler/backend/riscv/instruction-selector-riscv64.cc
++++ b/src/compiler/backend/riscv/instruction-selector-riscv64.cc
+@@ -321,6 +321,8 @@ void InstructionSelector::VisitLoad(Node* node) {
+   EmitLoad(this, node, opcode);
+ }
+ 
++void InstructionSelector::VisitStorePair(Node* node) { UNREACHABLE(); }
++
+ void InstructionSelector::VisitStore(Node* node) {
+   RiscvOperandGenerator g(this);
+   Node* base = node->InputAt(0);
+diff --git a/src/compiler/backend/s390/instruction-selector-s390.cc b/src/compiler/backend/s390/instruction-selector-s390.cc
+index dc97397e17..b965c36243 100644
+--- a/src/compiler/backend/s390/instruction-selector-s390.cc
++++ b/src/compiler/backend/s390/instruction-selector-s390.cc
+@@ -826,6 +826,8 @@ static void VisitGeneralStore(
+   }
+ }
+ 
++void InstructionSelector::VisitStorePair(Node* node) { UNREACHABLE(); }
++
+ void InstructionSelector::VisitStore(Node* node) {
+   StoreRepresentation store_rep = StoreRepresentationOf(node->op());
+   WriteBarrierKind write_barrier_kind = store_rep.write_barrier_kind();
+diff --git a/src/compiler/backend/x64/instruction-selector-x64.cc b/src/compiler/backend/x64/instruction-selector-x64.cc
+index 15279cf3d5..66f715c6fa 100644
+--- a/src/compiler/backend/x64/instruction-selector-x64.cc
++++ b/src/compiler/backend/x64/instruction-selector-x64.cc
+@@ -751,6 +751,8 @@ void VisitStoreCommon(InstructionSelector* selector, Node* node,
+ 
+ }  // namespace
+ 
++void InstructionSelector::VisitStorePair(Node* node) { UNREACHABLE(); }
++
+ void InstructionSelector::VisitStore(Node* node) {
+   return VisitStoreCommon(this, node, StoreRepresentationOf(node->op()),
+                           base::nullopt);
+diff --git a/src/compiler/decompression-optimizer.cc b/src/compiler/decompression-optimizer.cc
+index 18e682a4fd..5d626effbd 100644
+--- a/src/compiler/decompression-optimizer.cc
++++ b/src/compiler/decompression-optimizer.cc
+@@ -120,10 +120,13 @@ void DecompressionOptimizer::MarkNodeInputs(Node* node) {
+       break;
+     // SPECIAL CASES - Store.
+     case IrOpcode::kStore:
++    case IrOpcode::kStorePair:
+     case IrOpcode::kProtectedStore:
+     case IrOpcode::kStoreTrapOnNull:
+     case IrOpcode::kUnalignedStore: {
+-      DCHECK_EQ(node->op()->ValueInputCount(), 3);
++      DCHECK(node->op()->ValueInputCount() == 3 ||
++             (node->opcode() == IrOpcode::kStorePair &&
++              node->op()->ValueInputCount() == 4));
+       MaybeMarkAndQueueForRevisit(node->InputAt(0),
+                                   State::kEverythingObserved);  // base pointer
+       MaybeMarkAndQueueForRevisit(node->InputAt(1),
+@@ -131,14 +134,22 @@ void DecompressionOptimizer::MarkNodeInputs(Node* node) {
+       // TODO(v8:7703): When the implementation is done, check if this ternary
+       // operator is too restrictive, since we only mark Tagged stores as 32
+       // bits.
+-      MachineRepresentation representation =
+-          node->opcode() == IrOpcode::kUnalignedStore
+-              ? UnalignedStoreRepresentationOf(node->op())
+-              : StoreRepresentationOf(node->op()).representation();
+-      MaybeMarkAndQueueForRevisit(node->InputAt(2),
+-                                  IsAnyTagged(representation)
+-                                      ? State::kOnly32BitsObserved
+-                                      : State::kEverythingObserved);  // value
++      MachineRepresentation representation;
++      if (node->opcode() == IrOpcode::kUnalignedStore) {
++        representation = UnalignedStoreRepresentationOf(node->op());
++      } else if (node->opcode() == IrOpcode::kStorePair) {
++        representation =
++            StorePairRepresentationOf(node->op()).first.representation();
++      } else {
++        representation = StoreRepresentationOf(node->op()).representation();
++      }
++      State observed = ElementSizeLog2Of(representation) <= 2
++                           ? State::kOnly32BitsObserved
++                           : State::kEverythingObserved;
++      MaybeMarkAndQueueForRevisit(node->InputAt(2), observed);  // value
++      if (node->opcode() == IrOpcode::kStorePair) {
++        MaybeMarkAndQueueForRevisit(node->InputAt(3), observed);  // value 2
++      }
+     } break;
+     // SPECIAL CASES - Variable inputs.
+     // The deopt code knows how to handle Compressed inputs, both
+diff --git a/src/compiler/machine-operator.cc b/src/compiler/machine-operator.cc
+index 9eb44f180f..751fd54fac 100644
+--- a/src/compiler/machine-operator.cc
++++ b/src/compiler/machine-operator.cc
+@@ -202,6 +202,11 @@ StoreRepresentation const& StoreRepresentationOf(Operator const* op) {
+   return OpParameter<StoreRepresentation>(op);
+ }
+ 
++StorePairRepresentation const& StorePairRepresentationOf(Operator const* op) {
++  DCHECK(IrOpcode::kStorePair == op->opcode());
++  return OpParameter<StorePairRepresentation>(op);
++}
++
+ AtomicStoreParameters const& AtomicStoreParametersOf(Operator const* op) {
+   DCHECK(IrOpcode::kWord32AtomicStore == op->opcode() ||
+          IrOpcode::kWord64AtomicStore == op->opcode());
+@@ -759,6 +764,78 @@ std::ostream& operator<<(std::ostream& os, TruncateKind kind) {
+   V(kCompressed)                       \
+   V(kSimd256)
+ 
++#ifdef V8_TARGET_ARCH_64_BIT
++
++#ifdef V8_COMPRESS_POINTERS
++
++#define STORE_PAIR_MACHINE_REPRESENTATION_LIST(V) \
++  V(kWord32, kWord32)                             \
++  V(kWord32, kTagged)                             \
++  V(kWord32, kTaggedSigned)                       \
++  V(kWord32, kTaggedPointer)                      \
++  V(kWord32, kCompressed)                         \
++  V(kWord32, kCompressedPointer)                  \
++  V(kTagged, kWord32)                             \
++  V(kTagged, kTagged)                             \
++  V(kTagged, kTaggedSigned)                       \
++  V(kTagged, kTaggedPointer)                      \
++  V(kTagged, kCompressed)                         \
++  V(kTagged, kCompressedPointer)                  \
++  V(kTaggedSigned, kWord32)                       \
++  V(kTaggedSigned, kTagged)                       \
++  V(kTaggedSigned, kTaggedSigned)                 \
++  V(kTaggedSigned, kTaggedPointer)                \
++  V(kTaggedSigned, kCompressed)                   \
++  V(kTaggedSigned, kCompressedPointer)            \
++  V(kTaggedPointer, kWord32)                      \
++  V(kTaggedPointer, kTagged)                      \
++  V(kTaggedPointer, kTaggedSigned)                \
++  V(kTaggedPointer, kTaggedPointer)               \
++  V(kTaggedPointer, kCompressed)                  \
++  V(kTaggedPointer, kCompressedPointer)           \
++  V(kCompressed, kWord32)                         \
++  V(kCompressed, kTagged)                         \
++  V(kCompressed, kTaggedSigned)                   \
++  V(kCompressed, kTaggedPointer)                  \
++  V(kCompressed, kCompressed)                     \
++  V(kCompressed, kCompressedPointer)              \
++  V(kCompressedPointer, kWord32)                  \
++  V(kCompressedPointer, kTagged)                  \
++  V(kCompressedPointer, kTaggedSigned)            \
++  V(kCompressedPointer, kTaggedPointer)           \
++  V(kCompressedPointer, kCompressed)              \
++  V(kCompressedPointer, kCompressedPointer)       \
++  V(kWord64, kWord64)
++
++#else
++
++#define STORE_PAIR_MACHINE_REPRESENTATION_LIST(V) \
++  V(kWord32, kWord32)                             \
++  V(kWord64, kWord64)                             \
++  V(kWord64, kTagged)                             \
++  V(kWord64, kTaggedSigned)                       \
++  V(kWord64, kTaggedPointer)                      \
++  V(kTagged, kWord64)                             \
++  V(kTagged, kTagged)                             \
++  V(kTagged, kTaggedSigned)                       \
++  V(kTagged, kTaggedPointer)                      \
++  V(kTaggedSigned, kWord64)                       \
++  V(kTaggedSigned, kTagged)                       \
++  V(kTaggedSigned, kTaggedSigned)                 \
++  V(kTaggedSigned, kTaggedPointer)                \
++  V(kTaggedPointer, kWord64)                      \
++  V(kTaggedPointer, kTagged)                      \
++  V(kTaggedPointer, kTaggedSigned)                \
++  V(kTaggedPointer, kTaggedPointer)
++
++#endif  // V8_COMPRESS_POINTERS
++
++#else
++
++#define STORE_PAIR_MACHINE_REPRESENTATION_LIST(V)
++
++#endif  // V8_TARGET_ARCH_64_BIT
++
+ #define LOAD_TRANSFORM_LIST(V) \
+   V(S128Load8Splat)            \
+   V(S128Load16Splat)           \
+@@ -1174,6 +1251,41 @@ struct MachineOperatorGlobalCache {
+   MACHINE_REPRESENTATION_LIST(STORE)
+ #undef STORE
+ 
++  friend std::ostream& operator<<(std::ostream& out,
++                                  const StorePairRepresentation rep) {
++    out << rep.first << "," << rep.second;
++    return out;
++  }
++
++#define STORE_PAIR(Type1, Type2)                                           \
++  struct StorePair##Type1##Type2##Operator                                 \
++      : public Operator1<StorePairRepresentation> {                        \
++    explicit StorePair##Type1##Type2##Operator(                            \
++        WriteBarrierKind write_barrier_kind1,                              \
++        WriteBarrierKind write_barrier_kind2)                              \
++        : Operator1<StorePairRepresentation>(                              \
++              IrOpcode::kStorePair,                                        \
++              Operator::kNoDeopt | Operator::kNoRead | Operator::kNoThrow, \
++              "StorePair", 4, 1, 1, 0, 1, 0,                               \
++              {                                                            \
++                  StoreRepresentation(MachineRepresentation::Type1,        \
++                                      write_barrier_kind1),                \
++                  StoreRepresentation(MachineRepresentation::Type2,        \
++                                      write_barrier_kind2),                \
++              }) {}                                                        \
++  };                                                                       \
++  struct StorePair##Type1##Type2##NoWriteBarrier##Operator final           \
++      : public StorePair##Type1##Type2##Operator {                         \
++    StorePair##Type1##Type2##NoWriteBarrier##Operator()                    \
++        : StorePair##Type1##Type2                                          \
++          ##Operator(kNoWriteBarrier, kNoWriteBarrier) {}                  \
++  };                                                                       \
++  StorePair##Type1##Type2##NoWriteBarrier##Operator                        \
++      kStorePair##Type1##Type2##NoWriteBarrier;
++
++  STORE_PAIR_MACHINE_REPRESENTATION_LIST(STORE_PAIR)
++#undef STORE_PAIR
++
+ #define ATOMIC_LOAD_WITH_KIND(Type, Kind)                           \
+   struct Word32SeqCstLoad##Type##Kind##Operator                     \
+       : public Operator1<AtomicLoadParameters> {                    \
+@@ -1773,6 +1885,26 @@ const Operator* MachineOperatorBuilder::Store(StoreRepresentation store_rep) {
+   UNREACHABLE();
+ }
+ 
++base::Optional<const Operator*> MachineOperatorBuilder::TryStorePair(
++    StoreRepresentation store_rep1, StoreRepresentation store_rep2) {
++  DCHECK_NE(store_rep1.representation(), MachineRepresentation::kMapWord);
++
++#define STORE(kRep1, kRep2)                                          \
++  static_assert(ElementSizeLog2Of(MachineRepresentation::kRep1) ==   \
++                ElementSizeLog2Of(MachineRepresentation::kRep2));    \
++  if (MachineRepresentation::kRep1 == store_rep1.representation() && \
++      MachineRepresentation::kRep2 == store_rep2.representation()) { \
++    if (store_rep1.write_barrier_kind() != kNoWriteBarrier ||        \
++        store_rep2.write_barrier_kind() != kNoWriteBarrier) {        \
++      return {};                                                     \
++    }                                                                \
++    return &cache_.k##StorePair##kRep1##kRep2##NoWriteBarrier;       \
++  }
++  STORE_PAIR_MACHINE_REPRESENTATION_LIST(STORE);
++#undef STORE
++  return {};
++}
++
+ const Operator* MachineOperatorBuilder::ProtectedStore(
+     MachineRepresentation rep) {
+   switch (rep) {
+diff --git a/src/compiler/machine-operator.h b/src/compiler/machine-operator.h
+index 28aa3753c9..a9c745a420 100644
+--- a/src/compiler/machine-operator.h
++++ b/src/compiler/machine-operator.h
+@@ -180,6 +180,14 @@ class StoreRepresentation final {
+   WriteBarrierKind write_barrier_kind_;
+ };
+ 
++struct StorePairRepresentation final
++    : public std::pair<StoreRepresentation, StoreRepresentation> {
++  StorePairRepresentation(StoreRepresentation first, StoreRepresentation second)
++      : std::pair<StoreRepresentation, StoreRepresentation>(first, second) {}
++  friend std::ostream& operator<<(std::ostream& out,
++                                  const StorePairRepresentation rep);
++};
++
+ V8_EXPORT_PRIVATE bool operator==(StoreRepresentation, StoreRepresentation);
+ bool operator!=(StoreRepresentation, StoreRepresentation);
+ 
+@@ -190,6 +198,9 @@ V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream&, StoreRepresentation);
+ V8_EXPORT_PRIVATE StoreRepresentation const& StoreRepresentationOf(
+     Operator const*) V8_WARN_UNUSED_RESULT;
+ 
++V8_EXPORT_PRIVATE StorePairRepresentation const& StorePairRepresentationOf(
++    Operator const*) V8_WARN_UNUSED_RESULT;
++
+ // A Word(32|64)AtomicStore needs both a StoreRepresentation and a memory order.
+ class AtomicStoreParameters final {
+  public:
+@@ -360,6 +371,7 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
+     kSatConversionIsSafe = 1u << 26,
+     kWord32Select = 1u << 27,
+     kWord64Select = 1u << 28,
++    kLoadStorePairs = 1u << 29,
+     kAllOptionalOps =
+         kFloat32RoundDown | kFloat64RoundDown | kFloat32RoundUp |
+         kFloat64RoundUp | kFloat32RoundTruncate | kFloat64RoundTruncate |
+@@ -368,7 +380,8 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
+         kWord64Popcnt | kWord32ReverseBits | kWord64ReverseBits |
+         kInt32AbsWithOverflow | kInt64AbsWithOverflow | kWord32Rol |
+         kWord64Rol | kWord64RolLowerable | kSatConversionIsSafe |
+-        kFloat32Select | kFloat64Select | kWord32Select | kWord64Select
++        kFloat32Select | kFloat64Select | kWord32Select | kWord64Select |
++        kLoadStorePairs
+   };
+   using Flags = base::Flags<Flag, unsigned>;
+ 
+@@ -477,6 +490,13 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
+   // generate the correct value if a saturating conversion is requested.
+   bool SatConversionIsSafe() const { return flags_ & kSatConversionIsSafe; }
+ 
++  // Return true if the target suppoerts performing a pair of loads/stores in
++  // a single operation.
++  bool SupportsLoadStorePairs() const {
++    return !v8_flags.enable_unconditional_write_barriers &&
++           (flags_ & kLoadStorePairs);
++  }
++
+   const Operator* Word64And();
+   const Operator* Word64Or();
+   const Operator* Word64Xor();
+@@ -1020,6 +1040,8 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
+ 
+   // store [base + index], value
+   const Operator* Store(StoreRepresentation rep);
++  base::Optional<const Operator*> TryStorePair(StoreRepresentation rep1,
++                                               StoreRepresentation rep2);
+   const Operator* ProtectedStore(MachineRepresentation rep);
+   const Operator* StoreTrapOnNull(StoreRepresentation rep);
+ 
+diff --git a/src/compiler/memory-optimizer.cc b/src/compiler/memory-optimizer.cc
+index 507a871ac4..20ea3ccaa2 100644
+--- a/src/compiler/memory-optimizer.cc
++++ b/src/compiler/memory-optimizer.cc
+@@ -237,6 +237,9 @@ void MemoryOptimizer::VisitNode(Node* node, AllocationState const* state) {
+       return VisitStoreField(node, state);
+     case IrOpcode::kStore:
+       return VisitStore(node, state);
++    case IrOpcode::kStorePair:
++      // Store pairing should happen after this pass.
++      UNREACHABLE();
+     default:
+       if (!CanAllocate(node)) {
+         // These operations cannot trigger GC.
+diff --git a/src/compiler/opcodes.h b/src/compiler/opcodes.h
+index d20fd12243..7091041d9c 100644
+--- a/src/compiler/opcodes.h
++++ b/src/compiler/opcodes.h
+@@ -757,6 +757,7 @@
+   V(Load)                                \
+   V(LoadImmutable)                       \
+   V(Store)                               \
++  V(StorePair)                           \
+   V(StackSlot)                           \
+   V(Word32Popcnt)                        \
+   V(Word64Popcnt)                        \
+diff --git a/src/compiler/pair-load-store-reducer.cc b/src/compiler/pair-load-store-reducer.cc
+new file mode 100644
+index 0000000000..c2fe49d1c9
+--- /dev/null
++++ b/src/compiler/pair-load-store-reducer.cc
+@@ -0,0 +1,92 @@
++// Copyright 2023 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "src/compiler/pair-load-store-reducer.h"
++
++#include "src/compiler/machine-graph.h"
++
++namespace v8 {
++namespace internal {
++namespace compiler {
++
++namespace {
++
++base::Optional<std::tuple<int, const Operator*>> CanBePaired(
++    Node* node1, Node* node2, MachineOperatorBuilder* machine,
++    Isolate* isolate) {
++  DCHECK(node1->opcode() == IrOpcode::kStore &&
++         node1->opcode() == IrOpcode::kStore);
++
++  Node* base1 = node1->InputAt(0);
++  Node* base2 = node2->InputAt(0);
++  if (base1 != base2) return {};
++
++  auto rep1 = StoreRepresentationOf(node1->op());
++  auto rep2 = StoreRepresentationOf(node2->op());
++  auto combo = machine->TryStorePair(rep1, rep2);
++  if (!combo) return {};
++
++  Node* index1 = node1->InputAt(1);
++  Node* index2 = node2->InputAt(1);
++
++  int idx1, idx2;
++  if (index1->opcode() == IrOpcode::kInt64Constant) {
++    idx1 = static_cast<int>(OpParameter<int64_t>(index1->op()));
++  } else {
++    return {};
++  }
++  if (index2->opcode() == IrOpcode::kInt64Constant) {
++    idx2 = static_cast<int>(OpParameter<int64_t>(index2->op()));
++  } else {
++    return {};
++  }
++
++  int bytesize = 1 << ElementSizeLog2Of(rep1.representation());
++  int diff = idx2 - idx1;
++  if (diff != bytesize && diff != -bytesize) {
++    return {};
++  }
++
++  return {{diff, *combo}};
++}
++
++}  // namespace
++
++PairLoadStoreReducer::PairLoadStoreReducer(Editor* editor,
++                                           MachineGraph* mcgraph,
++                                           Isolate* isolate)
++    : AdvancedReducer(editor), mcgraph_(mcgraph), isolate_(isolate) {}
++
++Reduction PairLoadStoreReducer::Reduce(Node* cur) {
++  if (cur->opcode() != IrOpcode::kStore) {
++    return Reduction();
++  }
++
++  Node* prev = NodeProperties::GetEffectInput(cur);
++  if (prev->opcode() != IrOpcode::kStore) {
++    return Reduction();
++  }
++
++  if (!prev->OwnedBy(cur)) {
++    return Reduction();
++  }
++
++  auto pairing = CanBePaired(prev, cur, mcgraph_->machine(), isolate_);
++  if (!pairing) return Reduction();
++
++  if (std::get<int>(*pairing) > 0) {
++    prev->InsertInput(mcgraph_->zone(), 3, cur->InputAt(2));
++  } else {
++    NodeProperties::ReplaceValueInput(prev, cur->InputAt(1), 1);
++    prev->InsertInput(mcgraph_->zone(), 2, cur->InputAt(2));
++  }
++  NodeProperties::ChangeOp(prev, std::get<const Operator*>(*pairing));
++  Replace(cur, prev);
++  cur->Kill();
++  return Reduction(prev);
++}
++
++}  // namespace compiler
++}  // namespace internal
++}  // namespace v8
+diff --git a/src/compiler/pair-load-store-reducer.h b/src/compiler/pair-load-store-reducer.h
+new file mode 100644
+index 0000000000..5b9c5e9270
+--- /dev/null
++++ b/src/compiler/pair-load-store-reducer.h
+@@ -0,0 +1,46 @@
++#ifndef V8_COMPILER_PAIR_LOAD_STORE_REDUCER_H_
++#define V8_COMPILER_PAIR_LOAD_STORE_REDUCER_H_
++
++// Copyright 2023 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "src/base/compiler-specific.h"
++#include "src/common/globals.h"
++#include "src/compiler/graph-reducer.h"
++#include "src/compiler/machine-operator.h"
++
++namespace v8 {
++namespace internal {
++namespace compiler {
++
++// Forward declarations.
++class CommonOperatorBuilder;
++class MachineGraph;
++class Word32Adapter;
++class Word64Adapter;
++
++// Reduces (currently only) store pairs which can be combined on supported
++// platforms (currently arm64). Stores are trivially pairable if they are next
++// to each other, write to consecutive indices and do not have a write barrier.
++// TODO(olivf, v8:13877) Add support for loads, more word sizes, and arm.
++class V8_EXPORT_PRIVATE PairLoadStoreReducer final
++    : public NON_EXPORTED_BASE(AdvancedReducer) {
++ public:
++  PairLoadStoreReducer(Editor* editor, MachineGraph* mcgraph,
++                       Isolate* isolate_);
++
++  const char* reducer_name() const override { return "PairLoadStoreReducer"; }
++
++  Reduction Reduce(Node* node) override;
++
++ private:
++  MachineGraph* mcgraph_;
++  Isolate* isolate_;
++};
++
++}  // namespace compiler
++}  // namespace internal
++}  // namespace v8
++
++#endif  // V8_COMPILER_PAIR_LOAD_STORE_REDUCER_H_
+diff --git a/src/compiler/pipeline.cc b/src/compiler/pipeline.cc
+index 5104a427fb..efc04f60e7 100644
+--- a/src/compiler/pipeline.cc
++++ b/src/compiler/pipeline.cc
+@@ -70,6 +70,7 @@
+ #include "src/compiler/node-observer.h"
+ #include "src/compiler/node-origin-table.h"
+ #include "src/compiler/osr.h"
++#include "src/compiler/pair-load-store-reducer.h"
+ #include "src/compiler/phase.h"
+ #include "src/compiler/pipeline-statistics.h"
+ #include "src/compiler/redundancy-elimination.h"
+@@ -2093,9 +2094,14 @@ struct MachineOperatorOptimizationPhase {
+     ValueNumberingReducer value_numbering(temp_zone, data->graph()->zone());
+     MachineOperatorReducer machine_reducer(&graph_reducer, data->jsgraph(),
+                                            signalling_nan_propagation);
++    PairLoadStoreReducer pair_load_store_reducer(
++        &graph_reducer, data->jsgraph(), data->isolate());
+ 
+     AddReducer(data, &graph_reducer, &machine_reducer);
+     AddReducer(data, &graph_reducer, &value_numbering);
++    if (data->machine()->SupportsLoadStorePairs()) {
++      AddReducer(data, &graph_reducer, &pair_load_store_reducer);
++    }
+     graph_reducer.ReduceGraph();
+   }
+ };
+@@ -2334,11 +2340,16 @@ struct CsaOptimizationPhase {
+         &graph_reducer, data->graph(), data->broker(), data->common(),
+         data->machine(), temp_zone, BranchSemantics::kMachine);
+     ValueNumberingReducer value_numbering(temp_zone, data->graph()->zone());
++    PairLoadStoreReducer pair_load_store_reducer(
++        &graph_reducer, data->jsgraph(), data->isolate());
+     AddReducer(data, &graph_reducer, &branch_condition_elimination);
+     AddReducer(data, &graph_reducer, &dead_code_elimination);
+     AddReducer(data, &graph_reducer, &machine_reducer);
+     AddReducer(data, &graph_reducer, &common_reducer);
+     AddReducer(data, &graph_reducer, &value_numbering);
++    if (data->machine()->SupportsLoadStorePairs()) {
++      AddReducer(data, &graph_reducer, &pair_load_store_reducer);
++    }
+     graph_reducer.ReduceGraph();
+   }
+ };
+diff --git a/src/compiler/simplified-lowering-verifier.cc b/src/compiler/simplified-lowering-verifier.cc
+index 7a076916ed..e4dd29a8dd 100644
+--- a/src/compiler/simplified-lowering-verifier.cc
++++ b/src/compiler/simplified-lowering-verifier.cc
+@@ -608,6 +608,7 @@ void SimplifiedLoweringVerifier::VisitNode(Node* node,
+       CASE(Load)
+       CASE(LoadImmutable)
+       CASE(Store)
++      CASE(StorePair)
+       CASE(StackSlot)
+       CASE(Word32Popcnt)
+       CASE(Word64Popcnt)
+diff --git a/src/compiler/typer.cc b/src/compiler/typer.cc
+index 3866f09f02..3cf9de67b6 100644
+--- a/src/compiler/typer.cc
++++ b/src/compiler/typer.cc
+@@ -178,6 +178,7 @@ class Typer::Visitor : public Reducer {
+       DECLARE_IMPOSSIBLE_CASE(DebugBreak)
+       DECLARE_IMPOSSIBLE_CASE(Comment)
+       DECLARE_IMPOSSIBLE_CASE(LoadImmutable)
++      DECLARE_IMPOSSIBLE_CASE(StorePair)
+       DECLARE_IMPOSSIBLE_CASE(Store)
+       DECLARE_IMPOSSIBLE_CASE(StackSlot)
+       DECLARE_IMPOSSIBLE_CASE(Word32Popcnt)
+diff --git a/src/compiler/verifier.cc b/src/compiler/verifier.cc
+index 342f773d34..734b828717 100644
+--- a/src/compiler/verifier.cc
++++ b/src/compiler/verifier.cc
+@@ -1735,6 +1735,7 @@ void Verifier::Visitor::Check(Node* node, const AllNodes& all) {
+     case IrOpcode::kLoadTrapOnNull:
+     case IrOpcode::kStoreTrapOnNull:
+     case IrOpcode::kStore:
++    case IrOpcode::kStorePair:
+     case IrOpcode::kStackSlot:
+     case IrOpcode::kWord32And:
+     case IrOpcode::kWord32Or:
+diff --git a/src/logging/runtime-call-stats.h b/src/logging/runtime-call-stats.h
+index faf43daf40..b1d6577715 100644
+--- a/src/logging/runtime-call-stats.h
++++ b/src/logging/runtime-call-stats.h
+@@ -357,6 +357,7 @@ class RuntimeCallTimer final {
+   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, LoopExitElimination)             \
+   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, LoopPeeling)                     \
+   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, MachineOperatorOptimization)     \
++  ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, PairingOptimization)             \
+   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, MeetRegisterConstraints)         \
+   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, MemoryOptimization)              \
+   ADD_THREAD_SPECIFIC_COUNTER(V, Optimize, OptimizeMoves)                   \
+-- 
+2.35.1
+

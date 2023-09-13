@@ -1,0 +1,119 @@
+From 3ebdddeb660d49714345bc242ee2da3037d7231f Mon Sep 17 00:00:00 2001
+From: jameslahm <wangao.james@bytedance.com>
+Date: Tue, 31 May 2022 08:57:25 +0800
+Subject: [PATCH] [test] Move cctest/test-disasm-ppc to unittests/assembler/
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+... disasm-pcc-unittest.
+
+Bug: v8:12781
+Change-Id: I239c5101a0b978b0b824bac8e31a6e62b3e7e836
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3676639
+Reviewed-by: Leszek Swirski <leszeks@chromium.org>
+Commit-Queue: 王澳 <wangao.james@bytedance.com>
+Cr-Commit-Position: refs/heads/main@{#80835}
+---
+ test/cctest/BUILD.gn                           |  5 +----
+ test/unittests/BUILD.gn                        |  1 +
+ .../assembler/disasm-ppc-unittest.cc}          | 18 ++++++++----------
+ 3 files changed, 10 insertions(+), 14 deletions(-)
+ rename test/{cctest/test-disasm-ppc.cc => unittests/assembler/disasm-ppc-unittest.cc} (95%)
+
+diff --git a/test/cctest/BUILD.gn b/test/cctest/BUILD.gn
+index 1f030749b4..fe11885c24 100644
+--- a/test/cctest/BUILD.gn
++++ b/test/cctest/BUILD.gn
+@@ -312,10 +312,7 @@ v8_source_set("cctest_sources") {
+       sources += [ "test-stack-unwinding-win64.cc" ]
+     }
+   } else if (v8_current_cpu == "ppc" || v8_current_cpu == "ppc64") {
+-    sources += [  ### gcmole(arch:ppc) ###
+-      "test-assembler-ppc.cc",
+-      "test-disasm-ppc.cc",
+-    ]
++    sources += [ "test-assembler-ppc.cc" ]  ### gcmole(arch:ppc) ###
+   } else if (v8_current_cpu == "s390" || v8_current_cpu == "s390x") {
+     sources += [ "test-assembler-s390.cc" ]  ### gcmole(arch:s390) ###
+   } else if (v8_current_cpu == "riscv64") {
+diff --git a/test/unittests/BUILD.gn b/test/unittests/BUILD.gn
+index 1505cc3a5b..23f051aa8d 100644
+--- a/test/unittests/BUILD.gn
++++ b/test/unittests/BUILD.gn
+@@ -541,6 +541,7 @@ v8_source_set("unittests_sources") {
+     }
+   } else if (v8_current_cpu == "ppc" || v8_current_cpu == "ppc64") {
+     sources += [
++      "assembler/disasm-ppc-unittest.cc",
+       "assembler/turbo-assembler-ppc-unittest.cc",
+       "compiler/ppc/instruction-selector-ppc-unittest.cc",
+     ]
+diff --git a/test/cctest/test-disasm-ppc.cc b/test/unittests/assembler/disasm-ppc-unittest.cc
+similarity index 95%
+rename from test/cctest/test-disasm-ppc.cc
+rename to test/unittests/assembler/disasm-ppc-unittest.cc
+index f746016177..13581673ab 100644
+--- a/test/cctest/test-disasm-ppc.cc
++++ b/test/unittests/assembler/disasm-ppc-unittest.cc
+@@ -28,18 +28,20 @@
+ 
+ #include <stdlib.h>
+ 
+-#include "src/init/v8.h"
+-
+ #include "src/codegen/macro-assembler.h"
+ #include "src/debug/debug.h"
+ #include "src/diagnostics/disasm.h"
+ #include "src/diagnostics/disassembler.h"
+ #include "src/execution/frames-inl.h"
+-#include "test/cctest/cctest.h"
++#include "src/init/v8.h"
++#include "test/unittests/test-utils.h"
++#include "testing/gtest/include/gtest/gtest.h"
+ 
+ namespace v8 {
+ namespace internal {
+ 
++using DisasmPpcTest = TestWithIsolate;
++
+ bool DisassembleAndCompare(byte* pc, const char* compare_string) {
+   disasm::NameConverter converter;
+   disasm::Disassembler disasm(converter);
+@@ -59,14 +61,11 @@ bool DisassembleAndCompare(byte* pc, const char* compare_string) {
+   return true;
+ }
+ 
+-
+ // Set up V8 to a state where we can at least run the assembler and
+ // disassembler. Declare the variables and allocate the data structures used
+ // in the rest of the macros.
+-#define SET_UP()                                            \
+-  CcTest::InitializeVM();                                   \
+-  Isolate* isolate = CcTest::i_isolate();                   \
+-  HandleScope scope(isolate);                               \
++#define SET_UP()                                             \
++  HandleScope scope(isolate());                              \
+   byte* buffer = reinterpret_cast<byte*>(malloc(4 * 1024));  \
+   Assembler assm(AssemblerOptions{},                         \
+                  ExternalAssemblerBuffer(buffer, 4 * 1024)); \
+@@ -87,7 +86,6 @@ bool DisassembleAndCompare(byte* pc, const char* compare_string) {
+ // Force emission of any pending literals into a pool.
+ #define EMIT_PENDING_LITERALS() assm.CheckConstPool(true, false)
+ 
+-
+ // Verify that all invocations of the COMPARE macro passed successfully.
+ // Exit with a failure if at least one of the tests failed.
+ #define VERIFY_RUN()                           \
+@@ -95,7 +93,7 @@ bool DisassembleAndCompare(byte* pc, const char* compare_string) {
+     FATAL("PPC Disassembler tests failed.\n"); \
+   }
+ 
+-TEST(DisasmPPC) {
++TEST_F(DisasmPpcTest, DisasmPPC) {
+   SET_UP();
+ 
+   COMPARE(addc(r9, r7, r9), "7d274814       addc    r9, r7, r9");
+-- 
+2.35.1
+

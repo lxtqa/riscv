@@ -1,0 +1,125 @@
+From a5692811bd211de44046c38f207912c1aea10ec2 Mon Sep 17 00:00:00 2001
+From: Ng Zhi An <zhin@chromium.org>
+Date: Thu, 30 Sep 2021 14:34:57 -0700
+Subject: [PATCH] [wasm] Check SIMD support when validating function sig params
+
+Bug: chromium:1254675
+Change-Id: I8c24d3956752a367a4fa60827ee47a589c48e699
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3197700
+Reviewed-by: Clemens Backes <clemensb@chromium.org>
+Commit-Queue: Zhi An Ng <zhin@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#77201}
+---
+ src/wasm/function-body-decoder-impl.h        |  4 +++
+ test/cctest/cctest.status                    |  4 ++-
+ test/mjsunit/mjsunit.status                  |  7 +++++
+ test/mjsunit/regress/wasm/regress-1254675.js | 30 ++++++++++++++++++++
+ 4 files changed, 44 insertions(+), 1 deletion(-)
+ create mode 100644 test/mjsunit/regress/wasm/regress-1254675.js
+
+diff --git a/src/wasm/function-body-decoder-impl.h b/src/wasm/function-body-decoder-impl.h
+index 3231c39e0c..3d5ec7f933 100644
+--- a/src/wasm/function-body-decoder-impl.h
++++ b/src/wasm/function-body-decoder-impl.h
+@@ -397,6 +397,10 @@ ValueType read_value_type(Decoder* decoder, const byte* pc,
+             "invalid value type 's128', enable with --experimental-wasm-simd");
+         return kWasmBottom;
+       }
++      if (!VALIDATE(CheckHardwareSupportsSimd())) {
++        DecodeError<validate>(decoder, pc, "Wasm SIMD unsupported");
++        return kWasmBottom;
++      }
+       return kWasmS128;
+     }
+     // Although these codes are included in ValueTypeCode, they technically
+diff --git a/test/cctest/cctest.status b/test/cctest/cctest.status
+index e98dc712ec..e4c2f58966 100644
+--- a/test/cctest/cctest.status
++++ b/test/cctest/cctest.status
+@@ -428,6 +428,7 @@
+   'test-cpu-profiler/CrossScriptInliningCallerLineNumbers2': [SKIP],
+ 
+   # SIMD not fully implemented yet.
++  'test-run-wasm-relaxed-simd/*': [SKIP],
+   'test-run-wasm-simd/RunWasm_F64x2ExtractLaneWithI64x2_liftoff': [SKIP],
+   'test-run-wasm-simd/RunWasm_I64x2ExtractWithF64x2_liftoff': [SKIP],
+   'test-run-wasm-simd-liftoff/*': [SKIP],
+@@ -758,8 +759,9 @@
+ 
+ ##############################################################################
+ ['no_simd_hardware == True', {
+-  'test-run-wasm-simd/*': [SKIP],
++  'test-run-wasm-relaxed-simd/*': [SKIP],
+   'test-run-wasm-simd-liftoff/*': [SKIP],
++  'test-run-wasm-simd/*': [SKIP],
+   'test-gc/RunWasmLiftoff_RefTrivialCasts': [SKIP],
+   'test-gc/RunWasmTurbofan_RefTrivialCasts': [SKIP],
+   'test-gc/RunWasmLiftoff_RefTrivialCastsStatic': [SKIP],
+diff --git a/test/mjsunit/mjsunit.status b/test/mjsunit/mjsunit.status
+index 19f9f6c70a..02c1a06cf4 100644
+--- a/test/mjsunit/mjsunit.status
++++ b/test/mjsunit/mjsunit.status
+@@ -1428,6 +1428,7 @@
+   'wasm/liftoff-simd-params': [SKIP],
+   'wasm/multi-value-simd': [SKIP],
+   'wasm/simd-*': [SKIP],
++  'regress/wasm/regress-9447': [SKIP],
+   'regress/wasm/regress-10309': [SKIP],
+   'regress/wasm/regress-10831': [SKIP],
+   'regress/wasm/regress-1054466': [SKIP],
+@@ -1446,10 +1447,16 @@
+   'regress/wasm/regress-1187831': [SKIP],
+   'regress/wasm/regress-1199662': [SKIP],
+   'regress/wasm/regress-1231950': [SKIP],
++  'regress/wasm/regress-1237024': [SKIP],
+   'regress/wasm/regress-1242300': [SKIP],
+   'regress/wasm/regress-1242689': [SKIP],
+ }],  # no_simd_hardware == True
+ 
++##############################################################################
++['no_simd_hardware == False', {
++  'regress/wasm/regress-1254675': [SKIP],
++}],  # no_simd_hardware == False
++
+ ##############################################################################
+ # TODO(v8:11421): Port baseline compiler to other architectures.
+ ['arch not in (x64, arm64, ia32, arm, mips64el, mipsel, riscv64, loong64)', {
+diff --git a/test/mjsunit/regress/wasm/regress-1254675.js b/test/mjsunit/regress/wasm/regress-1254675.js
+new file mode 100644
+index 0000000000..9df8f17211
+--- /dev/null
++++ b/test/mjsunit/regress/wasm/regress-1254675.js
+@@ -0,0 +1,30 @@
++// Copyright 2020 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// This test should only be run on configurations that don't support Wasm SIMD.
++
++d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
++
++// Test case manually reduced from https://crbug.com/1254675.
++// This exercises a bug where we are missing checks for SIMD hardware support
++// when a function has a v128 parameter but doesn't use any SIMD instructions.
++(function() {
++  const builder = new WasmModuleBuilder();
++    builder.addType(kSig_i_s);
++    builder.addFunction(undefined, 0)
++            .addBodyWithEnd([kExprUnreachable, kExprEnd]);
++
++  assertThrows(() => builder.instantiate());
++}());
++
++// Additional test case to verify that a declared v128 local traps.
++(function() {
++  const builder = new WasmModuleBuilder();
++    builder.addType(kSig_i_i);
++    builder.addFunction(undefined, 0)
++           .addBodyWithEnd([kExprUnreachable, kExprEnd])
++           .addLocals('v128', 1);
++
++  assertThrows(() => builder.instantiate());
++}());
+-- 
+2.35.1
+

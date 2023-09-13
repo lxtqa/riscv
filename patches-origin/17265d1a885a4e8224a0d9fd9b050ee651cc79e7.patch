@@ -1,0 +1,121 @@
+From 17265d1a885a4e8224a0d9fd9b050ee651cc79e7 Mon Sep 17 00:00:00 2001
+From: jameslahm <wangao.james@bytedance.com>
+Date: Tue, 31 May 2022 09:13:46 +0800
+Subject: [PATCH] [test] Move cctest/test-disasm-s390 to unittests/assembler/
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+... disasm-s390-unittest.
+
+Bug: v8:12781
+Change-Id: I52155e0f6667202ce2f3c7bd59cb0031694edbc6
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3676642
+Commit-Queue: 王澳 <wangao.james@bytedance.com>
+Reviewed-by: Leszek Swirski <leszeks@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#80829}
+---
+ test/cctest/BUILD.gn                              |  5 +----
+ test/unittests/BUILD.gn                           |  1 +
+ .../assembler/disasm-s390-unittest.cc}            | 15 +++++++--------
+ 3 files changed, 9 insertions(+), 12 deletions(-)
+ rename test/{cctest/test-disasm-s390.cc => unittests/assembler/disasm-s390-unittest.cc} (98%)
+
+diff --git a/test/cctest/BUILD.gn b/test/cctest/BUILD.gn
+index 561e454e2e..62091b3d42 100644
+--- a/test/cctest/BUILD.gn
++++ b/test/cctest/BUILD.gn
+@@ -322,10 +322,7 @@ v8_source_set("cctest_sources") {
+       "test-disasm-ppc.cc",
+     ]
+   } else if (v8_current_cpu == "s390" || v8_current_cpu == "s390x") {
+-    sources += [  ### gcmole(arch:s390) ###
+-      "test-assembler-s390.cc",
+-      "test-disasm-s390.cc",
+-    ]
++    sources += [ "test-assembler-s390.cc" ]  ### gcmole(arch:s390) ###
+   } else if (v8_current_cpu == "riscv64") {
+     sources += [  ### gcmole(arch:riscv64) ###
+       "test-assembler-riscv64.cc",
+diff --git a/test/unittests/BUILD.gn b/test/unittests/BUILD.gn
+index 6d33643e80..8cefff9924 100644
+--- a/test/unittests/BUILD.gn
++++ b/test/unittests/BUILD.gn
+@@ -541,6 +541,7 @@ v8_source_set("unittests_sources") {
+     ]
+   } else if (v8_current_cpu == "s390" || v8_current_cpu == "s390x") {
+     sources += [
++      "assembler/disasm-s390-unittest.cc",
+       "assembler/turbo-assembler-s390-unittest.cc",
+       "compiler/s390/instruction-selector-s390-unittest.cc",
+     ]
+diff --git a/test/cctest/test-disasm-s390.cc b/test/unittests/assembler/disasm-s390-unittest.cc
+similarity index 98%
+rename from test/cctest/test-disasm-s390.cc
+rename to test/unittests/assembler/disasm-s390-unittest.cc
+index f44b3e1599..bb2bfe8163 100644
+--- a/test/cctest/test-disasm-s390.cc
++++ b/test/unittests/assembler/disasm-s390-unittest.cc
+@@ -28,18 +28,19 @@
+ 
+ #include <stdlib.h>
+ 
+-#include "src/init/v8.h"
+-
+ #include "src/codegen/macro-assembler.h"
+ #include "src/debug/debug.h"
+ #include "src/diagnostics/disasm.h"
+ #include "src/diagnostics/disassembler.h"
+ #include "src/execution/frames-inl.h"
++#include "src/init/v8.h"
+ #include "test/cctest/cctest.h"
+ 
+ namespace v8 {
+ namespace internal {
+ 
++using DisasmS390Test = TestWithIsolate;
++
+ bool DisassembleAndCompare(byte* pc, const char* compare_string) {
+   disasm::NameConverter converter;
+   disasm::Disassembler disasm(converter);
+@@ -63,9 +64,7 @@ bool DisassembleAndCompare(byte* pc, const char* compare_string) {
+ // disassembler. Declare the variables and allocate the data structures used
+ // in the rest of the macros.
+ #define SET_UP()                                             \
+-  CcTest::InitializeVM();                                    \
+-  Isolate* isolate = CcTest::i_isolate();                    \
+-  HandleScope scope(isolate);                                \
++  HandleScope scope(isolate());                              \
+   byte* buffer = reinterpret_cast<byte*>(malloc(4 * 1024));  \
+   Assembler assm(AssemblerOptions{},                         \
+                  ExternalAssemblerBuffer(buffer, 4 * 1024)); \
+@@ -93,7 +92,7 @@ bool DisassembleAndCompare(byte* pc, const char* compare_string) {
+     FATAL("S390 Disassembler tests failed.\n"); \
+   }
+ 
+-TEST(TwoBytes) {
++TEST_F(DisasmS390Test, TwoBytes) {
+   SET_UP();
+ 
+   COMPARE(ar(r3, r10), "1a3a           ar\tr3,r10");
+@@ -118,7 +117,7 @@ TEST(TwoBytes) {
+   VERIFY_RUN();
+ }
+ 
+-TEST(FourBytes) {
++TEST_F(DisasmS390Test, FourBytes) {
+   SET_UP();
+ 
+ #if V8_TARGET_ARCH_S390X
+@@ -170,7 +169,7 @@ TEST(FourBytes) {
+   VERIFY_RUN();
+ }
+ 
+-TEST(SixBytes) {
++TEST_F(DisasmS390Test, SixBytes) {
+   SET_UP();
+ 
+ #if V8_TARGET_ARCH_S390X
+-- 
+2.35.1
+

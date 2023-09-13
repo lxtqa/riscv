@@ -1,0 +1,1757 @@
+From 539b50f5ae2f793156ecdae679e18fe1214e57cc Mon Sep 17 00:00:00 2001
+From: Jakob Linke <jgruber@chromium.org>
+Date: Wed, 11 Jan 2023 11:08:53 +0100
+Subject: [PATCH] [turbofan] Add the v8_enable_turbofan build option
+
+When disabled, Turbofan is fully excluded from the compilation result.
+This is expected to reduce V8's contribution to chromium's binary size
+by roughly 20%.
+
+If Turbofan is disabled, Maglev and Webassembly must also be disabled
+(since both depend on TF).
+
+Note this new configuration (v8_enable_turbofan=false) is not yet
+used anywhere - we'll probably enable it for lite_mode bots in an
+upcoming CL for test coverage.
+
+Changes in detail:
+- Split out all src/compiler files from the main source sets. This
+  was mostly done already, here we only clean up the few files that
+  were left.
+- Define a new main TF entry point in turbofan.h. `NewCompilationJob`
+  replaces `Pipeline::NewCompilationJob`.
+- When TF is enabled, turbofan-enabled.cc implements the above.
+- When disabled, turbofan-disabled stubs out the above with a runtime
+  FATAL message.
+- The build process is modified s.t. mksnapshot always has TF
+  available since it's needed to generate builtins. When disabled,
+  TF is removed from other components, in particular it is no longer
+  included in v8_compiler and transitively in v8_base.
+- When disabled, v8_for_testing no longer has v8_initializers
+  available. These were only needed for test-serialize.cc, which
+  is now excluded from this build mode.
+- When disabled, remove all related cctest/ und unittest/ files from
+  the build.
+
+Bug: v8:13629
+Change-Id: I63ab7632f03d0ee4a787cfc01574b5fdb08fd80b
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4128529
+Reviewed-by: Tobias Tebbi <tebbi@chromium.org>
+Auto-Submit: Jakob Linke <jgruber@chromium.org>
+Reviewed-by: Michael Achenbach <machenbach@chromium.org>
+Reviewed-by: Victor Gomes <victorgomes@chromium.org>
+Commit-Queue: Jakob Linke <jgruber@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#85210}
+---
+ BUILD.bazel                                   |   5 +
+ BUILD.gn                                      | 188 +++++++++++-----
+ bazel/defs.bzl                                |   1 +
+ gni/v8.gni                                    |  15 ++
+ src/DEPS                                      |   2 +-
+ src/builtins/builtins-descriptors.h           |   7 +-
+ src/codegen/compiler.cc                       |  12 +-
+ src/common/globals.h                          |   5 +
+ src/compiler/code-assembler.h                 |   3 +-
+ src/compiler/linkage.h                        |   3 +-
+ src/compiler/turbofan-disabled.cc             |  25 +++
+ src/compiler/turbofan-enabled.cc              |  27 +++
+ src/compiler/turbofan.h                       |  39 ++++
+ src/flags/flag-definitions.h                  |   9 +
+ src/flags/flags.cc                            |   4 +-
+ src/runtime/runtime-test.cc                   |   6 +-
+ test/cctest/BUILD.gn                          |  85 +++----
+ test/cctest/cctest.cc                         |   4 +
+ test/cctest/heap/test-heap.cc                 |  24 +-
+ test/cctest/test-api.cc                       |  28 +--
+ test/cctest/test-cpu-profiler.cc              |  14 +-
+ test/cctest/test-profile-generator.cc         |   4 +-
+ test/mjsunit/optimized-string-includes.js     |  18 +-
+ test/unittests/BUILD.gn                       | 209 ++++++++++--------
+ tools/testrunner/base_runner.py               |   2 +
+ tools/testrunner/build_config.py              |   2 +
+ tools/testrunner/local/variants.py            |   4 +-
+ .../testroot1/out/build/v8_build_config.json  |   1 +
+ .../testroot2/out/build/v8_build_config.json  |   1 +
+ .../testroot3/out/build/v8_build_config.json  |   1 +
+ .../out.gn/build/v8_build_config.json         |   1 +
+ .../testroot6/out/build/v8_build_config.json  |   1 +
+ 32 files changed, 503 insertions(+), 247 deletions(-)
+ create mode 100644 src/compiler/turbofan-disabled.cc
+ create mode 100644 src/compiler/turbofan-enabled.cc
+ create mode 100644 src/compiler/turbofan.h
+
+diff --git a/BUILD.bazel b/BUILD.bazel
+index 099ec2ea90..8efca775f3 100644
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -146,6 +146,8 @@ v8_flag(name = "v8_enable_verify_predictable")
+ 
+ v8_flag(name = "v8_enable_test_features")
+ 
++v8_flag(name = "v8_enable_turbofan")
++
+ v8_flag(
+     name = "v8_enable_webassembly",
+     default = True,
+@@ -320,6 +322,7 @@ v8_config(
+         "v8_enable_snapshot_native_code_counters": "V8_SNAPSHOT_NATIVE_CODE_COUNTERS",
+         "v8_enable_static_roots": "V8_STATIC_ROOTS",
+         "v8_enable_trace_maps": "V8_TRACE_MAPS",
++        "v8_enable_turbofan": "V8_ENABLE_TURBOFAN",
+         "v8_enable_v8_checks": "V8_ENABLE_CHECKS",
+         "v8_enable_verify_csa": "ENABLE_VERIFY_CSA",
+         "v8_enable_verify_heap": "VERIFY_HEAP",
+@@ -2894,6 +2897,8 @@ filegroup(
+         "src/compiler/state-values-utils.h",
+         "src/compiler/store-store-elimination.cc",
+         "src/compiler/store-store-elimination.h",
++        "src/compiler/turbofan-enabled.cc",
++        "src/compiler/turbofan.h",
+         "src/compiler/turboshaft/assembler.cc",
+         "src/compiler/turboshaft/assembler.h",
+         "src/compiler/turboshaft/assert-types-reducer.h",
+diff --git a/BUILD.gn b/BUILD.gn
+index 187cd5ac1a..15fc373d07 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -207,10 +207,6 @@ declare_args() {
+   # Sets -dV8_EXTERNAL_CODE_SPACE
+   v8_enable_external_code_space = ""
+ 
+-  # Enable the Maglev compiler.
+-  # Sets -dV8_ENABLE_MAGLEV
+-  v8_enable_maglev = ""
+-
+   # With post mortem support enabled, metadata is embedded into libv8 that
+   # describes various parameters of the VM for use by debuggers. See
+   # tools/gen-postmortem-metadata.py for details.
+@@ -462,8 +458,12 @@ if (v8_enable_external_code_space == "") {
+        (target_os != "fuchsia" && v8_current_cpu == "arm64"))
+ }
+ if (v8_enable_maglev == "") {
+-  v8_enable_maglev = v8_current_cpu == "x64" && v8_enable_pointer_compression
++  v8_enable_maglev = v8_enable_turbofan && v8_current_cpu == "x64" &&
++                     v8_enable_pointer_compression
+ }
++assert(v8_enable_turbofan || !v8_enable_maglev,
++       "Maglev is not available when Turbofan is disabled.")
++
+ if (v8_builtins_profiling_log_file == "default") {
+   v8_builtins_profiling_log_file = ""
+ 
+@@ -1050,6 +1050,9 @@ config("features") {
+   if (v8_enable_maglev) {
+     defines += [ "V8_ENABLE_MAGLEV" ]
+   }
++  if (v8_enable_turbofan) {
++    defines += [ "V8_ENABLE_TURBOFAN" ]
++  }
+   if (v8_enable_swiss_name_dictionary) {
+     defines += [ "V8_ENABLE_SWISS_NAME_DICTIONARY" ]
+   }
+@@ -2362,6 +2365,7 @@ action("v8_dump_build_config") {
+     "v8_enable_single_generation=$v8_enable_single_generation",
+     "v8_enable_slow_dchecks=$v8_enable_slow_dchecks",
+     "v8_enable_third_party_heap=$v8_enable_third_party_heap",
++    "v8_enable_turbofan=$v8_enable_turbofan",
+     "v8_enable_verify_csa=$v8_enable_verify_csa",
+     "v8_enable_verify_heap=$v8_enable_verify_heap",
+     "v8_enable_verify_predictable=$v8_enable_verify_predictable",
+@@ -2999,6 +3003,7 @@ v8_header_set("v8_internal_headers") {
+     "src/compiler/simplified-operator.h",
+     "src/compiler/state-values-utils.h",
+     "src/compiler/store-store-elimination.h",
++    "src/compiler/turbofan.h",
+     "src/compiler/turboshaft/assembler.h",
+     "src/compiler/turboshaft/assert-types-reducer.h",
+     "src/compiler/turboshaft/branch-elimination-reducer.h",
+@@ -4265,6 +4270,7 @@ v8_compiler_sources = [
+   "src/compiler/simplified-operator.cc",
+   "src/compiler/state-values-utils.cc",
+   "src/compiler/store-store-elimination.cc",
++  "src/compiler/turbofan-enabled.cc",
+   "src/compiler/type-cache.cc",
+   "src/compiler/type-narrowing-reducer.cc",
+   "src/compiler/typed-optimization.cc",
+@@ -4273,10 +4279,93 @@ v8_compiler_sources = [
+   "src/compiler/value-numbering-reducer.cc",
+   "src/compiler/verifier.cc",
+   "src/compiler/zone-stats.cc",
+-  "src/utils/hex-format.cc",
+-  "src/utils/sha-256.cc",
+ ]
+ 
++if (v8_current_cpu == "x86") {
++  v8_compiler_sources += [
++    ### gcmole(ia32) ###
++    "src/compiler/backend/ia32/code-generator-ia32.cc",
++    "src/compiler/backend/ia32/instruction-scheduler-ia32.cc",
++    "src/compiler/backend/ia32/instruction-selector-ia32.cc",
++  ]
++} else if (v8_current_cpu == "x64") {
++  v8_compiler_sources += [
++    ### gcmole(x64) ###
++    "src/compiler/backend/x64/code-generator-x64.cc",
++    "src/compiler/backend/x64/instruction-scheduler-x64.cc",
++    "src/compiler/backend/x64/instruction-selector-x64.cc",
++    "src/compiler/backend/x64/unwinding-info-writer-x64.cc",
++  ]
++} else if (v8_current_cpu == "arm") {
++  v8_compiler_sources += [
++    ### gcmole(arm) ###
++    "src/compiler/backend/arm/code-generator-arm.cc",
++    "src/compiler/backend/arm/instruction-scheduler-arm.cc",
++    "src/compiler/backend/arm/instruction-selector-arm.cc",
++    "src/compiler/backend/arm/unwinding-info-writer-arm.cc",
++  ]
++} else if (v8_current_cpu == "arm64") {
++  v8_compiler_sources += [
++    ### gcmole(arm64) ###
++    "src/compiler/backend/arm64/code-generator-arm64.cc",
++    "src/compiler/backend/arm64/instruction-scheduler-arm64.cc",
++    "src/compiler/backend/arm64/instruction-selector-arm64.cc",
++    "src/compiler/backend/arm64/unwinding-info-writer-arm64.cc",
++  ]
++} else if (v8_current_cpu == "mips64" || v8_current_cpu == "mips64el") {
++  v8_compiler_sources += [
++    ### gcmole(mips64el) ###
++    "src/compiler/backend/mips64/code-generator-mips64.cc",
++    "src/compiler/backend/mips64/instruction-scheduler-mips64.cc",
++    "src/compiler/backend/mips64/instruction-selector-mips64.cc",
++  ]
++} else if (v8_current_cpu == "loong64") {
++  v8_compiler_sources += [
++    ### gcmole(loong64) ###
++    "src/compiler/backend/loong64/code-generator-loong64.cc",
++    "src/compiler/backend/loong64/instruction-scheduler-loong64.cc",
++    "src/compiler/backend/loong64/instruction-selector-loong64.cc",
++  ]
++} else if (v8_current_cpu == "ppc") {
++  v8_compiler_sources += [
++    ### gcmole(ppc) ###
++    "src/compiler/backend/ppc/code-generator-ppc.cc",
++    "src/compiler/backend/ppc/instruction-scheduler-ppc.cc",
++    "src/compiler/backend/ppc/instruction-selector-ppc.cc",
++    "src/compiler/backend/ppc/unwinding-info-writer-ppc.cc",
++  ]
++} else if (v8_current_cpu == "ppc64") {
++  v8_compiler_sources += [
++    ### gcmole(ppc64) ###
++    "src/compiler/backend/ppc/code-generator-ppc.cc",
++    "src/compiler/backend/ppc/instruction-scheduler-ppc.cc",
++    "src/compiler/backend/ppc/instruction-selector-ppc.cc",
++    "src/compiler/backend/ppc/unwinding-info-writer-ppc.cc",
++  ]
++} else if (v8_current_cpu == "s390" || v8_current_cpu == "s390x") {
++  v8_compiler_sources += [
++    ### gcmole(s390) ###
++    "src/compiler/backend/s390/code-generator-s390.cc",
++    "src/compiler/backend/s390/instruction-scheduler-s390.cc",
++    "src/compiler/backend/s390/instruction-selector-s390.cc",
++    "src/compiler/backend/s390/unwinding-info-writer-s390.cc",
++  ]
++} else if (v8_current_cpu == "riscv64") {
++  v8_compiler_sources += [
++    ### gcmole(riscv64) ###
++    "src/compiler/backend/riscv/code-generator-riscv.cc",
++    "src/compiler/backend/riscv/instruction-scheduler-riscv.cc",
++    "src/compiler/backend/riscv/instruction-selector-riscv64.cc",
++  ]
++} else if (v8_current_cpu == "riscv32") {
++  v8_compiler_sources += [
++    ### gcmole(riscv32) ###
++    "src/compiler/backend/riscv/code-generator-riscv.cc",
++    "src/compiler/backend/riscv/instruction-scheduler-riscv.cc",
++    "src/compiler/backend/riscv/instruction-selector-riscv32.cc",
++  ]
++}
++
+ if (v8_enable_webassembly) {
+   v8_compiler_sources += [
+     "src/compiler/int64-lowering.cc",
+@@ -4299,8 +4388,12 @@ if (v8_enable_wasm_simd256_revec) {
+   ]
+ }
+ 
+-# The src/compiler files with optimizations.
+-v8_source_set("v8_compiler_opt") {
++# The src/compiler files for use in mksnapshot.
++# - These might be built with additional optimizations if
++#   v8_enable_fast_mksnapshot is set.
++# - We always include Turbofan even if v8_enable_turbofan is unset s.t.
++#   builtins can be generated by mksnapshot.
++v8_source_set("v8_compiler_for_mksnapshot_source_set") {
+   visibility = [ ":*" ]  # Only targets in this file can depend on this.
+ 
+   sources = v8_compiler_sources
+@@ -4331,11 +4424,16 @@ v8_source_set("v8_compiler_opt") {
+   }
+ }
+ 
+-# The src/compiler files with default optimization behavior.
++# The src/compiler files with default behavior.
+ v8_source_set("v8_compiler") {
+   visibility = [ ":*" ]  # Only targets in this file can depend on this.
+ 
+-  sources = v8_compiler_sources
++  if (v8_enable_turbofan) {
++    sources = v8_compiler_sources
++  } else {
++    # With Turbofan disabled, we only include the stubbed-out API.
++    sources = [ "src/compiler/turbofan-disabled.cc" ]
++  }
+ 
+   public_deps = [
+     ":generate_bytecode_builtins_list",
+@@ -4394,8 +4492,14 @@ v8_source_set("v8_turboshaft") {
+ }
+ 
+ group("v8_compiler_for_mksnapshot") {
+-  if (is_debug && !v8_optimized_debug && v8_enable_fast_mksnapshot) {
+-    deps = [ ":v8_compiler_opt" ]
++  if ((is_debug && !v8_optimized_debug && v8_enable_fast_mksnapshot) ||
++      !v8_enable_turbofan) {
++    # mksnapshot needs its own version of the compiler, either because
++    # a) we're optimizing for mksnapshot execution speed and the compiler
++    #    should be optimized even if the rest of V8 is not; or
++    # b) Turbofan is disabled and thus not compiled into the rest of V8, yet
++    #    mksnapshot still needs TF to generate builtins.
++    deps = [ ":v8_compiler_for_mksnapshot_source_set" ]
+   } else {
+     deps = [ ":v8_compiler" ]
+   }
+@@ -4855,9 +4959,11 @@ v8_source_set("v8_base_without_compiler") {
+     "src/utils/allocation.cc",
+     "src/utils/bit-vector.cc",
+     "src/utils/detachable-vector.cc",
++    "src/utils/hex-format.cc",
+     "src/utils/identity-map.cc",
+     "src/utils/memcopy.cc",
+     "src/utils/ostreams.cc",
++    "src/utils/sha-256.cc",
+     "src/utils/utils.cc",
+     "src/utils/version.cc",
+     "src/web-snapshot/web-snapshot.cc",
+@@ -4990,9 +5096,6 @@ v8_source_set("v8_base_without_compiler") {
+       "src/codegen/ia32/cpu-ia32.cc",
+       "src/codegen/ia32/macro-assembler-ia32.cc",
+       "src/codegen/shared-ia32-x64/macro-assembler-shared-ia32-x64.cc",
+-      "src/compiler/backend/ia32/code-generator-ia32.cc",
+-      "src/compiler/backend/ia32/instruction-scheduler-ia32.cc",
+-      "src/compiler/backend/ia32/instruction-selector-ia32.cc",
+       "src/deoptimizer/ia32/deoptimizer-ia32.cc",
+       "src/diagnostics/ia32/disasm-ia32.cc",
+       "src/diagnostics/ia32/unwinder-ia32.cc",
+@@ -5006,10 +5109,6 @@ v8_source_set("v8_base_without_compiler") {
+       "src/codegen/x64/assembler-x64.cc",
+       "src/codegen/x64/cpu-x64.cc",
+       "src/codegen/x64/macro-assembler-x64.cc",
+-      "src/compiler/backend/x64/code-generator-x64.cc",
+-      "src/compiler/backend/x64/instruction-scheduler-x64.cc",
+-      "src/compiler/backend/x64/instruction-selector-x64.cc",
+-      "src/compiler/backend/x64/unwinding-info-writer-x64.cc",
+       "src/deoptimizer/x64/deoptimizer-x64.cc",
+       "src/diagnostics/x64/disasm-x64.cc",
+       "src/diagnostics/x64/eh-frame-x64.cc",
+@@ -5045,10 +5144,6 @@ v8_source_set("v8_base_without_compiler") {
+       "src/codegen/arm/constants-arm.cc",
+       "src/codegen/arm/cpu-arm.cc",
+       "src/codegen/arm/macro-assembler-arm.cc",
+-      "src/compiler/backend/arm/code-generator-arm.cc",
+-      "src/compiler/backend/arm/instruction-scheduler-arm.cc",
+-      "src/compiler/backend/arm/instruction-selector-arm.cc",
+-      "src/compiler/backend/arm/unwinding-info-writer-arm.cc",
+       "src/deoptimizer/arm/deoptimizer-arm.cc",
+       "src/diagnostics/arm/disasm-arm.cc",
+       "src/diagnostics/arm/eh-frame-arm.cc",
+@@ -5068,10 +5163,6 @@ v8_source_set("v8_base_without_compiler") {
+       "src/codegen/arm64/macro-assembler-arm64.cc",
+       "src/codegen/arm64/register-arm64.cc",
+       "src/codegen/arm64/utils-arm64.cc",
+-      "src/compiler/backend/arm64/code-generator-arm64.cc",
+-      "src/compiler/backend/arm64/instruction-scheduler-arm64.cc",
+-      "src/compiler/backend/arm64/instruction-selector-arm64.cc",
+-      "src/compiler/backend/arm64/unwinding-info-writer-arm64.cc",
+       "src/deoptimizer/arm64/deoptimizer-arm64.cc",
+       "src/diagnostics/arm64/disasm-arm64.cc",
+       "src/diagnostics/arm64/eh-frame-arm64.cc",
+@@ -5113,9 +5204,6 @@ v8_source_set("v8_base_without_compiler") {
+       "src/codegen/mips64/cpu-mips64.cc",
+       "src/codegen/mips64/interface-descriptors-mips64-inl.h",
+       "src/codegen/mips64/macro-assembler-mips64.cc",
+-      "src/compiler/backend/mips64/code-generator-mips64.cc",
+-      "src/compiler/backend/mips64/instruction-scheduler-mips64.cc",
+-      "src/compiler/backend/mips64/instruction-selector-mips64.cc",
+       "src/deoptimizer/mips64/deoptimizer-mips64.cc",
+       "src/diagnostics/mips64/disasm-mips64.cc",
+       "src/diagnostics/mips64/unwinder-mips64.cc",
+@@ -5131,9 +5219,6 @@ v8_source_set("v8_base_without_compiler") {
+       "src/codegen/loong64/cpu-loong64.cc",
+       "src/codegen/loong64/interface-descriptors-loong64-inl.h",
+       "src/codegen/loong64/macro-assembler-loong64.cc",
+-      "src/compiler/backend/loong64/code-generator-loong64.cc",
+-      "src/compiler/backend/loong64/instruction-scheduler-loong64.cc",
+-      "src/compiler/backend/loong64/instruction-selector-loong64.cc",
+       "src/deoptimizer/loong64/deoptimizer-loong64.cc",
+       "src/diagnostics/loong64/disasm-loong64.cc",
+       "src/diagnostics/loong64/unwinder-loong64.cc",
+@@ -5148,10 +5233,6 @@ v8_source_set("v8_base_without_compiler") {
+       "src/codegen/ppc/constants-ppc.cc",
+       "src/codegen/ppc/cpu-ppc.cc",
+       "src/codegen/ppc/macro-assembler-ppc.cc",
+-      "src/compiler/backend/ppc/code-generator-ppc.cc",
+-      "src/compiler/backend/ppc/instruction-scheduler-ppc.cc",
+-      "src/compiler/backend/ppc/instruction-selector-ppc.cc",
+-      "src/compiler/backend/ppc/unwinding-info-writer-ppc.cc",
+       "src/deoptimizer/ppc/deoptimizer-ppc.cc",
+       "src/diagnostics/ppc/disasm-ppc.cc",
+       "src/diagnostics/ppc/eh-frame-ppc.cc",
+@@ -5167,10 +5248,6 @@ v8_source_set("v8_base_without_compiler") {
+       "src/codegen/ppc/constants-ppc.cc",
+       "src/codegen/ppc/cpu-ppc.cc",
+       "src/codegen/ppc/macro-assembler-ppc.cc",
+-      "src/compiler/backend/ppc/code-generator-ppc.cc",
+-      "src/compiler/backend/ppc/instruction-scheduler-ppc.cc",
+-      "src/compiler/backend/ppc/instruction-selector-ppc.cc",
+-      "src/compiler/backend/ppc/unwinding-info-writer-ppc.cc",
+       "src/deoptimizer/ppc/deoptimizer-ppc.cc",
+       "src/diagnostics/ppc/disasm-ppc.cc",
+       "src/diagnostics/ppc/eh-frame-ppc.cc",
+@@ -5186,10 +5263,6 @@ v8_source_set("v8_base_without_compiler") {
+       "src/codegen/s390/constants-s390.cc",
+       "src/codegen/s390/cpu-s390.cc",
+       "src/codegen/s390/macro-assembler-s390.cc",
+-      "src/compiler/backend/s390/code-generator-s390.cc",
+-      "src/compiler/backend/s390/instruction-scheduler-s390.cc",
+-      "src/compiler/backend/s390/instruction-selector-s390.cc",
+-      "src/compiler/backend/s390/unwinding-info-writer-s390.cc",
+       "src/deoptimizer/s390/deoptimizer-s390.cc",
+       "src/diagnostics/s390/disasm-s390.cc",
+       "src/diagnostics/s390/eh-frame-s390.cc",
+@@ -5215,9 +5288,6 @@ v8_source_set("v8_base_without_compiler") {
+       "src/codegen/riscv/extension-riscv-zicsr.cc",
+       "src/codegen/riscv/extension-riscv-zifencei.cc",
+       "src/codegen/riscv/macro-assembler-riscv.cc",
+-      "src/compiler/backend/riscv/code-generator-riscv.cc",
+-      "src/compiler/backend/riscv/instruction-scheduler-riscv.cc",
+-      "src/compiler/backend/riscv/instruction-selector-riscv64.cc",
+       "src/deoptimizer/riscv/deoptimizer-riscv.cc",
+       "src/diagnostics/riscv/disasm-riscv.cc",
+       "src/diagnostics/riscv/unwinder-riscv.cc",
+@@ -5242,9 +5312,6 @@ v8_source_set("v8_base_without_compiler") {
+       "src/codegen/riscv/extension-riscv-zicsr.cc",
+       "src/codegen/riscv/extension-riscv-zifencei.cc",
+       "src/codegen/riscv/macro-assembler-riscv.cc",
+-      "src/compiler/backend/riscv/code-generator-riscv.cc",
+-      "src/compiler/backend/riscv/instruction-scheduler-riscv.cc",
+-      "src/compiler/backend/riscv/instruction-selector-riscv32.cc",
+       "src/deoptimizer/riscv/deoptimizer-riscv.cc",
+       "src/diagnostics/riscv/disasm-riscv.cc",
+       "src/diagnostics/riscv/unwinder-riscv.cc",
+@@ -5365,8 +5432,11 @@ group("v8_base") {
+   public_deps = [
+     ":v8_base_without_compiler",
+     ":v8_compiler",
+-    ":v8_turboshaft",
+   ]
++
++  if (v8_enable_turbofan) {
++    public_deps += [ ":v8_turboshaft" ]
++  }
+ }
+ 
+ v8_source_set("torque_base") {
+@@ -6572,10 +6642,14 @@ if (is_component_build) {
+       ":torque_ls_base",
+       ":v8_base",
+       ":v8_headers",
+-      ":v8_initializers",
+       ":v8_snapshot",
+     ]
+ 
++    if (v8_enable_turbofan) {
++      # For cctest/test-serialize.
++      public_deps += [ ":v8_initializers" ]
++    }
++
+     configs = [ ":internal_config" ]
+ 
+     public_configs = [ ":external_config" ]
+@@ -6628,10 +6702,14 @@ if (is_component_build) {
+       ":torque_base",
+       ":torque_ls_base",
+       ":v8_base",
+-      ":v8_initializers",
+       ":v8_snapshot",
+     ]
+ 
++    if (v8_enable_turbofan) {
++      # For cctest/test-serialize.
++      public_deps += [ ":v8_initializers" ]
++    }
++
+     public_configs = [ ":external_config" ]
+   }
+ 
+diff --git a/bazel/defs.bzl b/bazel/defs.bzl
+index facf35803e..248add01dc 100644
+--- a/bazel/defs.bzl
++++ b/bazel/defs.bzl
+@@ -540,6 +540,7 @@ def build_config_content(cpu, icu):
+         ("v8_enable_verify_heap", "false"),
+         ("v8_enable_slow_dchecks", "false"),
+         ("v8_enable_maglev", "false"),
++        ("v8_enable_turbofan", "true"),
+         ("v8_enable_disassembler", "false"),
+         ("is_DEBUG_defined", "false"),
+         ("v8_enable_gdbjit", "false"),
+diff --git a/gni/v8.gni b/gni/v8.gni
+index f297eb379b..accae349a9 100644
+--- a/gni/v8.gni
++++ b/gni/v8.gni
+@@ -63,10 +63,19 @@ declare_args() {
+   # Sets -DV8_LITE_MODE.
+   v8_enable_lite_mode = false
+ 
++  # Enable the Turbofan compiler.
++  # Sets -dV8_ENABLE_TURBOFAN.
++  v8_enable_turbofan = ""
++
++  # Enable the Maglev compiler.
++  # Sets -dV8_ENABLE_MAGLEV
++  v8_enable_maglev = ""
++
+   # Include support for WebAssembly. If disabled, the 'WebAssembly' global
+   # will not be available, and embedder APIs to generate WebAssembly modules
+   # will fail. Also, asm.js will not be translated to WebAssembly and will be
+   # executed as standard JavaScript instead.
++  # Sets -dV8_ENABLE_WEBASSEMBLY.
+   v8_enable_webassembly = ""
+ 
+   # Enable 256-bit long vector re-vectorization pass in WASM compilation pipeline.
+@@ -135,6 +144,12 @@ if (v8_enable_webassembly == "") {
+ assert(!(v8_enable_webassembly && v8_enable_lite_mode),
+        "Webassembly is not available in lite mode.")
+ 
++if (v8_enable_turbofan == "") {
++  v8_enable_turbofan = true
++}
++assert(v8_enable_turbofan || !v8_enable_webassembly,
++       "Webassembly is not available when Turbofan is disabled.")
++
+ # Points to // in v8 stand-alone or to //v8/ in chromium. We need absolute
+ # paths for all configs in templates as they are shared in different
+ # subdirectories.
+diff --git a/src/DEPS b/src/DEPS
+index aeb32f23a1..9f5fcfd272 100644
+--- a/src/DEPS
++++ b/src/DEPS
+@@ -10,8 +10,8 @@ include_rules = [
+   "-src/bigint",
+   "+src/bigint/bigint.h",
+   "-src/compiler",
+-  "+src/compiler/pipeline.h",
+   "+src/compiler/code-assembler.h",
++  "+src/compiler/turbofan.h",
+   "+src/compiler/wasm-compiler-definitions.h",
+   "+src/compiler/wasm-compiler.h",
+   "-src/heap",
+diff --git a/src/builtins/builtins-descriptors.h b/src/builtins/builtins-descriptors.h
+index 12f7f58ec5..dd05ed4aa6 100644
+--- a/src/builtins/builtins-descriptors.h
++++ b/src/builtins/builtins-descriptors.h
+@@ -5,10 +5,9 @@
+ #ifndef V8_BUILTINS_BUILTINS_DESCRIPTORS_H_
+ #define V8_BUILTINS_BUILTINS_DESCRIPTORS_H_
+ 
+-#include "src/builtins/builtins.h"
++#include "src/builtins/builtins-definitions.h"
+ #include "src/codegen/interface-descriptors.h"
+-#include "src/compiler/code-assembler.h"
+-#include "src/objects/shared-function-info.h"
++#include "src/common/globals.h"
+ 
+ namespace v8 {
+ namespace internal {
+@@ -17,7 +16,7 @@ namespace internal {
+ #define DEFINE_TFJ_INTERFACE_DESCRIPTOR(Name, Argc, ...)                 \
+   struct Builtin_##Name##_InterfaceDescriptor {                          \
+     enum ParameterIndices {                                              \
+-      kJSTarget = compiler::CodeAssembler::kTargetParameterIndex,        \
++      kJSTarget = kJSCallClosureParameterIndex,                          \
+       ##__VA_ARGS__,                                                     \
+       kJSNewTarget,                                                      \
+       kJSActualArgumentsCount,                                           \
+diff --git a/src/codegen/compiler.cc b/src/codegen/compiler.cc
+index 187a46d510..773b79a5bb 100644
+--- a/src/codegen/compiler.cc
++++ b/src/codegen/compiler.cc
+@@ -26,7 +26,7 @@
+ #include "src/common/message-template.h"
+ #include "src/compiler-dispatcher/lazy-compile-dispatcher.h"
+ #include "src/compiler-dispatcher/optimizing-compile-dispatcher.h"
+-#include "src/compiler/pipeline.h"
++#include "src/compiler/turbofan.h"
+ #include "src/debug/debug.h"
+ #include "src/debug/liveedit.h"
+ #include "src/diagnostics/code-tracer.h"
+@@ -1141,13 +1141,15 @@ MaybeHandle<CodeT> CompileTurbofan(Isolate* isolate,
+ 
+   DCHECK(!isolate->has_pending_exception());
+   PostponeInterruptsScope postpone(isolate);
+-  bool has_script = shared->script().IsScript();
++  const compiler::IsScriptAvailable has_script =
++      shared->script().IsScript() ? compiler::IsScriptAvailable::kYes
++                                  : compiler::IsScriptAvailable::kNo;
+   // BUG(5946): This DCHECK is necessary to make certain that we won't
+   // tolerate the lack of a script without bytecode.
+-  DCHECK_IMPLIES(!has_script, shared->HasBytecodeArray());
++  DCHECK_IMPLIES(has_script == compiler::IsScriptAvailable::kNo,
++                 shared->HasBytecodeArray());
+   std::unique_ptr<TurbofanCompilationJob> job(
+-      compiler::Pipeline::NewCompilationJob(
+-          isolate, function, CodeKind::TURBOFAN, has_script, osr_offset));
++      compiler::NewCompilationJob(isolate, function, has_script, osr_offset));
+ 
+   if (result_behavior == CompileResultBehavior::kDiscardForTesting) {
+     job->compilation_info()->set_discard_result_for_testing();
+diff --git a/src/common/globals.h b/src/common/globals.h
+index 2b3713ea47..2d42176b02 100644
+--- a/src/common/globals.h
++++ b/src/common/globals.h
+@@ -2090,6 +2090,11 @@ inline constexpr int JSParameterCount(int param_count_without_receiver) {
+   return param_count_without_receiver + kJSArgcReceiverSlots;
+ }
+ 
++// A special {Parameter} index for JSCalls that represents the closure.
++// The constant is defined here for accessibility (without having to include TF
++// internals), even though it is mostly relevant to Turbofan.
++constexpr int kJSCallClosureParameterIndex = -1;
++
+ // Opaque data type for identifying stack frames. Used extensively
+ // by the debugger.
+ // ID_MIN_VALUE and ID_MAX_VALUE are specified to ensure that enumeration type
+diff --git a/src/compiler/code-assembler.h b/src/compiler/code-assembler.h
+index 2fc7ee4fd0..0bd840f819 100644
+--- a/src/compiler/code-assembler.h
++++ b/src/compiler/code-assembler.h
+@@ -583,7 +583,8 @@ class V8_EXPORT_PRIVATE CodeAssembler {
+     return UncheckedCast<UintPtrT>(x);
+   }
+ 
+-  static constexpr int kTargetParameterIndex = -1;
++  static constexpr int kTargetParameterIndex = kJSCallClosureParameterIndex;
++  static_assert(kTargetParameterIndex == -1);
+ 
+   template <class T>
+   TNode<T> Parameter(
+diff --git a/src/compiler/linkage.h b/src/compiler/linkage.h
+index 3b41f3bc19..a80a3eca28 100644
+--- a/src/compiler/linkage.h
++++ b/src/compiler/linkage.h
+@@ -587,7 +587,8 @@ class V8_EXPORT_PRIVATE Linkage : public NON_EXPORTED_BASE(ZoneObject) {
+   }
+ 
+   // A special {Parameter} index for JSCalls that represents the closure.
+-  static constexpr int kJSCallClosureParamIndex = -1;
++  static constexpr int kJSCallClosureParamIndex = kJSCallClosureParameterIndex;
++  static_assert(kJSCallClosureParamIndex == -1);
+ 
+   // A special {OsrValue} index to indicate the context spill slot.
+   static const int kOsrContextSpillSlotIndex = -1;
+diff --git a/src/compiler/turbofan-disabled.cc b/src/compiler/turbofan-disabled.cc
+new file mode 100644
+index 0000000000..53c91a24e6
+--- /dev/null
++++ b/src/compiler/turbofan-disabled.cc
+@@ -0,0 +1,25 @@
++// Copyright 2023 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++//
++// This file stubs out the Turbofan API when TF is disabled.
++// See also v8_enable_turbofan in BUILD.gn.
++
++#include "src/codegen/compiler.h"
++#include "src/compiler/turbofan.h"
++
++namespace v8 {
++namespace internal {
++namespace compiler {
++
++std::unique_ptr<TurbofanCompilationJob> NewCompilationJob(
++    Isolate* isolate, Handle<JSFunction> function, IsScriptAvailable has_script,
++    BytecodeOffset osr_offset) {
++  FATAL(
++      "compiler::NewCompilationJob must not be called when Turbofan is "
++      "disabled (`v8_enable_turbofan = false`)");
++}
++
++}  // namespace compiler
++}  // namespace internal
++}  // namespace v8
+diff --git a/src/compiler/turbofan-enabled.cc b/src/compiler/turbofan-enabled.cc
+new file mode 100644
+index 0000000000..8b4661a65a
+--- /dev/null
++++ b/src/compiler/turbofan-enabled.cc
+@@ -0,0 +1,27 @@
++// Copyright 2023 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++//
++// This file implements the Turbofan API when TF is enabled.
++// See also v8_enable_turbofan in BUILD.gn.
++
++#include "src/codegen/compiler.h"
++#include "src/compiler/pipeline.h"
++#include "src/compiler/turbofan.h"
++#include "src/objects/code-kind.h"
++
++namespace v8 {
++namespace internal {
++namespace compiler {
++
++std::unique_ptr<TurbofanCompilationJob> NewCompilationJob(
++    Isolate* isolate, Handle<JSFunction> function, IsScriptAvailable has_script,
++    BytecodeOffset osr_offset) {
++  return Pipeline::NewCompilationJob(isolate, function, CodeKind::TURBOFAN,
++                                     has_script == IsScriptAvailable::kYes,
++                                     osr_offset);
++}
++
++}  // namespace compiler
++}  // namespace internal
++}  // namespace v8
+diff --git a/src/compiler/turbofan.h b/src/compiler/turbofan.h
+new file mode 100644
+index 0000000000..5a91951902
+--- /dev/null
++++ b/src/compiler/turbofan.h
+@@ -0,0 +1,39 @@
++// Copyright 2023 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef V8_COMPILER_TURBOFAN_H_
++#define V8_COMPILER_TURBOFAN_H_
++
++#include <memory>
++
++// Clients of this interface shouldn't depend on compiler internals.
++// Do not include anything from src/compiler here, and keep includes minimal.
++
++#include "src/base/macros.h"
++#include "src/utils/utils.h"
++
++namespace v8 {
++namespace internal {
++
++class Isolate;
++class JSFunction;
++class TurbofanCompilationJob;
++
++namespace compiler {
++
++// Whether the given JSFunction has an associated Script.
++enum class IsScriptAvailable {
++  kNo,
++  kYes,
++};
++
++V8_EXPORT_PRIVATE std::unique_ptr<TurbofanCompilationJob> NewCompilationJob(
++    Isolate* isolate, Handle<JSFunction> function, IsScriptAvailable has_script,
++    BytecodeOffset osr_offset = BytecodeOffset::None());
++
++}  // namespace compiler
++}  // namespace internal
++}  // namespace v8
++
++#endif  // V8_COMPILER_TURBOFAN_H_
+diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
+index e2ce06a55b..bdba1e44c9 100644
+--- a/src/flags/flag-definitions.h
++++ b/src/flags/flag-definitions.h
+@@ -507,7 +507,9 @@ DEFINE_UINT(max_opt, 999,
+             "> 3 == any, 0 == ignition/interpreter, 1 == sparkplug/baseline, "
+             "2 == maglev, 3 == turbofan")
+ 
++#ifdef V8_ENABLE_TURBOFAN
+ DEFINE_WEAK_VALUE_IMPLICATION(max_opt < 3, turbofan, false)
++#endif  // V8_ENABLE_TURBOFAN
+ #ifdef V8_ENABLE_MAGLEV
+ DEFINE_WEAK_VALUE_IMPLICATION(max_opt < 2, maglev, false)
+ #endif  // V8_ENABLE_MAGLEV
+@@ -811,10 +813,17 @@ DEFINE_INT(deopt_every_n_times, 0,
+ DEFINE_BOOL(print_deopt_stress, false, "print number of possible deopt points")
+ 
+ // Flags for TurboFan.
++#ifdef V8_ENABLE_TURBOFAN
++#define V8_ENABLE_TURBOFAN_BOOL true
+ DEFINE_BOOL(turbofan, true, "use the Turbofan optimizing compiler")
+ // TODO(leszeks): Temporary alias until we make sure all our infra is passing
+ // --turbofan instead of --opt.
+ DEFINE_ALIAS_BOOL(opt, turbofan)
++#else
++#define V8_ENABLE_TURBOFAN_BOOL false
++DEFINE_BOOL_READONLY(turbofan, false, "use the Turbofan optimizing compiler")
++DEFINE_BOOL_READONLY(opt, false, "use the Turbofan optimizing compiler")
++#endif  // V8_ENABLE_TURBOFAN
+ 
+ DEFINE_BOOL(turbo_sp_frame_access, false,
+             "use stack pointer-relative access to frame wherever possible")
+diff --git a/src/flags/flags.cc b/src/flags/flags.cc
+index 2b9ae1dffe..e41b71f85e 100644
+--- a/src/flags/flags.cc
++++ b/src/flags/flags.cc
+@@ -909,7 +909,9 @@ class ImplicationProcessor {
+     return true;
+   }
+ 
+-  // Called from {DEFINE_*_IMPLICATION} in flag-definitions.h.
++  // Called from {DEFINE_*_IMPLICATION} in flag-definitions.h, when the
++  // conclusion flag is read-only (note this is the const overload of the
++  // function just above).
+   template <class T>
+   bool TriggerImplication(bool premise, const char* premise_name,
+                           const FlagValue<T>* conclusion_value,
+diff --git a/src/runtime/runtime-test.cc b/src/runtime/runtime-test.cc
+index a7a8f64cae..e33c7c3897 100644
+--- a/src/runtime/runtime-test.cc
++++ b/src/runtime/runtime-test.cc
+@@ -747,9 +747,9 @@ RUNTIME_FUNCTION(Runtime_GetOptimizationStatus) {
+   DCHECK_EQ(args.length(), 1);
+ 
+   int status = 0;
+-  if (v8_flags.lite_mode || v8_flags.jitless) {
+-    // Both jitless and lite modes cannot optimize. Unit tests should handle
+-    // these the same way. In the future, the two flags may become synonyms.
++  if (v8_flags.lite_mode || v8_flags.jitless || !V8_ENABLE_TURBOFAN_BOOL) {
++    // These modes cannot optimize. Unit tests should handle these the same
++    // way.
+     status |= static_cast<int>(OptimizationStatus::kLiteMode);
+   }
+   if (!isolate->use_optimizer()) {
+diff --git a/test/cctest/BUILD.gn b/test/cctest/BUILD.gn
+index 93595d5c33..950d8ab27b 100644
+--- a/test/cctest/BUILD.gn
++++ b/test/cctest/BUILD.gn
+@@ -91,38 +91,6 @@ v8_source_set("cctest_sources") {
+     "../common/value-helper.h",
+     "cctest-utils.h",
+     "collector.h",
+-    "compiler/codegen-tester.cc",
+-    "compiler/codegen-tester.h",
+-    "compiler/function-tester.cc",
+-    "compiler/function-tester.h",
+-    "compiler/test-atomic-load-store-codegen.cc",
+-    "compiler/test-basic-block-profiler.cc",
+-    "compiler/test-branch-combine.cc",
+-    "compiler/test-calls-with-arraylike-or-spread.cc",
+-    "compiler/test-code-assembler.cc",
+-    "compiler/test-code-generator.cc",
+-    "compiler/test-concurrent-shared-function-info.cc",
+-    "compiler/test-gap-resolver.cc",
+-    "compiler/test-graph-visualizer.cc",
+-    "compiler/test-instruction-scheduler.cc",
+-    "compiler/test-instruction.cc",
+-    "compiler/test-js-constant-cache.cc",
+-    "compiler/test-js-context-specialization.cc",
+-    "compiler/test-js-typed-lowering.cc",
+-    "compiler/test-jump-threading.cc",
+-    "compiler/test-linkage.cc",
+-    "compiler/test-loop-analysis.cc",
+-    "compiler/test-machine-operator-reducer.cc",
+-    "compiler/test-node.cc",
+-    "compiler/test-operator.cc",
+-    "compiler/test-representation-change.cc",
+-    "compiler/test-run-calls-to-external-references.cc",
+-    "compiler/test-run-load-store.cc",
+-    "compiler/test-run-machops.cc",
+-    "compiler/test-run-stackcheck.cc",
+-    "compiler/test-run-unwinding-info.cc",
+-    "compiler/test-run-variables.cc",
+-    "compiler/test-verify-type.cc",
+     "expression-type-collector-macros.h",
+     "feedback-vector-helper.h",
+     "heap/heap-tester.h",
+@@ -150,9 +118,6 @@ v8_source_set("cctest_sources") {
+     "print-extension.h",
+     "profiler-extension.cc",
+     "profiler-extension.h",
+-    "setup-isolate-for-tests.cc",
+-    "setup-isolate-for-tests.h",
+-    "test-accessor-assembler.cc",
+     "test-accessors.cc",
+     "test-allocation.cc",
+     "test-api-array-buffer.cc",
+@@ -161,12 +126,10 @@ v8_source_set("cctest_sources") {
+     "test-api-typed-array.cc",
+     "test-api.cc",
+     "test-api.h",
+-    "test-code-stub-assembler.cc",
+     "test-constantpool.cc",
+     "test-cpu-profiler.cc",
+     "test-debug-helper.cc",
+     "test-debug.cc",
+-    "test-descriptor-array.cc",
+     "test-disasm-regex-helper.cc",
+     "test-disasm-regex-helper.h",
+     "test-field-type-tracking.cc",
+@@ -185,11 +148,9 @@ v8_source_set("cctest_sources") {
+     "test-ptr-compr-cage.cc",
+     "test-random-number-generator.cc",
+     "test-sampler-api.cc",
+-    "test-serialize.cc",
+     "test-shared-strings.cc",
+     "test-smi-lexicographic-compare.cc",
+     "test-strings.cc",
+-    "test-swiss-name-dictionary-csa.cc",
+     "test-swiss-name-dictionary-infra.cc",
+     "test-swiss-name-dictionary.cc",
+     "test-trace-event.cc",
+@@ -201,11 +162,55 @@ v8_source_set("cctest_sources") {
+     "test-usecounters.cc",
+     "test-utils.cc",
+     "test-verifiers.cc",
+-    "torque/test-torque.cc",
+     "trace-extension.cc",
+     "trace-extension.h",
+   ]
+ 
++  if (v8_enable_turbofan) {
++    sources += [
++      "compiler/codegen-tester.cc",
++      "compiler/codegen-tester.h",
++      "compiler/function-tester.cc",
++      "compiler/function-tester.h",
++      "compiler/test-atomic-load-store-codegen.cc",
++      "compiler/test-basic-block-profiler.cc",
++      "compiler/test-branch-combine.cc",
++      "compiler/test-calls-with-arraylike-or-spread.cc",
++      "compiler/test-code-assembler.cc",
++      "compiler/test-code-generator.cc",
++      "compiler/test-concurrent-shared-function-info.cc",
++      "compiler/test-gap-resolver.cc",
++      "compiler/test-graph-visualizer.cc",
++      "compiler/test-instruction-scheduler.cc",
++      "compiler/test-instruction.cc",
++      "compiler/test-js-constant-cache.cc",
++      "compiler/test-js-context-specialization.cc",
++      "compiler/test-js-typed-lowering.cc",
++      "compiler/test-jump-threading.cc",
++      "compiler/test-linkage.cc",
++      "compiler/test-loop-analysis.cc",
++      "compiler/test-machine-operator-reducer.cc",
++      "compiler/test-node.cc",
++      "compiler/test-operator.cc",
++      "compiler/test-representation-change.cc",
++      "compiler/test-run-calls-to-external-references.cc",
++      "compiler/test-run-load-store.cc",
++      "compiler/test-run-machops.cc",
++      "compiler/test-run-stackcheck.cc",
++      "compiler/test-run-unwinding-info.cc",
++      "compiler/test-run-variables.cc",
++      "compiler/test-verify-type.cc",
++      "setup-isolate-for-tests.cc",
++      "setup-isolate-for-tests.h",
++      "test-accessor-assembler.cc",
++      "test-code-stub-assembler.cc",
++      "test-descriptor-array.cc",
++      "test-serialize.cc",
++      "test-swiss-name-dictionary-csa.cc",
++      "torque/test-torque.cc",
++    ]
++  }
++
+   if (v8_current_cpu == "arm") {
+     sources += [
+       ### gcmole(arm) ###
+diff --git a/test/cctest/cctest.cc b/test/cctest/cctest.cc
+index 319582b568..4a149849ac 100644
+--- a/test/cctest/cctest.cc
++++ b/test/cctest/cctest.cc
+@@ -44,7 +44,9 @@
+ #include "src/codegen/compiler.h"
+ #include "src/codegen/optimized-compilation-info.h"
+ #include "src/common/globals.h"
++#ifdef V8_ENABLE_TURBOFAN
+ #include "src/compiler/pipeline.h"
++#endif  // V8_ENABLE_TURBOFAN
+ #include "src/flags/flags.h"
+ #include "src/objects/objects-inl.h"
+ #include "src/trap-handler/trap-handler.h"
+@@ -311,6 +313,7 @@ HandleAndZoneScope::HandleAndZoneScope(bool support_zone_compression)
+ 
+ HandleAndZoneScope::~HandleAndZoneScope() = default;
+ 
++#ifdef V8_ENABLE_TURBOFAN
+ i::Handle<i::JSFunction> Optimize(
+     i::Handle<i::JSFunction> function, i::Zone* zone, i::Isolate* isolate,
+     uint32_t flags, std::unique_ptr<i::compiler::JSHeapBroker>* out_broker) {
+@@ -340,6 +343,7 @@ i::Handle<i::JSFunction> Optimize(
+   function->set_code(*code, v8::kReleaseStore);
+   return function;
+ }
++#endif  // V8_ENABLE_TURBOFAN
+ 
+ static void PrintTestList() {
+   int test_num = 0;
+diff --git a/test/cctest/heap/test-heap.cc b/test/cctest/heap/test-heap.cc
+index 77ff826998..c189ca5362 100644
+--- a/test/cctest/heap/test-heap.cc
++++ b/test/cctest/heap/test-heap.cc
+@@ -1078,11 +1078,11 @@ TEST(Iteration) {
+ }
+ 
+ TEST(TestBytecodeFlushing) {
+-#ifndef V8_LITE_MODE
++#if !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+   v8_flags.turbofan = false;
+   v8_flags.always_turbofan = false;
+   i::v8_flags.optimize_for_size = false;
+-#endif  // V8_LITE_MODE
++#endif  // !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+ #if ENABLE_SPARKPLUG
+   v8_flags.always_sparkplug = false;
+ #endif  // ENABLE_SPARKPLUG
+@@ -1144,11 +1144,11 @@ TEST(TestBytecodeFlushing) {
+ }
+ 
+ static void TestMultiReferencedBytecodeFlushing(bool sparkplug_compile) {
+-#ifndef V8_LITE_MODE
++#if !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+   v8_flags.turbofan = false;
+   v8_flags.always_turbofan = false;
+   i::v8_flags.optimize_for_size = false;
+-#endif  // V8_LITE_MODE
++#endif  // !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+ #if ENABLE_SPARKPLUG
+   v8_flags.always_sparkplug = false;
+   v8_flags.flush_baseline_code = true;
+@@ -1233,8 +1233,10 @@ HEAP_TEST(Regress10560) {
+   i::v8_flags.flush_bytecode = true;
+   i::v8_flags.allow_natives_syntax = true;
+   // Disable flags that allocate a feedback vector eagerly.
++#if !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+   i::v8_flags.turbofan = false;
+   i::v8_flags.always_turbofan = false;
++#endif  // !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+ #if ENABLE_SPARKPLUG
+   v8_flags.always_sparkplug = false;
+ #endif  // ENABLE_SPARKPLUG
+@@ -1403,8 +1405,7 @@ UNINITIALIZED_TEST(Regress12777) {
+   isolate->Dispose();
+ }
+ 
+-#ifndef V8_LITE_MODE
+-
++#if !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+ TEST(TestOptimizeAfterBytecodeFlushingCandidate) {
+   if (v8_flags.single_generation) return;
+   v8_flags.turbofan = true;
+@@ -1489,8 +1490,7 @@ TEST(TestOptimizeAfterBytecodeFlushingCandidate) {
+   CHECK(function->shared().is_compiled());
+   CHECK(function->is_compiled());
+ }
+-
+-#endif  // V8_LITE_MODE
++#endif  // !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+ 
+ TEST(TestUseOfIncrementalBarrierOnCompileLazy) {
+   if (!v8_flags.incremental_marking) return;
+@@ -3311,10 +3311,10 @@ TEST(ReleaseOverReservedPages) {
+   if (!v8_flags.compact) return;
+   v8_flags.trace_gc = true;
+   // The optimizer can allocate stuff, messing up the test.
+-#ifndef V8_LITE_MODE
++#if !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+   v8_flags.turbofan = false;
+   v8_flags.always_turbofan = false;
+-#endif  // V8_LITE_MODE
++#endif  // !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+   // - Parallel compaction increases fragmentation, depending on how existing
+   //   memory is distributed. Since this is non-deterministic because of
+   //   concurrent sweeping, we disable it for this test.
+@@ -3848,9 +3848,9 @@ TEST(DetailedErrorStackTraceBuiltinExit) {
+ 
+ TEST(Regress169928) {
+   v8_flags.allow_natives_syntax = true;
+-#ifndef V8_LITE_MODE
++#if !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+   v8_flags.turbofan = false;
+-#endif  // V8_LITE_MODE
++#endif  // !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+   CcTest::InitializeVM();
+   Isolate* isolate = CcTest::i_isolate();
+   LocalContext env;
+diff --git a/test/cctest/test-api.cc b/test/cctest/test-api.cc
+index 4dd9b07b9d..9e63d1e4a5 100644
+--- a/test/cctest/test-api.cc
++++ b/test/cctest/test-api.cc
+@@ -24698,7 +24698,7 @@ TEST(StringConcatOverflow) {
+ }
+ 
+ TEST(TurboAsmDisablesDetach) {
+-#ifndef V8_LITE_MODE
++#if !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+   i::v8_flags.turbofan = true;
+   i::v8_flags.allow_natives_syntax = true;
+   v8::HandleScope scope(CcTest::isolate());
+@@ -24732,7 +24732,7 @@ TEST(TurboAsmDisablesDetach) {
+ 
+   result = CompileRun(store).As<v8::ArrayBuffer>();
+   CHECK(!result->IsDetachable());
+-#endif  // V8_LITE_MODE
++#endif  // !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+ }
+ 
+ TEST(ClassPrototypeCreationContext) {
+@@ -27596,7 +27596,7 @@ UNINITIALIZED_TEST(NestedIsolates) {
+ 
+ #undef THREADED_PROFILED_TEST
+ 
+-#ifndef V8_LITE_MODE
++#if !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+ namespace {
+ 
+ #ifdef V8_USE_SIMULATOR_WITH_GENERIC_C_CALLS
+@@ -28306,10 +28306,10 @@ void CheckDynamicTypeInfo() {
+   CHECK_EQ(c_func.ReturnInfo().GetType(), v8::CTypeInfo::Type::kVoid);
+ }
+ }  // namespace
+-#endif  // V8_LITE_MODE
++#endif  // !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+ 
+ TEST(FastApiStackSlot) {
+-#ifndef V8_LITE_MODE
++#if !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+   if (i::v8_flags.jitless) return;
+ 
+   i::v8_flags.turbofan = true;
+@@ -28357,11 +28357,11 @@ TEST(FastApiStackSlot) {
+   int32_t slow_value_typed = checker.slow_value_.ToChecked();
+   CHECK_EQ(slow_value_typed, test_value);
+   CHECK_EQ(checker.fast_value_, test_value);
+-#endif
++#endif  // !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+ }
+ 
+ TEST(FastApiCalls) {
+-#ifndef V8_LITE_MODE
++#if !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+   if (i::v8_flags.jitless) return;
+ 
+   i::v8_flags.turbofan = true;
+@@ -28828,10 +28828,10 @@ TEST(FastApiCalls) {
+   // TODO(mslekova): Restructure the tests so that the fast optimized calls
+   // are compared against the slow optimized calls.
+   // TODO(mslekova): Add tests for FTI that requires access check.
+-#endif  // V8_LITE_MODE
++#endif  // !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+ }
+ 
+-#ifndef V8_LITE_MODE
++#if !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+ namespace {
+ static Trivial* UnwrapTrivialObject(Local<Object> object) {
+   i::Address addr = *reinterpret_cast<i::Address*>(*object);
+@@ -28908,10 +28908,10 @@ void SequenceSlowCallback(const v8::FunctionCallbackInfo<v8::Value>& args) {
+   return;
+ }
+ }  // namespace
+-#endif  // V8_LITE_MODE
++#endif  // !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+ 
+ TEST(FastApiSequenceOverloads) {
+-#ifndef V8_LITE_MODE
++#if !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+   if (i::v8_flags.jitless) return;
+ 
+   i::v8_flags.turbofan = true;
+@@ -28965,11 +28965,11 @@ TEST(FastApiSequenceOverloads) {
+       CompileRun("const ta = new Int32Array([1, 2, 3, 4]);"
+                  "func(4, ta);"));
+   CHECK_EQ(4, rcv->x());
+-#endif  // V8_LITE_MODE
++#endif  // !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+ }
+ 
+ TEST(FastApiOverloadResolution) {
+-#ifndef V8_LITE_MODE
++#if !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+   if (i::v8_flags.jitless) return;
+ 
+   i::v8_flags.turbofan = true;
+@@ -29013,7 +29013,7 @@ TEST(FastApiOverloadResolution) {
+   CHECK_EQ(v8::CFunction::OverloadResolution::kAtCompileTime,
+            typed_array_callback.GetOverloadResolution(&diff_arity_callback));
+ 
+-#endif  // V8_LITE_MODE
++#endif  // !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+ }
+ 
+ THREADED_TEST(Recorder_GetContext) {
+diff --git a/test/cctest/test-cpu-profiler.cc b/test/cctest/test-cpu-profiler.cc
+index c811ab7942..13b24a24e6 100644
+--- a/test/cctest/test-cpu-profiler.cc
++++ b/test/cctest/test-cpu-profiler.cc
+@@ -1236,13 +1236,13 @@ TEST(BoundFunctionCall) {
+ 
+ // This tests checks distribution of the samples through the source lines.
+ static void TickLines(bool optimize) {
+-#ifndef V8_LITE_MODE
++#if !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+   v8_flags.turbofan = optimize;
+ #ifdef V8_ENABLE_MAGLEV
+   // TODO(v8:7700): Also test maglev here.
+   v8_flags.maglev = false;
+ #endif  // V8_ENABLE_MAGLEV
+-#endif  // V8_LITE_MODE
++#endif  // !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+   CcTest::InitializeVM();
+   LocalContext env;
+   i::v8_flags.allow_natives_syntax = true;
+@@ -4463,7 +4463,8 @@ TEST(CanStartStopProfilerWithTitlesAndIds) {
+ }
+ 
+ TEST(FastApiCPUProfiler) {
+-#if !defined(V8_LITE_MODE) && !defined(USE_SIMULATOR)
++#if !defined(V8_LITE_MODE) && !defined(USE_SIMULATOR) && \
++    defined(V8_ENABLE_TURBOFAN)
+   // None of the following configurations include JSCallReducer.
+   if (i::v8_flags.jitless) return;
+ 
+@@ -4559,15 +4560,16 @@ TEST(FastApiCPUProfiler) {
+   CHECK_GE(api_func_ticks, 800);
+ 
+   profile->Delete();
+-#endif
++#endif  // !defined(V8_LITE_MODE) && !defined(USE_SIMULATOR) &&
++        // defined(V8_ENABLE_TURBOFAN)
+ }
+ 
+ TEST(BytecodeFlushEventsEagerLogging) {
+-#ifndef V8_LITE_MODE
++#if !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+   v8_flags.turbofan = false;
+   v8_flags.always_turbofan = false;
+   v8_flags.optimize_for_size = false;
+-#endif  // V8_LITE_MODE
++#endif  // !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+ #if ENABLE_SPARKPLUG
+   v8_flags.always_sparkplug = false;
+ #endif  // ENABLE_SPARKPLUG
+diff --git a/test/cctest/test-profile-generator.cc b/test/cctest/test-profile-generator.cc
+index e0164a7d8e..5db0719566 100644
+--- a/test/cctest/test-profile-generator.cc
++++ b/test/cctest/test-profile-generator.cc
+@@ -900,7 +900,7 @@ TEST(LineNumber) {
+ }
+ 
+ TEST(BailoutReason) {
+-#ifndef V8_LITE_MODE
++#if !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+   i::v8_flags.allow_natives_syntax = true;
+   i::v8_flags.always_turbofan = false;
+   i::v8_flags.turbofan = true;
+@@ -944,7 +944,7 @@ TEST(BailoutReason) {
+   CHECK(const_cast<v8::CpuProfileNode*>(current));
+   CHECK(
+       !strcmp("Optimization is always disabled", current->GetBailoutReason()));
+-#endif  // V8_LITE_MODE
++#endif  // !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+ }
+ 
+ TEST(NodeSourceTypes) {
+diff --git a/test/mjsunit/optimized-string-includes.js b/test/mjsunit/optimized-string-includes.js
+index 32056d2ca3..4799405b7a 100644
+--- a/test/mjsunit/optimized-string-includes.js
++++ b/test/mjsunit/optimized-string-includes.js
+@@ -14,7 +14,7 @@
+   assertEquals(true, f());
+   %OptimizeFunctionOnNextCall(f);
+   assertEquals(true, f());
+-  assertTrue(isOptimized(f));
++  assertOptimized(f);
+ 
+   function f2() {
+     return 'abc'.includes('a', 1);
+@@ -25,7 +25,7 @@
+   assertEquals(false, f2());
+   %OptimizeFunctionOnNextCall(f2);
+   assertEquals(false, f2());
+-  assertTrue(isOptimized(f2));
++  assertOptimized(f2);
+ 
+   function f3() {
+     return 'abc'.includes('b');
+@@ -36,7 +36,7 @@
+   assertEquals(true, f3());
+   %OptimizeFunctionOnNextCall(f3);
+   assertEquals(true, f3());
+-  assertTrue(isOptimized(f3));
++  assertOptimized(f3);
+ 
+   function f4() {
+     return 'abcbc'.includes('bc', 2);
+@@ -47,7 +47,7 @@
+   assertEquals(true, f4());
+   %OptimizeFunctionOnNextCall(f4);
+   assertEquals(true, f4());
+-  assertTrue(isOptimized(f4));
++  assertOptimized(f4);
+ 
+   function f5() {
+     return 'abcbc'.includes('b', -1);
+@@ -58,7 +58,7 @@
+   assertEquals(true, f5());
+   %OptimizeFunctionOnNextCall(f5);
+   assertEquals(true, f5());
+-  assertTrue(isOptimized(f5));
++  assertOptimized(f5);
+ 
+   function f6() {
+     return 'abcbc'.includes('b', -10737418);
+@@ -69,7 +69,7 @@
+   assertEquals(true, f6());
+   %OptimizeFunctionOnNextCall(f6);
+   assertEquals(true, f6());
+-  assertTrue(isOptimized(f6));
++  assertOptimized(f6);
+ })();
+ 
+ (function optimizeOSR() {
+@@ -122,7 +122,7 @@
+                    return 'abc'
+                  }
+   }));
+-  assertFalse(isOptimized(f));
++  assertUnoptimized(f);
+ 
+   function f2(str) {
+     return 'abc'.includes(str)
+@@ -135,7 +135,7 @@
+                    return 'a'
+                  }
+                }));
+-  assertFalse(isOptimized(f2));
++  assertUnoptimized(f2);
+ 
+   function f3(index) {
+     return 'abc'.includes('a', index)
+@@ -148,5 +148,5 @@
+                    return 0
+                  }
+   }));
+-  assertFalse(isOptimized(f3));
++  assertUnoptimized(f3);
+ })();
+diff --git a/test/unittests/BUILD.gn b/test/unittests/BUILD.gn
+index cd1e19f570..dca8fb1ae2 100644
+--- a/test/unittests/BUILD.gn
++++ b/test/unittests/BUILD.gn
+@@ -299,91 +299,11 @@ v8_source_set("unittests_sources") {
+     "codegen/aligned-slot-allocator-unittest.cc",
+     "codegen/code-layout-unittest.cc",
+     "codegen/code-pages-unittest.cc",
+-    "codegen/code-stub-assembler-unittest.cc",
+-    "codegen/code-stub-assembler-unittest.h",
+     "codegen/factory-unittest.cc",
+     "codegen/register-configuration-unittest.cc",
+     "codegen/source-position-table-unittest.cc",
+     "compiler-dispatcher/compiler-dispatcher-unittest.cc",
+     "compiler-dispatcher/optimizing-compile-dispatcher-unittest.cc",
+-    "compiler/backend/instruction-selector-unittest.cc",
+-    "compiler/backend/instruction-selector-unittest.h",
+-    "compiler/backend/instruction-sequence-unittest.cc",
+-    "compiler/backend/instruction-sequence-unittest.h",
+-    "compiler/backend/instruction-unittest.cc",
+-    "compiler/branch-elimination-unittest.cc",
+-    "compiler/bytecode-analysis-unittest.cc",
+-    "compiler/checkpoint-elimination-unittest.cc",
+-    "compiler/codegen-tester.cc",
+-    "compiler/codegen-tester.h",
+-    "compiler/codegen-unittest.cc",
+-    "compiler/common-operator-reducer-unittest.cc",
+-    "compiler/common-operator-unittest.cc",
+-    "compiler/compiler-test-utils.h",
+-    "compiler/compiler-unittest.cc",
+-    "compiler/constant-folding-reducer-unittest.cc",
+-    "compiler/control-equivalence-unittest.cc",
+-    "compiler/control-flow-optimizer-unittest.cc",
+-    "compiler/csa-load-elimination-unittest.cc",
+-    "compiler/dead-code-elimination-unittest.cc",
+-    "compiler/decompression-optimizer-unittest.cc",
+-    "compiler/diamond-unittest.cc",
+-    "compiler/effect-control-linearizer-unittest.cc",
+-    "compiler/frame-unittest.cc",
+-    "compiler/function-tester.cc",
+-    "compiler/function-tester.h",
+-    "compiler/graph-reducer-unittest.cc",
+-    "compiler/graph-reducer-unittest.h",
+-    "compiler/graph-trimmer-unittest.cc",
+-    "compiler/graph-unittest.cc",
+-    "compiler/graph-unittest.h",
+-    "compiler/js-call-reducer-unittest.cc",
+-    "compiler/js-create-lowering-unittest.cc",
+-    "compiler/js-intrinsic-lowering-unittest.cc",
+-    "compiler/js-native-context-specialization-unittest.cc",
+-    "compiler/js-operator-unittest.cc",
+-    "compiler/js-typed-lowering-unittest.cc",
+-    "compiler/linkage-tail-call-unittest.cc",
+-    "compiler/load-elimination-unittest.cc",
+-    "compiler/loop-peeling-unittest.cc",
+-    "compiler/machine-operator-reducer-unittest.cc",
+-    "compiler/machine-operator-unittest.cc",
+-    "compiler/node-cache-unittest.cc",
+-    "compiler/node-matchers-unittest.cc",
+-    "compiler/node-properties-unittest.cc",
+-    "compiler/node-test-utils.cc",
+-    "compiler/node-test-utils.h",
+-    "compiler/node-unittest.cc",
+-    "compiler/opcodes-unittest.cc",
+-    "compiler/persistent-unittest.cc",
+-    "compiler/redundancy-elimination-unittest.cc",
+-    "compiler/regalloc/live-range-unittest.cc",
+-    "compiler/regalloc/mid-tier-register-allocator-unittest.cc",
+-    "compiler/regalloc/move-optimizer-unittest.cc",
+-    "compiler/regalloc/register-allocator-unittest.cc",
+-    "compiler/run-bytecode-graph-builder-unittest.cc",
+-    "compiler/run-deopt-unittest.cc",
+-    "compiler/run-jsbranches-unittest.cc",
+-    "compiler/run-jscalls-unittest.cc",
+-    "compiler/run-jsexceptions-unittest.cc",
+-    "compiler/run-jsobjects-unittest.cc",
+-    "compiler/run-jsops-unittest.cc",
+-    "compiler/run-tail-calls-unittest.cc",
+-    "compiler/schedule-unittest.cc",
+-    "compiler/scheduler-rpo-unittest.cc",
+-    "compiler/scheduler-unittest.cc",
+-    "compiler/simplified-lowering-unittest.cc",
+-    "compiler/simplified-operator-reducer-unittest.cc",
+-    "compiler/simplified-operator-unittest.cc",
+-    "compiler/sloppy-equality-unittest.cc",
+-    "compiler/state-values-utils-unittest.cc",
+-    "compiler/turboshaft/snapshot-table-unittest.cc",
+-    "compiler/turboshaft/turboshaft-types-unittest.cc",
+-    "compiler/typed-optimization-unittest.cc",
+-    "compiler/typer-unittest.cc",
+-    "compiler/types-unittest.cc",
+-    "compiler/value-numbering-reducer-unittest.cc",
+-    "compiler/zone-stats-unittest.cc",
+     "date/date-cache-unittest.cc",
+     "date/date-unittest.cc",
+     "debug/debug-property-iterator-unittest.cc",
+@@ -454,8 +374,6 @@ v8_source_set("unittests_sources") {
+     "interpreter/bytecode-utils.h",
+     "interpreter/bytecodes-unittest.cc",
+     "interpreter/constant-array-builder-unittest.cc",
+-    "interpreter/interpreter-assembler-unittest.cc",
+-    "interpreter/interpreter-assembler-unittest.h",
+     "interpreter/interpreter-intrinsics-unittest.cc",
+     "interpreter/interpreter-tester.cc",
+     "interpreter/interpreter-tester.h",
+@@ -553,6 +471,93 @@ v8_source_set("unittests_sources") {
+     "zone/zone-unittest.cc",
+   ]
+ 
++  if (v8_enable_turbofan) {
++    sources += [
++      "codegen/code-stub-assembler-unittest.cc",
++      "codegen/code-stub-assembler-unittest.h",
++      "compiler/backend/instruction-selector-unittest.cc",
++      "compiler/backend/instruction-selector-unittest.h",
++      "compiler/backend/instruction-sequence-unittest.cc",
++      "compiler/backend/instruction-sequence-unittest.h",
++      "compiler/backend/instruction-unittest.cc",
++      "compiler/branch-elimination-unittest.cc",
++      "compiler/bytecode-analysis-unittest.cc",
++      "compiler/checkpoint-elimination-unittest.cc",
++      "compiler/codegen-tester.cc",
++      "compiler/codegen-tester.h",
++      "compiler/codegen-unittest.cc",
++      "compiler/common-operator-reducer-unittest.cc",
++      "compiler/common-operator-unittest.cc",
++      "compiler/compiler-test-utils.h",
++      "compiler/compiler-unittest.cc",
++      "compiler/constant-folding-reducer-unittest.cc",
++      "compiler/control-equivalence-unittest.cc",
++      "compiler/control-flow-optimizer-unittest.cc",
++      "compiler/csa-load-elimination-unittest.cc",
++      "compiler/dead-code-elimination-unittest.cc",
++      "compiler/decompression-optimizer-unittest.cc",
++      "compiler/diamond-unittest.cc",
++      "compiler/effect-control-linearizer-unittest.cc",
++      "compiler/frame-unittest.cc",
++      "compiler/function-tester.cc",
++      "compiler/function-tester.h",
++      "compiler/graph-reducer-unittest.cc",
++      "compiler/graph-reducer-unittest.h",
++      "compiler/graph-trimmer-unittest.cc",
++      "compiler/graph-unittest.cc",
++      "compiler/graph-unittest.h",
++      "compiler/js-call-reducer-unittest.cc",
++      "compiler/js-create-lowering-unittest.cc",
++      "compiler/js-intrinsic-lowering-unittest.cc",
++      "compiler/js-native-context-specialization-unittest.cc",
++      "compiler/js-operator-unittest.cc",
++      "compiler/js-typed-lowering-unittest.cc",
++      "compiler/linkage-tail-call-unittest.cc",
++      "compiler/load-elimination-unittest.cc",
++      "compiler/loop-peeling-unittest.cc",
++      "compiler/machine-operator-reducer-unittest.cc",
++      "compiler/machine-operator-unittest.cc",
++      "compiler/node-cache-unittest.cc",
++      "compiler/node-matchers-unittest.cc",
++      "compiler/node-properties-unittest.cc",
++      "compiler/node-test-utils.cc",
++      "compiler/node-test-utils.h",
++      "compiler/node-unittest.cc",
++      "compiler/opcodes-unittest.cc",
++      "compiler/persistent-unittest.cc",
++      "compiler/redundancy-elimination-unittest.cc",
++      "compiler/regalloc/live-range-unittest.cc",
++      "compiler/regalloc/mid-tier-register-allocator-unittest.cc",
++      "compiler/regalloc/move-optimizer-unittest.cc",
++      "compiler/regalloc/register-allocator-unittest.cc",
++      "compiler/run-bytecode-graph-builder-unittest.cc",
++      "compiler/run-deopt-unittest.cc",
++      "compiler/run-jsbranches-unittest.cc",
++      "compiler/run-jscalls-unittest.cc",
++      "compiler/run-jsexceptions-unittest.cc",
++      "compiler/run-jsobjects-unittest.cc",
++      "compiler/run-jsops-unittest.cc",
++      "compiler/run-tail-calls-unittest.cc",
++      "compiler/schedule-unittest.cc",
++      "compiler/scheduler-rpo-unittest.cc",
++      "compiler/scheduler-unittest.cc",
++      "compiler/simplified-lowering-unittest.cc",
++      "compiler/simplified-operator-reducer-unittest.cc",
++      "compiler/simplified-operator-unittest.cc",
++      "compiler/sloppy-equality-unittest.cc",
++      "compiler/state-values-utils-unittest.cc",
++      "compiler/turboshaft/snapshot-table-unittest.cc",
++      "compiler/turboshaft/turboshaft-types-unittest.cc",
++      "compiler/typed-optimization-unittest.cc",
++      "compiler/typer-unittest.cc",
++      "compiler/types-unittest.cc",
++      "compiler/value-numbering-reducer-unittest.cc",
++      "compiler/zone-stats-unittest.cc",
++      "interpreter/interpreter-assembler-unittest.cc",
++      "interpreter/interpreter-assembler-unittest.h",
++    ]
++  }
++
+   if (v8_enable_runtime_call_stats) {
+     sources += [ "logging/runtime-call-stats-unittest.cc" ]
+   }
+@@ -632,16 +637,20 @@ v8_source_set("unittests_sources") {
+     sources += [
+       "assembler/disasm-arm-unittest.cc",
+       "assembler/turbo-assembler-arm-unittest.cc",
+-      "compiler/arm/instruction-selector-arm-unittest.cc",
+     ]
++    if (v8_enable_turbofan) {
++      sources += [ "compiler/arm/instruction-selector-arm-unittest.cc" ]
++    }
+   } else if (v8_current_cpu == "arm64") {
+     sources += [
+       "assembler/disasm-arm64-unittest.cc",
+       "assembler/macro-assembler-arm64-unittest.cc",
+       "assembler/turbo-assembler-arm64-unittest.cc",
+       "codegen/pointer-auth-arm64-unittest.cc",
+-      "compiler/arm64/instruction-selector-arm64-unittest.cc",
+     ]
++    if (v8_enable_turbofan) {
++      sources += [ "compiler/arm64/instruction-selector-arm64-unittest.cc" ]
++    }
+     if (v8_enable_webassembly && current_cpu == "arm64") {
+       sources += [ "wasm/trap-handler-x64-arm64-unittest.cc" ]
+     }
+@@ -649,34 +658,44 @@ v8_source_set("unittests_sources") {
+     sources += [
+       "assembler/disasm-ia32-unittest.cc",
+       "assembler/turbo-assembler-ia32-unittest.cc",
+-      "compiler/ia32/instruction-selector-ia32-unittest.cc",
+     ]
++    if (v8_enable_turbofan) {
++      sources += [ "compiler/ia32/instruction-selector-ia32-unittest.cc" ]
++    }
+   } else if (v8_current_cpu == "mips64" || v8_current_cpu == "mips64el") {
+     sources += [
+       "assembler/disasm-mips64-unittest.cc",
+       "assembler/turbo-assembler-mips64-unittest.cc",
+-      "compiler/mips64/instruction-selector-mips64-unittest.cc",
+     ]
++    if (v8_enable_turbofan) {
++      sources += [ "compiler/mips64/instruction-selector-mips64-unittest.cc" ]
++    }
+   } else if (v8_current_cpu == "riscv64") {
+     sources += [
+       "assembler/disasm-riscv-unittest.cc",
+       "assembler/turbo-assembler-riscv-unittest.cc",
+-      "compiler/riscv64/instruction-selector-riscv64-unittest.cc",
+     ]
++    if (v8_enable_turbofan) {
++      sources += [ "compiler/riscv64/instruction-selector-riscv64-unittest.cc" ]
++    }
+   } else if (v8_current_cpu == "riscv32") {
+     sources += [
+       "assembler/disasm-riscv-unittest.cc",
+       "assembler/turbo-assembler-riscv-unittest.cc",
+-      "compiler/riscv32/instruction-selector-riscv32-unittest.cc",
+     ]
++    if (v8_enable_turbofan) {
++      sources += [ "compiler/riscv32/instruction-selector-riscv32-unittest.cc" ]
++    }
+   } else if (v8_current_cpu == "x64") {
+     sources += [
+       "assembler/assembler-x64-unittest.cc",
+       "assembler/disasm-x64-unittest.cc",
+       "assembler/macro-assembler-x64-unittest.cc",
+       "assembler/turbo-assembler-x64-unittest.cc",
+-      "compiler/x64/instruction-selector-x64-unittest.cc",
+     ]
++    if (v8_enable_turbofan) {
++      sources += [ "compiler/x64/instruction-selector-x64-unittest.cc" ]
++    }
+     if (v8_enable_webassembly) {
+       sources += [ "wasm/trap-handler-x64-arm64-unittest.cc" ]
+     }
+@@ -684,20 +703,26 @@ v8_source_set("unittests_sources") {
+     sources += [
+       "assembler/disasm-ppc-unittest.cc",
+       "assembler/turbo-assembler-ppc-unittest.cc",
+-      "compiler/ppc/instruction-selector-ppc-unittest.cc",
+     ]
++    if (v8_enable_turbofan) {
++      sources += [ "compiler/ppc/instruction-selector-ppc-unittest.cc" ]
++    }
+   } else if (v8_current_cpu == "s390" || v8_current_cpu == "s390x") {
+     sources += [
+       "assembler/disasm-s390-unittest.cc",
+       "assembler/turbo-assembler-s390-unittest.cc",
+-      "compiler/s390/instruction-selector-s390-unittest.cc",
+     ]
++    if (v8_enable_turbofan) {
++      sources += [ "compiler/s390/instruction-selector-s390-unittest.cc" ]
++    }
+   } else if (v8_current_cpu == "loong64") {
+     sources += [
+       "assembler/disasm-loong64-unittest.cc",
+       "assembler/turbo-assembler-loong64-unittest.cc",
+-      "compiler/loong64/instruction-selector-loong64-unittest.cc",
+     ]
++    if (v8_enable_turbofan) {
++      sources += [ "compiler/loong64/instruction-selector-loong64-unittest.cc" ]
++    }
+   }
+ 
+   if (v8_enable_webassembly) {
+diff --git a/tools/testrunner/base_runner.py b/tools/testrunner/base_runner.py
+index 89bb8ae90e..698be9926b 100644
+--- a/tools/testrunner/base_runner.py
++++ b/tools/testrunner/base_runner.py
+@@ -587,6 +587,8 @@ class BaseTestRunner(object):
+         # statusfile.py (this really shouldn't be needed).
+         "has_maglev":
+             self.build_config.maglev,
++        "has_turbofan":
++            self.build_config.turbofan,
+         "has_webassembly":
+             self.build_config.webassembly,
+         "isolates":
+diff --git a/tools/testrunner/build_config.py b/tools/testrunner/build_config.py
+index 10b5749c5f..788e73a1d7 100644
+--- a/tools/testrunner/build_config.py
++++ b/tools/testrunner/build_config.py
+@@ -57,6 +57,7 @@ class BuildConfig(object):
+     self.slow_dchecks = build_config['v8_enable_slow_dchecks']
+     self.third_party_heap = build_config['v8_enable_third_party_heap']
+     self.tsan = build_config['is_tsan']
++    self.turbofan = build_config['v8_enable_turbofan']
+     # TODO(machenbach): We only have ubsan not ubsan_vptr.
+     self.ubsan_vptr = build_config['is_ubsan_vptr']
+     self.verify_csa = build_config['v8_enable_verify_csa']
+@@ -165,6 +166,7 @@ class BuildConfig(object):
+         'slow_dchecks',
+         'third_party_heap',
+         'tsan',
++        'turbofan',
+         'ubsan_vptr',
+         'verify_csa',
+         'verify_heap',
+diff --git a/tools/testrunner/local/variants.py b/tools/testrunner/local/variants.py
+index d66f430c8b..876dcd6efc 100644
+--- a/tools/testrunner/local/variants.py
++++ b/tools/testrunner/local/variants.py
+@@ -163,7 +163,9 @@ INCOMPATIBLE_FLAGS_PER_BUILD_VARIABLE = {
+     ],
+     "!slow_dchecks": ["--enable-slow-asserts"],
+     "!gdbjit": ["--gdbjit", "--gdbjit_full", "--gdbjit_dump"],
+-    "!maglev": ["--maglev"],
++    "!has_maglev": ["--maglev"],
++    "!has_turbofan":
++        kIncompatibleFlagsForNoTurbofan,
+     "lite_mode": ["--no-lazy-feedback-allocation", "--max-semi-space-size=*"] +
+                  INCOMPATIBLE_FLAGS_PER_VARIANT["jitless"],
+     "predictable": [
+diff --git a/tools/testrunner/testdata/testroot1/out/build/v8_build_config.json b/tools/testrunner/testdata/testroot1/out/build/v8_build_config.json
+index c4aa78f7f5..feb4d3ddd5 100644
+--- a/tools/testrunner/testdata/testroot1/out/build/v8_build_config.json
++++ b/tools/testrunner/testdata/testroot1/out/build/v8_build_config.json
+@@ -40,5 +40,6 @@
+   "v8_enable_maglev": false,
+   "v8_enable_disassembler": false,
+   "is_DEBUG_defined": false,
++  "v8_enable_turbofan": false,
+   "v8_enable_gdbjit": false
+ }
+diff --git a/tools/testrunner/testdata/testroot2/out/build/v8_build_config.json b/tools/testrunner/testdata/testroot2/out/build/v8_build_config.json
+index 3ad5534b05..edbd5faace 100644
+--- a/tools/testrunner/testdata/testroot2/out/build/v8_build_config.json
++++ b/tools/testrunner/testdata/testroot2/out/build/v8_build_config.json
+@@ -40,5 +40,6 @@
+   "v8_enable_maglev": false,
+   "v8_enable_disassembler": false,
+   "is_DEBUG_defined": false,
++  "v8_enable_turbofan": false,
+   "v8_enable_gdbjit": false
+ }
+diff --git a/tools/testrunner/testdata/testroot3/out/build/v8_build_config.json b/tools/testrunner/testdata/testroot3/out/build/v8_build_config.json
+index c4aa78f7f5..feb4d3ddd5 100644
+--- a/tools/testrunner/testdata/testroot3/out/build/v8_build_config.json
++++ b/tools/testrunner/testdata/testroot3/out/build/v8_build_config.json
+@@ -40,5 +40,6 @@
+   "v8_enable_maglev": false,
+   "v8_enable_disassembler": false,
+   "is_DEBUG_defined": false,
++  "v8_enable_turbofan": false,
+   "v8_enable_gdbjit": false
+ }
+diff --git a/tools/testrunner/testdata/testroot5/out.gn/build/v8_build_config.json b/tools/testrunner/testdata/testroot5/out.gn/build/v8_build_config.json
+index c4aa78f7f5..feb4d3ddd5 100644
+--- a/tools/testrunner/testdata/testroot5/out.gn/build/v8_build_config.json
++++ b/tools/testrunner/testdata/testroot5/out.gn/build/v8_build_config.json
+@@ -40,5 +40,6 @@
+   "v8_enable_maglev": false,
+   "v8_enable_disassembler": false,
+   "is_DEBUG_defined": false,
++  "v8_enable_turbofan": false,
+   "v8_enable_gdbjit": false
+ }
+diff --git a/tools/testrunner/testdata/testroot6/out/build/v8_build_config.json b/tools/testrunner/testdata/testroot6/out/build/v8_build_config.json
+index c4aa78f7f5..feb4d3ddd5 100644
+--- a/tools/testrunner/testdata/testroot6/out/build/v8_build_config.json
++++ b/tools/testrunner/testdata/testroot6/out/build/v8_build_config.json
+@@ -40,5 +40,6 @@
+   "v8_enable_maglev": false,
+   "v8_enable_disassembler": false,
+   "is_DEBUG_defined": false,
++  "v8_enable_turbofan": false,
+   "v8_enable_gdbjit": false
+ }
+-- 
+2.35.1
+

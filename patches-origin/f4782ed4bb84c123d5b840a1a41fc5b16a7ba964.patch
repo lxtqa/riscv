@@ -1,0 +1,89 @@
+From f4782ed4bb84c123d5b840a1a41fc5b16a7ba964 Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Tue, 28 Sep 2021 15:45:10 +0800
+Subject: [PATCH] [riscv64] Uint32 sign extend into 64bit
+
+The intent of the RISC-V ISA is that 32-bit C values are stored sign extended in registers, even for unsigned types.
+So we skip cctest case RunLoadStoreZeroExtend64/RunUnalignedLoadStoreZeroExtend64 due to sign extend uint32
+
+Change-Id: Icfe727916b1c04aad5681902ec4782cc98906964
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3184560
+Reviewed-by: Ji Qiu <qiuji@iscas.ac.cn>
+Reviewed-by: Michael Achenbach <machenbach@chromium.org>
+Commit-Queue: Ji Qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#77112}
+---
+ src/compiler/backend/riscv64/instruction-selector-riscv64.cc | 5 ++---
+ test/cctest/cctest.status                                    | 4 ++++
+ .../riscv64/instruction-selector-riscv64-unittest.cc         | 5 +++--
+ 3 files changed, 9 insertions(+), 5 deletions(-)
+
+diff --git a/src/compiler/backend/riscv64/instruction-selector-riscv64.cc b/src/compiler/backend/riscv64/instruction-selector-riscv64.cc
+index 85d61aa02f..31f0372ece 100644
+--- a/src/compiler/backend/riscv64/instruction-selector-riscv64.cc
++++ b/src/compiler/backend/riscv64/instruction-selector-riscv64.cc
+@@ -454,7 +454,7 @@ void InstructionSelector::VisitLoad(Node* node) {
+       opcode = load_rep.IsUnsigned() ? kRiscvLhu : kRiscvLh;
+       break;
+     case MachineRepresentation::kWord32:
+-      opcode = load_rep.IsUnsigned() ? kRiscvLwu : kRiscvLw;
++      opcode = kRiscvLw;
+       break;
+ #ifdef V8_COMPRESS_POINTERS
+     case MachineRepresentation::kTaggedSigned:
+@@ -1287,7 +1287,6 @@ bool InstructionSelector::ZeroExtendsWord32ToWord64NoPhis(Node* node) {
+       switch (load_rep.representation()) {
+         case MachineRepresentation::kWord8:
+         case MachineRepresentation::kWord16:
+-        case MachineRepresentation::kWord32:
+           return true;
+         default:
+           return false;
+@@ -1623,7 +1622,7 @@ void InstructionSelector::VisitUnalignedLoad(Node* node) {
+       opcode = load_rep.IsUnsigned() ? kRiscvUlhu : kRiscvUlh;
+       break;
+     case MachineRepresentation::kWord32:
+-      opcode = load_rep.IsUnsigned() ? kRiscvUlwu : kRiscvUlw;
++      opcode = kRiscvUlw;
+       break;
+     case MachineRepresentation::kTaggedSigned:   // Fall through.
+     case MachineRepresentation::kTaggedPointer:  // Fall through.
+diff --git a/test/cctest/cctest.status b/test/cctest/cctest.status
+index 797468cd3f..d06470eeb5 100644
+--- a/test/cctest/cctest.status
++++ b/test/cctest/cctest.status
+@@ -441,6 +441,10 @@
+   'test-liftoff-for-fuzzing/NondeterminismUnopF64x2OneNaN': [SKIP],
+   'test-liftoff-for-fuzzing/NondeterminismUnopF32x4AllNaN': [SKIP],
+   'test-liftoff-for-fuzzing/NondeterminismUnopF32x4OneNaN': [SKIP],
++
++  # riscv64 sign extend on uint32.
++  'test-run-load-store/RunUnalignedLoadStoreZeroExtend64': [SKIP],
++  'test-run-load-store/RunLoadStoreZeroExtend64': [SKIP],
+ }],  # 'arch == riscv64'
+ 
+ ##############################################################################
+diff --git a/test/unittests/compiler/riscv64/instruction-selector-riscv64-unittest.cc b/test/unittests/compiler/riscv64/instruction-selector-riscv64-unittest.cc
+index d81f5adabe..9b7687b6c4 100644
+--- a/test/unittests/compiler/riscv64/instruction-selector-riscv64-unittest.cc
++++ b/test/unittests/compiler/riscv64/instruction-selector-riscv64-unittest.cc
+@@ -995,13 +995,14 @@ TEST_F(InstructionSelectorTest, ChangeUint32ToUint64AfterLoad) {
+     m.Return(m.ChangeUint32ToUint64(
+         m.Load(MachineType::Uint32(), m.Parameter(0), m.Parameter(1))));
+     Stream s = m.Build();
+-    ASSERT_EQ(2U, s.size());
++    ASSERT_EQ(3U, s.size());
+     EXPECT_EQ(kRiscvAdd64, s[0]->arch_opcode());
+     EXPECT_EQ(kMode_None, s[0]->addressing_mode());
+     EXPECT_EQ(2U, s[0]->InputCount());
+     EXPECT_EQ(1U, s[0]->OutputCount());
+-    EXPECT_EQ(kRiscvLwu, s[1]->arch_opcode());
++    EXPECT_EQ(kRiscvLw, s[1]->arch_opcode());
+     EXPECT_EQ(kMode_MRI, s[1]->addressing_mode());
++    EXPECT_EQ(kRiscvZeroExtendWord, s[2]->arch_opcode());
+     EXPECT_EQ(2U, s[1]->InputCount());
+     EXPECT_EQ(1U, s[1]->OutputCount());
+   }
+-- 
+2.35.1
+

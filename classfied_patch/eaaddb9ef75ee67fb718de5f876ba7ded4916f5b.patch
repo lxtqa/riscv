@@ -1,0 +1,1003 @@
+From eaaddb9ef75ee67fb718de5f876ba7ded4916f5b Mon Sep 17 00:00:00 2001
+From: Camillo Bruni <cbruni@chromium.org>
+Date: Thu, 16 Mar 2023 14:48:11 +0100
+Subject: [PATCH] [builtins] Link up various offset for api calls
+
+This should make upcoming refactorings a bit less error-prone.
+
+Drive-by-fix:
+- Use stricter constexpr
+- Slightly improve CallApiCallback on x64 by intercepting RSP earlier
+
+Bug: v8:13825
+Change-Id: I21f51a3f96a20d0c462c426b08fb3233c81201c6
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4307583
+Reviewed-by: Igor Sheludko <ishell@chromium.org>
+Commit-Queue: Camillo Bruni <cbruni@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#86505}
+---
+ include/v8-function-callback.h           | 74 ++++++++++++++++--------
+ src/api/api-arguments-inl.h              |  4 +-
+ src/api/api-arguments.h                  | 46 ++++++++++-----
+ src/builtins/arm/builtins-arm.cc         | 41 +++++++++----
+ src/builtins/arm64/builtins-arm64.cc     | 44 +++++++++-----
+ src/builtins/builtins-api.cc             |  2 +-
+ src/builtins/builtins-utils.h            | 24 +++++++-
+ src/builtins/ia32/builtins-ia32.cc       |  8 +--
+ src/builtins/loong64/builtins-loong64.cc | 10 ++--
+ src/builtins/mips64/builtins-mips64.cc   | 10 ++--
+ src/builtins/ppc/builtins-ppc.cc         |  8 +--
+ src/builtins/riscv/builtins-riscv.cc     | 10 ++--
+ src/builtins/s390/builtins-s390.cc       |  8 +--
+ src/builtins/x64/builtins-x64.cc         | 39 +++++++------
+ src/objects/js-objects.cc                |  2 +-
+ 15 files changed, 214 insertions(+), 116 deletions(-)
+
+diff --git a/include/v8-function-callback.h b/include/v8-function-callback.h
+index 599728d5ac..60ecca1fd2 100644
+--- a/include/v8-function-callback.h
++++ b/include/v8-function-callback.h
+@@ -21,6 +21,7 @@ class Value;
+ namespace internal {
+ class FunctionCallbackArguments;
+ class PropertyCallbackArguments;
++class Builtins;
+ }  // namespace internal
+ 
+ namespace debug {
+@@ -74,6 +75,11 @@ class ReturnValue {
+   V8_INLINE void SetInternal(internal::Address value) { *value_ = value; }
+   V8_INLINE internal::Address GetDefaultValue();
+   V8_INLINE explicit ReturnValue(internal::Address* slot);
++
++  // See FunctionCallbackInfo.
++  static constexpr int kIsolateValueIndex = -2;
++  static constexpr int kDefaultValueValueIndex = -1;
++
+   internal::Address* value_;
+ };
+ 
+@@ -116,19 +122,35 @@ class FunctionCallbackInfo {
+   V8_INLINE Isolate* GetIsolate() const;
+   /** The ReturnValue for the call. */
+   V8_INLINE ReturnValue<T> GetReturnValue() const;
+-  // This shouldn't be public, but the arm compiler needs it.
+-  static const int kArgsLength = 6;
+ 
+- protected:
++ private:
+   friend class internal::FunctionCallbackArguments;
+   friend class internal::CustomArguments<FunctionCallbackInfo>;
+   friend class debug::ConsoleCallArguments;
+-  static const int kHolderIndex = 0;
+-  static const int kIsolateIndex = 1;
+-  static const int kReturnValueDefaultValueIndex = 2;
+-  static const int kReturnValueIndex = 3;
+-  static const int kDataIndex = 4;
+-  static const int kNewTargetIndex = 5;
++  friend class internal::Builtins;
++  static constexpr int kHolderIndex = 0;
++  static constexpr int kIsolateIndex = 1;
++  static constexpr int kReturnValueDefaultValueIndex = 2;
++  static constexpr int kReturnValueIndex = 3;
++  static constexpr int kDataIndex = 4;
++  static constexpr int kNewTargetIndex = 5;
++
++  static constexpr int kArgsLength = 6;
++  static constexpr int kArgsLengthWithReceiver = 7;
++
++  // Codegen constants:
++  static constexpr int kSize = 3 * internal::kApiSystemPointerSize;
++  static constexpr int kImplicitArgsOffset = 0;
++  static constexpr int kValuesOffset =
++      kImplicitArgsOffset + internal::kApiSystemPointerSize;
++  static constexpr int kLengthOffset =
++      kValuesOffset + internal::kApiSystemPointerSize;
++
++  static constexpr int kThisValuesIndex = -1;
++  static_assert(ReturnValue<Value>::kDefaultValueValueIndex ==
++                kReturnValueDefaultValueIndex - kReturnValueIndex);
++  static_assert(ReturnValue<Value>::kIsolateValueIndex ==
++                kIsolateIndex - kReturnValueIndex);
+ 
+   V8_INLINE FunctionCallbackInfo(internal::Address* implicit_args,
+                                  internal::Address* values, int length);
+@@ -229,22 +251,24 @@ class PropertyCallbackInfo {
+    */
+   V8_INLINE bool ShouldThrowOnError() const;
+ 
+-  // This shouldn't be public, but the arm compiler needs it.
+-  static const int kArgsLength = 7;
+-
+- protected:
++ private:
+   friend class MacroAssembler;
+   friend class internal::PropertyCallbackArguments;
+   friend class internal::CustomArguments<PropertyCallbackInfo>;
+-  static const int kShouldThrowOnErrorIndex = 0;
+-  static const int kHolderIndex = 1;
+-  static const int kIsolateIndex = 2;
+-  static const int kReturnValueDefaultValueIndex = 3;
+-  static const int kReturnValueIndex = 4;
+-  static const int kDataIndex = 5;
+-  static const int kThisIndex = 6;
+-
+-  V8_INLINE PropertyCallbackInfo(internal::Address* args) : args_(args) {}
++  static constexpr int kShouldThrowOnErrorIndex = 0;
++  static constexpr int kHolderIndex = 1;
++  static constexpr int kIsolateIndex = 2;
++  static constexpr int kReturnValueDefaultValueIndex = 3;
++  static constexpr int kReturnValueIndex = 4;
++  static constexpr int kDataIndex = 5;
++  static constexpr int kThisIndex = 6;
++
++  static constexpr int kArgsLength = 7;
++
++  static constexpr int kSize = 1 * internal::kApiSystemPointerSize;
++
++  V8_INLINE explicit PropertyCallbackInfo(internal::Address* args)
++      : args_(args) {}
+   internal::Address* args_;
+ };
+ 
+@@ -355,7 +379,7 @@ void ReturnValue<T>::SetEmptyString() {
+ template <typename T>
+ Isolate* ReturnValue<T>::GetIsolate() const {
+   // Isolate is always the pointer below the default value on the stack.
+-  return *reinterpret_cast<Isolate**>(&value_[-2]);
++  return *reinterpret_cast<Isolate**>(&value_[kIsolateValueIndex]);
+ }
+ 
+ template <typename T>
+@@ -380,7 +404,7 @@ void ReturnValue<T>::Set(S* whatever) {
+ template <typename T>
+ internal::Address ReturnValue<T>::GetDefaultValue() {
+   // Default value is always the pointer below value_ on the stack.
+-  return value_[-1];
++  return value_[kDefaultValueValueIndex];
+ }
+ 
+ template <typename T>
+@@ -399,7 +423,7 @@ Local<Value> FunctionCallbackInfo<T>::operator[](int i) const {
+ template <typename T>
+ Local<Object> FunctionCallbackInfo<T>::This() const {
+   // values_ points to the first argument (not the receiver).
+-  return Local<Object>::FromSlot(values_ - 1);
++  return Local<Object>::FromSlot(values_ + kThisValuesIndex);
+ }
+ 
+ template <typename T>
+diff --git a/src/api/api-arguments-inl.h b/src/api/api-arguments-inl.h
+index 0a54c6c86a..31daa9a39c 100644
+--- a/src/api/api-arguments-inl.h
++++ b/src/api/api-arguments-inl.h
+@@ -32,14 +32,14 @@ CustomArgumentsBase::CustomArgumentsBase(Isolate* isolate)
+ 
+ template <typename T>
+ CustomArguments<T>::~CustomArguments() {
+-  slot_at(kReturnValueOffset).store(Object(kHandleZapValue));
++  slot_at(kReturnValueIndex).store(Object(kHandleZapValue));
+ }
+ 
+ template <typename T>
+ template <typename V>
+ Handle<V> CustomArguments<T>::GetReturnValue(Isolate* isolate) const {
+   // Check the ReturnValue.
+-  FullObjectSlot slot = slot_at(kReturnValueOffset);
++  FullObjectSlot slot = slot_at(kReturnValueIndex);
+   // Nothing was set, return empty handle as per previous behaviour.
+   Object raw_object = *slot;
+   if (raw_object.IsTheHole(isolate)) return Handle<V>();
+diff --git a/src/api/api-arguments.h b/src/api/api-arguments.h
+index baa4a394f7..9caf5decb0 100644
+--- a/src/api/api-arguments.h
++++ b/src/api/api-arguments.h
+@@ -6,6 +6,7 @@
+ #define V8_API_API_ARGUMENTS_H_
+ 
+ #include "include/v8-template.h"
++#include "src/builtins/builtins-utils.h"
+ #include "src/execution/isolate.h"
+ #include "src/objects/slots.h"
+ #include "src/objects/visitors.h"
+@@ -24,7 +25,8 @@ class CustomArgumentsBase : public Relocatable {
+ template <typename T>
+ class CustomArguments : public CustomArgumentsBase {
+  public:
+-  static const int kReturnValueOffset = T::kReturnValueIndex;
++  static constexpr int kReturnValueIndex = T::kReturnValueIndex;
++  static_assert(T::kSize == sizeof(T));
+ 
+   ~CustomArguments() override;
+ 
+@@ -51,6 +53,7 @@ class CustomArguments : public CustomArgumentsBase {
+               static_cast<unsigned>(T::kArgsLength));
+     return FullObjectSlot(values_ + index);
+   }
++
+   Address values_[T::kArgsLength];
+ };
+ 
+@@ -69,14 +72,14 @@ class PropertyCallbackArguments final
+  public:
+   using T = PropertyCallbackInfo<Value>;
+   using Super = CustomArguments<T>;
+-  static const int kArgsLength = T::kArgsLength;
+-  static const int kThisIndex = T::kThisIndex;
+-  static const int kHolderIndex = T::kHolderIndex;
+-  static const int kDataIndex = T::kDataIndex;
+-  static const int kReturnValueDefaultValueIndex =
++  static constexpr int kArgsLength = T::kArgsLength;
++  static constexpr int kThisIndex = T::kThisIndex;
++  static constexpr int kHolderIndex = T::kHolderIndex;
++  static constexpr int kDataIndex = T::kDataIndex;
++  static constexpr int kReturnValueDefaultValueIndex =
+       T::kReturnValueDefaultValueIndex;
+-  static const int kIsolateIndex = T::kIsolateIndex;
+-  static const int kShouldThrowOnErrorIndex = T::kShouldThrowOnErrorIndex;
++  static constexpr int kIsolateIndex = T::kIsolateIndex;
++  static constexpr int kShouldThrowOnErrorIndex = T::kShouldThrowOnErrorIndex;
+ 
+   PropertyCallbackArguments(Isolate* isolate, Object data, Object self,
+                             JSObject holder, Maybe<ShouldThrow> should_throw);
+@@ -167,7 +170,7 @@ class PropertyCallbackArguments final
+ #ifdef DEBUG
+   // This stores current value of Isolate::javascript_execution_counter().
+   // It's used for detecting whether JavaScript code was executed between
+-  // PropertyCallbackArguments's constructior and destructor.
++  // PropertyCallbackArguments's constructor and destructor.
+   uint32_t javascript_execution_counter_;
+ #endif  // DEBUG
+ };
+@@ -177,13 +180,21 @@ class FunctionCallbackArguments
+  public:
+   using T = FunctionCallbackInfo<Value>;
+   using Super = CustomArguments<T>;
+-  static const int kArgsLength = T::kArgsLength;
+-  static const int kHolderIndex = T::kHolderIndex;
+-  static const int kDataIndex = T::kDataIndex;
+-  static const int kReturnValueDefaultValueIndex =
++  static constexpr int kArgsLength = T::kArgsLength;
++  static constexpr int kArgsLengthWithReceiver = T::kArgsLengthWithReceiver;
++
++  static constexpr int kHolderIndex = T::kHolderIndex;
++  static constexpr int kDataIndex = T::kDataIndex;
++  static constexpr int kReturnValueDefaultValueIndex =
+       T::kReturnValueDefaultValueIndex;
+-  static const int kIsolateIndex = T::kIsolateIndex;
+-  static const int kNewTargetIndex = T::kNewTargetIndex;
++  static constexpr int kIsolateIndex = T::kIsolateIndex;
++  static constexpr int kNewTargetIndex = T::kNewTargetIndex;
++
++  static_assert(T::kThisValuesIndex == BuiltinArguments::kReceiverArgsOffset);
++  // Make sure all FunctionCallbackInfo constants are in sync.
++  static_assert(T::kImplicitArgsOffset == offsetof(T, implicit_args_));
++  static_assert(T::kValuesOffset == offsetof(T, values_));
++  static_assert(T::kLengthOffset == offsetof(T, length_));
+ 
+   FunctionCallbackArguments(Isolate* isolate, Object data, Object holder,
+                             HeapObject new_target, Address* argv, int argc);
+@@ -205,6 +216,11 @@ class FunctionCallbackArguments
+   int const argc_;
+ };
+ 
++static_assert(BuiltinArguments::kNumExtraArgs ==
++              BuiltinExitFrameConstants::kNumExtraArgsWithoutReceiver);
++static_assert(BuiltinArguments::kNumExtraArgsWithReceiver ==
++              BuiltinExitFrameConstants::kNumExtraArgsWithReceiver);
++
+ }  // namespace internal
+ }  // namespace v8
+ 
+diff --git a/src/builtins/arm/builtins-arm.cc b/src/builtins/arm/builtins-arm.cc
+index a465357fdb..b7996476c7 100644
+--- a/src/builtins/arm/builtins-arm.cc
++++ b/src/builtins/arm/builtins-arm.cc
+@@ -3100,6 +3100,11 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+   __ jmp(&leave_exit_frame);
+ }
+ 
++MemOperand ExitFrameStackSlotOperand(int offset) {
++  static constexpr int kFrameOffset = 1 * kPointerSize;
++  return MemOperand(sp, kFrameOffset + offset);
++}
++
+ MemOperand ExitFrameCallerStackSlotOperand(int index) {
+   return MemOperand(
+       fp, (BuiltinExitFrameConstants::kFixedSlotCountAboveFp + index) *
+@@ -3129,12 +3134,13 @@ void Builtins::Generate_CallApiCallback(MacroAssembler* masm) {
+ 
+   DCHECK(!AreAliased(api_function_address, argc, call_data, holder, scratch));
+ 
++  using FCI = FunctionCallbackInfo<v8::Value>;
+   using FCA = FunctionCallbackArguments;
+ 
+   static_assert(FCA::kArgsLength == 6);
+   static_assert(FCA::kNewTargetIndex == 5);
+   static_assert(FCA::kDataIndex == 4);
+-  static_assert(FCA::kReturnValueOffset == 3);
++  static_assert(FCA::kReturnValueIndex == 3);
+   static_assert(FCA::kReturnValueDefaultValueIndex == 2);
+   static_assert(FCA::kIsolateIndex == 1);
+   static_assert(FCA::kHolderIndex == 0);
+@@ -3142,12 +3148,14 @@ void Builtins::Generate_CallApiCallback(MacroAssembler* masm) {
+   // Set up FunctionCallbackInfo's implicit_args on the stack as follows:
+   //
+   // Target state:
+-  //   sp[0 * kPointerSize]: kHolder
++  //   sp[0 * kPointerSize]: kHolder   <= FCI::implicit_args_
+   //   sp[1 * kPointerSize]: kIsolate
+   //   sp[2 * kPointerSize]: undefined (kReturnValueDefaultValue)
+   //   sp[3 * kPointerSize]: undefined (kReturnValue)
+   //   sp[4 * kPointerSize]: kData
+   //   sp[5 * kPointerSize]: undefined (kNewTarget)
++  // Existing state:
++  //   sp[6 * kPointerSize]:            <= FCI:::values_
+ 
+   // Reserve space on the stack.
+   __ AllocateStackSpace(FCA::kArgsLength * kPointerSize);
+@@ -3176,37 +3184,46 @@ void Builtins::Generate_CallApiCallback(MacroAssembler* masm) {
+ 
+   // Allocate the v8::Arguments structure in the arguments' space since
+   // it's not controlled by GC.
+-  static constexpr int kApiStackSpace = 4;
++  static constexpr int kSlotsToDropSize = 1 * kPointerSize;
++  static constexpr int kApiStackSpace =
++      (FCI::kSize + kSlotsToDropSize) / kPointerSize;
++  static_assert(kApiStackSpace == 4);
++  static_assert(FCI::kImplicitArgsOffset == 0);
++  static_assert(FCI::kValuesOffset == 1 * kPointerSize);
++  static_assert(FCI::kLengthOffset == 2 * kPointerSize);
++
+   FrameScope frame_scope(masm, StackFrame::MANUAL);
+   __ EnterExitFrame(kApiStackSpace, StackFrame::EXIT);
+ 
+   // FunctionCallbackInfo::implicit_args_ (points at kHolder as set up above).
+   // Arguments are after the return address (pushed by EnterExitFrame()).
+-  __ str(scratch, MemOperand(sp, 1 * kPointerSize));
++  __ str(scratch, ExitFrameStackSlotOperand(FCI::kImplicitArgsOffset));
+ 
+   // FunctionCallbackInfo::values_ (points at the first varargs argument passed
+   // on the stack).
+-  __ add(scratch, scratch, Operand((FCA::kArgsLength + 1) * kPointerSize));
+-  __ str(scratch, MemOperand(sp, 2 * kPointerSize));
++  __ add(scratch, scratch,
++         Operand(FCA::kArgsLengthWithReceiver * kPointerSize));
++  __ str(scratch, ExitFrameStackSlotOperand(FCI::kValuesOffset));
+ 
+   // FunctionCallbackInfo::length_.
+-  __ str(argc, MemOperand(sp, 3 * kPointerSize));
++  __ str(argc, ExitFrameStackSlotOperand(FCI::kLengthOffset));
+ 
+   // We also store the number of bytes to drop from the stack after returning
+   // from the API function here.
++  MemOperand stack_space_operand =
++      ExitFrameStackSlotOperand(FCI::kLengthOffset + kSlotsToDropSize);
+   __ mov(scratch,
+          Operand((FCA::kArgsLength + 1 /* receiver */) * kPointerSize));
+   __ add(scratch, scratch, Operand(argc, LSL, kPointerSizeLog2));
+-  __ str(scratch, MemOperand(sp, 4 * kPointerSize));
++  __ str(scratch, stack_space_operand);
+ 
+   // v8::InvocationCallback's argument.
+   __ add(r0, sp, Operand(1 * kPointerSize));
+ 
+   ExternalReference thunk_ref = ExternalReference::invoke_function_callback();
+   MemOperand return_value_operand =
+-      ExitFrameCallerStackSlotOperand(FCA::kReturnValueOffset);
++      ExitFrameCallerStackSlotOperand(FCA::kReturnValueIndex);
+   static constexpr int kUseStackSpaceOperand = 0;
+-  MemOperand stack_space_operand(sp, 4 * kPointerSize);
+ 
+   AllowExternalCallThatCantCauseGC scope(masm);
+   CallApiFunctionAndReturn(masm, api_function_address, thunk_ref,
+@@ -3222,7 +3239,7 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+   static_assert(PCA::kHolderIndex == 1);
+   static_assert(PCA::kIsolateIndex == 2);
+   static_assert(PCA::kReturnValueDefaultValueIndex == 3);
+-  static_assert(PCA::kReturnValueOffset == 4);
++  static_assert(PCA::kReturnValueIndex == 4);
+   static_assert(PCA::kDataIndex == 5);
+   static_assert(PCA::kThisIndex == 6);
+   static_assert(PCA::kArgsLength == 7);
+@@ -3268,7 +3285,7 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+   __ ldr(api_function_address,
+          FieldMemOperand(callback, AccessorInfo::kMaybeRedirectedGetterOffset));
+   MemOperand return_value_operand = ExitFrameCallerStackSlotOperand(
+-      PCA::kReturnValueOffset + kNameHandleStackSize);
++      PCA::kReturnValueIndex + kNameHandleStackSize);
+   MemOperand* const kUseStackSpaceConstant = nullptr;
+   CallApiFunctionAndReturn(masm, api_function_address, thunk_ref,
+                            kStackUnwindSpace, kUseStackSpaceConstant,
+diff --git a/src/builtins/arm64/builtins-arm64.cc b/src/builtins/arm64/builtins-arm64.cc
+index 1313563987..7d6c89d309 100644
+--- a/src/builtins/arm64/builtins-arm64.cc
++++ b/src/builtins/arm64/builtins-arm64.cc
+@@ -5184,6 +5184,11 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+   __ B(&leave_exit_frame);
+ }
+ 
++MemOperand ExitFrameStackSlotOperand(int offset) {
++  static constexpr int kFrameOffset = 1 * kSystemPointerSize;
++  return MemOperand(sp, kFrameOffset + offset);
++}
++
+ MemOperand ExitFrameCallerStackSlotOperand(int index) {
+   return MemOperand(
+       fp, (BuiltinExitFrameConstants::kFixedSlotCountAboveFp + index) *
+@@ -5213,25 +5218,27 @@ void Builtins::Generate_CallApiCallback(MacroAssembler* masm) {
+ 
+   DCHECK(!AreAliased(api_function_address, argc, call_data, holder, scratch));
+ 
++  using FCI = FunctionCallbackInfo<v8::Value>;
+   using FCA = FunctionCallbackArguments;
+ 
+   static_assert(FCA::kArgsLength == 6);
+   static_assert(FCA::kNewTargetIndex == 5);
+   static_assert(FCA::kDataIndex == 4);
+-  static_assert(FCA::kReturnValueOffset == 3);
++  static_assert(FCA::kReturnValueIndex == 3);
+   static_assert(FCA::kReturnValueDefaultValueIndex == 2);
+   static_assert(FCA::kIsolateIndex == 1);
+   static_assert(FCA::kHolderIndex == 0);
+ 
+   // Set up FunctionCallbackInfo's implicit_args on the stack as follows:
+-  //
+   // Target state:
+-  //   sp[0 * kSystemPointerSize]: kHolder
++  //   sp[0 * kSystemPointerSize]: kHolder   <= FCA::implicit_args_
+   //   sp[1 * kSystemPointerSize]: kIsolate
+   //   sp[2 * kSystemPointerSize]: undefined (kReturnValueDefaultValue)
+   //   sp[3 * kSystemPointerSize]: undefined (kReturnValue)
+   //   sp[4 * kSystemPointerSize]: kData
+   //   sp[5 * kSystemPointerSize]: undefined (kNewTarget)
++  // Existing state:
++  //   sp[6 * kSystemPointerSize]:            <= FCA:::values_
+ 
+   // Reserve space on the stack.
+   __ Claim(FCA::kArgsLength, kSystemPointerSize);
+@@ -5260,24 +5267,30 @@ void Builtins::Generate_CallApiCallback(MacroAssembler* masm) {
+ 
+   // Allocate the v8::Arguments structure in the arguments' space, since it's
+   // not controlled by GC.
+-  static constexpr int kApiStackSpace = 4;
++  static constexpr int kSlotsToDropSize = 1 * kSystemPointerSize;
++  static constexpr int kApiStackSpace =
++      (FCI::kSize + kSlotsToDropSize) / kSystemPointerSize;
++  static_assert(kApiStackSpace == 4);
++  static_assert(FCI::kImplicitArgsOffset == 0);
++  static_assert(FCI::kValuesOffset == 1 * kSystemPointerSize);
++  static_assert(FCI::kLengthOffset == 2 * kSystemPointerSize);
+ 
+   FrameScope frame_scope(masm, StackFrame::MANUAL);
+   __ EnterExitFrame(x10, kApiStackSpace + kCallApiFunctionSpillSpace,
+                     StackFrame::EXIT);
+ 
+   // FunctionCallbackInfo::implicit_args_ (points at kHolder as set up above).
+-  // Arguments are after the return address (pushed by EnterExitFrame()).
+-  __ Str(scratch, MemOperand(sp, 1 * kSystemPointerSize));
++  // Arguments are after the return address(pushed by EnterExitFrame()).
++  __ Str(scratch, ExitFrameStackSlotOperand(FCI::kImplicitArgsOffset));
+ 
+   // FunctionCallbackInfo::values_ (points at the first varargs argument passed
+   // on the stack).
+   __ Add(scratch, scratch,
+-         Operand((FCA::kArgsLength + 1) * kSystemPointerSize));
+-  __ Str(scratch, MemOperand(sp, 2 * kSystemPointerSize));
++         Operand(FCA::kArgsLengthWithReceiver * kSystemPointerSize));
++  __ Str(scratch, ExitFrameStackSlotOperand(FCI::kValuesOffset));
+ 
+   // FunctionCallbackInfo::length_.
+-  __ Str(argc, MemOperand(sp, 3 * kSystemPointerSize));
++  __ Str(argc, ExitFrameStackSlotOperand(FCI::kLengthOffset));
+ 
+   // We also store the number of slots to drop from the stack after returning
+   // from the API function here.
+@@ -5285,8 +5298,10 @@ void Builtins::Generate_CallApiCallback(MacroAssembler* masm) {
+   // drop, not the number of bytes. arm64 must always drop a slot count that is
+   // a multiple of two, and related helper functions (DropArguments) expect a
+   // register containing the slot count.
+-  __ Add(scratch, argc, Operand(FCA::kArgsLength + 1 /*receiver*/));
+-  __ Str(scratch, MemOperand(sp, 4 * kSystemPointerSize));
++  MemOperand stack_space_operand =
++      ExitFrameStackSlotOperand(FCI::kLengthOffset + kSlotsToDropSize);
++  __ Add(scratch, argc, Operand(FCA::kArgsLengthWithReceiver));
++  __ Str(scratch, stack_space_operand);
+ 
+   // v8::InvocationCallback's argument.
+   DCHECK(!AreAliased(x0, api_function_address));
+@@ -5298,10 +5313,9 @@ void Builtins::Generate_CallApiCallback(MacroAssembler* masm) {
+   DCHECK_EQ(FCA::kArgsLength % 2, 0);
+ 
+   MemOperand return_value_operand =
+-      ExitFrameCallerStackSlotOperand(FCA::kReturnValueOffset);
++      ExitFrameCallerStackSlotOperand(FCA::kReturnValueIndex);
+   static constexpr int kSpillOffset = 1 + kApiStackSpace;
+   static constexpr int kUseStackSpaceOperand = 0;
+-  MemOperand stack_space_operand(sp, 4 * kSystemPointerSize);
+ 
+   AllowExternalCallThatCantCauseGC scope(masm);
+   CallApiFunctionAndReturn(masm, api_function_address, thunk_ref,
+@@ -5315,7 +5329,7 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+   static_assert(PCA::kHolderIndex == 1);
+   static_assert(PCA::kIsolateIndex == 2);
+   static_assert(PCA::kReturnValueDefaultValueIndex == 3);
+-  static_assert(PCA::kReturnValueOffset == 4);
++  static_assert(PCA::kReturnValueIndex == 4);
+   static_assert(PCA::kDataIndex == 5);
+   static_assert(PCA::kThisIndex == 6);
+   static_assert(PCA::kArgsLength == 7);
+@@ -5376,7 +5390,7 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+       ExternalReference::invoke_accessor_getter_callback();
+   static constexpr int kSpillOffset = 1 + kApiStackSpace;
+   MemOperand return_value_operand = ExitFrameCallerStackSlotOperand(
+-      PCA::kReturnValueOffset + kNameHandleStackSize);
++      PCA::kReturnValueIndex + kNameHandleStackSize);
+   MemOperand* const kUseStackSpaceConstant = nullptr;
+ 
+   CallApiFunctionAndReturn(masm, api_function_address, thunk_ref,
+diff --git a/src/builtins/builtins-api.cc b/src/builtins/builtins-api.cc
+index 813db707c5..ac4083df59 100644
+--- a/src/builtins/builtins-api.cc
++++ b/src/builtins/builtins-api.cc
+@@ -75,7 +75,7 @@ V8_WARN_UNUSED_RESULT MaybeHandle<Object> HandleApiCallHelper(
+         ApiNatives::InstantiateObject(isolate, instance_template,
+                                       Handle<JSReceiver>::cast(new_target)),
+         Object);
+-    argv[-1] = js_receiver->ptr();
++    argv[BuiltinArguments::kReceiverArgsOffset] = js_receiver->ptr();
+     raw_holder = *js_receiver;
+   } else {
+     DCHECK(receiver->IsJSReceiver());
+diff --git a/src/builtins/builtins-utils.h b/src/builtins/builtins-utils.h
+index 9e3b49fc01..03a4b2e9b1 100644
+--- a/src/builtins/builtins-utils.h
++++ b/src/builtins/builtins-utils.h
+@@ -8,6 +8,7 @@
+ #include "src/base/logging.h"
+ #include "src/builtins/builtins.h"
+ #include "src/execution/arguments.h"
++#include "src/execution/frame-constants.h"
+ #include "src/execution/isolate.h"
+ #include "src/heap/factory.h"
+ #include "src/logging/runtime-call-stats-scope.h"
+@@ -43,7 +44,7 @@ class BuiltinArguments : public JavaScriptArguments {
+   // Note: this should return the address after the receiver,
+   // even when length() == 1.
+   inline Address* address_of_first_argument() const {
+-    return address_of_arg_at(kArgsOffset + 1);  // Skips receiver.
++    return address_of_arg_at(kFirstArgsOffset);
+   }
+ 
+   static constexpr int kNewTargetOffset = 0;
+@@ -54,7 +55,11 @@ class BuiltinArguments : public JavaScriptArguments {
+ 
+   static constexpr int kNumExtraArgs = 4;
+   static constexpr int kNumExtraArgsWithReceiver = 5;
++
+   static constexpr int kArgsOffset = 4;
++  static_assert(kArgsOffset == kReceiverOffset);
++  static constexpr int kFirstArgsOffset = kArgsOffset + 1;  // Skip receiver.
++  static constexpr int kReceiverArgsOffset = kArgsOffset - kFirstArgsOffset;
+ 
+   inline Handle<Object> atOrUndefined(Isolate* isolate, int index) const;
+   inline Handle<Object> receiver() const;
+@@ -66,6 +71,23 @@ class BuiltinArguments : public JavaScriptArguments {
+   int length() const { return Arguments::length() - kNumExtraArgs; }
+ };
+ 
++#define ASSERT_OFFSET(BuiltinsOffset, FrameOffset)              \
++  static_assert(BuiltinArguments::BuiltinsOffset ==             \
++                (BuiltinExitFrameConstants::FrameOffset -       \
++                 BuiltinExitFrameConstants::kNewTargetOffset) / \
++                    kSystemPointerSize)
++ASSERT_OFFSET(kNewTargetOffset, kNewTargetOffset);
++ASSERT_OFFSET(kTargetOffset, kTargetOffset);
++ASSERT_OFFSET(kArgcOffset, kArgcOffset);
++ASSERT_OFFSET(kPaddingOffset, kPaddingOffset);
++ASSERT_OFFSET(kReceiverOffset, kFirstArgumentOffset);
++#undef ASSERT_OFFSET
++
++static_assert(BuiltinArguments::kNumExtraArgs ==
++              BuiltinExitFrameConstants::kNumExtraArgsWithoutReceiver);
++static_assert(BuiltinArguments::kNumExtraArgsWithReceiver ==
++              BuiltinExitFrameConstants::kNumExtraArgsWithReceiver);
++
+ // ----------------------------------------------------------------------------
+ // Support macro for defining builtins in C++.
+ // ----------------------------------------------------------------------------
+diff --git a/src/builtins/ia32/builtins-ia32.cc b/src/builtins/ia32/builtins-ia32.cc
+index 06a928b252..5e8ba2dee6 100644
+--- a/src/builtins/ia32/builtins-ia32.cc
++++ b/src/builtins/ia32/builtins-ia32.cc
+@@ -3460,7 +3460,7 @@ void Builtins::Generate_CallApiCallback(MacroAssembler* masm) {
+   static_assert(FCA::kArgsLength == 6);
+   static_assert(FCA::kNewTargetIndex == 5);
+   static_assert(FCA::kDataIndex == 4);
+-  static_assert(FCA::kReturnValueOffset == 3);
++  static_assert(FCA::kReturnValueIndex == 3);
+   static_assert(FCA::kReturnValueDefaultValueIndex == 2);
+   static_assert(FCA::kIsolateIndex == 1);
+   static_assert(FCA::kHolderIndex == 0);
+@@ -3533,7 +3533,7 @@ void Builtins::Generate_CallApiCallback(MacroAssembler* masm) {
+ 
+   ExternalReference thunk_ref = ExternalReference::invoke_function_callback();
+   Operand return_value_operand =
+-      ExitFrameCallerStackSlotOperand(FCA::kReturnValueOffset);
++      ExitFrameCallerStackSlotOperand(FCA::kReturnValueIndex);
+   static constexpr int kUseStackSpaceOperand = 0;
+   Operand stack_space_operand = ApiParameterOperand(kApiArgc + 3);
+   CallApiFunctionAndReturn(masm, api_function_address, thunk_ref,
+@@ -3549,7 +3549,7 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+   static_assert(PCA::kHolderIndex == 1);
+   static_assert(PCA::kIsolateIndex == 2);
+   static_assert(PCA::kReturnValueDefaultValueIndex == 3);
+-  static_assert(PCA::kReturnValueOffset == 4);
++  static_assert(PCA::kReturnValueIndex == 4);
+   static_assert(PCA::kDataIndex == 5);
+   static_assert(PCA::kThisIndex == 6);
+   static_assert(PCA::kArgsLength == 7);
+@@ -3606,7 +3606,7 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+   ExternalReference thunk_ref =
+       ExternalReference::invoke_accessor_getter_callback();
+   Operand return_value_operand = ExitFrameCallerStackSlotOperand(
+-      PCA::kReturnValueOffset + kNameHandleStackSize);
++      PCA::kReturnValueIndex + kNameHandleStackSize);
+   Operand* const kUseStackSpaceConstant = nullptr;
+   CallApiFunctionAndReturn(masm, function_address, thunk_ref, thunk_last_arg,
+                            kStackUnwindSpace, kUseStackSpaceConstant,
+diff --git a/src/builtins/loong64/builtins-loong64.cc b/src/builtins/loong64/builtins-loong64.cc
+index c686421c4c..c05ddf5888 100644
+--- a/src/builtins/loong64/builtins-loong64.cc
++++ b/src/builtins/loong64/builtins-loong64.cc
+@@ -3147,7 +3147,7 @@ void Builtins::Generate_CallApiCallback(MacroAssembler* masm) {
+   static_assert(FCA::kArgsLength == 6);
+   static_assert(FCA::kNewTargetIndex == 5);
+   static_assert(FCA::kDataIndex == 4);
+-  static_assert(FCA::kReturnValueOffset == 3);
++  static_assert(FCA::kReturnValueIndex == 3);
+   static_assert(FCA::kReturnValueDefaultValueIndex == 2);
+   static_assert(FCA::kIsolateIndex == 1);
+   static_assert(FCA::kHolderIndex == 0);
+@@ -3232,7 +3232,7 @@ void Builtins::Generate_CallApiCallback(MacroAssembler* masm) {
+   // TODO(jgruber): Document what these arguments are.
+   static constexpr int kStackSlotsAboveFCA = 2;
+   MemOperand return_value_operand(
+-      fp, (kStackSlotsAboveFCA + FCA::kReturnValueOffset) * kSystemPointerSize);
++      fp, (kStackSlotsAboveFCA + FCA::kReturnValueIndex) * kSystemPointerSize);
+ 
+   static constexpr int kUseStackSpaceOperand = 0;
+   MemOperand stack_space_operand(sp, 4 * kSystemPointerSize);
+@@ -3250,7 +3250,7 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+   static_assert(PropertyCallbackArguments::kHolderIndex == 1);
+   static_assert(PropertyCallbackArguments::kIsolateIndex == 2);
+   static_assert(PropertyCallbackArguments::kReturnValueDefaultValueIndex == 3);
+-  static_assert(PropertyCallbackArguments::kReturnValueOffset == 4);
++  static_assert(PropertyCallbackArguments::kReturnValueIndex == 4);
+   static_assert(PropertyCallbackArguments::kDataIndex == 5);
+   static_assert(PropertyCallbackArguments::kThisIndex == 6);
+   static_assert(PropertyCallbackArguments::kArgsLength == 7);
+@@ -3272,7 +3272,7 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+   __ St_d(scratch, MemOperand(sp, (PCA::kDataIndex + 1) * kSystemPointerSize));
+   __ LoadRoot(scratch, RootIndex::kUndefinedValue);
+   __ St_d(scratch,
+-          MemOperand(sp, (PCA::kReturnValueOffset + 1) * kSystemPointerSize));
++          MemOperand(sp, (PCA::kReturnValueIndex + 1) * kSystemPointerSize));
+   __ St_d(scratch, MemOperand(sp, (PCA::kReturnValueDefaultValueIndex + 1) *
+                                       kSystemPointerSize));
+   __ li(scratch, ExternalReference::isolate_address(masm->isolate()));
+@@ -3314,7 +3314,7 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+   // +3 is to skip prolog, return address and name handle.
+   MemOperand return_value_operand(
+       fp,
+-      (PropertyCallbackArguments::kReturnValueOffset + 3) * kSystemPointerSize);
++      (PropertyCallbackArguments::kReturnValueIndex + 3) * kSystemPointerSize);
+   MemOperand* const kUseStackSpaceConstant = nullptr;
+   CallApiFunctionAndReturn(masm, api_function_address, thunk_ref,
+                            kStackUnwindSpace, kUseStackSpaceConstant,
+diff --git a/src/builtins/mips64/builtins-mips64.cc b/src/builtins/mips64/builtins-mips64.cc
+index 5d5e364cfd..239814bfa2 100644
+--- a/src/builtins/mips64/builtins-mips64.cc
++++ b/src/builtins/mips64/builtins-mips64.cc
+@@ -3197,7 +3197,7 @@ void Builtins::Generate_CallApiCallback(MacroAssembler* masm) {
+   static_assert(FCA::kArgsLength == 6);
+   static_assert(FCA::kNewTargetIndex == 5);
+   static_assert(FCA::kDataIndex == 4);
+-  static_assert(FCA::kReturnValueOffset == 3);
++  static_assert(FCA::kReturnValueIndex == 3);
+   static_assert(FCA::kReturnValueDefaultValueIndex == 2);
+   static_assert(FCA::kIsolateIndex == 1);
+   static_assert(FCA::kHolderIndex == 0);
+@@ -3282,7 +3282,7 @@ void Builtins::Generate_CallApiCallback(MacroAssembler* masm) {
+   // TODO(jgruber): Document what these arguments are.
+   static constexpr int kStackSlotsAboveFCA = 2;
+   MemOperand return_value_operand(
+-      fp, (kStackSlotsAboveFCA + FCA::kReturnValueOffset) * kPointerSize);
++      fp, (kStackSlotsAboveFCA + FCA::kReturnValueIndex) * kPointerSize);
+ 
+   static constexpr int kUseStackSpaceOperand = 0;
+   MemOperand stack_space_operand(sp, 4 * kPointerSize);
+@@ -3300,7 +3300,7 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+   static_assert(PropertyCallbackArguments::kHolderIndex == 1);
+   static_assert(PropertyCallbackArguments::kIsolateIndex == 2);
+   static_assert(PropertyCallbackArguments::kReturnValueDefaultValueIndex == 3);
+-  static_assert(PropertyCallbackArguments::kReturnValueOffset == 4);
++  static_assert(PropertyCallbackArguments::kReturnValueIndex == 4);
+   static_assert(PropertyCallbackArguments::kDataIndex == 5);
+   static_assert(PropertyCallbackArguments::kThisIndex == 6);
+   static_assert(PropertyCallbackArguments::kArgsLength == 7);
+@@ -3320,7 +3320,7 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+   __ Ld(scratch, FieldMemOperand(callback, AccessorInfo::kDataOffset));
+   __ Sd(scratch, MemOperand(sp, (PCA::kDataIndex + 1) * kPointerSize));
+   __ LoadRoot(scratch, RootIndex::kUndefinedValue);
+-  __ Sd(scratch, MemOperand(sp, (PCA::kReturnValueOffset + 1) * kPointerSize));
++  __ Sd(scratch, MemOperand(sp, (PCA::kReturnValueIndex + 1) * kPointerSize));
+   __ Sd(scratch, MemOperand(sp, (PCA::kReturnValueDefaultValueIndex + 1) *
+                                     kPointerSize));
+   __ li(scratch, ExternalReference::isolate_address(masm->isolate()));
+@@ -3358,7 +3358,7 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+ 
+   // +3 is to skip prolog, return address and name handle.
+   MemOperand return_value_operand(
+-      fp, (PropertyCallbackArguments::kReturnValueOffset + 3) * kPointerSize);
++      fp, (PropertyCallbackArguments::kReturnValueIndex + 3) * kPointerSize);
+   MemOperand* const kUseStackSpaceConstant = nullptr;
+   CallApiFunctionAndReturn(masm, api_function_address, thunk_ref,
+                            kStackUnwindSpace, kUseStackSpaceConstant,
+diff --git a/src/builtins/ppc/builtins-ppc.cc b/src/builtins/ppc/builtins-ppc.cc
+index b5789f3cda..726091014e 100644
+--- a/src/builtins/ppc/builtins-ppc.cc
++++ b/src/builtins/ppc/builtins-ppc.cc
+@@ -3413,7 +3413,7 @@ void Builtins::Generate_CallApiCallback(MacroAssembler* masm) {
+   static_assert(FCA::kArgsLength == 6);
+   static_assert(FCA::kNewTargetIndex == 5);
+   static_assert(FCA::kDataIndex == 4);
+-  static_assert(FCA::kReturnValueOffset == 3);
++  static_assert(FCA::kReturnValueIndex == 3);
+   static_assert(FCA::kReturnValueDefaultValueIndex == 2);
+   static_assert(FCA::kIsolateIndex == 1);
+   static_assert(FCA::kHolderIndex == 0);
+@@ -3501,7 +3501,7 @@ void Builtins::Generate_CallApiCallback(MacroAssembler* masm) {
+   // TODO(jgruber): Document what these arguments are.
+   static constexpr int kStackSlotsAboveFCA = 2;
+   MemOperand return_value_operand(
+-      fp, (kStackSlotsAboveFCA + FCA::kReturnValueOffset) * kSystemPointerSize);
++      fp, (kStackSlotsAboveFCA + FCA::kReturnValueIndex) * kSystemPointerSize);
+ 
+   static constexpr int kUseStackSpaceOperand = 0;
+   MemOperand stack_space_operand(
+@@ -3524,7 +3524,7 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+   static_assert(PropertyCallbackArguments::kHolderIndex == 1);
+   static_assert(PropertyCallbackArguments::kIsolateIndex == 2);
+   static_assert(PropertyCallbackArguments::kReturnValueDefaultValueIndex == 3);
+-  static_assert(PropertyCallbackArguments::kReturnValueOffset == 4);
++  static_assert(PropertyCallbackArguments::kReturnValueIndex == 4);
+   static_assert(PropertyCallbackArguments::kDataIndex == 5);
+   static_assert(PropertyCallbackArguments::kThisIndex == 6);
+   static_assert(PropertyCallbackArguments::kArgsLength == 7);
+@@ -3605,7 +3605,7 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+   // +3 is to skip prolog, return address and name handle.
+   MemOperand return_value_operand(
+       fp,
+-      (PropertyCallbackArguments::kReturnValueOffset + 3) * kSystemPointerSize);
++      (PropertyCallbackArguments::kReturnValueIndex + 3) * kSystemPointerSize);
+   MemOperand* const kUseStackSpaceConstant = nullptr;
+   CallApiFunctionAndReturn(masm, api_function_address, thunk_ref,
+                            kStackUnwindSpace, kUseStackSpaceConstant,
+diff --git a/src/builtins/riscv/builtins-riscv.cc b/src/builtins/riscv/builtins-riscv.cc
+index c811690d4e..d3609e49b6 100644
+--- a/src/builtins/riscv/builtins-riscv.cc
++++ b/src/builtins/riscv/builtins-riscv.cc
+@@ -3252,7 +3252,7 @@ void Builtins::Generate_CallApiCallback(MacroAssembler* masm) {
+   static_assert(FCA::kArgsLength == 6);
+   static_assert(FCA::kNewTargetIndex == 5);
+   static_assert(FCA::kDataIndex == 4);
+-  static_assert(FCA::kReturnValueOffset == 3);
++  static_assert(FCA::kReturnValueIndex == 3);
+   static_assert(FCA::kReturnValueDefaultValueIndex == 2);
+   static_assert(FCA::kIsolateIndex == 1);
+   static_assert(FCA::kHolderIndex == 0);
+@@ -3336,7 +3336,7 @@ void Builtins::Generate_CallApiCallback(MacroAssembler* masm) {
+   // TODO(jgruber): Document what these arguments are.
+   static constexpr int kStackSlotsAboveFCA = 2;
+   MemOperand return_value_operand(
+-      fp, (kStackSlotsAboveFCA + FCA::kReturnValueOffset) * kSystemPointerSize);
++      fp, (kStackSlotsAboveFCA + FCA::kReturnValueIndex) * kSystemPointerSize);
+ 
+   static constexpr int kUseStackSpaceOperand = 0;
+   MemOperand stack_space_operand(sp, 4 * kSystemPointerSize);
+@@ -3354,7 +3354,7 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+   static_assert(PropertyCallbackArguments::kHolderIndex == 1);
+   static_assert(PropertyCallbackArguments::kIsolateIndex == 2);
+   static_assert(PropertyCallbackArguments::kReturnValueDefaultValueIndex == 3);
+-  static_assert(PropertyCallbackArguments::kReturnValueOffset == 4);
++  static_assert(PropertyCallbackArguments::kReturnValueIndex == 4);
+   static_assert(PropertyCallbackArguments::kDataIndex == 5);
+   static_assert(PropertyCallbackArguments::kThisIndex == 6);
+   static_assert(PropertyCallbackArguments::kArgsLength == 7);
+@@ -3377,7 +3377,7 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+   __ StoreWord(scratch,
+                MemOperand(sp, (PCA::kDataIndex + 1) * kSystemPointerSize));
+   __ LoadRoot(scratch, RootIndex::kUndefinedValue);
+-  __ StoreWord(scratch, MemOperand(sp, (PCA::kReturnValueOffset + 1) *
++  __ StoreWord(scratch, MemOperand(sp, (PCA::kReturnValueIndex + 1) *
+                                            kSystemPointerSize));
+   __ StoreWord(scratch,
+                MemOperand(sp, (PCA::kReturnValueDefaultValueIndex + 1) *
+@@ -3422,7 +3422,7 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+   // +3 is to skip prolog, return address and name handle.
+   MemOperand return_value_operand(
+       fp,
+-      (PropertyCallbackArguments::kReturnValueOffset + 3) * kSystemPointerSize);
++      (PropertyCallbackArguments::kReturnValueIndex + 3) * kSystemPointerSize);
+   MemOperand* const kUseStackSpaceConstant = nullptr;
+   CallApiFunctionAndReturn(masm, api_function_address, thunk_ref,
+                            kStackUnwindSpace, kUseStackSpaceConstant,
+diff --git a/src/builtins/s390/builtins-s390.cc b/src/builtins/s390/builtins-s390.cc
+index 5714dd06ed..69efa8208d 100644
+--- a/src/builtins/s390/builtins-s390.cc
++++ b/src/builtins/s390/builtins-s390.cc
+@@ -3386,7 +3386,7 @@ void Builtins::Generate_CallApiCallback(MacroAssembler* masm) {
+   static_assert(FCA::kArgsLength == 6);
+   static_assert(FCA::kNewTargetIndex == 5);
+   static_assert(FCA::kDataIndex == 4);
+-  static_assert(FCA::kReturnValueOffset == 3);
++  static_assert(FCA::kReturnValueIndex == 3);
+   static_assert(FCA::kReturnValueDefaultValueIndex == 2);
+   static_assert(FCA::kIsolateIndex == 1);
+   static_assert(FCA::kHolderIndex == 0);
+@@ -3474,7 +3474,7 @@ void Builtins::Generate_CallApiCallback(MacroAssembler* masm) {
+   // TODO(jgruber): Document what these arguments are.
+   static constexpr int kStackSlotsAboveFCA = 2;
+   MemOperand return_value_operand(
+-      fp, (kStackSlotsAboveFCA + FCA::kReturnValueOffset) * kSystemPointerSize);
++      fp, (kStackSlotsAboveFCA + FCA::kReturnValueIndex) * kSystemPointerSize);
+ 
+   static constexpr int kUseStackSpaceOperand = 0;
+   MemOperand stack_space_operand(
+@@ -3496,7 +3496,7 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+   static_assert(PropertyCallbackArguments::kHolderIndex == 1);
+   static_assert(PropertyCallbackArguments::kIsolateIndex == 2);
+   static_assert(PropertyCallbackArguments::kReturnValueDefaultValueIndex == 3);
+-  static_assert(PropertyCallbackArguments::kReturnValueOffset == 4);
++  static_assert(PropertyCallbackArguments::kReturnValueIndex == 4);
+   static_assert(PropertyCallbackArguments::kDataIndex == 5);
+   static_assert(PropertyCallbackArguments::kThisIndex == 6);
+   static_assert(PropertyCallbackArguments::kArgsLength == 7);
+@@ -3576,7 +3576,7 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+   // +3 is to skip prolog, return address and name handle.
+   MemOperand return_value_operand(
+       fp,
+-      (PropertyCallbackArguments::kReturnValueOffset + 3) * kSystemPointerSize);
++      (PropertyCallbackArguments::kReturnValueIndex + 3) * kSystemPointerSize);
+   MemOperand* const kUseStackSpaceConstant = nullptr;
+   CallApiFunctionAndReturn(masm, api_function_address, thunk_ref,
+                            kStackUnwindSpace, kUseStackSpaceConstant,
+diff --git a/src/builtins/x64/builtins-x64.cc b/src/builtins/x64/builtins-x64.cc
+index aeb2acc11a..0f9fdf1c5d 100644
+--- a/src/builtins/x64/builtins-x64.cc
++++ b/src/builtins/x64/builtins-x64.cc
+@@ -4749,12 +4749,13 @@ void Builtins::Generate_CallApiCallback(MacroAssembler* masm) {
+   DCHECK(!AreAliased(api_function_address, argc, holder, call_data,
+                      kScratchRegister));
+ 
++  using FCI = FunctionCallbackInfo<v8::Value>;
+   using FCA = FunctionCallbackArguments;
+ 
+   static_assert(FCA::kArgsLength == 6);
+   static_assert(FCA::kNewTargetIndex == 5);
+   static_assert(FCA::kDataIndex == 4);
+-  static_assert(FCA::kReturnValueOffset == 3);
++  static_assert(FCA::kReturnValueIndex == 3);
+   static_assert(FCA::kReturnValueDefaultValueIndex == 2);
+   static_assert(FCA::kIsolateIndex == 1);
+   static_assert(FCA::kHolderIndex == 0);
+@@ -4781,43 +4782,47 @@ void Builtins::Generate_CallApiCallback(MacroAssembler* masm) {
+   __ Push(kScratchRegister);
+   __ PushAddress(ExternalReference::isolate_address(masm->isolate()));
+   __ Push(holder);
+-  __ PushReturnAddressFrom(rax);
+-
+   // Keep a pointer to kHolder (= implicit_args) in a scratch register.
+   // We use it below to set up the FunctionCallbackInfo object.
+   Register scratch = rbx;
+-  __ leaq(scratch, Operand(rsp, 1 * kSystemPointerSize));
++  __ movq(scratch, rsp);
++
++  __ PushReturnAddressFrom(rax);
+ 
+   // Allocate the v8::Arguments structure in the arguments' space since it's
+   // not controlled by GC.
+   static constexpr int kApiStackSpace = 4;
+-
+-  // We reserve stack space for the FunctionCallbackInfo, and an extra slot (see
+-  // below).
+-  static_assert(kApiStackSpace ==
+-                sizeof(FunctionCallbackInfo<v8::Value>) / kSystemPointerSize +
+-                    1);
++  static_assert(kApiStackSpace == sizeof(FCI) / kSystemPointerSize + 1);
+ 
+   __ EnterExitFrame(kApiStackSpace, StackFrame::EXIT);
+ 
+   // FunctionCallbackInfo::implicit_args_ (points at kHolder as set up above).
+-  __ movq(ExitFrameStackSlotOperand(0), scratch);
++  constexpr int kImplicitArgsOffset = 0;
++  static_assert(kImplicitArgsOffset ==
++                offsetof(FCI, implicit_args_) / kSystemPointerSize);
++  __ movq(ExitFrameStackSlotOperand(kImplicitArgsOffset), scratch);
+ 
+   // FunctionCallbackInfo::values_ (points at the first varargs argument passed
+   // on the stack).
++  constexpr int kValuesOffset = 1;
++  static_assert(kValuesOffset == offsetof(FCI, values_) / kSystemPointerSize);
+   __ leaq(scratch,
+           Operand(scratch, (FCA::kArgsLength + 1) * kSystemPointerSize));
+-  __ movq(ExitFrameStackSlotOperand(1), scratch);
++  __ movq(ExitFrameStackSlotOperand(kValuesOffset), scratch);
+ 
+   // FunctionCallbackInfo::length_.
++  constexpr int kLengthOffset = 2;
++  static_assert(kLengthOffset == offsetof(FCI, length_) / kSystemPointerSize);
+   __ movq(ExitFrameStackSlotOperand(2), argc);
+ 
+   // We also store the number of bytes to drop from the stack after returning
+   // from the API function here.
++  constexpr int kBytesToDropOffset = kLengthOffset + 1;
++  static_assert(kBytesToDropOffset == kApiStackSpace - 1);
+   __ leaq(kScratchRegister, Operand(argc, times_system_pointer_size,
+                                     FCA::kArgsLength * kSystemPointerSize +
+                                         kReceiverOnStackSize));
+-  __ movq(ExitFrameStackSlotOperand(3), kScratchRegister);
++  __ movq(ExitFrameStackSlotOperand(kBytesToDropOffset), kScratchRegister);
+ 
+   Register arguments_arg = arg_reg_1;
+   Register callback_arg = arg_reg_2;
+@@ -4826,12 +4831,12 @@ void Builtins::Generate_CallApiCallback(MacroAssembler* masm) {
+   DCHECK(api_function_address != arguments_arg);
+ 
+   // v8::InvocationCallback's argument.
+-  __ leaq(arguments_arg, ExitFrameStackSlotOperand(0));
++  __ leaq(arguments_arg, ExitFrameStackSlotOperand(kImplicitArgsOffset));
+ 
+   ExternalReference thunk_ref = ExternalReference::invoke_function_callback();
+ 
+   Operand return_value_operand =
+-      ExitFrameCallerStackSlotOperand(FCA::kReturnValueOffset);
++      ExitFrameCallerStackSlotOperand(FCA::kReturnValueIndex);
+   static constexpr int kUseExitFrameStackSlotOperand = 0;
+   Operand stack_space_operand = ExitFrameStackSlotOperand(3);
+   CallApiFunctionAndReturn(masm, api_function_address, thunk_ref, callback_arg,
+@@ -4859,7 +4864,7 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+   static_assert(PCA::kHolderIndex == 1);
+   static_assert(PCA::kIsolateIndex == 2);
+   static_assert(PCA::kReturnValueDefaultValueIndex == 3);
+-  static_assert(PCA::kReturnValueOffset == 4);
++  static_assert(PCA::kReturnValueIndex == 4);
+   static_assert(PCA::kDataIndex == 5);
+   static_assert(PCA::kThisIndex == 6);
+   static_assert(PCA::kArgsLength == 7);
+@@ -4916,7 +4921,7 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+   ExternalReference thunk_ref =
+       ExternalReference::invoke_accessor_getter_callback();
+   Operand return_value_operand = ExitFrameCallerStackSlotOperand(
+-      PCA::kReturnValueOffset + kNameHandleStackSize);
++      PCA::kReturnValueIndex + kNameHandleStackSize);
+   Operand* const kUseStackSpaceConstant = nullptr;
+ 
+   CallApiFunctionAndReturn(masm, api_function_address, thunk_ref, getter_arg,
+diff --git a/src/objects/js-objects.cc b/src/objects/js-objects.cc
+index 935e97fa03..a8a6a23ae3 100644
+--- a/src/objects/js-objects.cc
++++ b/src/objects/js-objects.cc
+@@ -4118,7 +4118,7 @@ Maybe<bool> JSObject::DeletePropertyWithInterceptor(LookupIterator* it,
+ 
+   DCHECK(result->IsBoolean());
+   args.AcceptSideEffects();
+-  // Rebox CustomArguments::kReturnValueOffset before returning.
++  // Rebox CustomArguments::kReturnValueIndex before returning.
+   return Just(result->IsTrue(isolate));
+ }
+ 
+-- 
+2.35.1
+

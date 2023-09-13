@@ -1,0 +1,88 @@
+From 2768d44a6a7acafc2c7e29e88c7ec335d99f6bc4 Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Mon, 6 Mar 2023 18:02:26 +0800
+Subject: [PATCH] [riscv]Optimizations for jitless builds
+
+Port commit ed3ce33a3745fdadc055760a2486d307ff4e4468
+
+Bug: v8:9450
+Change-Id: If9b4f876ed3c6e1a2b19649e175b8411ab7cdb74
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4307619
+Auto-Submit: Yahan Lu <yahan@iscas.ac.cn>
+Commit-Queue: Ji Qiu <qiuji@iscas.ac.cn>
+Reviewed-by: Ji Qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#86258}
+---
+ src/builtins/riscv/builtins-riscv.cc | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/src/builtins/riscv/builtins-riscv.cc b/src/builtins/riscv/builtins-riscv.cc
+index 790de0edf7..5231fb8d3e 100644
+--- a/src/builtins/riscv/builtins-riscv.cc
++++ b/src/builtins/riscv/builtins-riscv.cc
+@@ -341,6 +341,8 @@ static void GetSharedFunctionInfoBytecodeOrBaseline(MacroAssembler* masm,
+   Label done;
+ 
+   __ GetObjectType(sfi_data, scratch1, scratch1);
++
++#ifndef V8_JITLESS
+   if (v8_flags.debug_code) {
+     Label not_baseline;
+     __ Branch(&not_baseline, ne, scratch1, Operand(CODE_TYPE));
+@@ -350,6 +352,7 @@ static void GetSharedFunctionInfoBytecodeOrBaseline(MacroAssembler* masm,
+   } else {
+     __ Branch(is_baseline, eq, scratch1, Operand(CODE_TYPE));
+   }
++#endif  // !V8_JITLESS
+ 
+   __ Branch(&done, ne, scratch1, Operand(INTERPRETER_DATA_TYPE),
+             Label::Distance::kNear);
+@@ -1126,7 +1129,6 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+ void Builtins::Generate_InterpreterEntryTrampoline(
+     MacroAssembler* masm, InterpreterEntryTrampolineMode mode) {
+   Register closure = a1;
+-  Register feedback_vector = a2;
+   // Get the bytecode array from the function object and load it into
+   // kInterpreterBytecodeArrayRegister.
+   __ LoadTaggedField(
+@@ -1145,6 +1147,8 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+   __ GetObjectType(kInterpreterBytecodeArrayRegister, kScratchReg, kScratchReg);
+   __ Branch(&compile_lazy, ne, kScratchReg, Operand(BYTECODE_ARRAY_TYPE));
+ 
++#ifndef V8_JITLESS
++  Register feedback_vector = a2;
+   // Load the feedback vector from the closure.
+   __ LoadTaggedField(feedback_vector,
+                      FieldMemOperand(closure, JSFunction::kFeedbackCellOffset));
+@@ -1184,6 +1188,12 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+   // MANUAL indicates that the scope shouldn't actually generate code to set up
+   // the frame (that is done below).
+   __ bind(&push_stack_frame);
++#else
++  // Note: By omitting the above code in jitless mode we also disable:
++  // - kFlagsLogNextExecution: only used for logging/profiling; and
++  // - kInvocationCountOffset: only used for tiering heuristics and code
++  //   coverage.
++#endif  // !V8_JITLESS
+   FrameScope frame_scope(masm, StackFrame::MANUAL);
+   __ PushStandardFrame(closure);
+ 
+@@ -1324,6 +1334,7 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+ 
+   __ Branch(&after_stack_check_interrupt);
+ 
++#ifndef V8_JITLESS
+   __ bind(&flags_need_processing);
+   __ OptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
+   __ bind(&is_baseline);
+@@ -1356,6 +1367,7 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+     __ bind(&install_baseline_code);
+     __ GenerateTailCallToReturnedCode(Runtime::kInstallBaselineCode);
+   }
++#endif  // !V8_JITLESS
+ 
+   __ bind(&compile_lazy);
+   __ GenerateTailCallToReturnedCode(Runtime::kCompileLazy);
+-- 
+2.35.1
+

@@ -1,0 +1,98 @@
+From 85e287c9cb08662a5bbc0267c958ee3bb00c85ea Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Tue, 12 Oct 2021 12:45:47 +0800
+Subject: [PATCH] [riscv64] Port 3217193: [regexp] Various refactors
+
+Change-Id: I2d9cb95d8b04a96f436b6f8eae1ce87d80df7f6f
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3218710
+Reviewed-by: ji qiu <qiuji@iscas.ac.cn>
+Commit-Queue: ji qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#77331}
+---
+ .../riscv64/regexp-macro-assembler-riscv64.cc | 21 +++++++------------
+ .../riscv64/regexp-macro-assembler-riscv64.h  |  2 +-
+ 2 files changed, 9 insertions(+), 14 deletions(-)
+
+diff --git a/src/regexp/riscv64/regexp-macro-assembler-riscv64.cc b/src/regexp/riscv64/regexp-macro-assembler-riscv64.cc
+index bb15bc24ed..3dd55ff0c6 100644
+--- a/src/regexp/riscv64/regexp-macro-assembler-riscv64.cc
++++ b/src/regexp/riscv64/regexp-macro-assembler-riscv64.cc
+@@ -335,10 +335,9 @@ void RegExpMacroAssemblerRISCV::CheckNotBackReferenceIgnoreCase(
+     {
+       AllowExternalCallThatCantCauseGC scope(masm_.get());
+       ExternalReference function =
+-          unicode ? ExternalReference::re_case_insensitive_compare_unicode(
+-                        isolate())
+-                  : ExternalReference::re_case_insensitive_compare_non_unicode(
+-                        isolate());
++          unicode
++              ? ExternalReference::re_case_insensitive_compare_unicode()
++              : ExternalReference::re_case_insensitive_compare_non_unicode();
+       __ CallCFunction(function, argument_count);
+     }
+ 
+@@ -552,8 +551,7 @@ bool RegExpMacroAssemblerRISCV::CheckSpecialCharacterClass(base::uc16 type,
+         BranchOrBacktrack(on_no_match, Ugreater, current_character(),
+                           Operand('z'));
+       }
+-      ExternalReference map =
+-          ExternalReference::re_word_character_map(isolate());
++      ExternalReference map = ExternalReference::re_word_character_map();
+       __ li(a0, Operand(map));
+       __ Add64(a0, a0, current_character());
+       __ Lbu(a0, MemOperand(a0, 0));
+@@ -566,8 +564,7 @@ bool RegExpMacroAssemblerRISCV::CheckSpecialCharacterClass(base::uc16 type,
+         // Table is 256 entries, so all Latin1 characters can be tested.
+         __ BranchShort(&done, Ugreater, current_character(), Operand('z'));
+       }
+-      ExternalReference map =
+-          ExternalReference::re_word_character_map(isolate());
++      ExternalReference map = ExternalReference::re_word_character_map();
+       __ li(a0, Operand(map));
+       __ Add64(a0, a0, current_character());
+       __ Lbu(a0, MemOperand(a0, 0));
+@@ -929,8 +926,7 @@ Handle<HeapObject> RegExpMacroAssemblerRISCV::GetCode(Handle<String> source) {
+       static constexpr int kNumArguments = 1;
+       __ PrepareCallCFunction(kNumArguments, 0, a0);
+       __ li(a0, ExternalReference::isolate_address(isolate()));
+-      ExternalReference grow_stack =
+-          ExternalReference::re_grow_stack(isolate());
++      ExternalReference grow_stack = ExternalReference::re_grow_stack();
+       __ CallCFunction(grow_stack, kNumArguments);
+       // If nullptr is returned, we have failed to grow the stack, and must exit
+       // with a stack-overflow exception.
+@@ -1107,8 +1103,7 @@ void RegExpMacroAssemblerRISCV::ClearRegisters(int reg_from, int reg_to) {
+   }
+ }
+ 
+-
+-bool RegExpMacroAssemblerRISCV::CanReadUnaligned() { return false; }
++bool RegExpMacroAssemblerRISCV::CanReadUnaligned() const { return false; }
+ 
+ // Private methods:
+ 
+@@ -1147,7 +1142,7 @@ void RegExpMacroAssemblerRISCV::CallCheckStackGuardState(Register scratch) {
+   __ mv(a0, sp);
+ 
+   ExternalReference stack_guard_check =
+-      ExternalReference::re_check_stack_guard_state(masm_->isolate());
++      ExternalReference::re_check_stack_guard_state();
+   __ li(t6, Operand(stack_guard_check));
+ 
+   EmbeddedData d = EmbeddedData::FromBlob();
+diff --git a/src/regexp/riscv64/regexp-macro-assembler-riscv64.h b/src/regexp/riscv64/regexp-macro-assembler-riscv64.h
+index 211f17b314..86b66f9db0 100644
+--- a/src/regexp/riscv64/regexp-macro-assembler-riscv64.h
++++ b/src/regexp/riscv64/regexp-macro-assembler-riscv64.h
+@@ -78,7 +78,7 @@ class V8_EXPORT_PRIVATE RegExpMacroAssemblerRISCV
+   virtual void WriteCurrentPositionToRegister(int reg, int cp_offset);
+   virtual void ClearRegisters(int reg_from, int reg_to);
+   virtual void WriteStackPointerToRegister(int reg);
+-  virtual bool CanReadUnaligned();
++  virtual bool CanReadUnaligned() const;
+ 
+   // Called from RegExp if the stack-guard is triggered.
+   // If the code object is relocated, the return address is fixed before
+-- 
+2.35.1
+

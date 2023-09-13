@@ -1,0 +1,56 @@
+From c77ca6b3ac1ad76d2a117dc7dbdd0d00196e6b1e Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Fri, 18 Jun 2021 17:06:51 +0800
+Subject: [PATCH] [riscv64] Fix uncorrectly branch
+
+Change-Id: Ic73b5414e62de76a3d4d604c52686c273d9a1b44
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/2970813
+Commit-Queue: Yahan Lu <yahan@iscas.ac.cn>
+Commit-Queue: Ji Qiu <qiuji@iscas.ac.cn>
+Auto-Submit: Yahan Lu <yahan@iscas.ac.cn>
+Reviewed-by: Ji Qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/master@{#75238}
+---
+ src/codegen/riscv64/macro-assembler-riscv64.cc | 10 +++-------
+ 1 file changed, 3 insertions(+), 7 deletions(-)
+
+diff --git a/src/codegen/riscv64/macro-assembler-riscv64.cc b/src/codegen/riscv64/macro-assembler-riscv64.cc
+index b3fc684f99..afd0c7d5ce 100644
+--- a/src/codegen/riscv64/macro-assembler-riscv64.cc
++++ b/src/codegen/riscv64/macro-assembler-riscv64.cc
+@@ -4640,7 +4640,7 @@ void TurboAssembler::LoadCodeObjectEntry(Register destination,
+ 
+   if (options().isolate_independent_code) {
+     DCHECK(root_array_available());
+-    Label if_code_is_off_heap, no_builtin_index, out;
++    Label if_code_is_off_heap, out;
+ 
+     UseScratchRegisterScope temps(this);
+     Register scratch = temps.Acquire();
+@@ -4653,11 +4653,10 @@ void TurboAssembler::LoadCodeObjectEntry(Register destination,
+     // trampoline.  Otherwise, just call the Code object as always.
+ 
+     Lw(scratch, FieldMemOperand(code_object, Code::kFlagsOffset));
+-    Branch(&if_code_is_off_heap, ne, scratch,
+-           Operand(Code::IsOffHeapTrampoline::kMask));
++    And(scratch, scratch, Operand(Code::IsOffHeapTrampoline::kMask));
++    Branch(&if_code_is_off_heap, ne, scratch, Operand(zero_reg));
+     // Not an off-heap trampoline object, the entry point is at
+     // Code::raw_instruction_start().
+-    bind(&no_builtin_index);
+     Add64(destination, code_object, Code::kHeaderSize - kHeapObjectTag);
+     Branch(&out);
+ 
+@@ -4665,9 +4664,6 @@ void TurboAssembler::LoadCodeObjectEntry(Register destination,
+     // table.
+     bind(&if_code_is_off_heap);
+     Lw(scratch, FieldMemOperand(code_object, Code::kBuiltinIndexOffset));
+-    // TODO(RISCV): https://github.com/v8-riscv/v8/issues/373
+-    Branch(&no_builtin_index, eq, scratch,
+-           Operand(static_cast<int>(Builtin::kNoBuiltinId)));
+     slli(destination, scratch, kSystemPointerSizeLog2);
+     Add64(destination, destination, kRootRegister);
+     Ld(destination,
+-- 
+2.35.1
+

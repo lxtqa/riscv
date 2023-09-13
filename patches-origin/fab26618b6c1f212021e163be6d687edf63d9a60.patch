@@ -1,0 +1,787 @@
+From fab26618b6c1f212021e163be6d687edf63d9a60 Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Wed, 24 May 2023 13:30:04 +0800
+Subject: [PATCH] [riscv]Fix pointer compression
+
+Change-Id: I7bd4dc61b2a3d49b5ee0930bc0b4acc7f723ec5b
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4559353
+Commit-Queue: Ji Qiu <qiuji@iscas.ac.cn>
+Reviewed-by: Ji Qiu <qiuji@iscas.ac.cn>
+Auto-Submit: Yahan Lu <yahan@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#87852}
+---
+ src/builtins/riscv/builtins-riscv.cc          |  96 ++++++---------
+ src/codegen/riscv/assembler-riscv.cc          |   1 -
+ src/codegen/riscv/macro-assembler-riscv.cc    |  68 ++++++++++-
+ src/codegen/riscv/macro-assembler-riscv.h     |  17 ++-
+ .../backend/riscv/code-generator-riscv.cc     |  43 ++++---
+ .../backend/riscv/instruction-codes-riscv.h   | 111 +++++++++---------
+ .../riscv/instruction-scheduler-riscv.cc      |   8 +-
+ .../riscv/instruction-selector-riscv.h        |   6 +-
+ .../riscv/instruction-selector-riscv32.cc     |  12 +-
+ .../riscv/instruction-selector-riscv64.cc     |  16 ++-
+ .../riscv/liftoff-assembler-riscv64.h         |   2 +-
+ 11 files changed, 227 insertions(+), 153 deletions(-)
+
+diff --git a/src/builtins/riscv/builtins-riscv.cc b/src/builtins/riscv/builtins-riscv.cc
+index 8ef4e56821..174f528518 100644
+--- a/src/builtins/riscv/builtins-riscv.cc
++++ b/src/builtins/riscv/builtins-riscv.cc
+@@ -259,9 +259,6 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
+   masm->isolate()->heap()->SetConstructStubInvokeDeoptPCOffset(
+       masm->pc_offset());
+ 
+-  // Restore the context from the frame.
+-  __ LoadWord(cp, MemOperand(fp, ConstructFrameConstants::kContextOffset));
+-
+   // If the result is an object (in the ECMA sense), we should get rid
+   // of the receiver and use the result; see ECMA-262 section 13.2.2-7
+   // on page 74.
+@@ -370,7 +367,6 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
+   //  -- a1 : the JSGeneratorObject to resume
+   //  -- ra : return address
+   // -----------------------------------
+-
+   // Store input value into generator object.
+   __ StoreTaggedField(
+       a0, FieldMemOperand(a1, JSGeneratorObject::kInputOrDebugPosOffset));
+@@ -804,6 +800,7 @@ static void Generate_JSEntryTrampolineHelper(MacroAssembler* masm,
+ #endif
+     // s6 holds the root address. Do not clobber.
+     // s7 is cp. Do not init.
++    // s11 is pointer cage base register (kPointerCageBaseRegister).
+ 
+     // Invoke the code.
+     Handle<Code> builtin = is_construct
+@@ -992,10 +989,10 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+       BaselineOutOfLinePrologueDescriptor::kClosure);
+   // Load the feedback vector from the closure.
+   Register feedback_vector = temps.Acquire();
+-  __ LoadWord(feedback_vector,
+-              FieldMemOperand(closure, JSFunction::kFeedbackCellOffset));
+-  __ LoadWord(feedback_vector,
+-              FieldMemOperand(feedback_vector, Cell::kValueOffset));
++  __ LoadTaggedField(feedback_vector,
++                     FieldMemOperand(closure, JSFunction::kFeedbackCellOffset));
++  __ LoadTaggedField(feedback_vector,
++                     FieldMemOperand(feedback_vector, Cell::kValueOffset));
+   {
+     UseScratchRegisterScope temp(masm);
+     Register type = temps.Acquire();
+@@ -1748,8 +1745,8 @@ void OnStackReplacement(MacroAssembler* masm, OsrSourceTier source,
+     // If maybe_target_code is not null, no need to call into runtime. A
+     // precondition here is: if maybe_target_code is a InstructionStream object,
+     // it must NOT be marked_for_deoptimization (callers must ensure this).
+-    __ Branch(&jump_to_optimized_code, ne, maybe_target_code,
+-              Operand(Smi::zero()));
++    __ CompareTaggedAndBranch(&jump_to_optimized_code, ne, maybe_target_code,
++                              Operand(Smi::zero()));
+   }
+   ASM_CODE_COMMENT(masm);
+   {
+@@ -1758,7 +1755,11 @@ void OnStackReplacement(MacroAssembler* masm, OsrSourceTier source,
+   }
+ 
+   // If the code object is null, just return to the caller.
+-  __ Ret(eq, a0, Operand(Smi::zero()));
++  // If the code object is null, just return to the caller.
++  __ CompareTaggedAndBranch(&jump_to_optimized_code, ne, maybe_target_code,
++                            Operand(Smi::zero()));
++  __ Ret();
++
+   __ bind(&jump_to_optimized_code);
+ 
+   // OSR entry tracing.
+@@ -1792,9 +1793,10 @@ void OnStackReplacement(MacroAssembler* masm, OsrSourceTier source,
+ 
+   // Load the OSR entrypoint offset from the deoptimization data.
+   // <osr_offset> = <deopt_data>[#header_size + #osr_pc_offset]
+-  __ SmiUntag(a1, MemOperand(a1, FixedArray::OffsetOfElementAt(
+-                                     DeoptimizationData::kOsrPcOffsetIndex) -
+-                                     kHeapObjectTag));
++  __ SmiUntagField(a1,
++                   MemOperand(a1, FixedArray::OffsetOfElementAt(
++                                      DeoptimizationData::kOsrPcOffsetIndex) -
++                                      kHeapObjectTag));
+ 
+   __ LoadCodeInstructionStart(a0, a0);
+ 
+@@ -1835,6 +1837,7 @@ void Builtins::Generate_FunctionPrototypeApply(MacroAssembler* masm) {
+   Register receiver = a1;
+   Register this_arg = a5;
+   Register undefined_value = a3;
++  Register scratch = a4;
+ 
+   __ LoadRoot(undefined_value, RootIndex::kUndefinedValue);
+ 
+@@ -1880,9 +1883,10 @@ void Builtins::Generate_FunctionPrototypeApply(MacroAssembler* masm) {
+ 
+   // 3. Tail call with no arguments if argArray is null or undefined.
+   Label no_arguments;
+-  __ JumpIfRoot(arg_array, RootIndex::kNullValue, &no_arguments);
+-  __ Branch(&no_arguments, eq, arg_array, Operand(undefined_value),
+-            Label::Distance::kNear);
++  __ LoadRoot(scratch, RootIndex::kNullValue);
++  __ CompareTaggedAndBranch(&no_arguments, eq, arg_array, Operand(scratch));
++  __ CompareTaggedAndBranch(&no_arguments, eq, arg_array,
++                            Operand(undefined_value));
+ 
+   // 4a. Apply the receiver to the given argArray.
+   __ Jump(BUILTIN_CODE(masm->isolate(), CallWithArrayLike),
+@@ -2165,11 +2169,7 @@ void Builtins::Generate_CallOrConstructVarargs(MacroAssembler* masm,
+     __ bind(&loop);
+     __ LoadTaggedField(a5, MemOperand(src));
+     __ AddWord(src, src, kTaggedSize);
+-#if V8_STATIC_ROOTS_BOOL
+-    __ Branch(&push, ne, a5, RootIndex::kTheHoleValue);
+-#else
+-    __ Branch(&push, ne, a5, Operand(hole_value));
+-#endif
++    __ CompareTaggedAndBranch(&push, ne, a5, Operand(hole_value));
+     __ LoadRoot(a5, RootIndex::kUndefinedValue);
+     __ bind(&push);
+     __ StoreWord(a5, MemOperand(a7, 0));
+@@ -2280,15 +2280,10 @@ void Builtins::Generate_CallFunction(MacroAssembler* masm,
+   //  -- a0 : the number of arguments
+   //  -- a1 : the function to call (checked to be a JSFunction)
+   // -----------------------------------
+-  __ AssertCallableFunction(a1);
++  __ AssertFunction(a1);
+ 
+-  Label class_constructor;
+   __ LoadTaggedField(
+       a2, FieldMemOperand(a1, JSFunction::kSharedFunctionInfoOffset));
+-  __ Load32U(a3, FieldMemOperand(a2, SharedFunctionInfo::kFlagsOffset));
+-  __ And(kScratchReg, a3,
+-         Operand(SharedFunctionInfo::IsClassConstructorBit::kMask));
+-  __ Branch(&class_constructor, ne, kScratchReg, Operand(zero_reg));
+ 
+   // Enter the context of the function; ToObject has to run in the function
+   // context, and we also need to take the global proxy from the function
+@@ -2316,10 +2311,7 @@ void Builtins::Generate_CallFunction(MacroAssembler* masm,
+       Label convert_to_object, convert_receiver;
+       __ LoadReceiver(a3, a0);
+       __ JumpIfSmi(a3, &convert_to_object);
+-      static_assert(LAST_JS_RECEIVER_TYPE == LAST_TYPE);
+-      __ GetObjectType(a3, a4, a4);
+-      __ Branch(&done_convert, Ugreater_equal, a4,
+-                Operand(FIRST_JS_RECEIVER_TYPE));
++      __ JumpIfJSAnyIsNotPrimitive(a3, a4, &done_convert);
+       if (mode != ConvertReceiverMode::kNotNullOrUndefined) {
+         Label convert_global_proxy;
+         __ JumpIfRoot(a3, RootIndex::kUndefinedValue, &convert_global_proxy);
+@@ -2366,14 +2358,6 @@ void Builtins::Generate_CallFunction(MacroAssembler* masm,
+   __ Lhu(a2,
+          FieldMemOperand(a2, SharedFunctionInfo::kFormalParameterCountOffset));
+   __ InvokeFunctionCode(a1, no_reg, a2, a0, InvokeType::kJump);
+-
+-  // The function is a "classConstructor", need to raise an exception.
+-  __ bind(&class_constructor);
+-  {
+-    FrameScope frame(masm, StackFrame::INTERNAL);
+-    __ Push(a1);
+-    __ CallRuntime(Runtime::kThrowConstructorNonCallableError);
+-  }
+ }
+ 
+ namespace {
+@@ -2597,16 +2581,7 @@ void Builtins::Generate_ConstructBoundFunction(MacroAssembler* masm) {
+ 
+   // Patch new.target to [[BoundTargetFunction]] if new.target equals target.
+   Label skip;
+-  {
+-#ifdef V8_COMPRESS_POINTERS
+-    UseScratchRegisterScope temps(masm);
+-    Register scratch = temps.Acquire();
+-    __ CmpTagged(scratch, a1, a3);
+-    __ Branch(&skip, ne, scratch, Operand(zero_reg), Label::Distance::kNear);
+-#else
+-    __ Branch(&skip, ne, a1, Operand(a3), Label::Distance::kNear);
+-#endif
+-  }
++  __ CompareTaggedAndBranch(&skip, ne, a1, Operand(a3));
+   __ LoadTaggedField(
+       a3, FieldMemOperand(a1, JSBoundFunction::kBoundTargetFunctionOffset));
+   __ bind(&skip);
+@@ -2885,8 +2860,7 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
+ 
+   // Check result for exception sentinel.
+   Label exception_returned;
+-  __ LoadRoot(a4, RootIndex::kException);
+-  __ Branch(&exception_returned, eq, a4, Operand(a0));
++  __ Branch(&exception_returned, eq, a0, RootIndex::kException);
+ 
+   // Check that there is no pending exception, otherwise we
+   // should have returned the exception sentinel.
+@@ -2896,9 +2870,8 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
+         IsolateAddressId::kPendingExceptionAddress, masm->isolate());
+     __ li(a2, pending_exception_address);
+     __ LoadWord(a2, MemOperand(a2));
+-    __ LoadRoot(a4, RootIndex::kTheHoleValue);
+     // Cannot use check here as it attempts to generate call into runtime.
+-    __ Branch(&okay, eq, a4, Operand(a2), Label::Distance::kNear);
++    __ Branch(&okay, eq, a2, RootIndex::kTheHoleValue);
+     __ stop();
+     __ bind(&okay);
+   }
+@@ -2955,6 +2928,15 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
+   __ StoreWord(cp, MemOperand(fp, StandardFrameConstants::kContextOffset));
+   __ bind(&zero);
+ 
++  // Clear c_entry_fp, like we do in `LeaveExitFrame`.
++  {
++    UseScratchRegisterScope temps(masm);
++    Register scratch = temps.Acquire();
++    __ li(scratch, ExternalReference::Create(IsolateAddressId::kCEntryFPAddress,
++                                             masm->isolate()));
++    __ StoreWord(zero_reg, MemOperand(scratch, 0));
++  }
++
+   // Compute the handler entry address and jump to it.
+   UseScratchRegisterScope temp(masm);
+   Register scratch = temp.Acquire();
+@@ -3138,8 +3120,8 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+       ER::handle_scope_level_address(isolate), no_reg);
+ 
+   Register return_value = a0;
+-  Register scratch = kScratchReg2;
+-  Register scratch2 = s11;
++  Register scratch = a4;
++  Register scratch2 = a5;
+ 
+   // Allocate HandleScope in callee-saved registers.
+   // We will need to restore the HandleScope after the call to the API function,
+@@ -3242,7 +3224,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+   {
+     ASM_CODE_COMMENT_STRING(masm, "Convert return value");
+     Label finish_return;
+-    __ JumpIfNotRoot(return_value, RootIndex::kTheHoleValue, &finish_return);
++    __ Branch(&finish_return, ne, return_value, RootIndex::kTheHoleValue);
+     __ LoadRoot(return_value, RootIndex::kUndefinedValue);
+     __ bind(&finish_return);
+   }
+diff --git a/src/codegen/riscv/assembler-riscv.cc b/src/codegen/riscv/assembler-riscv.cc
+index db5b12139e..0ffe085458 100644
+--- a/src/codegen/riscv/assembler-riscv.cc
++++ b/src/codegen/riscv/assembler-riscv.cc
+@@ -1084,7 +1084,6 @@ void Assembler::li_ptr(Register rd, int64_t imm) {
+     ori(rd, rd, a6);       // 6 bits are put in. 48 bis in rd
+   } else {
+     FATAL("SV57 is not supported");
+-    UNIMPLEMENTED();
+   }
+ }
+ 
+diff --git a/src/codegen/riscv/macro-assembler-riscv.cc b/src/codegen/riscv/macro-assembler-riscv.cc
+index 9ee9ab1dcb..4578eb4468 100644
+--- a/src/codegen/riscv/macro-assembler-riscv.cc
++++ b/src/codegen/riscv/macro-assembler-riscv.cc
+@@ -3921,16 +3921,11 @@ void MacroAssembler::Branch(Label* L, Condition cond, Register rs,
+ }
+ 
+ void MacroAssembler::Branch(Label* L, Condition cond, Register rs,
+-                            RootIndex index, Label::Distance distance,
+-                            bool need_sign_extend) {
++                            RootIndex index, Label::Distance distance) {
+   UseScratchRegisterScope temps(this);
+   Register right = temps.Acquire();
+   if (COMPRESS_POINTERS_BOOL) {
+     Register left = rs;
+-    if (need_sign_extend) {
+-      left = temps.Acquire();
+-      Sll32(left, rs, 0);
+-    }
+     LoadTaggedRoot(right, index);
+     Branch(L, cond, left, Operand(right));
+   } else {
+@@ -3939,6 +3934,29 @@ void MacroAssembler::Branch(Label* L, Condition cond, Register rs,
+   }
+ }
+ 
++void MacroAssembler::CompareTaggedAndBranch(Label* label, Condition cond,
++                                            Register r1, const Operand& r2,
++                                            bool need_link) {
++  if (COMPRESS_POINTERS_BOOL) {
++    UseScratchRegisterScope temps(this);
++    Register scratch0 = temps.Acquire();
++    Sll32(scratch0, r1, 0);
++    if (IsZero(r2)) {
++      Branch(label, cond, scratch0, Operand(zero_reg));
++    } else {
++      Register scratch1 = temps.Acquire();
++      if (r2.is_reg()) {
++        Sll32(scratch1, r2.rm(), 0);
++      } else {
++        li(scratch1, r2);
++      }
++      Branch(label, cond, scratch0, Operand(scratch1));
++    }
++  } else {
++    Branch(label, cond, r1, r2);
++  }
++}
++
+ void MacroAssembler::BranchShortHelper(int32_t offset, Label* L) {
+   DCHECK(L == nullptr || offset == 0);
+   offset = GetOffset(offset, L, OffsetSize::kOffset21);
+@@ -5858,6 +5876,44 @@ void MacroAssembler::JumpIfObjectType(Label* target, Condition cc,
+   Branch(target, cc, scratch, Operand(instance_type));
+ }
+ 
++void MacroAssembler::JumpIfJSAnyIsNotPrimitive(Register heap_object,
++                                               Register scratch, Label* target,
++                                               Label::Distance distance,
++                                               Condition cc) {
++  CHECK(cc == Condition::kUnsignedLessThan ||
++        cc == Condition::kUnsignedGreaterThanEqual);
++  if (V8_STATIC_ROOTS_BOOL) {
++#ifdef DEBUG
++    Label ok;
++    LoadMap(scratch, heap_object);
++    GetInstanceTypeRange(scratch, scratch, FIRST_JS_RECEIVER_TYPE, scratch);
++    Branch(&ok, Condition::kUnsignedLessThanEqual, scratch,
++           Operand(LAST_JS_RECEIVER_TYPE - FIRST_JS_RECEIVER_TYPE));
++
++    LoadMap(scratch, heap_object);
++    GetInstanceTypeRange(scratch, scratch, FIRST_PRIMITIVE_HEAP_OBJECT_TYPE,
++                         scratch);
++    Branch(&ok, Condition::kUnsignedLessThanEqual, scratch,
++           Operand(LAST_PRIMITIVE_HEAP_OBJECT_TYPE -
++                   FIRST_PRIMITIVE_HEAP_OBJECT_TYPE));
++
++    Abort(AbortReason::kInvalidReceiver);
++    bind(&ok);
++#endif  // DEBUG
++
++    // All primitive object's maps are allocated at the start of the read only
++    // heap. Thus JS_RECEIVER's must have maps with larger (compressed)
++    // addresses.
++    LoadCompressedMap(scratch, heap_object);
++    Branch(target, cc, scratch,
++           Operand(InstanceTypeChecker::kNonJsReceiverMapLimit));
++  } else {
++    static_assert(LAST_JS_RECEIVER_TYPE == LAST_TYPE);
++    GetObjectType(heap_object, scratch, scratch);
++    Branch(target, cc, scratch, Operand(FIRST_JS_RECEIVER_TYPE));
++  }
++}
++
+ void MacroAssembler::AssertNotSmi(Register object, AbortReason reason) {
+   if (v8_flags.debug_code) {
+     ASM_CODE_COMMENT(this);
+diff --git a/src/codegen/riscv/macro-assembler-riscv.h b/src/codegen/riscv/macro-assembler-riscv.h
+index 068d68655a..2c23eacf61 100644
+--- a/src/codegen/riscv/macro-assembler-riscv.h
++++ b/src/codegen/riscv/macro-assembler-riscv.h
+@@ -170,8 +170,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
+   void Branch(int32_t target, Condition cond, Register r1, const Operand& r2,
+               Label::Distance distance = Label::kFar);
+   void Branch(Label* L, Condition cond, Register rj, RootIndex index,
+-              Label::Distance distance = Label::kFar,
+-              bool need_sign_extend = true);
++              Label::Distance distance = Label::kFar);
+ #undef DECLARE_BRANCH_PROTOTYPES
+ #undef COND_TYPED_ARGS
+ #undef COND_ARGS
+@@ -204,6 +203,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
+   void BranchTrueF(Register rs, Label* target);
+   void BranchFalseF(Register rs, Label* target);
+ 
++  void CompareTaggedAndBranch(Label* label, Condition cond, Register r1,
++                              const Operand& r2, bool need_link = false);
+   static int InstrCountForLi64Bit(int64_t value);
+   inline void LiLower32BitHelper(Register rd, Operand j);
+   void li_optimized(Register rd, Operand j, LiFlags mode = OPTIMIZE_SIZE);
+@@ -1231,6 +1232,18 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
+                        unsigned higher_limit, Label* on_in_range);
+   void JumpIfObjectType(Label* target, Condition cc, Register object,
+                         InstanceType instance_type, Register scratch = no_reg);
++  // Fast check if the object is a js receiver type. Assumes only primitive
++  // objects or js receivers are passed.
++  void JumpIfJSAnyIsNotPrimitive(
++      Register heap_object, Register scratch, Label* target,
++      Label::Distance distance = Label::kFar,
++      Condition condition = Condition::kUnsignedGreaterThanEqual);
++  void JumpIfJSAnyIsPrimitive(Register heap_object, Register scratch,
++                              Label* target,
++                              Label::Distance distance = Label::kFar) {
++    return JumpIfJSAnyIsNotPrimitive(heap_object, scratch, target, distance,
++                                     Condition::kUnsignedLessThan);
++  }
+   // ---------------------------------------------------------------------------
+   // GC Support
+ 
+diff --git a/src/compiler/backend/riscv/code-generator-riscv.cc b/src/compiler/backend/riscv/code-generator-riscv.cc
+index c672b9d007..bdd3c08ae1 100644
+--- a/src/compiler/backend/riscv/code-generator-riscv.cc
++++ b/src/compiler/backend/riscv/code-generator-riscv.cc
+@@ -321,11 +321,11 @@ FPUCondition FlagsConditionToConditionCmpFPU(bool* predicate,
+     __ sync();                                           \
+   } while (0)
+ 
+-#define ASSEMBLE_ATOMIC_STORE_INTEGER(asm_instr)               \
+-  do {                                                         \
+-    __ sync();                                                 \
+-    __ asm_instr(i.InputOrZeroRegister(2), i.MemoryOperand()); \
+-    __ sync();                                                 \
++#define ASSEMBLE_ATOMIC_STORE_INTEGER(asm_instr)                \
++  do {                                                          \
++    __ sync();                                                  \
++    __ asm_instr(i.InputOrZeroRegister(0), i.MemoryOperand(1)); \
++    __ sync();                                                  \
+   } while (0)
+ 
+ #define ASSEMBLE_ATOMIC_BINOP(load_linked, store_conditional, bin_instr)       \
+@@ -1255,14 +1255,19 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+     case kRiscvRor64:
+       __ Dror(i.OutputRegister(), i.InputRegister(0), i.InputOperand(1));
+       break;
+-#endif
+-    case kRiscvRor32:
+-      __ Ror(i.OutputRegister(), i.InputRegister(0), i.InputOperand(1));
++    case kRiscvTst64:
++      __ And(kScratchReg, i.InputRegister(0), i.InputOperand(1));
++      // Pseudo-instruction used for cmp/branch. No opcode emitted here.
+       break;
+-    case kRiscvTst:
++#endif
++    case kRiscvTst32:
+       __ And(kScratchReg, i.InputRegister(0), i.InputOperand(1));
++      __ Sll32(kScratchReg, kScratchReg, 0x0);
+       // Pseudo-instruction used for cmp/branch. No opcode emitted here.
+       break;
++    case kRiscvRor32:
++      __ Ror(i.OutputRegister(), i.InputRegister(0), i.InputOperand(1));
++      break;
+     case kRiscvCmp:
+       // Pseudo-instruction used for cmp/branch. No opcode emitted here.
+       break;
+@@ -2200,9 +2205,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       break;
+ #if V8_TARGET_ARCH_RISCV64
+     case kRiscvStoreCompressTagged: {
+-      size_t index = 0;
+-      MemOperand mem = i.MemoryOperand(&index);
+-      __ StoreTaggedField(i.InputOrZeroRegister(index), mem);
++      MemOperand mem = i.MemoryOperand(1);
++      __ StoreTaggedField(i.InputOrZeroRegister(0), mem);
+       break;
+     }
+     case kRiscvLoadDecompressTaggedSigned: {
+@@ -3734,8 +3738,12 @@ void AssembleBranchToLabels(CodeGenerator* gen, MacroAssembler* masm,
+   // instructions that do the actual comparison. Essential that the input
+   // registers to compare pseudo-op are not modified before this branch op, as
+   // they are tested here.
+-
+-  if (instr->arch_opcode() == kRiscvTst) {
++#if V8_TARGET_ARCH_RISCV64
++  if (instr->arch_opcode() == kRiscvTst64 ||
++      instr->arch_opcode() == kRiscvTst32) {
++#elif V8_TARGET_ARCH_RISCV32
++  if (instr->arch_opcode() == kRiscvTst32) {
++#endif
+     Condition cc = FlagsConditionToConditionTst(condition);
+     __ Branch(tlabel, cc, kScratchReg, Operand(zero_reg));
+ #if V8_TARGET_ARCH_RISCV64
+@@ -3909,7 +3917,12 @@ void CodeGenerator::AssembleArchBoolean(Instruction* instr,
+   // implemented differently than on the other arch's. The compare operations
+   // emit riscv64 pseudo-instructions, which are checked and handled here.
+ 
+-  if (instr->arch_opcode() == kRiscvTst) {
++#if V8_TARGET_ARCH_RISCV64
++  if (instr->arch_opcode() == kRiscvTst64 ||
++      instr->arch_opcode() == kRiscvTst32) {
++#elif V8_TARGET_ARCH_RISCV32
++  if (instr->arch_opcode() == kRiscvTst32) {
++#endif
+     Condition cc = FlagsConditionToConditionTst(condition);
+     if (cc == eq) {
+       __ Sltu(result, kScratchReg, 1);
+diff --git a/src/compiler/backend/riscv/instruction-codes-riscv.h b/src/compiler/backend/riscv/instruction-codes-riscv.h
+index dd854aa22d..9e27bbb829 100644
+--- a/src/compiler/backend/riscv/instruction-codes-riscv.h
++++ b/src/compiler/backend/riscv/instruction-codes-riscv.h
+@@ -12,60 +12,61 @@ namespace compiler {
+ // RISC-V-specific opcodes that specify which assembly sequence to emit.
+ // Most opcodes specify a single instruction.
+ #if V8_TARGET_ARCH_RISCV64
+-#define TARGET_ARCH_OPCODE_LIST_SPECAIL(V) \
+-  V(RiscvAdd64)                            \
+-  V(RiscvAddOvf64)                         \
+-  V(RiscvSub64)                            \
+-  V(RiscvSubOvf64)                         \
+-  V(RiscvMulHigh64)                        \
+-  V(RiscvMulHighU64)                       \
+-  V(RiscvMul64)                            \
+-  V(RiscvMulOvf64)                         \
+-  V(RiscvDiv64)                            \
+-  V(RiscvDivU64)                           \
+-  V(RiscvMod64)                            \
+-  V(RiscvModU64)                           \
+-  V(RiscvZeroExtendWord)                   \
+-  V(RiscvSignExtendWord)                   \
+-  V(RiscvClz64)                            \
+-  V(RiscvCtz64)                            \
+-  V(RiscvPopcnt64)                         \
+-  V(RiscvShl64)                            \
+-  V(RiscvShr64)                            \
+-  V(RiscvSar64)                            \
+-  V(RiscvRor64)                            \
+-  V(RiscvFloat64RoundDown)                 \
+-  V(RiscvFloat64RoundTruncate)             \
+-  V(RiscvFloat64RoundUp)                   \
+-  V(RiscvFloat64RoundTiesEven)             \
+-  V(RiscvTruncLS)                          \
+-  V(RiscvTruncLD)                          \
+-  V(RiscvTruncUlS)                         \
+-  V(RiscvTruncUlD)                         \
+-  V(RiscvCvtSL)                            \
+-  V(RiscvCvtSUl)                           \
+-  V(RiscvCvtDL)                            \
+-  V(RiscvCvtDUl)                           \
+-  V(RiscvLd)                               \
+-  V(RiscvSd)                               \
+-  V(RiscvUsd)                              \
+-  V(RiscvLwu)                              \
+-  V(RiscvUlwu)                             \
+-  V(RiscvBitcastDL)                        \
+-  V(RiscvBitcastLD)                        \
+-  V(RiscvByteSwap64)                       \
+-  V(RiscvWord64AtomicLoadUint64)           \
+-  V(RiscvWord64AtomicStoreWord64)          \
+-  V(RiscvWord64AtomicAddUint64)            \
+-  V(RiscvWord64AtomicSubUint64)            \
+-  V(RiscvWord64AtomicAndUint64)            \
+-  V(RiscvWord64AtomicOrUint64)             \
+-  V(RiscvWord64AtomicXorUint64)            \
+-  V(RiscvWord64AtomicExchangeUint64)       \
+-  V(RiscvStoreCompressTagged)              \
+-  V(RiscvLoadDecompressTaggedSigned)       \
+-  V(RiscvLoadDecompressTagged)             \
+-  V(RiscvWord64AtomicCompareExchangeUint64)
++#define TARGET_ARCH_OPCODE_LIST_SPECAIL(V)  \
++  V(RiscvAdd64)                             \
++  V(RiscvAddOvf64)                          \
++  V(RiscvSub64)                             \
++  V(RiscvSubOvf64)                          \
++  V(RiscvMulHigh64)                         \
++  V(RiscvMulHighU64)                        \
++  V(RiscvMul64)                             \
++  V(RiscvMulOvf64)                          \
++  V(RiscvDiv64)                             \
++  V(RiscvDivU64)                            \
++  V(RiscvMod64)                             \
++  V(RiscvModU64)                            \
++  V(RiscvZeroExtendWord)                    \
++  V(RiscvSignExtendWord)                    \
++  V(RiscvClz64)                             \
++  V(RiscvCtz64)                             \
++  V(RiscvPopcnt64)                          \
++  V(RiscvShl64)                             \
++  V(RiscvShr64)                             \
++  V(RiscvSar64)                             \
++  V(RiscvRor64)                             \
++  V(RiscvFloat64RoundDown)                  \
++  V(RiscvFloat64RoundTruncate)              \
++  V(RiscvFloat64RoundUp)                    \
++  V(RiscvFloat64RoundTiesEven)              \
++  V(RiscvTruncLS)                           \
++  V(RiscvTruncLD)                           \
++  V(RiscvTruncUlS)                          \
++  V(RiscvTruncUlD)                          \
++  V(RiscvCvtSL)                             \
++  V(RiscvCvtSUl)                            \
++  V(RiscvCvtDL)                             \
++  V(RiscvCvtDUl)                            \
++  V(RiscvLd)                                \
++  V(RiscvSd)                                \
++  V(RiscvUsd)                               \
++  V(RiscvLwu)                               \
++  V(RiscvUlwu)                              \
++  V(RiscvBitcastDL)                         \
++  V(RiscvBitcastLD)                         \
++  V(RiscvByteSwap64)                        \
++  V(RiscvWord64AtomicLoadUint64)            \
++  V(RiscvWord64AtomicStoreWord64)           \
++  V(RiscvWord64AtomicAddUint64)             \
++  V(RiscvWord64AtomicSubUint64)             \
++  V(RiscvWord64AtomicAndUint64)             \
++  V(RiscvWord64AtomicOrUint64)              \
++  V(RiscvWord64AtomicXorUint64)             \
++  V(RiscvWord64AtomicExchangeUint64)        \
++  V(RiscvStoreCompressTagged)               \
++  V(RiscvLoadDecompressTaggedSigned)        \
++  V(RiscvLoadDecompressTagged)              \
++  V(RiscvWord64AtomicCompareExchangeUint64) \
++  V(RiscvTst64)
+ #elif V8_TARGET_ARCH_RISCV32
+ #define TARGET_ARCH_OPCODE_LIST_SPECAIL(V) \
+   V(RiscvAddOvf)                           \
+@@ -117,7 +118,7 @@ namespace compiler {
+   V(RiscvPopcnt32)                        \
+   V(RiscvRor32)                           \
+   V(RiscvMov)                             \
+-  V(RiscvTst)                             \
++  V(RiscvTst32)                           \
+   V(RiscvCmp)                             \
+   V(RiscvCmpZero)                         \
+   V(RiscvCmpS)                            \
+diff --git a/src/compiler/backend/riscv/instruction-scheduler-riscv.cc b/src/compiler/backend/riscv/instruction-scheduler-riscv.cc
+index 51663e2b6e..289e564e00 100644
+--- a/src/compiler/backend/riscv/instruction-scheduler-riscv.cc
++++ b/src/compiler/backend/riscv/instruction-scheduler-riscv.cc
+@@ -367,11 +367,12 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kRiscvTruncUwS:
+     case kRiscvTruncWD:
+     case kRiscvTruncWS:
+-    case kRiscvTst:
++    case kRiscvTst32:
+     case kRiscvXor:
+     case kRiscvXor32:
+       return kNoOpcodeFlags;
+ #if V8_TARGET_ARCH_RISCV64
++    case kRiscvTst64:
+     case kRiscvLd:
+     case kRiscvLwu:
+     case kRiscvUlwu:
+@@ -1339,11 +1340,12 @@ int InstructionScheduler::GetInstructionLatency(const Instruction* instr) {
+     case kRiscvShr64:
+     case kRiscvSar64:
+     case kRiscvRor64:
++    case kRiscvTst64:
+ #endif
++    case kRiscvTst32:
++      return AndLatency(instr->InputAt(1)->IsRegister());
+     case kRiscvRor32:
+       return 1;
+-    case kRiscvTst:
+-      return AndLatency(instr->InputAt(1)->IsRegister());
+     case kRiscvMov:
+       return 1;
+     case kRiscvCmpS:
+diff --git a/src/compiler/backend/riscv/instruction-selector-riscv.h b/src/compiler/backend/riscv/instruction-selector-riscv.h
+index 28cedf9c44..f986577118 100644
+--- a/src/compiler/backend/riscv/instruction-selector-riscv.h
++++ b/src/compiler/backend/riscv/instruction-selector-riscv.h
+@@ -346,7 +346,11 @@ void VisitWordCompare(InstructionSelector* selector, Node* node,
+   }
+   // Match immediates on right side of comparison.
+   if (g.CanBeImmediate(right, opcode)) {
+-    if (opcode == kRiscvTst) {
++#if V8_TARGET_ARCH_RISCV64
++    if (opcode == kRiscvTst64 || opcode == kRiscvTst32) {
++#elif V8_TARGET_ARCH_RISCV32
++    if (opcode == kRiscvTst32) {
++#endif
+       VisitCompare(selector, opcode, g.UseRegister(left), g.UseImmediate(right),
+                    cont);
+     } else {
+diff --git a/src/compiler/backend/riscv/instruction-selector-riscv32.cc b/src/compiler/backend/riscv/instruction-selector-riscv32.cc
+index d0b4681c93..68ff98b0d4 100644
+--- a/src/compiler/backend/riscv/instruction-selector-riscv32.cc
++++ b/src/compiler/backend/riscv/instruction-selector-riscv32.cc
+@@ -33,7 +33,7 @@ bool RiscvOperandGenerator::CanBeImmediate(int64_t value,
+     case kRiscvAnd:
+     case kRiscvOr32:
+     case kRiscvOr:
+-    case kRiscvTst:
++    case kRiscvTst32:
+     case kRiscvXor:
+       return is_int12(value);
+     case kRiscvLb:
+@@ -720,8 +720,8 @@ void VisitAtomicStore(InstructionSelector* selector, Node* node,
+   if (g.CanBeImmediate(index, opcode)) {
+     selector->Emit(opcode | AddressingModeField::encode(kMode_MRI) |
+                        AtomicWidthField::encode(width),
+-                   g.NoOutput(), g.UseRegister(base), g.UseImmediate(index),
+-                   g.UseRegisterOrImmediateZero(value));
++                   g.NoOutput(), g.UseRegisterOrImmediateZero(value),
++                   g.UseRegister(base), g.UseImmediate(index));
+   } else {
+     InstructionOperand addr_reg = g.TempRegister();
+     selector->Emit(kRiscvAdd32 | AddressingModeField::encode(kMode_None),
+@@ -729,8 +729,8 @@ void VisitAtomicStore(InstructionSelector* selector, Node* node,
+     // Emit desired store opcode, using temp addr_reg.
+     selector->Emit(opcode | AddressingModeField::encode(kMode_MRI) |
+                        AtomicWidthField::encode(width),
+-                   g.NoOutput(), addr_reg, g.TempImmediate(0),
+-                   g.UseRegisterOrImmediateZero(value));
++                   g.NoOutput(), g.UseRegisterOrImmediateZero(value), addr_reg,
++                   g.TempImmediate(0));
+   }
+ }
+ 
+@@ -879,7 +879,7 @@ void InstructionSelector::VisitWordCompareZero(Node* user, Node* value,
+         }
+         break;
+       case IrOpcode::kWord32And:
+-        return VisitWordCompare(this, value, kRiscvTst, cont, true);
++        return VisitWordCompare(this, value, kRiscvTst32, cont, true);
+       case IrOpcode::kStackPointerGreaterThan:
+         cont->OverwriteAndNegateIfEqual(kStackPointerGreaterThanCondition);
+         return VisitStackPointerGreaterThan(value, cont);
+diff --git a/src/compiler/backend/riscv/instruction-selector-riscv64.cc b/src/compiler/backend/riscv/instruction-selector-riscv64.cc
+index 4f5cfa3ea9..a8309ec5d8 100644
+--- a/src/compiler/backend/riscv/instruction-selector-riscv64.cc
++++ b/src/compiler/backend/riscv/instruction-selector-riscv64.cc
+@@ -50,7 +50,8 @@ bool RiscvOperandGenerator::CanBeImmediate(int64_t value,
+     case kRiscvAdd64:
+     case kRiscvOr32:
+     case kRiscvOr:
+-    case kRiscvTst:
++    case kRiscvTst64:
++    case kRiscvTst32:
+     case kRiscvXor:
+       return is_int12(value);
+     case kRiscvLb:
+@@ -1654,8 +1655,8 @@ void VisitAtomicStore(InstructionSelector* selector, Node* node,
+     if (g.CanBeImmediate(index, code)) {
+       selector->Emit(code | AddressingModeField::encode(kMode_MRI) |
+                          AtomicWidthField::encode(width),
+-                     g.NoOutput(), g.UseRegister(base), g.UseImmediate(index),
+-                     g.UseRegisterOrImmediateZero(value));
++                     g.NoOutput(), g.UseRegisterOrImmediateZero(value),
++                     g.UseRegister(base), g.UseImmediate(index));
+     } else {
+       InstructionOperand addr_reg = g.TempRegister();
+       selector->Emit(kRiscvAdd64 | AddressingModeField::encode(kMode_None),
+@@ -1663,8 +1664,8 @@ void VisitAtomicStore(InstructionSelector* selector, Node* node,
+       // Emit desired store opcode, using temp addr_reg.
+       selector->Emit(code | AddressingModeField::encode(kMode_MRI) |
+                          AtomicWidthField::encode(width),
+-                     g.NoOutput(), addr_reg, g.TempImmediate(0),
+-                     g.UseRegisterOrImmediateZero(value));
++                     g.NoOutput(), g.UseRegisterOrImmediateZero(value),
++                     addr_reg, g.TempImmediate(0));
+     }
+   }
+ }
+@@ -1844,8 +1845,11 @@ void InstructionSelector::VisitWordCompareZero(Node* user, Node* value,
+         }
+         break;
+       case IrOpcode::kWord32And:
++#if V8_COMPRESS_POINTERS
++        return VisitWordCompare(this, value, kRiscvTst32, cont, true);
++#endif
+       case IrOpcode::kWord64And:
+-        return VisitWordCompare(this, value, kRiscvTst, cont, true);
++        return VisitWordCompare(this, value, kRiscvTst64, cont, true);
+       case IrOpcode::kStackPointerGreaterThan:
+         cont->OverwriteAndNegateIfEqual(kStackPointerGreaterThanCondition);
+         return VisitStackPointerGreaterThan(value, cont);
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
+index 6abf9a39a8..e2ba92741f 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
+@@ -176,7 +176,7 @@ void LiftoffAssembler::LoadTaggedPointer(Register dst, Register src_addr,
+   unsigned shift_amount = !needs_shift ? 0 : 3;
+   MemOperand src_op = liftoff::GetMemOp(this, src_addr, offset_reg, offset_imm,
+                                         false, shift_amount);
+-  Ld(dst, src_op);
++  LoadTaggedField(dst, src_op);
+ }
+ 
+ void LiftoffAssembler::LoadFullPointer(Register dst, Register src_addr,
+-- 
+2.35.1
+

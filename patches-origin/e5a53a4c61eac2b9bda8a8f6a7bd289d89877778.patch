@@ -1,0 +1,73 @@
+From e5a53a4c61eac2b9bda8a8f6a7bd289d89877778 Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Tue, 18 May 2021 12:54:01 +0800
+Subject: [PATCH] [riscv64] Fix error in LeaveExitFrame
+
+Bug: v8:11767
+Change-Id: Ie697921bf9d4247d1032015bddcbcc892223efdf
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/2902341
+Reviewed-by: Jakob Gruber <jgruber@chromium.org>
+Commit-Queue: Yahan Lu <yahan@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/master@{#74626}
+---
+ src/codegen/riscv64/macro-assembler-riscv64.cc | 11 ++++++-----
+ test/cctest/cctest.status                      |  7 -------
+ test/inspector/inspector.status                |  2 --
+ 3 files changed, 6 insertions(+), 14 deletions(-)
+
+diff --git a/src/codegen/riscv64/macro-assembler-riscv64.cc b/src/codegen/riscv64/macro-assembler-riscv64.cc
+index b3062d69b4..801a74f569 100644
+--- a/src/codegen/riscv64/macro-assembler-riscv64.cc
++++ b/src/codegen/riscv64/macro-assembler-riscv64.cc
+@@ -4119,11 +4119,12 @@ void MacroAssembler::LeaveExitFrame(bool save_doubles, Register argument_count,
+      ExternalReference::Create(IsolateAddressId::kContextAddress, isolate()));
+   Ld(cp, MemOperand(scratch));
+ 
+-#ifdef DEBUG
+-  li(scratch,
+-     ExternalReference::Create(IsolateAddressId::kContextAddress, isolate()));
+-  Sd(a3, MemOperand(scratch));
+-#endif
++  if (FLAG_debug_code) {
++    UseScratchRegisterScope temp(this);
++    Register scratch2 = temp.Acquire();
++    li(scratch2, Operand(Context::kInvalidContext));
++    Sd(scratch2, MemOperand(scratch));
++  }
+ 
+   // Pop the arguments, restore registers, and return.
+   mv(sp, fp);  // Respect ABI stack constraint.
+diff --git a/test/cctest/cctest.status b/test/cctest/cctest.status
+index 31ffa5b466..8223db6f13 100644
+--- a/test/cctest/cctest.status
++++ b/test/cctest/cctest.status
+@@ -402,13 +402,6 @@
+   'test-run-wasm-64/*': [SKIP],
+   'test-run-wasm/*': [SKIP],
+ 
+-  # https://github.com/riscv/v8/issues/490
+-  'test-api/CallICFastApi_TrivialSignatureWithProfiler': [SKIP],
+-  'test-api/FunctionTemplateWithProfiler': [SKIP],
+-  'test-api/InterceptorCallICFastApi_TrivialSignatureWithProfiler': [SKIP],
+-  'test-api/LoadICFastApi_DirectCall_GCMoveStubWithProfiler': [SKIP],
+-  'test-api/SimpleCallbackWithProfiler': [SKIP],
+-  'test-cpu-profiler/*': [SKIP],
+ 
+ }],  # 'arch == riscv64'
+ 
+diff --git a/test/inspector/inspector.status b/test/inspector/inspector.status
+index 17927b3be6..9803a2954e 100644
+--- a/test/inspector/inspector.status
++++ b/test/inspector/inspector.status
+@@ -130,8 +130,6 @@
+   'debugger/wasm-scope-info*': [SKIP],
+   'debugger/wasm-step-after-trap': [SKIP],
+ 
+-  # https://github.com/riscv/v8/issues/490
+-  'cpu-profiler/console-profile-wasm': [SKIP],
+ }],  # 'arch == riscv64'
+ 
+ ['arch == riscv64 and variant == stress_incremental_marking', {
+-- 
+2.35.1
+

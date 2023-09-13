@@ -1,0 +1,236 @@
+From aaa15e65d40d8af4933d3788c5855f1205297ed4 Mon Sep 17 00:00:00 2001
+From: Deepti Gandluri <gdeepti@chromium.org>
+Date: Thu, 18 Aug 2022 10:01:12 -0700
+Subject: [PATCH] [wasm-relaxed-simd] Implement relaxed i16x8.q15mulr_s on
+ ia32/x64
+
+Reference instruction lowerings are in the corresponding issue:
+https://github.com/WebAssembly/relaxed-simd/issues/40
+
+Lowers directly to Pmulhrsw in the macro assembler as we use
+DefineSameAsFirst in place of the Movdqa on non-AVX hardware
+
+Bug: v8:12609, v8:12284
+Change-Id: I6de45a2d8895637f895d3b0cc68f5dd1f67f77aa
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3837853
+Reviewed-by: Tobias Tebbi <tebbi@chromium.org>
+Reviewed-by: Clemens Backes <clemensb@chromium.org>
+Commit-Queue: Deepti Gandluri <gdeepti@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#82571}
+---
+ .../backend/ia32/code-generator-ia32.cc       |  5 +++
+ .../backend/ia32/instruction-codes-ia32.h     |  1 +
+ .../ia32/instruction-scheduler-ia32.cc        |  1 +
+ .../backend/ia32/instruction-selector-ia32.cc |  3 +-
+ src/compiler/backend/instruction-selector.cc  |  6 ++-
+ .../backend/x64/code-generator-x64.cc         | 11 ++++-
+ .../backend/x64/instruction-codes-x64.h       |  1 +
+ .../backend/x64/instruction-scheduler-x64.cc  |  1 +
+ .../backend/x64/instruction-selector-x64.cc   |  1 +
+ .../cctest/wasm/test-run-wasm-relaxed-simd.cc | 41 +++++++++++++++----
+ 10 files changed, 59 insertions(+), 12 deletions(-)
+
+diff --git a/src/compiler/backend/ia32/code-generator-ia32.cc b/src/compiler/backend/ia32/code-generator-ia32.cc
+index 0e5aa21693..23c3c0abb7 100644
+--- a/src/compiler/backend/ia32/code-generator-ia32.cc
++++ b/src/compiler/backend/ia32/code-generator-ia32.cc
+@@ -2084,6 +2084,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+                           i.InputSimd128Register(1), kScratchDoubleReg);
+       break;
+     }
++    case kIA32I16x8RelaxedQ15MulRS: {
++      __ Pmulhrsw(i.OutputSimd128Register(), i.InputSimd128Register(0),
++                  i.InputSimd128Register(1));
++      break;
++    }
+     case kIA32F32x4Splat: {
+       __ F32x4Splat(i.OutputSimd128Register(), i.InputDoubleRegister(0));
+       break;
+diff --git a/src/compiler/backend/ia32/instruction-codes-ia32.h b/src/compiler/backend/ia32/instruction-codes-ia32.h
+index 19d19f4482..f854bffdcd 100644
+--- a/src/compiler/backend/ia32/instruction-codes-ia32.h
++++ b/src/compiler/backend/ia32/instruction-codes-ia32.h
+@@ -259,6 +259,7 @@ namespace compiler {
+   V(IA32I16x8ExtAddPairwiseI8x16S) \
+   V(IA32I16x8ExtAddPairwiseI8x16U) \
+   V(IA32I16x8Q15MulRSatS)          \
++  V(IA32I16x8RelaxedQ15MulRS)      \
+   V(IA32I8x16Splat)                \
+   V(IA32I8x16ExtractLaneS)         \
+   V(IA32Pinsrb)                    \
+diff --git a/src/compiler/backend/ia32/instruction-scheduler-ia32.cc b/src/compiler/backend/ia32/instruction-scheduler-ia32.cc
+index 17ccb2c4a1..62e5d5ad04 100644
+--- a/src/compiler/backend/ia32/instruction-scheduler-ia32.cc
++++ b/src/compiler/backend/ia32/instruction-scheduler-ia32.cc
+@@ -243,6 +243,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kIA32I16x8ExtAddPairwiseI8x16S:
+     case kIA32I16x8ExtAddPairwiseI8x16U:
+     case kIA32I16x8Q15MulRSatS:
++    case kIA32I16x8RelaxedQ15MulRS:
+     case kIA32I8x16Splat:
+     case kIA32I8x16ExtractLaneS:
+     case kIA32Pinsrb:
+diff --git a/src/compiler/backend/ia32/instruction-selector-ia32.cc b/src/compiler/backend/ia32/instruction-selector-ia32.cc
+index 26329edea8..b5a23478e6 100644
+--- a/src/compiler/backend/ia32/instruction-selector-ia32.cc
++++ b/src/compiler/backend/ia32/instruction-selector-ia32.cc
+@@ -2373,7 +2373,8 @@ void InstructionSelector::VisitWord32AtomicPairCompareExchange(Node* node) {
+   V(I16x8ExtMulHighI8x16S) \
+   V(I16x8ExtMulLowI8x16U)  \
+   V(I16x8ExtMulHighI8x16U) \
+-  V(I16x8Q15MulRSatS)
++  V(I16x8Q15MulRSatS)      \
++  V(I16x8RelaxedQ15MulRS)
+ 
+ #define SIMD_UNOP_LIST(V)   \
+   V(F64x2ConvertLowI32x4S)  \
+diff --git a/src/compiler/backend/instruction-selector.cc b/src/compiler/backend/instruction-selector.cc
+index 57e7fe22f5..e963132d63 100644
+--- a/src/compiler/backend/instruction-selector.cc
++++ b/src/compiler/backend/instruction-selector.cc
+@@ -2836,11 +2836,13 @@ void InstructionSelector::VisitI32x4RelaxedTruncF32x4U(Node* node) {
+         // && !V8_TARGET_ARCH_RISCV64 && !V8_TARGET_ARM &&
+         // !V8_TARGET_ARCH_RISCV32
+ 
+-#if !V8_TARGET_ARCH_ARM64 && !V8_TARGET_ARCH_ARM
++#if !V8_TARGET_ARCH_ARM64 && !V8_TARGET_ARCH_ARM && !V8_TARGET_ARCH_X64 && \
++    !V8_TARGET_ARCH_IA32
+ void InstructionSelector::VisitI16x8RelaxedQ15MulRS(Node* node) {
+   UNIMPLEMENTED();
+ }
+-#endif  // !V8_TARGET_ARCH_ARM6 && !V8_TARGET_ARCH_ARM
++#endif  // !V8_TARGET_ARCH_ARM64 && !V8_TARGET_ARCH_ARM !V8_TARGET_ARCH_X64 &&
++        // !V8_TARGET_ARCH_IA32
+ 
+ #if !V8_TARGET_ARCH_ARM64
+ void InstructionSelector::VisitI16x8DotI8x16I7x16S(Node* node) {
+diff --git a/src/compiler/backend/x64/code-generator-x64.cc b/src/compiler/backend/x64/code-generator-x64.cc
+index eac433a603..4ee0b5f8c0 100644
+--- a/src/compiler/backend/x64/code-generator-x64.cc
++++ b/src/compiler/backend/x64/code-generator-x64.cc
+@@ -3646,6 +3646,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+                           i.InputSimd128Register(1), kScratchDoubleReg);
+       break;
+     }
++    case kX64I16x8RelaxedQ15MulRS: {
++      __ Pmulhrsw(i.OutputSimd128Register(), i.InputSimd128Register(0),
++                  i.InputSimd128Register(1));
++      break;
++    }
+     case kX64I8x16Splat: {
+       XMMRegister dst = i.OutputSimd128Register();
+       if (HasRegisterInput(instr, 0)) {
+@@ -3853,7 +3858,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+     }
+     case kX64I32x4ExtMulLowI16x8S: {
+       __ I32x4ExtMul(i.OutputSimd128Register(), i.InputSimd128Register(0),
+-                     i.InputSimd128Register(1), kScratchDoubleReg, /*low=*/true,
++                     i.InputSimd128Register(1), kScratchDoubleReg,
++                     /*low=*/true,
+                      /*is_signed=*/true);
+       break;
+     }
+@@ -3866,7 +3872,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+     }
+     case kX64I32x4ExtMulLowI16x8U: {
+       __ I32x4ExtMul(i.OutputSimd128Register(), i.InputSimd128Register(0),
+-                     i.InputSimd128Register(1), kScratchDoubleReg, /*low=*/true,
++                     i.InputSimd128Register(1), kScratchDoubleReg,
++                     /*low=*/true,
+                      /*is_signed=*/false);
+       break;
+     }
+diff --git a/src/compiler/backend/x64/instruction-codes-x64.h b/src/compiler/backend/x64/instruction-codes-x64.h
+index 2ffca9e7f0..9c0f6dc46f 100644
+--- a/src/compiler/backend/x64/instruction-codes-x64.h
++++ b/src/compiler/backend/x64/instruction-codes-x64.h
+@@ -334,6 +334,7 @@ namespace compiler {
+   V(X64I16x8ExtAddPairwiseI8x16S)                    \
+   V(X64I16x8ExtAddPairwiseI8x16U)                    \
+   V(X64I16x8Q15MulRSatS)                             \
++  V(X64I16x8RelaxedQ15MulRS)                         \
+   V(X64I8x16Splat)                                   \
+   V(X64I8x16ExtractLaneS)                            \
+   V(X64I8x16SConvertI16x8)                           \
+diff --git a/src/compiler/backend/x64/instruction-scheduler-x64.cc b/src/compiler/backend/x64/instruction-scheduler-x64.cc
+index f520d7f9b3..92f88f2655 100644
+--- a/src/compiler/backend/x64/instruction-scheduler-x64.cc
++++ b/src/compiler/backend/x64/instruction-scheduler-x64.cc
+@@ -279,6 +279,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kX64I16x8ExtAddPairwiseI8x16S:
+     case kX64I16x8ExtAddPairwiseI8x16U:
+     case kX64I16x8Q15MulRSatS:
++    case kX64I16x8RelaxedQ15MulRS:
+     case kX64I8x16Splat:
+     case kX64I8x16ExtractLaneS:
+     case kX64I8x16SConvertI16x8:
+diff --git a/src/compiler/backend/x64/instruction-selector-x64.cc b/src/compiler/backend/x64/instruction-selector-x64.cc
+index d432ef1aef..548360b0b5 100644
+--- a/src/compiler/backend/x64/instruction-selector-x64.cc
++++ b/src/compiler/backend/x64/instruction-selector-x64.cc
+@@ -3309,6 +3309,7 @@ VISIT_ATOMIC_BINOP(Xor)
+   V(I16x8ExtMulLowI8x16U)          \
+   V(I16x8ExtMulHighI8x16U)         \
+   V(I16x8Q15MulRSatS)              \
++  V(I16x8RelaxedQ15MulRS)          \
+   V(I8x16SConvertI16x8)            \
+   V(I8x16UConvertI16x8)            \
+   V(I8x16Add)                      \
+diff --git a/test/cctest/wasm/test-run-wasm-relaxed-simd.cc b/test/cctest/wasm/test-run-wasm-relaxed-simd.cc
+index a2dd5e58fa..966fb60f3a 100644
+--- a/test/cctest/wasm/test-run-wasm-relaxed-simd.cc
++++ b/test/cctest/wasm/test-run-wasm-relaxed-simd.cc
+@@ -403,16 +403,43 @@ WASM_RELAXED_SIMD_TEST(I8x16RelaxedSwizzle) {
+     CHECK_EQ(LANE(dst, i), i);
+   }
+ }
+-#endif  // V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_IA32 || V8_TARGET_ARCH_ARM64 ||
+-        // V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_RISCV64
+ 
+-#if V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_ARM
+ WASM_RELAXED_SIMD_TEST(I16x8RelaxedQ15MulRS) {
+-  RunI16x8BinOpTest<int16_t>(execution_tier, kExprI16x8RelaxedQ15MulRS,
+-                             SaturateRoundingQMul<int16_t>);
+-}
++  // TODO(v8:12609): Complete Liftoff implementation.
++  if (execution_tier == TestExecutionTier::kLiftoff) return;
++  WasmRunner<int32_t, int16_t, int16_t> r(execution_tier);
++  // Global to hold output.
++  int16_t* g = r.builder().template AddGlobal<int16_t>(kWasmS128);
++  // Build fn to splat test values, perform binop, and write the result.
++  byte value1 = 0, value2 = 1;
++  byte temp1 = r.AllocateLocal(kWasmS128);
++  byte temp2 = r.AllocateLocal(kWasmS128);
++  BUILD(r, WASM_LOCAL_SET(temp1, WASM_SIMD_I16x8_SPLAT(WASM_LOCAL_GET(value1))),
++        WASM_LOCAL_SET(temp2, WASM_SIMD_I16x8_SPLAT(WASM_LOCAL_GET(value2))),
++        WASM_GLOBAL_SET(
++            0, WASM_SIMD_BINOP(kExprI16x8RelaxedQ15MulRS, WASM_LOCAL_GET(temp1),
++                               WASM_LOCAL_GET(temp2))),
++        WASM_ONE);
+ 
+-#endif  // V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_ARM
++  for (int16_t x : compiler::ValueHelper::GetVector<int16_t>()) {
++    for (int16_t y : compiler::ValueHelper::GetVector<int16_t>()) {
++      // Results are dependent on the underlying hardware when both inputs are
++      // INT16_MIN, we could do something specific to test for x64/ARM behavior
++      // but predictably other supported V8 platforms will have to test specific
++      // behavior in that case, given that the lowering is fairly
++      // straighforward, and occurence of this in higher level programs is rare,
++      // this is okay to skip.
++      if (x == INT16_MIN && y == INT16_MIN) break;
++      r.Call(x, y);
++      int16_t expected = SaturateRoundingQMul(x, y);
++      for (int i = 0; i < 8; i++) {
++        CHECK_EQ(expected, LANE(g, i));
++      }
++    }
++  }
++}
++#endif  // V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_IA32 || V8_TARGET_ARCH_ARM64 ||
++        // V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_RISCV64
+ 
+ #if V8_TARGET_ARCH_ARM64
+ WASM_RELAXED_SIMD_TEST(I16x8DotI8x16I7x16S) {
+-- 
+2.35.1
+

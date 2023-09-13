@@ -1,0 +1,304 @@
+From 9960f69ffd82bc9d3a6f121d5a8168b7234eabc7 Mon Sep 17 00:00:00 2001
+From: Deepti Gandluri <gdeepti@chromium.org>
+Date: Thu, 18 Feb 2021 20:59:36 -0800
+Subject: [PATCH] Stop inlining the SupportsWasmSimd128 function
+
+Change-Id: Id9b69f960887f55d26842ecad57c43367c7ddfcd
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/2704951
+Reviewed-by: Zhi An Ng <zhin@chromium.org>
+Commit-Queue: Deepti Gandluri <gdeepti@chromium.org>
+Cr-Commit-Position: refs/heads/master@{#73083}
+---
+ src/codegen/arm/assembler-arm-inl.h         | 2 --
+ src/codegen/arm/assembler-arm.cc            | 2 ++
+ src/codegen/arm64/assembler-arm64-inl.h     | 2 --
+ src/codegen/arm64/assembler-arm64.cc        | 1 +
+ src/codegen/cpu-features.h                  | 4 ++--
+ src/codegen/ia32/assembler-ia32-inl.h       | 6 ------
+ src/codegen/ia32/assembler-ia32.cc          | 6 ++++++
+ src/codegen/mips/assembler-mips-inl.h       | 2 --
+ src/codegen/mips/assembler-mips.cc          | 2 ++
+ src/codegen/mips64/assembler-mips64-inl.h   | 2 --
+ src/codegen/mips64/assembler-mips64.cc      | 2 ++
+ src/codegen/ppc/assembler-ppc-inl.h         | 2 --
+ src/codegen/ppc/assembler-ppc.cc            | 2 ++
+ src/codegen/riscv64/assembler-riscv64-inl.h | 2 --
+ src/codegen/riscv64/assembler-riscv64.cc    | 2 ++
+ src/codegen/s390/assembler-s390-inl.h       | 4 ----
+ src/codegen/s390/assembler-s390.cc          | 4 ++++
+ src/codegen/x64/assembler-x64-inl.h         | 6 ------
+ src/codegen/x64/assembler-x64.cc            | 6 ++++++
+ 19 files changed, 29 insertions(+), 30 deletions(-)
+
+diff --git a/src/codegen/arm/assembler-arm-inl.h b/src/codegen/arm/assembler-arm-inl.h
+index 9dadad96ac..7035fa2492 100644
+--- a/src/codegen/arm/assembler-arm-inl.h
++++ b/src/codegen/arm/assembler-arm-inl.h
+@@ -49,8 +49,6 @@ namespace internal {
+ 
+ bool CpuFeatures::SupportsOptimizer() { return true; }
+ 
+-bool CpuFeatures::SupportsWasmSimd128() { return IsSupported(NEON); }
+-
+ int DoubleRegister::SupportedRegisterCount() {
+   return CpuFeatures::IsSupported(VFP32DREGS) ? 32 : 16;
+ }
+diff --git a/src/codegen/arm/assembler-arm.cc b/src/codegen/arm/assembler-arm.cc
+index 77e40cf006..edd279e39c 100644
+--- a/src/codegen/arm/assembler-arm.cc
++++ b/src/codegen/arm/assembler-arm.cc
+@@ -198,6 +198,8 @@ static constexpr unsigned CpuFeaturesFromCompiler() {
+ #endif
+ }
+ 
++bool CpuFeatures::SupportsWasmSimd128() { return IsSupported(NEON); }
++
+ void CpuFeatures::ProbeImpl(bool cross_compile) {
+   dcache_line_size_ = 64;
+ 
+diff --git a/src/codegen/arm64/assembler-arm64-inl.h b/src/codegen/arm64/assembler-arm64-inl.h
+index 1027dccc47..ee64dbe1f2 100644
+--- a/src/codegen/arm64/assembler-arm64-inl.h
++++ b/src/codegen/arm64/assembler-arm64-inl.h
+@@ -19,8 +19,6 @@ namespace internal {
+ 
+ bool CpuFeatures::SupportsOptimizer() { return true; }
+ 
+-bool CpuFeatures::SupportsWasmSimd128() { return true; }
+-
+ void RelocInfo::apply(intptr_t delta) {
+   // On arm64 only internal references and immediate branches need extra work.
+   if (RelocInfo::IsInternalReference(rmode_)) {
+diff --git a/src/codegen/arm64/assembler-arm64.cc b/src/codegen/arm64/assembler-arm64.cc
+index 441f299a17..72cac5bd60 100644
+--- a/src/codegen/arm64/assembler-arm64.cc
++++ b/src/codegen/arm64/assembler-arm64.cc
+@@ -82,6 +82,7 @@ constexpr unsigned CpuFeaturesFromTargetOS() {
+ 
+ // -----------------------------------------------------------------------------
+ // CpuFeatures implementation.
++bool CpuFeatures::SupportsWasmSimd128() { return true; }
+ 
+ void CpuFeatures::ProbeImpl(bool cross_compile) {
+   // Only use statically determined features for cross compile (snapshot).
+diff --git a/src/codegen/cpu-features.h b/src/codegen/cpu-features.h
+index 7cb45c7785..ab1011809e 100644
+--- a/src/codegen/cpu-features.h
++++ b/src/codegen/cpu-features.h
+@@ -108,9 +108,9 @@ class V8_EXPORT_PRIVATE CpuFeatures : public AllStatic {
+     return (supported_ & (1u << f)) != 0;
+   }
+ 
+-  static inline bool SupportsOptimizer();
++  static bool SupportsWasmSimd128();
+ 
+-  static inline bool SupportsWasmSimd128();
++  static inline bool SupportsOptimizer();
+ 
+   static inline unsigned icache_line_size() {
+     DCHECK_NE(icache_line_size_, 0);
+diff --git a/src/codegen/ia32/assembler-ia32-inl.h b/src/codegen/ia32/assembler-ia32-inl.h
+index 25d2d486ce..1585f970e8 100644
+--- a/src/codegen/ia32/assembler-ia32-inl.h
++++ b/src/codegen/ia32/assembler-ia32-inl.h
+@@ -49,12 +49,6 @@ namespace internal {
+ 
+ bool CpuFeatures::SupportsOptimizer() { return true; }
+ 
+-bool CpuFeatures::SupportsWasmSimd128() {
+-  if (IsSupported(SSE4_1)) return true;
+-  if (FLAG_wasm_simd_ssse3_codegen && IsSupported(SSSE3)) return true;
+-  return false;
+-}
+-
+ // The modes possibly affected by apply must be in kApplyMask.
+ void RelocInfo::apply(intptr_t delta) {
+   DCHECK_EQ(kApplyMask, (RelocInfo::ModeMask(RelocInfo::CODE_TARGET) |
+diff --git a/src/codegen/ia32/assembler-ia32.cc b/src/codegen/ia32/assembler-ia32.cc
+index 3f9d7ddfa2..93c2461795 100644
+--- a/src/codegen/ia32/assembler-ia32.cc
++++ b/src/codegen/ia32/assembler-ia32.cc
+@@ -122,6 +122,12 @@ bool OSHasAVXSupport() {
+ 
+ }  // namespace
+ 
++bool CpuFeatures::SupportsWasmSimd128() {
++  if (IsSupported(SSE4_1)) return true;
++  if (FLAG_wasm_simd_ssse3_codegen && IsSupported(SSSE3)) return true;
++  return false;
++}
++
+ void CpuFeatures::ProbeImpl(bool cross_compile) {
+   base::CPU cpu;
+   CHECK(cpu.has_sse2());  // SSE2 support is mandatory.
+diff --git a/src/codegen/mips/assembler-mips-inl.h b/src/codegen/mips/assembler-mips-inl.h
+index 8ffc46003f..d00da6efba 100644
+--- a/src/codegen/mips/assembler-mips-inl.h
++++ b/src/codegen/mips/assembler-mips-inl.h
+@@ -47,8 +47,6 @@ namespace internal {
+ 
+ bool CpuFeatures::SupportsOptimizer() { return IsSupported(FPU); }
+ 
+-bool CpuFeatures::SupportsWasmSimd128() { return IsSupported(MIPS_SIMD); }
+-
+ // -----------------------------------------------------------------------------
+ // Operand and MemOperand.
+ 
+diff --git a/src/codegen/mips/assembler-mips.cc b/src/codegen/mips/assembler-mips.cc
+index 9864c0f253..2ef08ae87c 100644
+--- a/src/codegen/mips/assembler-mips.cc
++++ b/src/codegen/mips/assembler-mips.cc
+@@ -67,6 +67,8 @@ static unsigned CpuFeaturesImpliedByCompiler() {
+   return answer;
+ }
+ 
++bool CpuFeatures::SupportsWasmSimd128() { return IsSupported(MIPS_SIMD); }
++
+ void CpuFeatures::ProbeImpl(bool cross_compile) {
+   supported_ |= CpuFeaturesImpliedByCompiler();
+ 
+diff --git a/src/codegen/mips64/assembler-mips64-inl.h b/src/codegen/mips64/assembler-mips64-inl.h
+index e5ac8d209c..2924b661f2 100644
+--- a/src/codegen/mips64/assembler-mips64-inl.h
++++ b/src/codegen/mips64/assembler-mips64-inl.h
+@@ -47,8 +47,6 @@ namespace internal {
+ 
+ bool CpuFeatures::SupportsOptimizer() { return IsSupported(FPU); }
+ 
+-bool CpuFeatures::SupportsWasmSimd128() { return IsSupported(MIPS_SIMD); }
+-
+ // -----------------------------------------------------------------------------
+ // Operand and MemOperand.
+ 
+diff --git a/src/codegen/mips64/assembler-mips64.cc b/src/codegen/mips64/assembler-mips64.cc
+index 11dd818922..7f7ebd2c73 100644
+--- a/src/codegen/mips64/assembler-mips64.cc
++++ b/src/codegen/mips64/assembler-mips64.cc
+@@ -67,6 +67,8 @@ static unsigned CpuFeaturesImpliedByCompiler() {
+   return answer;
+ }
+ 
++bool CpuFeatures::SupportsWasmSimd128() { return IsSupported(MIPS_SIMD); }
++
+ void CpuFeatures::ProbeImpl(bool cross_compile) {
+   supported_ |= CpuFeaturesImpliedByCompiler();
+ 
+diff --git a/src/codegen/ppc/assembler-ppc-inl.h b/src/codegen/ppc/assembler-ppc-inl.h
+index a638ba9759..d8cd524451 100644
+--- a/src/codegen/ppc/assembler-ppc-inl.h
++++ b/src/codegen/ppc/assembler-ppc-inl.h
+@@ -48,8 +48,6 @@ namespace internal {
+ 
+ bool CpuFeatures::SupportsOptimizer() { return true; }
+ 
+-bool CpuFeatures::SupportsWasmSimd128() { return false; }
+-
+ void RelocInfo::apply(intptr_t delta) {
+   // absolute code pointer inside code object moves with the code object.
+   if (IsInternalReference(rmode_)) {
+diff --git a/src/codegen/ppc/assembler-ppc.cc b/src/codegen/ppc/assembler-ppc.cc
+index 02e50e5fa3..e385f71a5d 100644
+--- a/src/codegen/ppc/assembler-ppc.cc
++++ b/src/codegen/ppc/assembler-ppc.cc
+@@ -54,6 +54,8 @@ static unsigned CpuFeaturesImpliedByCompiler() {
+   return answer;
+ }
+ 
++bool CpuFeatures::SupportsWasmSimd128() { return false; }
++
+ void CpuFeatures::ProbeImpl(bool cross_compile) {
+   supported_ |= CpuFeaturesImpliedByCompiler();
+   icache_line_size_ = 128;
+diff --git a/src/codegen/riscv64/assembler-riscv64-inl.h b/src/codegen/riscv64/assembler-riscv64-inl.h
+index b99262cb36..40bd56d15b 100644
+--- a/src/codegen/riscv64/assembler-riscv64-inl.h
++++ b/src/codegen/riscv64/assembler-riscv64-inl.h
+@@ -45,8 +45,6 @@ namespace internal {
+ 
+ bool CpuFeatures::SupportsOptimizer() { return IsSupported(FPU); }
+ 
+-bool CpuFeatures::SupportsWasmSimd128() { return IsSupported(RISCV_SIMD); }
+-
+ // -----------------------------------------------------------------------------
+ // Operand and MemOperand.
+ 
+diff --git a/src/codegen/riscv64/assembler-riscv64.cc b/src/codegen/riscv64/assembler-riscv64.cc
+index e070e72f45..914ea26f9f 100644
+--- a/src/codegen/riscv64/assembler-riscv64.cc
++++ b/src/codegen/riscv64/assembler-riscv64.cc
+@@ -60,6 +60,8 @@ static unsigned CpuFeaturesImpliedByCompiler() {
+   return answer;
+ }
+ 
++bool CpuFeatures::SupportsWasmSimd128() { return IsSupported(RISCV_SIMD); }
++
+ void CpuFeatures::ProbeImpl(bool cross_compile) {
+   supported_ |= CpuFeaturesImpliedByCompiler();
+ 
+diff --git a/src/codegen/s390/assembler-s390-inl.h b/src/codegen/s390/assembler-s390-inl.h
+index f58e891a90..dc04acec61 100644
+--- a/src/codegen/s390/assembler-s390-inl.h
++++ b/src/codegen/s390/assembler-s390-inl.h
+@@ -48,10 +48,6 @@ namespace internal {
+ 
+ bool CpuFeatures::SupportsOptimizer() { return true; }
+ 
+-bool CpuFeatures::SupportsWasmSimd128() {
+-  return CpuFeatures::IsSupported(VECTOR_ENHANCE_FACILITY_1);
+-}
+-
+ void RelocInfo::apply(intptr_t delta) {
+   // Absolute code pointer inside code object moves with the code object.
+   if (IsInternalReference(rmode_)) {
+diff --git a/src/codegen/s390/assembler-s390.cc b/src/codegen/s390/assembler-s390.cc
+index 76b3d9953e..dd5f59bc0b 100644
+--- a/src/codegen/s390/assembler-s390.cc
++++ b/src/codegen/s390/assembler-s390.cc
+@@ -159,6 +159,10 @@ static bool supportsSTFLE() {
+ #endif
+ }
+ 
++bool CpuFeatures::SupportsWasmSimd128() {
++  return CpuFeatures::IsSupported(VECTOR_ENHANCE_FACILITY_1);
++}
++
+ void CpuFeatures::ProbeImpl(bool cross_compile) {
+   supported_ |= CpuFeaturesImpliedByCompiler();
+   icache_line_size_ = 256;
+diff --git a/src/codegen/x64/assembler-x64-inl.h b/src/codegen/x64/assembler-x64-inl.h
+index 836566a1ac..38b7a3422f 100644
+--- a/src/codegen/x64/assembler-x64-inl.h
++++ b/src/codegen/x64/assembler-x64-inl.h
+@@ -17,12 +17,6 @@ namespace internal {
+ 
+ bool CpuFeatures::SupportsOptimizer() { return true; }
+ 
+-bool CpuFeatures::SupportsWasmSimd128() {
+-  if (IsSupported(SSE4_1)) return true;
+-  if (FLAG_wasm_simd_ssse3_codegen && IsSupported(SSSE3)) return true;
+-  return false;
+-}
+-
+ // -----------------------------------------------------------------------------
+ // Implementation of Assembler
+ 
+diff --git a/src/codegen/x64/assembler-x64.cc b/src/codegen/x64/assembler-x64.cc
+index 18330a9126..f1b00e308c 100644
+--- a/src/codegen/x64/assembler-x64.cc
++++ b/src/codegen/x64/assembler-x64.cc
+@@ -71,6 +71,12 @@ bool OSHasAVXSupport() {
+ 
+ }  // namespace
+ 
++bool CpuFeatures::SupportsWasmSimd128() {
++  if (IsSupported(SSE4_1)) return true;
++  if (FLAG_wasm_simd_ssse3_codegen && IsSupported(SSSE3)) return true;
++  return false;
++}
++
+ void CpuFeatures::ProbeImpl(bool cross_compile) {
+   base::CPU cpu;
+   CHECK(cpu.has_sse2());  // SSE2 support is mandatory.
+-- 
+2.35.1
+

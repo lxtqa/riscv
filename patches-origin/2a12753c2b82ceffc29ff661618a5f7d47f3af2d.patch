@@ -1,0 +1,799 @@
+From 2a12753c2b82ceffc29ff661618a5f7d47f3af2d Mon Sep 17 00:00:00 2001
+From: Ng Zhi An <zhin@chromium.org>
+Date: Tue, 9 Nov 2021 16:53:11 -0800
+Subject: [PATCH] [ia32][wasm-relaxed-simd] Implement qfma qfms
+
+Implement f32x4.qfma, f32x4.qfms, f64x2.qfma, f64x2.qfms.
+
+These were already implement in macro-assembler-x64, so move the
+implementation to shared-macro-assembler.
+
+x64 has a macro list in fma-instr, copy this to ia32, and then use this
+macro list to define existing vfma{ss,sd} instructions in
+assembler-ia32.
+
+Disassembly support is intentionally omitted in this patch, I will add
+this in a follow-up. The currently disassembly in x64 is quite verbose
+and I would like to make use of macro-list but it requires breaking up
+the macro list into smaller parts, so I will do that refactoring for
+both ia32 and x64 in the follow-up.
+
+Bug: v8:12284
+Change-Id: I3654ea108a123467506c5837072b6b63ecbc74da
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3255664
+Reviewed-by: Deepti Gandluri <gdeepti@chromium.org>
+Commit-Queue: Zhi An Ng <zhin@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#77932}
+---
+ src/codegen/ia32/assembler-ia32.cc            |  37 ++--
+ src/codegen/ia32/assembler-ia32.h             | 165 ++----------------
+ src/codegen/ia32/fma-instr.h                  |  46 +++++
+ .../macro-assembler-shared-ia32-x64.cc        |  95 ++++++++++
+ .../macro-assembler-shared-ia32-x64.h         |   9 +
+ src/codegen/x64/macro-assembler-x64.cc        |  95 ----------
+ src/codegen/x64/macro-assembler-x64.h         |   9 -
+ .../backend/ia32/code-generator-ia32.cc       |  24 +++
+ .../backend/ia32/instruction-codes-ia32.h     |   4 +
+ .../ia32/instruction-scheduler-ia32.cc        |   4 +
+ .../backend/ia32/instruction-selector-ia32.cc |  24 +++
+ src/compiler/backend/instruction-selector.cc  |   7 +-
+ .../cctest/wasm/test-run-wasm-relaxed-simd.cc |  12 +-
+ 13 files changed, 255 insertions(+), 276 deletions(-)
+ create mode 100644 src/codegen/ia32/fma-instr.h
+
+diff --git a/src/codegen/ia32/assembler-ia32.cc b/src/codegen/ia32/assembler-ia32.cc
+index f155a7e608..493faf7ee0 100644
+--- a/src/codegen/ia32/assembler-ia32.cc
++++ b/src/codegen/ia32/assembler-ia32.cc
+@@ -2861,23 +2861,6 @@ void Assembler::pd(byte opcode, XMMRegister dst, Operand src) {
+ }
+ 
+ // AVX instructions
+-void Assembler::vfmasd(byte op, XMMRegister dst, XMMRegister src1,
+-                       Operand src2) {
+-  DCHECK(IsEnabled(FMA3));
+-  EnsureSpace ensure_space(this);
+-  emit_vex_prefix(src1, kLIG, k66, k0F38, kW1);
+-  EMIT(op);
+-  emit_sse_operand(dst, src2);
+-}
+-
+-void Assembler::vfmass(byte op, XMMRegister dst, XMMRegister src1,
+-                       Operand src2) {
+-  DCHECK(IsEnabled(FMA3));
+-  EnsureSpace ensure_space(this);
+-  emit_vex_prefix(src1, kLIG, k66, k0F38, kW0);
+-  EMIT(op);
+-  emit_sse_operand(dst, src2);
+-}
+ 
+ void Assembler::vss(byte op, XMMRegister dst, XMMRegister src1, Operand src2) {
+   vinstr(op, dst, src1, src2, kF3, k0F, kWIG);
+@@ -3239,6 +3222,26 @@ void Assembler::vinstr(byte op, XMMRegister dst, XMMRegister src1, Operand src2,
+   emit_sse_operand(dst, src2);
+ }
+ 
++void Assembler::fma_instr(byte op, XMMRegister dst, XMMRegister src1,
++                          XMMRegister src2, VectorLength l, SIMDPrefix pp,
++                          LeadingOpcode m, VexW w) {
++  DCHECK(IsEnabled(FMA3));
++  EnsureSpace ensure_space(this);
++  emit_vex_prefix(src1, l, pp, m, w);
++  EMIT(op);
++  emit_sse_operand(dst, src2);
++}
++
++void Assembler::fma_instr(byte op, XMMRegister dst, XMMRegister src1,
++                          Operand src2, VectorLength l, SIMDPrefix pp,
++                          LeadingOpcode m, VexW w) {
++  DCHECK(IsEnabled(FMA3));
++  EnsureSpace ensure_space(this);
++  emit_vex_prefix(src1, l, pp, m, w);
++  EMIT(op);
++  emit_sse_operand(dst, src2);
++}
++
+ void Assembler::emit_sse_operand(XMMRegister reg, Operand adr) {
+   Register ireg = Register::from_code(reg.code());
+   emit_operand(ireg, adr);
+diff --git a/src/codegen/ia32/assembler-ia32.h b/src/codegen/ia32/assembler-ia32.h
+index bdf2007485..cca1dd1fe0 100644
+--- a/src/codegen/ia32/assembler-ia32.h
++++ b/src/codegen/ia32/assembler-ia32.h
+@@ -42,6 +42,7 @@
+ 
+ #include "src/codegen/assembler.h"
+ #include "src/codegen/ia32/constants-ia32.h"
++#include "src/codegen/ia32/fma-instr.h"
+ #include "src/codegen/ia32/register-ia32.h"
+ #include "src/codegen/ia32/sse-instr.h"
+ #include "src/codegen/label.h"
+@@ -1071,154 +1072,6 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   void roundpd(XMMRegister dst, XMMRegister src, RoundingMode mode);
+ 
+   // AVX instructions
+-  void vfmadd132sd(XMMRegister dst, XMMRegister src1, XMMRegister src2) {
+-    vfmadd132sd(dst, src1, Operand(src2));
+-  }
+-  void vfmadd213sd(XMMRegister dst, XMMRegister src1, XMMRegister src2) {
+-    vfmadd213sd(dst, src1, Operand(src2));
+-  }
+-  void vfmadd231sd(XMMRegister dst, XMMRegister src1, XMMRegister src2) {
+-    vfmadd231sd(dst, src1, Operand(src2));
+-  }
+-  void vfmadd132sd(XMMRegister dst, XMMRegister src1, Operand src2) {
+-    vfmasd(0x99, dst, src1, src2);
+-  }
+-  void vfmadd213sd(XMMRegister dst, XMMRegister src1, Operand src2) {
+-    vfmasd(0xa9, dst, src1, src2);
+-  }
+-  void vfmadd231sd(XMMRegister dst, XMMRegister src1, Operand src2) {
+-    vfmasd(0xb9, dst, src1, src2);
+-  }
+-  void vfmsub132sd(XMMRegister dst, XMMRegister src1, XMMRegister src2) {
+-    vfmsub132sd(dst, src1, Operand(src2));
+-  }
+-  void vfmsub213sd(XMMRegister dst, XMMRegister src1, XMMRegister src2) {
+-    vfmsub213sd(dst, src1, Operand(src2));
+-  }
+-  void vfmsub231sd(XMMRegister dst, XMMRegister src1, XMMRegister src2) {
+-    vfmsub231sd(dst, src1, Operand(src2));
+-  }
+-  void vfmsub132sd(XMMRegister dst, XMMRegister src1, Operand src2) {
+-    vfmasd(0x9b, dst, src1, src2);
+-  }
+-  void vfmsub213sd(XMMRegister dst, XMMRegister src1, Operand src2) {
+-    vfmasd(0xab, dst, src1, src2);
+-  }
+-  void vfmsub231sd(XMMRegister dst, XMMRegister src1, Operand src2) {
+-    vfmasd(0xbb, dst, src1, src2);
+-  }
+-  void vfnmadd132sd(XMMRegister dst, XMMRegister src1, XMMRegister src2) {
+-    vfnmadd132sd(dst, src1, Operand(src2));
+-  }
+-  void vfnmadd213sd(XMMRegister dst, XMMRegister src1, XMMRegister src2) {
+-    vfnmadd213sd(dst, src1, Operand(src2));
+-  }
+-  void vfnmadd231sd(XMMRegister dst, XMMRegister src1, XMMRegister src2) {
+-    vfnmadd231sd(dst, src1, Operand(src2));
+-  }
+-  void vfnmadd132sd(XMMRegister dst, XMMRegister src1, Operand src2) {
+-    vfmasd(0x9d, dst, src1, src2);
+-  }
+-  void vfnmadd213sd(XMMRegister dst, XMMRegister src1, Operand src2) {
+-    vfmasd(0xad, dst, src1, src2);
+-  }
+-  void vfnmadd231sd(XMMRegister dst, XMMRegister src1, Operand src2) {
+-    vfmasd(0xbd, dst, src1, src2);
+-  }
+-  void vfnmsub132sd(XMMRegister dst, XMMRegister src1, XMMRegister src2) {
+-    vfnmsub132sd(dst, src1, Operand(src2));
+-  }
+-  void vfnmsub213sd(XMMRegister dst, XMMRegister src1, XMMRegister src2) {
+-    vfnmsub213sd(dst, src1, Operand(src2));
+-  }
+-  void vfnmsub231sd(XMMRegister dst, XMMRegister src1, XMMRegister src2) {
+-    vfnmsub231sd(dst, src1, Operand(src2));
+-  }
+-  void vfnmsub132sd(XMMRegister dst, XMMRegister src1, Operand src2) {
+-    vfmasd(0x9f, dst, src1, src2);
+-  }
+-  void vfnmsub213sd(XMMRegister dst, XMMRegister src1, Operand src2) {
+-    vfmasd(0xaf, dst, src1, src2);
+-  }
+-  void vfnmsub231sd(XMMRegister dst, XMMRegister src1, Operand src2) {
+-    vfmasd(0xbf, dst, src1, src2);
+-  }
+-  void vfmasd(byte op, XMMRegister dst, XMMRegister src1, Operand src2);
+-
+-  void vfmadd132ss(XMMRegister dst, XMMRegister src1, XMMRegister src2) {
+-    vfmadd132ss(dst, src1, Operand(src2));
+-  }
+-  void vfmadd213ss(XMMRegister dst, XMMRegister src1, XMMRegister src2) {
+-    vfmadd213ss(dst, src1, Operand(src2));
+-  }
+-  void vfmadd231ss(XMMRegister dst, XMMRegister src1, XMMRegister src2) {
+-    vfmadd231ss(dst, src1, Operand(src2));
+-  }
+-  void vfmadd132ss(XMMRegister dst, XMMRegister src1, Operand src2) {
+-    vfmass(0x99, dst, src1, src2);
+-  }
+-  void vfmadd213ss(XMMRegister dst, XMMRegister src1, Operand src2) {
+-    vfmass(0xa9, dst, src1, src2);
+-  }
+-  void vfmadd231ss(XMMRegister dst, XMMRegister src1, Operand src2) {
+-    vfmass(0xb9, dst, src1, src2);
+-  }
+-  void vfmsub132ss(XMMRegister dst, XMMRegister src1, XMMRegister src2) {
+-    vfmsub132ss(dst, src1, Operand(src2));
+-  }
+-  void vfmsub213ss(XMMRegister dst, XMMRegister src1, XMMRegister src2) {
+-    vfmsub213ss(dst, src1, Operand(src2));
+-  }
+-  void vfmsub231ss(XMMRegister dst, XMMRegister src1, XMMRegister src2) {
+-    vfmsub231ss(dst, src1, Operand(src2));
+-  }
+-  void vfmsub132ss(XMMRegister dst, XMMRegister src1, Operand src2) {
+-    vfmass(0x9b, dst, src1, src2);
+-  }
+-  void vfmsub213ss(XMMRegister dst, XMMRegister src1, Operand src2) {
+-    vfmass(0xab, dst, src1, src2);
+-  }
+-  void vfmsub231ss(XMMRegister dst, XMMRegister src1, Operand src2) {
+-    vfmass(0xbb, dst, src1, src2);
+-  }
+-  void vfnmadd132ss(XMMRegister dst, XMMRegister src1, XMMRegister src2) {
+-    vfnmadd132ss(dst, src1, Operand(src2));
+-  }
+-  void vfnmadd213ss(XMMRegister dst, XMMRegister src1, XMMRegister src2) {
+-    vfnmadd213ss(dst, src1, Operand(src2));
+-  }
+-  void vfnmadd231ss(XMMRegister dst, XMMRegister src1, XMMRegister src2) {
+-    vfnmadd231ss(dst, src1, Operand(src2));
+-  }
+-  void vfnmadd132ss(XMMRegister dst, XMMRegister src1, Operand src2) {
+-    vfmass(0x9d, dst, src1, src2);
+-  }
+-  void vfnmadd213ss(XMMRegister dst, XMMRegister src1, Operand src2) {
+-    vfmass(0xad, dst, src1, src2);
+-  }
+-  void vfnmadd231ss(XMMRegister dst, XMMRegister src1, Operand src2) {
+-    vfmass(0xbd, dst, src1, src2);
+-  }
+-  void vfnmsub132ss(XMMRegister dst, XMMRegister src1, XMMRegister src2) {
+-    vfnmsub132ss(dst, src1, Operand(src2));
+-  }
+-  void vfnmsub213ss(XMMRegister dst, XMMRegister src1, XMMRegister src2) {
+-    vfnmsub213ss(dst, src1, Operand(src2));
+-  }
+-  void vfnmsub231ss(XMMRegister dst, XMMRegister src1, XMMRegister src2) {
+-    vfnmsub231ss(dst, src1, Operand(src2));
+-  }
+-  void vfnmsub132ss(XMMRegister dst, XMMRegister src1, Operand src2) {
+-    vfmass(0x9f, dst, src1, src2);
+-  }
+-  void vfnmsub213ss(XMMRegister dst, XMMRegister src1, Operand src2) {
+-    vfmass(0xaf, dst, src1, src2);
+-  }
+-  void vfnmsub231ss(XMMRegister dst, XMMRegister src1, Operand src2) {
+-    vfmass(0xbf, dst, src1, src2);
+-  }
+-  void vfmass(byte op, XMMRegister dst, XMMRegister src1, Operand src2);
+-
+   void vaddss(XMMRegister dst, XMMRegister src1, XMMRegister src2) {
+     vaddss(dst, src1, Operand(src2));
+   }
+@@ -1755,6 +1608,18 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   AVX2_BROADCAST_LIST(AVX2_INSTRUCTION)
+ #undef AVX2_INSTRUCTION
+ 
++#define FMA(instr, length, prefix, escape1, escape2, extension, opcode) \
++  void instr(XMMRegister dst, XMMRegister src1, XMMRegister src2) {     \
++    fma_instr(0x##opcode, dst, src1, src2, k##length, k##prefix,        \
++              k##escape1##escape2, k##extension);                       \
++  }                                                                     \
++  void instr(XMMRegister dst, XMMRegister src1, Operand src2) {         \
++    fma_instr(0x##opcode, dst, src1, src2, k##length, k##prefix,        \
++              k##escape1##escape2, k##extension);                       \
++  }
++  FMA_INSTRUCTION_LIST(FMA)
++#undef FMA
++
+   // Prefetch src position into cache level.
+   // Level 1, 2 or 3 specifies CPU cache level. Level 0 specifies a
+   // non-temporal
+@@ -1886,6 +1751,10 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // Most BMI instructions are similar.
+   void bmi1(byte op, Register reg, Register vreg, Operand rm);
+   void bmi2(SIMDPrefix pp, byte op, Register reg, Register vreg, Operand rm);
++  void fma_instr(byte op, XMMRegister dst, XMMRegister src1, XMMRegister src2,
++                 VectorLength l, SIMDPrefix pp, LeadingOpcode m, VexW w);
++  void fma_instr(byte op, XMMRegister dst, XMMRegister src1, Operand src2,
++                 VectorLength l, SIMDPrefix pp, LeadingOpcode m, VexW w);
+ 
+   // record reloc info for current pc_
+   void RecordRelocInfo(RelocInfo::Mode rmode, intptr_t data = 0);
+diff --git a/src/codegen/ia32/fma-instr.h b/src/codegen/ia32/fma-instr.h
+new file mode 100644
+index 0000000000..3efbdb9ed1
+--- /dev/null
++++ b/src/codegen/ia32/fma-instr.h
+@@ -0,0 +1,46 @@
++// Copyright 2021 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++//
++#ifndef V8_CODEGEN_IA32_FMA_INSTR_H_
++#define V8_CODEGEN_IA32_FMA_INSTR_H_
++
++#define FMA_INSTRUCTION_LIST(V)             \
++  V(vfmadd132sd, L128, 66, 0F, 38, W1, 99)  \
++  V(vfmadd213sd, L128, 66, 0F, 38, W1, a9)  \
++  V(vfmadd231sd, L128, 66, 0F, 38, W1, b9)  \
++  V(vfmsub132sd, L128, 66, 0F, 38, W1, 9b)  \
++  V(vfmsub213sd, L128, 66, 0F, 38, W1, ab)  \
++  V(vfmsub231sd, L128, 66, 0F, 38, W1, bb)  \
++  V(vfnmadd132sd, L128, 66, 0F, 38, W1, 9d) \
++  V(vfnmadd213sd, L128, 66, 0F, 38, W1, ad) \
++  V(vfnmadd231sd, L128, 66, 0F, 38, W1, bd) \
++  V(vfnmsub132sd, L128, 66, 0F, 38, W1, 9f) \
++  V(vfnmsub213sd, L128, 66, 0F, 38, W1, af) \
++  V(vfnmsub231sd, L128, 66, 0F, 38, W1, bf) \
++  V(vfmadd132ss, LIG, 66, 0F, 38, W0, 99)   \
++  V(vfmadd213ss, LIG, 66, 0F, 38, W0, a9)   \
++  V(vfmadd231ss, LIG, 66, 0F, 38, W0, b9)   \
++  V(vfmsub132ss, LIG, 66, 0F, 38, W0, 9b)   \
++  V(vfmsub213ss, LIG, 66, 0F, 38, W0, ab)   \
++  V(vfmsub231ss, LIG, 66, 0F, 38, W0, bb)   \
++  V(vfnmadd132ss, LIG, 66, 0F, 38, W0, 9d)  \
++  V(vfnmadd213ss, LIG, 66, 0F, 38, W0, ad)  \
++  V(vfnmadd231ss, LIG, 66, 0F, 38, W0, bd)  \
++  V(vfnmsub132ss, LIG, 66, 0F, 38, W0, 9f)  \
++  V(vfnmsub213ss, LIG, 66, 0F, 38, W0, af)  \
++  V(vfnmsub231ss, LIG, 66, 0F, 38, W0, bf)  \
++  V(vfmadd132ps, L128, 66, 0F, 38, W0, 98)  \
++  V(vfmadd213ps, L128, 66, 0F, 38, W0, a8)  \
++  V(vfmadd231ps, L128, 66, 0F, 38, W0, b8)  \
++  V(vfnmadd132ps, L128, 66, 0F, 38, W0, 9c) \
++  V(vfnmadd213ps, L128, 66, 0F, 38, W0, ac) \
++  V(vfnmadd231ps, L128, 66, 0F, 38, W0, bc) \
++  V(vfmadd132pd, L128, 66, 0F, 38, W1, 98)  \
++  V(vfmadd213pd, L128, 66, 0F, 38, W1, a8)  \
++  V(vfmadd231pd, L128, 66, 0F, 38, W1, b8)  \
++  V(vfnmadd132pd, L128, 66, 0F, 38, W1, 9c) \
++  V(vfnmadd213pd, L128, 66, 0F, 38, W1, ac) \
++  V(vfnmadd231pd, L128, 66, 0F, 38, W1, bc)
++
++#endif  // V8_CODEGEN_IA32_FMA_INSTR_H_
+diff --git a/src/codegen/shared-ia32-x64/macro-assembler-shared-ia32-x64.cc b/src/codegen/shared-ia32-x64/macro-assembler-shared-ia32-x64.cc
+index bbfe894443..4dd54fd6f0 100644
+--- a/src/codegen/shared-ia32-x64/macro-assembler-shared-ia32-x64.cc
++++ b/src/codegen/shared-ia32-x64/macro-assembler-shared-ia32-x64.cc
+@@ -1205,6 +1205,101 @@ void SharedTurboAssembler::S128Store64Lane(Operand dst, XMMRegister src,
+   }
+ }
+ 
++// Helper macro to define qfma macro-assembler. This takes care of every
++// possible case of register aliasing to minimize the number of instructions.
++#define QFMA(ps_or_pd)                        \
++  if (CpuFeatures::IsSupported(FMA3)) {       \
++    CpuFeatureScope fma3_scope(this, FMA3);   \
++    if (dst == src1) {                        \
++      vfmadd231##ps_or_pd(dst, src2, src3);   \
++    } else if (dst == src2) {                 \
++      vfmadd132##ps_or_pd(dst, src1, src3);   \
++    } else if (dst == src3) {                 \
++      vfmadd213##ps_or_pd(dst, src2, src1);   \
++    } else {                                  \
++      CpuFeatureScope avx_scope(this, AVX);   \
++      vmovups(dst, src1);                     \
++      vfmadd231##ps_or_pd(dst, src2, src3);   \
++    }                                         \
++  } else if (CpuFeatures::IsSupported(AVX)) { \
++    CpuFeatureScope avx_scope(this, AVX);     \
++    vmul##ps_or_pd(tmp, src2, src3);          \
++    vadd##ps_or_pd(dst, src1, tmp);           \
++  } else {                                    \
++    if (dst == src1) {                        \
++      movaps(tmp, src2);                      \
++      mul##ps_or_pd(tmp, src3);               \
++      add##ps_or_pd(dst, tmp);                \
++    } else if (dst == src2) {                 \
++      DCHECK_NE(src2, src1);                  \
++      mul##ps_or_pd(src2, src3);              \
++      add##ps_or_pd(src2, src1);              \
++    } else if (dst == src3) {                 \
++      DCHECK_NE(src3, src1);                  \
++      mul##ps_or_pd(src3, src2);              \
++      add##ps_or_pd(src3, src1);              \
++    } else {                                  \
++      movaps(dst, src2);                      \
++      mul##ps_or_pd(dst, src3);               \
++      add##ps_or_pd(dst, src1);               \
++    }                                         \
++  }
++
++// Helper macro to define qfms macro-assembler. This takes care of every
++// possible case of register aliasing to minimize the number of instructions.
++#define QFMS(ps_or_pd)                        \
++  if (CpuFeatures::IsSupported(FMA3)) {       \
++    CpuFeatureScope fma3_scope(this, FMA3);   \
++    if (dst == src1) {                        \
++      vfnmadd231##ps_or_pd(dst, src2, src3);  \
++    } else if (dst == src2) {                 \
++      vfnmadd132##ps_or_pd(dst, src1, src3);  \
++    } else if (dst == src3) {                 \
++      vfnmadd213##ps_or_pd(dst, src2, src1);  \
++    } else {                                  \
++      CpuFeatureScope avx_scope(this, AVX);   \
++      vmovups(dst, src1);                     \
++      vfnmadd231##ps_or_pd(dst, src2, src3);  \
++    }                                         \
++  } else if (CpuFeatures::IsSupported(AVX)) { \
++    CpuFeatureScope avx_scope(this, AVX);     \
++    vmul##ps_or_pd(tmp, src2, src3);          \
++    vsub##ps_or_pd(dst, src1, tmp);           \
++  } else {                                    \
++    movaps(tmp, src2);                        \
++    mul##ps_or_pd(tmp, src3);                 \
++    if (dst != src1) {                        \
++      movaps(dst, src1);                      \
++    }                                         \
++    sub##ps_or_pd(dst, tmp);                  \
++  }
++
++void SharedTurboAssembler::F32x4Qfma(XMMRegister dst, XMMRegister src1,
++                                     XMMRegister src2, XMMRegister src3,
++                                     XMMRegister tmp) {
++  QFMA(ps)
++}
++
++void SharedTurboAssembler::F32x4Qfms(XMMRegister dst, XMMRegister src1,
++                                     XMMRegister src2, XMMRegister src3,
++                                     XMMRegister tmp) {
++  QFMS(ps)
++}
++
++void SharedTurboAssembler::F64x2Qfma(XMMRegister dst, XMMRegister src1,
++                                     XMMRegister src2, XMMRegister src3,
++                                     XMMRegister tmp) {
++  QFMA(pd);
++}
++
++void SharedTurboAssembler::F64x2Qfms(XMMRegister dst, XMMRegister src1,
++                                     XMMRegister src2, XMMRegister src3,
++                                     XMMRegister tmp) {
++  QFMS(pd);
++}
++
++#undef QFMOP
++
+ }  // namespace internal
+ }  // namespace v8
+ 
+diff --git a/src/codegen/shared-ia32-x64/macro-assembler-shared-ia32-x64.h b/src/codegen/shared-ia32-x64/macro-assembler-shared-ia32-x64.h
+index 4553d1ac3a..abe1d6200a 100644
+--- a/src/codegen/shared-ia32-x64/macro-assembler-shared-ia32-x64.h
++++ b/src/codegen/shared-ia32-x64/macro-assembler-shared-ia32-x64.h
+@@ -476,6 +476,15 @@ class V8_EXPORT_PRIVATE SharedTurboAssembler : public TurboAssemblerBase {
+   void S128Load32Splat(XMMRegister dst, Operand src);
+   void S128Store64Lane(Operand dst, XMMRegister src, uint8_t laneidx);
+ 
++  void F64x2Qfma(XMMRegister dst, XMMRegister src1, XMMRegister src2,
++                 XMMRegister src3, XMMRegister tmp);
++  void F64x2Qfms(XMMRegister dst, XMMRegister src1, XMMRegister src2,
++                 XMMRegister src3, XMMRegister tmp);
++  void F32x4Qfma(XMMRegister dst, XMMRegister src1, XMMRegister src2,
++                 XMMRegister src3, XMMRegister tmp);
++  void F32x4Qfms(XMMRegister dst, XMMRegister src1, XMMRegister src2,
++                 XMMRegister src3, XMMRegister tmp);
++
+  protected:
+   template <typename Op>
+   using AvxFn = void (Assembler::*)(XMMRegister, XMMRegister, Op, uint8_t);
+diff --git a/src/codegen/x64/macro-assembler-x64.cc b/src/codegen/x64/macro-assembler-x64.cc
+index 4e4c78c74d..22312f5765 100644
+--- a/src/codegen/x64/macro-assembler-x64.cc
++++ b/src/codegen/x64/macro-assembler-x64.cc
+@@ -906,101 +906,6 @@ void TurboAssembler::Pextrq(Register dst, XMMRegister src, int8_t imm8) {
+   }
+ }
+ 
+-// Helper macro to define qfma macro-assembler. This takes care of every
+-// possible case of register aliasing to minimize the number of instructions.
+-#define QFMA(ps_or_pd)                        \
+-  if (CpuFeatures::IsSupported(FMA3)) {       \
+-    CpuFeatureScope fma3_scope(this, FMA3);   \
+-    if (dst == src1) {                        \
+-      vfmadd231##ps_or_pd(dst, src2, src3);   \
+-    } else if (dst == src2) {                 \
+-      vfmadd132##ps_or_pd(dst, src1, src3);   \
+-    } else if (dst == src3) {                 \
+-      vfmadd213##ps_or_pd(dst, src2, src1);   \
+-    } else {                                  \
+-      CpuFeatureScope avx_scope(this, AVX);   \
+-      vmovups(dst, src1);                     \
+-      vfmadd231##ps_or_pd(dst, src2, src3);   \
+-    }                                         \
+-  } else if (CpuFeatures::IsSupported(AVX)) { \
+-    CpuFeatureScope avx_scope(this, AVX);     \
+-    vmul##ps_or_pd(tmp, src2, src3);          \
+-    vadd##ps_or_pd(dst, src1, tmp);           \
+-  } else {                                    \
+-    if (dst == src1) {                        \
+-      movaps(tmp, src2);                      \
+-      mul##ps_or_pd(tmp, src3);               \
+-      add##ps_or_pd(dst, tmp);                \
+-    } else if (dst == src2) {                 \
+-      DCHECK_NE(src2, src1);                  \
+-      mul##ps_or_pd(src2, src3);              \
+-      add##ps_or_pd(src2, src1);              \
+-    } else if (dst == src3) {                 \
+-      DCHECK_NE(src3, src1);                  \
+-      mul##ps_or_pd(src3, src2);              \
+-      add##ps_or_pd(src3, src1);              \
+-    } else {                                  \
+-      movaps(dst, src2);                      \
+-      mul##ps_or_pd(dst, src3);               \
+-      add##ps_or_pd(dst, src1);               \
+-    }                                         \
+-  }
+-
+-// Helper macro to define qfms macro-assembler. This takes care of every
+-// possible case of register aliasing to minimize the number of instructions.
+-#define QFMS(ps_or_pd)                        \
+-  if (CpuFeatures::IsSupported(FMA3)) {       \
+-    CpuFeatureScope fma3_scope(this, FMA3);   \
+-    if (dst == src1) {                        \
+-      vfnmadd231##ps_or_pd(dst, src2, src3);  \
+-    } else if (dst == src2) {                 \
+-      vfnmadd132##ps_or_pd(dst, src1, src3);  \
+-    } else if (dst == src3) {                 \
+-      vfnmadd213##ps_or_pd(dst, src2, src1);  \
+-    } else {                                  \
+-      CpuFeatureScope avx_scope(this, AVX);   \
+-      vmovups(dst, src1);                     \
+-      vfnmadd231##ps_or_pd(dst, src2, src3);  \
+-    }                                         \
+-  } else if (CpuFeatures::IsSupported(AVX)) { \
+-    CpuFeatureScope avx_scope(this, AVX);     \
+-    vmul##ps_or_pd(tmp, src2, src3);          \
+-    vsub##ps_or_pd(dst, src1, tmp);           \
+-  } else {                                    \
+-    movaps(tmp, src2);                        \
+-    mul##ps_or_pd(tmp, src3);                 \
+-    if (dst != src1) {                        \
+-      movaps(dst, src1);                      \
+-    }                                         \
+-    sub##ps_or_pd(dst, tmp);                  \
+-  }
+-
+-void TurboAssembler::F32x4Qfma(XMMRegister dst, XMMRegister src1,
+-                               XMMRegister src2, XMMRegister src3,
+-                               XMMRegister tmp) {
+-  QFMA(ps)
+-}
+-
+-void TurboAssembler::F32x4Qfms(XMMRegister dst, XMMRegister src1,
+-                               XMMRegister src2, XMMRegister src3,
+-                               XMMRegister tmp) {
+-  QFMS(ps)
+-}
+-
+-void TurboAssembler::F64x2Qfma(XMMRegister dst, XMMRegister src1,
+-                               XMMRegister src2, XMMRegister src3,
+-                               XMMRegister tmp) {
+-  QFMA(pd);
+-}
+-
+-void TurboAssembler::F64x2Qfms(XMMRegister dst, XMMRegister src1,
+-                               XMMRegister src2, XMMRegister src3,
+-                               XMMRegister tmp) {
+-  QFMS(pd);
+-}
+-
+-#undef QFMOP
+-
+ void TurboAssembler::Cvtss2sd(XMMRegister dst, XMMRegister src) {
+   if (CpuFeatures::IsSupported(AVX)) {
+     CpuFeatureScope scope(this, AVX);
+diff --git a/src/codegen/x64/macro-assembler-x64.h b/src/codegen/x64/macro-assembler-x64.h
+index da57d4629a..55203ae23e 100644
+--- a/src/codegen/x64/macro-assembler-x64.h
++++ b/src/codegen/x64/macro-assembler-x64.h
+@@ -177,15 +177,6 @@ class V8_EXPORT_PRIVATE TurboAssembler
+   void Pinsrq(XMMRegister dst, XMMRegister src1, Operand src2, uint8_t imm8,
+               uint32_t* load_pc_offset = nullptr);
+ 
+-  void F64x2Qfma(XMMRegister dst, XMMRegister src1, XMMRegister src2,
+-                 XMMRegister src3, XMMRegister tmp);
+-  void F64x2Qfms(XMMRegister dst, XMMRegister src1, XMMRegister src2,
+-                 XMMRegister src3, XMMRegister tmp);
+-  void F32x4Qfma(XMMRegister dst, XMMRegister src1, XMMRegister src2,
+-                 XMMRegister src3, XMMRegister tmp);
+-  void F32x4Qfms(XMMRegister dst, XMMRegister src1, XMMRegister src2,
+-                 XMMRegister src3, XMMRegister tmp);
+-
+   void Lzcntq(Register dst, Register src);
+   void Lzcntq(Register dst, Operand src);
+   void Lzcntl(Register dst, Register src);
+diff --git a/src/compiler/backend/ia32/code-generator-ia32.cc b/src/compiler/backend/ia32/code-generator-ia32.cc
+index b7fae868b1..84cb574821 100644
+--- a/src/compiler/backend/ia32/code-generator-ia32.cc
++++ b/src/compiler/backend/ia32/code-generator-ia32.cc
+@@ -1823,6 +1823,18 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+                  i.InputOperand(1));
+       break;
+     }
++    case kIA32F64x2Qfma: {
++      __ F64x2Qfma(i.OutputSimd128Register(), i.InputSimd128Register(0),
++                   i.InputSimd128Register(1), i.InputSimd128Register(2),
++                   kScratchDoubleReg);
++      break;
++    }
++    case kIA32F64x2Qfms: {
++      __ F64x2Qfms(i.OutputSimd128Register(), i.InputSimd128Register(0),
++                   i.InputSimd128Register(1), i.InputSimd128Register(2),
++                   kScratchDoubleReg);
++      break;
++    }
+     case kIA32Minpd: {
+       __ Minpd(i.OutputSimd128Register(), i.InputSimd128Register(0),
+                i.InputSimd128Register(1));
+@@ -2174,6 +2186,18 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+                  i.InputOperand(1));
+       break;
+     }
++    case kIA32F32x4Qfma: {
++      __ F32x4Qfma(i.OutputSimd128Register(), i.InputSimd128Register(0),
++                   i.InputSimd128Register(1), i.InputSimd128Register(2),
++                   kScratchDoubleReg);
++      break;
++    }
++    case kIA32F32x4Qfms: {
++      __ F32x4Qfms(i.OutputSimd128Register(), i.InputSimd128Register(0),
++                   i.InputSimd128Register(1), i.InputSimd128Register(2),
++                   kScratchDoubleReg);
++      break;
++    }
+     case kIA32Minps: {
+       __ Minps(i.OutputSimd128Register(), i.InputSimd128Register(0),
+                i.InputSimd128Register(1));
+diff --git a/src/compiler/backend/ia32/instruction-codes-ia32.h b/src/compiler/backend/ia32/instruction-codes-ia32.h
+index bf410cd734..8125f25b21 100644
+--- a/src/compiler/backend/ia32/instruction-codes-ia32.h
++++ b/src/compiler/backend/ia32/instruction-codes-ia32.h
+@@ -124,6 +124,8 @@ namespace compiler {
+   V(IA32F64x2Ne)                   \
+   V(IA32F64x2Lt)                   \
+   V(IA32F64x2Le)                   \
++  V(IA32F64x2Qfma)                 \
++  V(IA32F64x2Qfms)                 \
+   V(IA32Minpd)                     \
+   V(IA32Maxpd)                     \
+   V(IA32F64x2Round)                \
+@@ -171,6 +173,8 @@ namespace compiler {
+   V(IA32F32x4Ne)                   \
+   V(IA32F32x4Lt)                   \
+   V(IA32F32x4Le)                   \
++  V(IA32F32x4Qfma)                 \
++  V(IA32F32x4Qfms)                 \
+   V(IA32Minps)                     \
+   V(IA32Maxps)                     \
+   V(IA32F32x4Round)                \
+diff --git a/src/compiler/backend/ia32/instruction-scheduler-ia32.cc b/src/compiler/backend/ia32/instruction-scheduler-ia32.cc
+index 678c03cac6..4c95f05fdc 100644
+--- a/src/compiler/backend/ia32/instruction-scheduler-ia32.cc
++++ b/src/compiler/backend/ia32/instruction-scheduler-ia32.cc
+@@ -108,6 +108,8 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kIA32F64x2Ne:
+     case kIA32F64x2Lt:
+     case kIA32F64x2Le:
++    case kIA32F64x2Qfma:
++    case kIA32F64x2Qfms:
+     case kIA32Minpd:
+     case kIA32Maxpd:
+     case kIA32F64x2Round:
+@@ -155,6 +157,8 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kIA32F32x4Ne:
+     case kIA32F32x4Lt:
+     case kIA32F32x4Le:
++    case kIA32F32x4Qfma:
++    case kIA32F32x4Qfms:
+     case kIA32Minps:
+     case kIA32Maxps:
+     case kIA32F32x4Round:
+diff --git a/src/compiler/backend/ia32/instruction-selector-ia32.cc b/src/compiler/backend/ia32/instruction-selector-ia32.cc
+index 24d3246a86..007745028c 100644
+--- a/src/compiler/backend/ia32/instruction-selector-ia32.cc
++++ b/src/compiler/backend/ia32/instruction-selector-ia32.cc
+@@ -432,6 +432,14 @@ void VisitRROSimdShift(InstructionSelector* selector, Node* node,
+   }
+ }
+ 
++void VisitRRRR(InstructionSelector* selector, Node* node,
++               InstructionCode opcode) {
++  IA32OperandGenerator g(selector);
++  selector->Emit(
++      opcode, g.DefineAsRegister(node), g.UseRegister(node->InputAt(0)),
++      g.UseRegister(node->InputAt(1)), g.UseRegister(node->InputAt(2)));
++}
++
+ void VisitI8x16Shift(InstructionSelector* selector, Node* node,
+                      ArchOpcode opcode) {
+   IA32OperandGenerator g(selector);
+@@ -3271,6 +3279,22 @@ void InstructionSelector::VisitI64x2RelaxedLaneSelect(Node* node) {
+   VisitRelaxedLaneSelect(this, node);
+ }
+ 
++void InstructionSelector::VisitF64x2Qfma(Node* node) {
++  VisitRRRR(this, node, kIA32F64x2Qfma);
++}
++
++void InstructionSelector::VisitF64x2Qfms(Node* node) {
++  VisitRRRR(this, node, kIA32F64x2Qfms);
++}
++
++void InstructionSelector::VisitF32x4Qfma(Node* node) {
++  VisitRRRR(this, node, kIA32F32x4Qfma);
++}
++
++void InstructionSelector::VisitF32x4Qfms(Node* node) {
++  VisitRRRR(this, node, kIA32F32x4Qfms);
++}
++
+ void InstructionSelector::AddOutputToSelectContinuation(OperandGenerator* g,
+                                                         int first_input_index,
+                                                         Node* node) {
+diff --git a/src/compiler/backend/instruction-selector.cc b/src/compiler/backend/instruction-selector.cc
+index 7ffc8fd3f5..d54d2180b2 100644
+--- a/src/compiler/backend/instruction-selector.cc
++++ b/src/compiler/backend/instruction-selector.cc
+@@ -2782,11 +2782,16 @@ void InstructionSelector::VisitI64x2ExtractLane(Node* node) { UNIMPLEMENTED(); }
+ void InstructionSelector::VisitI64x2ReplaceLane(Node* node) { UNIMPLEMENTED(); }
+ #endif  // !V8_TARGET_ARCH_MIPS64 && !V8_TARGET_ARCH_LOONG64 &&
+         // !V8_TARGET_ARCH_RISCV64
++#endif  // !V8_TARGET_ARCH_ARM64
++#endif  // !V8_TARGET_ARCH_X64 && !V8_TARGET_ARCH_S390X && !V8_TARGET_ARCH_PPC64
++
++#if !V8_TARGET_ARCH_X64 && !V8_TARGET_ARCH_S390X && !V8_TARGET_ARCH_PPC64
++#if !V8_TARGET_ARCH_ARM64 && !V8_TARGET_ARCH_IA32
+ void InstructionSelector::VisitF64x2Qfma(Node* node) { UNIMPLEMENTED(); }
+ void InstructionSelector::VisitF64x2Qfms(Node* node) { UNIMPLEMENTED(); }
+ void InstructionSelector::VisitF32x4Qfma(Node* node) { UNIMPLEMENTED(); }
+ void InstructionSelector::VisitF32x4Qfms(Node* node) { UNIMPLEMENTED(); }
+-#endif  // !V8_TARGET_ARCH_ARM64
++#endif  // !V8_TARGET_ARCH_ARM64 && !V8_TARGET_ARCH_IA32
+ #endif  // !V8_TARGET_ARCH_X64 && !V8_TARGET_ARCH_S390X && !V8_TARGET_ARCH_PPC64
+ 
+ #if !V8_TARGET_ARCH_X64 && !V8_TARGET_ARCH_IA32
+diff --git a/test/cctest/wasm/test-run-wasm-relaxed-simd.cc b/test/cctest/wasm/test-run-wasm-relaxed-simd.cc
+index 94ad39c4ab..609d43a987 100644
+--- a/test/cctest/wasm/test-run-wasm-relaxed-simd.cc
++++ b/test/cctest/wasm/test-run-wasm-relaxed-simd.cc
+@@ -34,7 +34,7 @@ namespace test_run_wasm_relaxed_simd {
+   void RunWasm_##name##_Impl(TestExecutionTier execution_tier)
+ 
+ #if V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_S390X || \
+-    V8_TARGET_ARCH_PPC64
++    V8_TARGET_ARCH_PPC64 || V8_TARGET_ARCH_IA32
+ // Only used for qfma and qfms tests below.
+ 
+ // FMOperation holds the params (a, b, c) for a Multiply-Add or
+@@ -112,20 +112,20 @@ static constexpr base::Vector<const FMOperation<T>> qfms_vector() {
+ // Fused results only when fma3 feature is enabled, and running on TurboFan or
+ // Liftoff (which can fall back to TurboFan if FMA is not implemented).
+ bool ExpectFused(TestExecutionTier tier) {
+-#ifdef V8_TARGET_ARCH_X64
++#if V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_IA32
+   return CpuFeatures::IsSupported(FMA3) &&
+          (tier == TestExecutionTier::kTurbofan ||
+           tier == TestExecutionTier::kLiftoff);
+ #else
+   return (tier == TestExecutionTier::kTurbofan ||
+           tier == TestExecutionTier::kLiftoff);
+-#endif
++#endif  // V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_IA32
+ }
+ #endif  // V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_S390X ||
+-        // V8_TARGET_ARCH_PPC64
++        // V8_TARGET_ARCH_PPC64 || V8_TARGET_ARCH_IA32
+ 
+ #if V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_S390X || \
+-    V8_TARGET_ARCH_PPC64
++    V8_TARGET_ARCH_PPC64 || V8_TARGET_ARCH_IA32
+ WASM_RELAXED_SIMD_TEST(F32x4Qfma) {
+   WasmRunner<int32_t, float, float, float> r(execution_tier);
+   // Set up global to hold mask output.
+@@ -222,7 +222,7 @@ WASM_RELAXED_SIMD_TEST(F64x2Qfms) {
+   }
+ }
+ #endif  // V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_S390X ||
+-        // V8_TARGET_ARCH_PPC64
++        // V8_TARGET_ARCH_PPC64 || V8_TARGET_ARCH_IA32
+ 
+ WASM_RELAXED_SIMD_TEST(F32x4RecipApprox) {
+   RunF32x4UnOpTest(execution_tier, kExprF32x4RecipApprox, base::Recip,
+-- 
+2.35.1
+

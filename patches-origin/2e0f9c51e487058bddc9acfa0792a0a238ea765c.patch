@@ -1,0 +1,71 @@
+From 2e0f9c51e487058bddc9acfa0792a0a238ea765c Mon Sep 17 00:00:00 2001
+From: Yahan Lu <yahan@iscas.ac.cn>
+Date: Fri, 29 Jul 2022 06:11:36 +0000
+Subject: [PATCH] Revert "[riscv][Cleanup] Use CmpInstanceTypeRange in
+ MacroAssembler"
+
+This reverts commit 859ff489615ad0aa62bcf5cfbf35ff6e4526897b.
+
+Reason for revert: Assert Failed in debug
+
+Original change's description:
+> [riscv][Cleanup] Use CmpInstanceTypeRange in MacroAssembler
+>
+> Bug: v8:11325
+>
+> Change-Id: I2eae55b49ea01567460bd0adfbb819c893ce7cd7
+> Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3793210
+> Auto-Submit: Yahan Lu <yahan@iscas.ac.cn>
+> Reviewed-by: ji qiu <qiuji@iscas.ac.cn>
+> Commit-Queue: ji qiu <qiuji@iscas.ac.cn>
+> Cr-Commit-Position: refs/heads/main@{#82054}
+
+Bug: v8:11325
+Change-Id: I57caf4ca86ac1b8b3afa94650c156e375158a3e9
+No-Presubmit: true
+No-Tree-Checks: true
+No-Try: true
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3793465
+Auto-Submit: Yahan Lu <yahan@iscas.ac.cn>
+Commit-Queue: Yahan Lu <yahan@iscas.ac.cn>
+Bot-Commit: Rubber Stamper <rubber-stamper@appspot.gserviceaccount.com>
+Cr-Commit-Position: refs/heads/main@{#82056}
+---
+ src/codegen/riscv/macro-assembler-riscv.cc | 21 ++++++++++++++++-----
+ 1 file changed, 16 insertions(+), 5 deletions(-)
+
+diff --git a/src/codegen/riscv/macro-assembler-riscv.cc b/src/codegen/riscv/macro-assembler-riscv.cc
+index 3c76ce0a1f..26962c0f0f 100644
+--- a/src/codegen/riscv/macro-assembler-riscv.cc
++++ b/src/codegen/riscv/macro-assembler-riscv.cc
+@@ -5624,11 +5624,22 @@ void MacroAssembler::AssertGeneratorObject(Register object) {
+   Check(ne, AbortReason::kOperandIsASmiAndNotAGeneratorObject, kScratchReg,
+         Operand(zero_reg));
+ 
+-  GetInstanceTypeRange(object, object, FIRST_JS_GENERATOR_OBJECT_TYPE,
+-                       kScratchReg);
+-  Check(
+-      Uless_equal, AbortReason::kOperandIsNotAGeneratorObject, kScratchReg,
+-      Operand(LAST_JS_GENERATOR_OBJECT_TYPE - FIRST_JS_GENERATOR_OBJECT_TYPE));
++  GetObjectType(object, kScratchReg, kScratchReg);
++
++  Label done;
++
++  // Check if JSGeneratorObject
++  BranchShort(&done, eq, kScratchReg, Operand(JS_GENERATOR_OBJECT_TYPE));
++
++  // Check if JSAsyncFunctionObject (See MacroAssembler::CompareInstanceType)
++  BranchShort(&done, eq, kScratchReg, Operand(JS_ASYNC_FUNCTION_OBJECT_TYPE));
++
++  // Check if JSAsyncGeneratorObject
++  BranchShort(&done, eq, kScratchReg, Operand(JS_ASYNC_GENERATOR_OBJECT_TYPE));
++
++  Abort(AbortReason::kOperandIsNotAGeneratorObject);
++
++  bind(&done);
+ }
+ 
+ void MacroAssembler::AssertUndefinedOrAllocationSite(Register object,
+-- 
+2.35.1
+

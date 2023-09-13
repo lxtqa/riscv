@@ -1,0 +1,293 @@
+From 8d0f5a0418451080cc5fcb591b85ec3da33180c6 Mon Sep 17 00:00:00 2001
+From: Andreas Haas <ahaas@chromium.org>
+Date: Fri, 12 Mar 2021 12:36:52 +0100
+Subject: [PATCH] [wasm][liftoff][arm64] Avoid x28 even without pointer
+ compression
+
+Due to a recent change Liftoff used different register configurations
+in the pointer-compression and no-pointer-compression setups. This
+caused a mismatch between the registers used by Liftoff and the
+registers spilled by the WasmDebugBreak builtin.
+
+With this CL the same register configuration is used both with and
+without pointer compression. Even without x28 there are 24 registers
+that can be used. Moreover, 24 registers can be spilled without
+padding, which would be needed with 25 registers to preserve stack
+alignment.
+
+Drive-by change: Use Reglist in frame-constants on all platforms.
+
+R=jkummerow@chromium.org
+
+Bug: v8:7581
+Change-Id: Iae2892718e905a7995a3fdd7be7fd4d75bebb3dd
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/2752884
+Commit-Queue: Andreas Haas <ahaas@chromium.org>
+Reviewed-by: Jakob Kummerow <jkummerow@chromium.org>
+Cr-Commit-Position: refs/heads/master@{#73366}
+---
+ src/builtins/arm/builtins-arm.cc              | 17 ++++++--
+ src/execution/arm/frame-constants-arm.h       | 20 +++++----
+ src/execution/arm64/frame-constants-arm64.h   | 23 ++++++++---
+ src/execution/ia32/frame-constants-ia32.h     | 12 ++++--
+ src/execution/x64/frame-constants-x64.h       | 10 +++--
+ src/wasm/baseline/liftoff-assembler-defs.h    |  5 ---
+ test/unittests/BUILD.gn                       |  1 +
+ .../wasm/liftoff-register-unittests.cc        | 41 +++++++++++++++++++
+ 8 files changed, 97 insertions(+), 32 deletions(-)
+ create mode 100644 test/unittests/wasm/liftoff-register-unittests.cc
+
+diff --git a/src/builtins/arm/builtins-arm.cc b/src/builtins/arm/builtins-arm.cc
+index 7370aa0f42..22fad42f05 100644
+--- a/src/builtins/arm/builtins-arm.cc
++++ b/src/builtins/arm/builtins-arm.cc
+@@ -2371,12 +2371,21 @@ void Builtins::Generate_WasmDebugBreak(MacroAssembler* masm) {
+   {
+     FrameAndConstantPoolScope scope(masm, StackFrame::WASM_DEBUG_BREAK);
+ 
++    STATIC_ASSERT(DwVfpRegister::kNumRegisters == 32);
++    constexpr uint32_t last =
++        31 - base::bits::CountLeadingZeros32(
++                 WasmDebugBreakFrameConstants::kPushedFpRegs);
++    constexpr uint32_t first = base::bits::CountTrailingZeros32(
++        WasmDebugBreakFrameConstants::kPushedFpRegs);
++    static_assert(
++        base::bits::CountPopulation(
++            WasmDebugBreakFrameConstants::kPushedFpRegs) == last - first + 1,
++        "All registers in the range from first to last have to be set");
++
+     // Save all parameter registers. They might hold live values, we restore
+     // them after the runtime call.
+-    constexpr DwVfpRegister lowest_fp_reg = DwVfpRegister::from_code(
+-        WasmDebugBreakFrameConstants::kFirstPushedFpReg);
+-    constexpr DwVfpRegister highest_fp_reg = DwVfpRegister::from_code(
+-        WasmDebugBreakFrameConstants::kLastPushedFpReg);
++    constexpr DwVfpRegister lowest_fp_reg = DwVfpRegister::from_code(first);
++    constexpr DwVfpRegister highest_fp_reg = DwVfpRegister::from_code(last);
+ 
+     // Store gp parameter registers.
+     __ stm(db_w, sp, WasmDebugBreakFrameConstants::kPushedGpRegs);
+diff --git a/src/execution/arm/frame-constants-arm.h b/src/execution/arm/frame-constants-arm.h
+index 7567a14c70..2e3b1ed665 100644
+--- a/src/execution/arm/frame-constants-arm.h
++++ b/src/execution/arm/frame-constants-arm.h
+@@ -76,16 +76,18 @@ class WasmCompileLazyFrameConstants : public TypedFrameConstants {
+ // registers (see liftoff-assembler-defs.h).
+ class WasmDebugBreakFrameConstants : public TypedFrameConstants {
+  public:
+-  // {r0, r1, r2, r3, r4, r5, r6, r7, r8, r9}
+-  static constexpr uint32_t kPushedGpRegs = 0b1111111111;
+-  // {d0 .. d12}
+-  static constexpr int kFirstPushedFpReg = 0;
+-  static constexpr int kLastPushedFpReg = 12;
++  // r10: root, r11: fp, r12: ip, r13: sp, r14: lr, r15: pc.
++  static constexpr RegList kPushedGpRegs =
++      Register::ListOf(r0, r1, r2, r3, r4, r5, r6, r7, r8, r9);
++
++  // d13: zero, d14-d15: scratch
++  static constexpr RegList kPushedFpRegs = LowDwVfpRegister::ListOf(
++      d0, d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11, d12);
+ 
+   static constexpr int kNumPushedGpRegisters =
+       base::bits::CountPopulation(kPushedGpRegs);
+   static constexpr int kNumPushedFpRegisters =
+-      kLastPushedFpReg - kFirstPushedFpReg + 1;
++      base::bits::CountPopulation(kPushedFpRegs);
+ 
+   static constexpr int kLastPushedGpRegisterOffset =
+       -TypedFrameConstants::kFixedFrameSizeFromFp -
+@@ -102,10 +104,10 @@ class WasmDebugBreakFrameConstants : public TypedFrameConstants {
+   }
+ 
+   static int GetPushedFpRegisterOffset(int reg_code) {
+-    DCHECK_LE(kFirstPushedFpReg, reg_code);
+-    DCHECK_GE(kLastPushedFpReg, reg_code);
++    DCHECK_NE(0, kPushedFpRegs & (1 << reg_code));
++    uint32_t lower_regs = kPushedFpRegs & ((uint32_t{1} << reg_code) - 1);
+     return kLastPushedFpRegisterOffset +
+-           (reg_code - kFirstPushedFpReg) * kDoubleSize;
++           base::bits::CountPopulation(lower_regs) * kDoubleSize;
+   }
+ };
+ 
+diff --git a/src/execution/arm64/frame-constants-arm64.h b/src/execution/arm64/frame-constants-arm64.h
+index a01c15d348..8810586360 100644
+--- a/src/execution/arm64/frame-constants-arm64.h
++++ b/src/execution/arm64/frame-constants-arm64.h
+@@ -7,6 +7,9 @@
+ 
+ #include "src/base/bits.h"
+ #include "src/base/macros.h"
++#include "src/codegen/arm64/register-arm64.h"
++#include "src/codegen/register.h"
++#include "src/codegen/reglist.h"
+ #include "src/common/globals.h"
+ #include "src/execution/frame-constants.h"
+ 
+@@ -93,15 +96,23 @@ class WasmCompileLazyFrameConstants : public TypedFrameConstants {
+ // registers (see liftoff-assembler-defs.h).
+ class WasmDebugBreakFrameConstants : public TypedFrameConstants {
+  public:
+-  // {x0 .. x28} \ {x16, x17, x18, x26, x27}
+-  static constexpr uint32_t kPushedGpRegs =
+-      (1 << 29) - 1 - (1 << 16) - (1 << 17) - (1 << 18) - (1 << 26) - (1 << 27);
+-  // {d0 .. d29}; {d15} is not used, but we still keep it for alignment reasons
+-  // (the frame size needs to be a multiple of 16).
+-  static constexpr uint32_t kPushedFpRegs = (1 << 30) - 1;
++  // x16: ip0, x17: ip1, x18: platform register, x26: root, x28: base, x29: fp,
++  // x30: lr, x31: xzr.
++  static constexpr RegList kPushedGpRegs = CPURegister::ListOf(
++      x0, x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11, x12, x13, x14, x15, x19,
++      x20, x21, x22, x23, x24, x25, x27);
++
++  // We push FpRegs as 128-bit SIMD registers, so 16-byte frame alignment
++  // is guaranteed regardless of register count.
++  static constexpr RegList kPushedFpRegs = CPURegister::ListOf(
++      d0, d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11, d12, d13, d14, d16, d17,
++      d18, d19, d20, d21, d22, d23, d24, d25, d26, d27, d28, d29);
+ 
+   static constexpr int kNumPushedGpRegisters =
+       base::bits::CountPopulation(kPushedGpRegs);
++  static_assert(kNumPushedGpRegisters % 2 == 0,
++                "stack frames need to be 16-byte aligned");
++
+   static constexpr int kNumPushedFpRegisters =
+       base::bits::CountPopulation(kPushedFpRegs);
+ 
+diff --git a/src/execution/ia32/frame-constants-ia32.h b/src/execution/ia32/frame-constants-ia32.h
+index dde0611f27..45c7355979 100644
+--- a/src/execution/ia32/frame-constants-ia32.h
++++ b/src/execution/ia32/frame-constants-ia32.h
+@@ -7,6 +7,7 @@
+ 
+ #include "src/base/bits.h"
+ #include "src/base/macros.h"
++#include "src/codegen/ia32/register-ia32.h"
+ #include "src/execution/frame-constants.h"
+ 
+ namespace v8 {
+@@ -51,10 +52,13 @@ class WasmCompileLazyFrameConstants : public TypedFrameConstants {
+ // registers (see liftoff-assembler-defs.h).
+ class WasmDebugBreakFrameConstants : public TypedFrameConstants {
+  public:
+-  // {eax, ecx, edx, esi, edi}
+-  static constexpr uint32_t kPushedGpRegs = 0b11000111;
+-  // {xmm0, xmm1, xmm2, xmm3, xmm4, xmm5, xmm6}
+-  static constexpr uint32_t kPushedFpRegs = 0b01111111;
++  // Omit ebx, which is the root register.
++  static constexpr RegList kPushedGpRegs =
++      Register::ListOf(eax, ecx, edx, esi, edi);
++
++  // Omit xmm7, which is the kScratchDoubleReg.
++  static constexpr RegList kPushedFpRegs =
++      DoubleRegister::ListOf(xmm0, xmm1, xmm2, xmm3, xmm4, xmm5, xmm6);
+ 
+   static constexpr int kNumPushedGpRegisters =
+       base::bits::CountPopulation(kPushedGpRegs);
+diff --git a/src/execution/x64/frame-constants-x64.h b/src/execution/x64/frame-constants-x64.h
+index 6ce0a02e14..6e1522da25 100644
+--- a/src/execution/x64/frame-constants-x64.h
++++ b/src/execution/x64/frame-constants-x64.h
+@@ -7,6 +7,7 @@
+ 
+ #include "src/base/bits.h"
+ #include "src/base/macros.h"
++#include "src/codegen/x64/register-x64.h"
+ #include "src/execution/frame-constants.h"
+ 
+ namespace v8 {
+@@ -60,10 +61,11 @@ class WasmCompileLazyFrameConstants : public TypedFrameConstants {
+ // registers (see liftoff-assembler-defs.h).
+ class WasmDebugBreakFrameConstants : public TypedFrameConstants {
+  public:
+-  // {rax, rcx, rdx, rbx, rsi, rdi, r9}
+-  static constexpr uint32_t kPushedGpRegs = 0b1011001111;
+-  // {xmm0, xmm1, xmm2, xmm3, xmm4, xmm5, xmm6, xmm7}
+-  static constexpr uint32_t kPushedFpRegs = 0b11111111;
++  static constexpr RegList kPushedGpRegs =
++      Register::ListOf(rax, rcx, rdx, rbx, rsi, rdi, r9);
++
++  static constexpr RegList kPushedFpRegs =
++      DoubleRegister::ListOf(xmm0, xmm1, xmm2, xmm3, xmm4, xmm5, xmm6, xmm7);
+ 
+   static constexpr int kNumPushedGpRegisters =
+       base::bits::CountPopulation(kPushedGpRegs);
+diff --git a/src/wasm/baseline/liftoff-assembler-defs.h b/src/wasm/baseline/liftoff-assembler-defs.h
+index 4a930d9849..f11f476811 100644
+--- a/src/wasm/baseline/liftoff-assembler-defs.h
++++ b/src/wasm/baseline/liftoff-assembler-defs.h
+@@ -62,12 +62,7 @@ constexpr RegList kLiftoffAssemblerFpCacheRegs = LowDwVfpRegister::ListOf(
+ // x30: lr, x31: xzr.
+ constexpr RegList kLiftoffAssemblerGpCacheRegs =
+     CPURegister::ListOf(x0, x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11, x12,
+-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+                         x13, x14, x15, x19, x20, x21, x22, x23, x24, x25, x27);
+-#else
+-                        x13, x14, x15, x19, x20, x21, x22, x23, x24, x25, x27,
+-                        x28);
+-#endif
+ 
+ // d15: fp_zero, d30-d31: macro-assembler scratch V Registers.
+ constexpr RegList kLiftoffAssemblerFpCacheRegs = CPURegister::ListOf(
+diff --git a/test/unittests/BUILD.gn b/test/unittests/BUILD.gn
+index 8695b94edd..5144202f14 100644
+--- a/test/unittests/BUILD.gn
++++ b/test/unittests/BUILD.gn
+@@ -399,6 +399,7 @@ v8_source_set("unittests_sources") {
+       "wasm/decoder-unittest.cc",
+       "wasm/function-body-decoder-unittest.cc",
+       "wasm/leb-helper-unittest.cc",
++      "wasm/liftoff-register-unittests.cc",
+       "wasm/loop-assignment-analysis-unittest.cc",
+       "wasm/module-decoder-memory64-unittest.cc",
+       "wasm/module-decoder-unittest.cc",
+diff --git a/test/unittests/wasm/liftoff-register-unittests.cc b/test/unittests/wasm/liftoff-register-unittests.cc
+new file mode 100644
+index 0000000000..84f5908768
+--- /dev/null
++++ b/test/unittests/wasm/liftoff-register-unittests.cc
+@@ -0,0 +1,41 @@
++// Copyright 2021 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "src/wasm/baseline/liftoff-assembler-defs.h"
++#if V8_TARGET_ARCH_IA32
++#include "src/execution/ia32/frame-constants-ia32.h"
++#elif V8_TARGET_ARCH_X64
++#include "src/execution/x64/frame-constants-x64.h"
++#elif V8_TARGET_ARCH_MIPS
++#include "src/execution/mips/frame-constants-mips.h"
++#elif V8_TARGET_ARCH_MIPS64
++#include "src/execution/mips64/frame-constants-mips64.h"
++#elif V8_TARGET_ARCH_ARM
++#include "src/execution/arm/frame-constants-arm.h"
++#elif V8_TARGET_ARCH_ARM64
++#include "src/execution/arm64/frame-constants-arm64.h"
++#elif V8_TARGET_ARCH_S390X
++#include "src/execution/s390/frame-constants-s390.h"
++#elif V8_TARGET_ARCH_PPC64
++#include "src/execution/ppc/frame-constants-ppc.h"
++#elif V8_TARGET_ARCH_RISCV64
++#include "src/execution/riscv64/frame-constants-riscv64.h"
++#endif
++
++#include "src/base/macros.h"
++
++namespace v8 {
++namespace internal {
++namespace wasm {
++
++// The registers used by Liftoff and the registers spilled by the
++// WasmDebugBreak builtin should match.
++STATIC_ASSERT(kLiftoffAssemblerGpCacheRegs ==
++              WasmDebugBreakFrameConstants::kPushedGpRegs);
++
++STATIC_ASSERT(kLiftoffAssemblerFpCacheRegs ==
++              WasmDebugBreakFrameConstants::kPushedFpRegs);
++}  // namespace wasm
++}  // namespace internal
++}  // namespace v8
+-- 
+2.35.1
+

@@ -1,0 +1,1011 @@
+From fd122c4221aad39507af2bea529d3bad240b122c Mon Sep 17 00:00:00 2001
+From: Thibaud Michaud <thibaudm@chromium.org>
+Date: Wed, 26 Jan 2022 18:18:34 +0100
+Subject: [PATCH] [wasm] Return chained promise on suspend
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Create and return the chained promise, which resumes the suspended wasm
+continuation once the JS promise resolves:
+- Add stub for the WasmResume builtin, which will resume the given
+suspender.
+- Add the JS function wrapper for the builtin.
+- On suspension, return promise.then(onFulfilled) to the prompt.
+
+R=ahaas@chromium.org
+CC=​fgm@chromium.org
+
+Bug: v8:12191
+Change-Id: I2d6136b2bd610daa4be1880f347b7bdf897e75ac
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3404776
+Reviewed-by: Jakob Kummerow <jkummerow@chromium.org>
+Reviewed-by: Dominik Inführ <dinfuehr@chromium.org>
+Reviewed-by: Andreas Haas <ahaas@chromium.org>
+Commit-Queue: Thibaud Michaud <thibaudm@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#78787}
+---
+ src/builtins/arm/builtins-arm.cc           |   5 +
+ src/builtins/arm64/builtins-arm64.cc       |   5 +
+ src/builtins/builtins-definitions.h        |   1 +
+ src/builtins/ia32/builtins-ia32.cc         |   5 +
+ src/builtins/loong64/builtins-loong64.cc   |   5 +
+ src/builtins/mips/builtins-mips.cc         |   5 +
+ src/builtins/mips64/builtins-mips64.cc     |   5 +
+ src/builtins/ppc/builtins-ppc.cc           |   5 +
+ src/builtins/riscv64/builtins-riscv64.cc   |   5 +
+ src/builtins/s390/builtins-s390.cc         |   5 +
+ src/builtins/x64/builtins-x64.cc           |   9 +
+ src/codegen/code-stub-assembler.cc         |   8 +
+ src/codegen/interface-descriptors.h        |   5 +-
+ src/compiler/wasm-compiler.cc              |  19 +-
+ src/diagnostics/objects-debug.cc           |   3 +-
+ src/diagnostics/objects-printer.cc         |   6 +
+ src/heap/factory.cc                        |  16 ++
+ src/heap/factory.h                         |   4 +
+ src/heap/objects-visiting.h                |   1 +
+ src/heap/setup-heap-internal.cc            |   2 +
+ src/objects/map.cc                         |   2 +
+ src/objects/map.h                          |   1 +
+ src/objects/object-list-macros.h           |   1 +
+ src/objects/objects-body-descriptors-inl.h |   2 +
+ src/objects/shared-function-info-inl.h     |   4 +
+ src/objects/shared-function-info.cc        |   3 +
+ src/objects/shared-function-info.h         |   1 +
+ src/roots/roots.h                          |   1 +
+ src/runtime/runtime-wasm.cc                |  46 +++-
+ src/runtime/runtime.h                      |   3 +-
+ src/wasm/wasm-objects-inl.h                |   1 +
+ src/wasm/wasm-objects.h                    |  10 +
+ src/wasm/wasm-objects.tq                   |   4 +
+ test/mjsunit/wasm/stack-switching.js       |   1 -
+ tools/v8heapconst.py                       | 272 +++++++++++----------
+ 35 files changed, 323 insertions(+), 148 deletions(-)
+
+diff --git a/src/builtins/arm/builtins-arm.cc b/src/builtins/arm/builtins-arm.cc
+index 9a5b09e263..a983efce04 100644
+--- a/src/builtins/arm/builtins-arm.cc
++++ b/src/builtins/arm/builtins-arm.cc
+@@ -2735,6 +2735,11 @@ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
+   __ Trap();
+ }
+ 
++void Builtins::Generate_WasmResume(MacroAssembler* masm) {
++  // TODO(v8:12191): Implement for this platform.
++  __ Trap();
++}
++
+ void Builtins::Generate_WasmOnStackReplace(MacroAssembler* masm) {
+   // Only needed on x64.
+   __ Trap();
+diff --git a/src/builtins/arm64/builtins-arm64.cc b/src/builtins/arm64/builtins-arm64.cc
+index 5249179081..6bc2385833 100644
+--- a/src/builtins/arm64/builtins-arm64.cc
++++ b/src/builtins/arm64/builtins-arm64.cc
+@@ -3135,6 +3135,11 @@ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
+   __ Trap();
+ }
+ 
++void Builtins::Generate_WasmResume(MacroAssembler* masm) {
++  // TODO(v8:12191): Implement for this platform.
++  __ Trap();
++}
++
+ void Builtins::Generate_WasmOnStackReplace(MacroAssembler* masm) {
+   // Only needed on x64.
+   __ Trap();
+diff --git a/src/builtins/builtins-definitions.h b/src/builtins/builtins-definitions.h
+index de0150919a..c1b6e1fd39 100644
+--- a/src/builtins/builtins-definitions.h
++++ b/src/builtins/builtins-definitions.h
+@@ -954,6 +954,7 @@ namespace internal {
+   IF_WASM(ASM, GenericJSToWasmWrapper, Dummy)                                  \
+   IF_WASM(ASM, WasmReturnPromiseOnSuspend, Dummy)                              \
+   IF_WASM(ASM, WasmSuspend, WasmSuspend)                                       \
++  IF_WASM(ASM, WasmResume, Dummy)                                              \
+   IF_WASM(ASM, WasmCompileLazy, Dummy)                                         \
+   IF_WASM(ASM, WasmDebugBreak, Dummy)                                          \
+   IF_WASM(ASM, WasmOnStackReplace, Dummy)                                      \
+diff --git a/src/builtins/ia32/builtins-ia32.cc b/src/builtins/ia32/builtins-ia32.cc
+index d66e166028..f172bbe0b4 100644
+--- a/src/builtins/ia32/builtins-ia32.cc
++++ b/src/builtins/ia32/builtins-ia32.cc
+@@ -2985,6 +2985,11 @@ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
+   __ Trap();
+ }
+ 
++void Builtins::Generate_WasmResume(MacroAssembler* masm) {
++  // TODO(v8:12191): Implement for this platform.
++  __ Trap();
++}
++
+ void Builtins::Generate_WasmOnStackReplace(MacroAssembler* masm) {
+   // Only needed on x64.
+   __ Trap();
+diff --git a/src/builtins/loong64/builtins-loong64.cc b/src/builtins/loong64/builtins-loong64.cc
+index 2230b54bc8..2c725cbe7b 100644
+--- a/src/builtins/loong64/builtins-loong64.cc
++++ b/src/builtins/loong64/builtins-loong64.cc
+@@ -2757,6 +2757,11 @@ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
+   __ Trap();
+ }
+ 
++void Builtins::Generate_WasmResume(MacroAssembler* masm) {
++  // TODO(v8:12191): Implement for this platform.
++  __ Trap();
++}
++
+ void Builtins::Generate_WasmOnStackReplace(MacroAssembler* masm) {
+   // Only needed on x64.
+   __ Trap();
+diff --git a/src/builtins/mips/builtins-mips.cc b/src/builtins/mips/builtins-mips.cc
+index 638a277b32..dee714b7ac 100644
+--- a/src/builtins/mips/builtins-mips.cc
++++ b/src/builtins/mips/builtins-mips.cc
+@@ -2693,6 +2693,11 @@ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
+   __ Trap();
+ }
+ 
++void Builtins::Generate_WasmResume(MacroAssembler* masm) {
++  // TODO(v8:12191): Implement for this platform.
++  __ Trap();
++}
++
+ void Builtins::Generate_WasmOnStackReplace(MacroAssembler* masm) {
+   // Only needed on x64.
+   __ Trap();
+diff --git a/src/builtins/mips64/builtins-mips64.cc b/src/builtins/mips64/builtins-mips64.cc
+index a93c452c99..f9b2b60d35 100644
+--- a/src/builtins/mips64/builtins-mips64.cc
++++ b/src/builtins/mips64/builtins-mips64.cc
+@@ -2778,6 +2778,11 @@ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
+   __ Trap();
+ }
+ 
++void Builtins::Generate_WasmResume(MacroAssembler* masm) {
++  // TODO(v8:12191): Implement for this platform.
++  __ Trap();
++}
++
+ void Builtins::Generate_WasmOnStackReplace(MacroAssembler* masm) {
+   // Only needed on x64.
+   __ Trap();
+diff --git a/src/builtins/ppc/builtins-ppc.cc b/src/builtins/ppc/builtins-ppc.cc
+index 6144133267..e768ad1186 100644
+--- a/src/builtins/ppc/builtins-ppc.cc
++++ b/src/builtins/ppc/builtins-ppc.cc
+@@ -2568,6 +2568,11 @@ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
+   __ Trap();
+ }
+ 
++void Builtins::Generate_WasmResume(MacroAssembler* masm) {
++  // TODO(v8:12191): Implement for this platform.
++  __ Trap();
++}
++
+ void Builtins::Generate_WasmOnStackReplace(MacroAssembler* masm) {
+   // Only needed on x64.
+   __ Trap();
+diff --git a/src/builtins/riscv64/builtins-riscv64.cc b/src/builtins/riscv64/builtins-riscv64.cc
+index 2d1e279b91..b189f5a1d6 100644
+--- a/src/builtins/riscv64/builtins-riscv64.cc
++++ b/src/builtins/riscv64/builtins-riscv64.cc
+@@ -3116,6 +3116,11 @@ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
+   __ Trap();
+ }
+ 
++void Builtins::Generate_WasmResume(MacroAssembler* masm) {
++  // TODO(v8:12191): Implement for this platform.
++  __ Trap();
++}
++
+ void Builtins::Generate_WasmOnStackReplace(MacroAssembler* masm) {
+   // Only needed on x64.
+   __ Trap();
+diff --git a/src/builtins/s390/builtins-s390.cc b/src/builtins/s390/builtins-s390.cc
+index 1d178960c0..22dfbf1d9e 100644
+--- a/src/builtins/s390/builtins-s390.cc
++++ b/src/builtins/s390/builtins-s390.cc
+@@ -2988,6 +2988,11 @@ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
+   __ Trap();
+ }
+ 
++void Builtins::Generate_WasmResume(MacroAssembler* masm) {
++  // TODO(v8:12191): Implement for this platform.
++  __ Trap();
++}
++
+ void Builtins::Generate_WasmOnStackReplace(MacroAssembler* masm) {
+   // Only needed on x64.
+   __ Trap();
+diff --git a/src/builtins/x64/builtins-x64.cc b/src/builtins/x64/builtins-x64.cc
+index 6db40fcabe..d37c694c69 100644
+--- a/src/builtins/x64/builtins-x64.cc
++++ b/src/builtins/x64/builtins-x64.cc
+@@ -3768,6 +3768,8 @@ void Builtins::Generate_WasmReturnPromiseOnSuspend(MacroAssembler* masm) {
+       kForeignForeignAddressTag, r8);
+   __ Push(wasm_instance);
+   __ call(function_entry);
++  // Note: we might be returning to an "OnFulfilled" frame if the stack was
++  // suspended and resumed via the chained promise.
+   __ Pop(wasm_instance);
+   // Unset thread_in_wasm_flag.
+   __ movq(
+@@ -3848,6 +3850,7 @@ void Builtins::Generate_WasmReturnPromiseOnSuspend(MacroAssembler* masm) {
+   // -------------------------------------------
+   // Epilogue.
+   // -------------------------------------------
++  param_count = rbx;
+   __ movq(
+       param_count,
+       MemOperand(rbp, ReturnPromiseOnSuspendFrameConstants::kParamCountOffset));
+@@ -3955,6 +3958,12 @@ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
+   __ ret(0);
+ }
+ 
++void Builtins::Generate_WasmResume(MacroAssembler* masm) {
++  __ EnterFrame(StackFrame::STACK_SWITCH);
++  __ LeaveFrame(StackFrame::STACK_SWITCH);
++  __ ret(0);
++}
++
+ void Builtins::Generate_WasmOnStackReplace(MacroAssembler* masm) {
+   MemOperand OSRTargetSlot(rbp, -wasm::kOSRTargetOffset);
+   __ movq(kScratchRegister, OSRTargetSlot);
+diff --git a/src/codegen/code-stub-assembler.cc b/src/codegen/code-stub-assembler.cc
+index 0881d966e5..360ecc3a1e 100644
+--- a/src/codegen/code-stub-assembler.cc
++++ b/src/codegen/code-stub-assembler.cc
+@@ -14595,6 +14595,7 @@ TNode<CodeT> CodeStubAssembler::GetSharedFunctionInfoCode(
+     WASM_EXPORTED_FUNCTION_DATA_TYPE,
+     WASM_JS_FUNCTION_DATA_TYPE,
+     ASM_WASM_DATA_TYPE,
++    WASM_ON_FULFILLED_DATA_TYPE,
+ #endif  // V8_ENABLE_WEBASSEMBLY
+   };
+   Label check_is_bytecode_array(this);
+@@ -14604,6 +14605,7 @@ TNode<CodeT> CodeStubAssembler::GetSharedFunctionInfoCode(
+   Label check_is_function_template_info(this);
+   Label check_is_interpreter_data(this);
+   Label check_is_wasm_function_data(this);
++  Label check_is_wasm_on_fulfilled(this);
+   Label* case_labels[] = {
+     &check_is_bytecode_array,
+     &check_is_baseline_data,
+@@ -14617,6 +14619,7 @@ TNode<CodeT> CodeStubAssembler::GetSharedFunctionInfoCode(
+     &check_is_wasm_function_data,
+     &check_is_wasm_function_data,
+     &check_is_asm_wasm_data,
++    &check_is_wasm_on_fulfilled,
+ #endif  // V8_ENABLE_WEBASSEMBLY
+   };
+   STATIC_ASSERT(arraysize(case_values) == arraysize(case_labels));
+@@ -14670,6 +14673,11 @@ TNode<CodeT> CodeStubAssembler::GetSharedFunctionInfoCode(
+   BIND(&check_is_asm_wasm_data);
+   sfi_code = HeapConstant(BUILTIN_CODE(isolate(), InstantiateAsmJs));
+   Goto(&done);
++
++  // IsWasmOnFulfilledData: Resume the suspended wasm continuation.
++  BIND(&check_is_wasm_on_fulfilled);
++  sfi_code = HeapConstant(BUILTIN_CODE(isolate(), WasmResume));
++  Goto(&done);
+ #endif  // V8_ENABLE_WEBASSEMBLY
+ 
+   BIND(&done);
+diff --git a/src/codegen/interface-descriptors.h b/src/codegen/interface-descriptors.h
+index 7339e02d30..5c3abba92d 100644
+--- a/src/codegen/interface-descriptors.h
++++ b/src/codegen/interface-descriptors.h
+@@ -1791,8 +1791,9 @@ class WasmFloat64ToNumberDescriptor final
+ class WasmSuspendDescriptor final
+     : public StaticCallInterfaceDescriptor<WasmSuspendDescriptor> {
+  public:
+-  DEFINE_RESULT_AND_PARAMETERS_NO_CONTEXT(0, kArg0, kArg1)
+-  DEFINE_RESULT_AND_PARAMETER_TYPES(MachineType::AnyTagged(),  // value
++  DEFINE_RESULT_AND_PARAMETERS_NO_CONTEXT(1, kArg0, kArg1)
++  DEFINE_RESULT_AND_PARAMETER_TYPES(MachineType::AnyTagged(),  // result
++                                    MachineType::AnyTagged(),  // value
+                                     MachineType::AnyTagged())  // value
+   DECLARE_DESCRIPTOR(WasmSuspendDescriptor)
+ };
+diff --git a/src/compiler/wasm-compiler.cc b/src/compiler/wasm-compiler.cc
+index f65af2256d..ae27b513b0 100644
+--- a/src/compiler/wasm-compiler.cc
++++ b/src/compiler/wasm-compiler.cc
+@@ -7008,6 +7008,18 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
+                         global_proxy);
+   }
+ 
++  Node* BuildSuspend(Node* promise, Node* suspender) {
++    auto* call_descriptor = GetBuiltinCallDescriptor(
++        Builtin::kWasmSuspend, zone_, StubCallMode::kCallWasmRuntimeStub);
++    Node* call_target = mcgraph()->RelocatableIntPtrConstant(
++        wasm::WasmCode::kWasmSuspend, RelocInfo::WASM_STUB_CALL);
++    Node* args[] = {promise, suspender};
++    Node* chained_promise =
++        BuildCallToRuntime(Runtime::kWasmCreateResumePromise, args, 2);
++    return gasm_->Call(call_descriptor, call_target, chained_promise,
++                       suspender);
++  }
++
+   // For wasm-to-js wrappers, parameter 0 is a WasmApiFunctionRef.
+   bool BuildWasmToJSWrapper(WasmImportCallKind kind, int expected_arity,
+                             wasm::Suspend suspend) {
+@@ -7072,16 +7084,11 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
+         DCHECK_EQ(pos, args.size());
+         call = gasm_->Call(call_descriptor, pos, args.begin());
+         if (suspend == wasm::kSuspend) {
+-          auto* call_descriptor = GetBuiltinCallDescriptor(
+-              Builtin::kWasmSuspend, zone_, StubCallMode::kCallWasmRuntimeStub);
+-          Node* call_target = mcgraph()->RelocatableIntPtrConstant(
+-              wasm::WasmCode::kWasmSuspend, RelocInfo::WASM_STUB_CALL);
+           Node* suspender =
+               gasm_->Load(MachineType::TaggedPointer(), Param(0),
+                           wasm::ObjectAccess::ToTagged(
+                               WasmApiFunctionRef::kSuspenderOffset));
+-          // TODO(thibaudm): Create and pass the chained promise.
+-          gasm_->Call(call_descriptor, call_target, call, suspender);
++          call = BuildSuspend(call, suspender);
+         }
+         break;
+       }
+diff --git a/src/diagnostics/objects-debug.cc b/src/diagnostics/objects-debug.cc
+index 39583d8446..2e23866cbb 100644
+--- a/src/diagnostics/objects-debug.cc
++++ b/src/diagnostics/objects-debug.cc
+@@ -893,7 +893,8 @@ void SharedFunctionInfo::SharedFunctionInfoVerify(ReadOnlyRoots roots) {
+ 
+ #if V8_ENABLE_WEBASSEMBLY
+   bool is_wasm = HasWasmExportedFunctionData() || HasAsmWasmData() ||
+-                 HasWasmJSFunctionData() || HasWasmCapiFunctionData();
++                 HasWasmJSFunctionData() || HasWasmCapiFunctionData() ||
++                 HasWasmOnFulfilledData();
+ #else
+   bool is_wasm = false;
+ #endif  // V8_ENABLE_WEBASSEMBLY
+diff --git a/src/diagnostics/objects-printer.cc b/src/diagnostics/objects-printer.cc
+index 89fe0c6fde..7bbfbb7471 100644
+--- a/src/diagnostics/objects-printer.cc
++++ b/src/diagnostics/objects-printer.cc
+@@ -1972,6 +1972,12 @@ void WasmJSFunctionData::WasmJSFunctionDataPrint(std::ostream& os) {
+   os << "\n";
+ }
+ 
++void WasmOnFulfilledData::WasmOnFulfilledDataPrint(std::ostream& os) {
++  PrintHeader(os, "WasmOnFulfilledData");
++  os << "\n - suspender: " << Brief(suspender());
++  os << '\n';
++}
++
+ void WasmApiFunctionRef::WasmApiFunctionRefPrint(std::ostream& os) {
+   PrintHeader(os, "WasmApiFunctionRef");
+   os << "\n - isolate_root: " << reinterpret_cast<void*>(isolate_root());
+diff --git a/src/heap/factory.cc b/src/heap/factory.cc
+index 5359f91834..ad2ae5e09a 100644
+--- a/src/heap/factory.cc
++++ b/src/heap/factory.cc
+@@ -1574,6 +1574,17 @@ Handle<WasmJSFunctionData> Factory::NewWasmJSFunctionData(
+   return handle(result, isolate());
+ }
+ 
++Handle<WasmOnFulfilledData> Factory::NewWasmOnFulfilledData(
++    Handle<WasmSuspenderObject> suspender) {
++  Map map = *wasm_onfulfilled_data_map();
++  WasmOnFulfilledData result =
++      WasmOnFulfilledData::cast(AllocateRawWithImmortalMap(
++          map.instance_size(), AllocationType::kOld, map));
++  DisallowGarbageCollection no_gc;
++  result.set_suspender(*suspender);
++  return handle(result, isolate());
++}
++
+ Handle<WasmExportedFunctionData> Factory::NewWasmExportedFunctionData(
+     Handle<CodeT> export_wrapper, Handle<WasmInstanceObject> instance,
+     Address call_target, Handle<Object> ref, int func_index,
+@@ -1704,6 +1715,11 @@ Handle<SharedFunctionInfo> Factory::NewSharedFunctionInfoForWasmJSFunction(
+   return NewSharedFunctionInfo(name, data, Builtin::kNoBuiltinId);
+ }
+ 
++Handle<SharedFunctionInfo> Factory::NewSharedFunctionInfoForWasmOnFulfilled(
++    Handle<WasmOnFulfilledData> data) {
++  return NewSharedFunctionInfo({}, data, Builtin::kNoBuiltinId);
++}
++
+ Handle<SharedFunctionInfo> Factory::NewSharedFunctionInfoForWasmCapiFunction(
+     Handle<WasmCapiFunctionData> data) {
+   return NewSharedFunctionInfo(MaybeHandle<String>(), data,
+diff --git a/src/heap/factory.h b/src/heap/factory.h
+index 620d1a51d9..f6a19eb784 100644
+--- a/src/heap/factory.h
++++ b/src/heap/factory.h
+@@ -613,6 +613,8 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
+       int parameter_count, Handle<PodArray<wasm::ValueType>> serialized_sig,
+       Handle<CodeT> wrapper_code, Handle<Map> rtt,
+       Handle<HeapObject> suspender);
++  Handle<WasmOnFulfilledData> NewWasmOnFulfilledData(
++      Handle<WasmSuspenderObject> suspender);
+   Handle<WasmStruct> NewWasmStruct(const wasm::StructType* type,
+                                    wasm::WasmValue* args, Handle<Map> map);
+   Handle<WasmArray> NewWasmArrayFromElements(
+@@ -625,6 +627,8 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
+       Handle<String> name, Handle<WasmExportedFunctionData> data);
+   Handle<SharedFunctionInfo> NewSharedFunctionInfoForWasmJSFunction(
+       Handle<String> name, Handle<WasmJSFunctionData> data);
++  Handle<SharedFunctionInfo> NewSharedFunctionInfoForWasmOnFulfilled(
++      Handle<WasmOnFulfilledData> data);
+   Handle<SharedFunctionInfo> NewSharedFunctionInfoForWasmCapiFunction(
+       Handle<WasmCapiFunctionData> data);
+ #endif  // V8_ENABLE_WEBASSEMBLY
+diff --git a/src/heap/objects-visiting.h b/src/heap/objects-visiting.h
+index 858e279ec4..b6bd810450 100644
+--- a/src/heap/objects-visiting.h
++++ b/src/heap/objects-visiting.h
+@@ -62,6 +62,7 @@ namespace internal {
+   IF_WASM(V, WasmJSFunctionData)        \
+   IF_WASM(V, WasmStruct)                \
+   IF_WASM(V, WasmSuspenderObject)       \
++  IF_WASM(V, WasmOnFulfilledData)       \
+   IF_WASM(V, WasmTypeInfo)
+ 
+ #define FORWARD_DECLARE(TypeName) class TypeName;
+diff --git a/src/heap/setup-heap-internal.cc b/src/heap/setup-heap-internal.cc
+index 1a950d50dd..48f9f9682b 100644
+--- a/src/heap/setup-heap-internal.cc
++++ b/src/heap/setup-heap-internal.cc
+@@ -518,6 +518,8 @@ bool Heap::CreateInitialMaps() {
+             WasmInternalFunction::kSize, wasm_internal_function)
+     IF_WASM(ALLOCATE_MAP, WASM_JS_FUNCTION_DATA_TYPE, WasmJSFunctionData::kSize,
+             wasm_js_function_data)
++    IF_WASM(ALLOCATE_MAP, WASM_ON_FULFILLED_DATA_TYPE,
++            WasmOnFulfilledData::kSize, wasm_onfulfilled_data)
+     IF_WASM(ALLOCATE_MAP, WASM_TYPE_INFO_TYPE, WasmTypeInfo::kSize,
+             wasm_type_info)
+ 
+diff --git a/src/objects/map.cc b/src/objects/map.cc
+index 75e83a0c2e..e74487dde8 100644
+--- a/src/objects/map.cc
++++ b/src/objects/map.cc
+@@ -374,6 +374,8 @@ VisitorId Map::GetVisitorId(Map map) {
+       return kVisitWasmInternalFunction;
+     case WASM_JS_FUNCTION_DATA_TYPE:
+       return kVisitWasmJSFunctionData;
++    case WASM_ON_FULFILLED_DATA_TYPE:
++      return kVisitWasmOnFulfilledData;
+     case WASM_API_FUNCTION_REF_TYPE:
+       return kVisitWasmApiFunctionRef;
+     case WASM_EXPORTED_FUNCTION_DATA_TYPE:
+diff --git a/src/objects/map.h b/src/objects/map.h
+index fe2cdf150a..384866734f 100644
+--- a/src/objects/map.h
++++ b/src/objects/map.h
+@@ -78,6 +78,7 @@ enum InstanceType : uint16_t;
+   IF_WASM(V, WasmInstanceObject)        \
+   IF_WASM(V, WasmInternalFunction)      \
+   IF_WASM(V, WasmJSFunctionData)        \
++  IF_WASM(V, WasmOnFulfilledData)       \
+   IF_WASM(V, WasmStruct)                \
+   IF_WASM(V, WasmSuspenderObject)       \
+   IF_WASM(V, WasmTypeInfo)              \
+diff --git a/src/objects/object-list-macros.h b/src/objects/object-list-macros.h
+index 558322193b..73f56e0db2 100644
+--- a/src/objects/object-list-macros.h
++++ b/src/objects/object-list-macros.h
+@@ -250,6 +250,7 @@ class ZoneForwardList;
+   IF_WASM(V, WasmMemoryObject)                 \
+   IF_WASM(V, WasmModuleObject)                 \
+   IF_WASM(V, WasmObject)                       \
++  IF_WASM(V, WasmOnFulfilledData)              \
+   IF_WASM(V, WasmStruct)                       \
+   IF_WASM(V, WasmTypeInfo)                     \
+   IF_WASM(V, WasmTableObject)                  \
+diff --git a/src/objects/objects-body-descriptors-inl.h b/src/objects/objects-body-descriptors-inl.h
+index af689c5ecc..8ef980178b 100644
+--- a/src/objects/objects-body-descriptors-inl.h
++++ b/src/objects/objects-body-descriptors-inl.h
+@@ -1111,6 +1111,8 @@ auto BodyDescriptorApply(InstanceType type, Args&&... args) {
+       return CALL_APPLY(WasmInternalFunction);
+     case WASM_JS_FUNCTION_DATA_TYPE:
+       return CALL_APPLY(WasmJSFunctionData);
++    case WASM_ON_FULFILLED_DATA_TYPE:
++      return CALL_APPLY(WasmOnFulfilledData);
+     case WASM_STRUCT_TYPE:
+       return CALL_APPLY(WasmStruct);
+     case WASM_TYPE_INFO_TYPE:
+diff --git a/src/objects/shared-function-info-inl.h b/src/objects/shared-function-info-inl.h
+index 723fd9e133..55c723bcea 100644
+--- a/src/objects/shared-function-info-inl.h
++++ b/src/objects/shared-function-info-inl.h
+@@ -707,6 +707,10 @@ bool SharedFunctionInfo::HasWasmCapiFunctionData() const {
+   return function_data(kAcquireLoad).IsWasmCapiFunctionData();
+ }
+ 
++bool SharedFunctionInfo::HasWasmOnFulfilledData() const {
++  return function_data(kAcquireLoad).IsWasmOnFulfilledData();
++}
++
+ AsmWasmData SharedFunctionInfo::asm_wasm_data() const {
+   DCHECK(HasAsmWasmData());
+   return AsmWasmData::cast(function_data(kAcquireLoad));
+diff --git a/src/objects/shared-function-info.cc b/src/objects/shared-function-info.cc
+index e1f6fb632b..624e7a26e6 100644
+--- a/src/objects/shared-function-info.cc
++++ b/src/objects/shared-function-info.cc
+@@ -108,6 +108,9 @@ CodeT SharedFunctionInfo::GetCode() const {
+   if (data.IsWasmCapiFunctionData()) {
+     return wasm_capi_function_data().wrapper_code();
+   }
++  if (data.IsWasmOnFulfilledData()) {
++    return isolate->builtins()->code(Builtin::kWasmResume);
++  }
+ #endif  // V8_ENABLE_WEBASSEMBLY
+   if (data.IsUncompiledData()) {
+     // Having uncompiled data (with or without scope) means we need to compile.
+diff --git a/src/objects/shared-function-info.h b/src/objects/shared-function-info.h
+index 230ce244e5..794f0542d3 100644
+--- a/src/objects/shared-function-info.h
++++ b/src/objects/shared-function-info.h
+@@ -351,6 +351,7 @@ class SharedFunctionInfo
+   inline bool HasWasmExportedFunctionData() const;
+   inline bool HasWasmJSFunctionData() const;
+   inline bool HasWasmCapiFunctionData() const;
++  inline bool HasWasmOnFulfilledData() const;
+   inline AsmWasmData asm_wasm_data() const;
+   inline void set_asm_wasm_data(AsmWasmData data);
+ 
+diff --git a/src/roots/roots.h b/src/roots/roots.h
+index f6bb9b1377..8fcae9b65e 100644
+--- a/src/roots/roots.h
++++ b/src/roots/roots.h
+@@ -118,6 +118,7 @@ class Symbol;
+           WasmExportedFunctionDataMap)                                         \
+   IF_WASM(V, Map, wasm_internal_function_map, WasmInternalFunctionMap)         \
+   IF_WASM(V, Map, wasm_js_function_data_map, WasmJSFunctionDataMap)            \
++  IF_WASM(V, Map, wasm_onfulfilled_data_map, WasmOnFulfilledDataMap)           \
+   IF_WASM(V, Map, wasm_type_info_map, WasmTypeInfoMap)                         \
+   V(Map, weak_fixed_array_map, WeakFixedArrayMap)                              \
+   V(Map, weak_array_list_map, WeakArrayListMap)                                \
+diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
+index aca64c5f23..0775d1a2b2 100644
+--- a/src/runtime/runtime-wasm.cc
++++ b/src/runtime/runtime-wasm.cc
+@@ -57,8 +57,13 @@ class FrameFinder {
+   StackFrameIterator frame_iterator_;
+ };
+ 
+-WasmInstanceObject GetWasmInstanceOnStackTop(Isolate* isolate) {
+-  return FrameFinder<WasmFrame>(isolate).frame()->wasm_instance();
++WasmInstanceObject GetWasmInstanceOnStackTop(
++    Isolate* isolate,
++    std::initializer_list<StackFrame::Type> skipped_frame_types = {
++        StackFrame::EXIT}) {
++  return FrameFinder<WasmFrame>(isolate, skipped_frame_types)
++      .frame()
++      ->wasm_instance();
+ }
+ 
+ Context GetNativeContextFromWasmInstanceOnStackTop(Isolate* isolate) {
+@@ -786,5 +791,42 @@ RUNTIME_FUNCTION(Runtime_WasmSyncStackLimit) {
+   return ReadOnlyRoots(isolate).undefined_value();
+ }
+ 
++// Takes a promise and a suspender, and returns promise.then(onFulfilled), where
++// onFulfilled resumes the suspender.
++RUNTIME_FUNCTION(Runtime_WasmCreateResumePromise) {
++  CHECK(FLAG_experimental_wasm_stack_switching);
++  HandleScope scope(isolate);
++  CONVERT_ARG_HANDLE_CHECKED(Object, promise, 0);
++  CONVERT_ARG_HANDLE_CHECKED(WasmSuspenderObject, suspender, 1);
++
++  // Instantiate onFulfilled callback.
++  Handle<WasmOnFulfilledData> function_data =
++      isolate->factory()->NewWasmOnFulfilledData(suspender);
++  Handle<SharedFunctionInfo> shared =
++      isolate->factory()->NewSharedFunctionInfoForWasmOnFulfilled(
++          function_data);
++  Handle<WasmInstanceObject> instance(
++      GetWasmInstanceOnStackTop(isolate,
++                                {StackFrame::EXIT, StackFrame::WASM_TO_JS}),
++      isolate);
++  isolate->set_context(instance->native_context());
++  Handle<Context> context(isolate->native_context());
++  Handle<Map> function_map = isolate->strict_function_map();
++  Handle<JSObject> on_fulfilled =
++      Factory::JSFunctionBuilder{isolate, shared, context}
++          .set_map(function_map)
++          .Build();
++
++  i::Handle<i::Object> argv[] = {on_fulfilled};
++  i::Handle<i::Object> result;
++  bool has_pending_exception =
++      !i::Execution::CallBuiltin(isolate, isolate->promise_then(), promise,
++                                 arraysize(argv), argv)
++           .ToHandle(&result);
++  // TODO(thibaudm): Propagate exception.
++  CHECK(!has_pending_exception);
++  return *result;
++}
++
+ }  // namespace internal
+ }  // namespace v8
+diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
+index e9ae24fa08..951c6dfe9d 100644
+--- a/src/runtime/runtime.h
++++ b/src/runtime/runtime.h
+@@ -590,7 +590,8 @@ namespace internal {
+   F(WasmArrayCopy, 5, 1)              \
+   F(WasmArrayInitFromData, 5, 1)      \
+   F(WasmAllocateContinuation, 1, 1)   \
+-  F(WasmSyncStackLimit, 0, 1)
++  F(WasmSyncStackLimit, 0, 1)         \
++  F(WasmCreateResumePromise, 2, 1)
+ 
+ #define FOR_EACH_INTRINSIC_WASM_TEST(F, I) \
+   F(DeserializeWasmModule, 2, 1)           \
+diff --git a/src/wasm/wasm-objects-inl.h b/src/wasm/wasm-objects-inl.h
+index b708969e42..374cb3aa16 100644
+--- a/src/wasm/wasm-objects-inl.h
++++ b/src/wasm/wasm-objects-inl.h
+@@ -54,6 +54,7 @@ TQ_OBJECT_CONSTRUCTORS_IMPL(WasmStruct)
+ TQ_OBJECT_CONSTRUCTORS_IMPL(WasmArray)
+ TQ_OBJECT_CONSTRUCTORS_IMPL(WasmContinuationObject)
+ TQ_OBJECT_CONSTRUCTORS_IMPL(WasmSuspenderObject)
++TQ_OBJECT_CONSTRUCTORS_IMPL(WasmOnFulfilledData)
+ 
+ CAST_ACCESSOR(WasmInstanceObject)
+ 
+diff --git a/src/wasm/wasm-objects.h b/src/wasm/wasm-objects.h
+index 9c42e11b97..ef173195f9 100644
+--- a/src/wasm/wasm-objects.h
++++ b/src/wasm/wasm-objects.h
+@@ -782,6 +782,16 @@ class WasmCapiFunctionData
+   TQ_OBJECT_CONSTRUCTORS(WasmCapiFunctionData)
+ };
+ 
++class WasmOnFulfilledData
++    : public TorqueGeneratedWasmOnFulfilledData<WasmOnFulfilledData,
++                                                HeapObject> {
++ public:
++  using BodyDescriptor =
++      FlexibleBodyDescriptor<WasmOnFulfilledData::kStartOfStrongFieldsOffset>;
++  DECL_PRINTER(WasmOnFulfilledData)
++  TQ_OBJECT_CONSTRUCTORS(WasmOnFulfilledData)
++};
++
+ class WasmScript : public AllStatic {
+  public:
+   // Position used for storing "on entry" breakpoints (a.k.a. instrumentation
+diff --git a/src/wasm/wasm-objects.tq b/src/wasm/wasm-objects.tq
+index 80610c0b6a..9fa8f0fb2e 100644
+--- a/src/wasm/wasm-objects.tq
++++ b/src/wasm/wasm-objects.tq
+@@ -80,6 +80,10 @@ extern class WasmCapiFunctionData extends WasmFunctionData {
+   serialized_signature: PodArrayOfWasmValueType;
+ }
+ 
++extern class WasmOnFulfilledData extends HeapObject {
++  suspender: WasmSuspenderObject;
++}
++
+ extern class WasmIndirectFunctionTable extends Struct {
+   size: uint32;
+   @if(TAGGED_SIZE_8_BYTES) optional_padding: uint32;
+diff --git a/test/mjsunit/wasm/stack-switching.js b/test/mjsunit/wasm/stack-switching.js
+index 2636927604..b9878ad53b 100644
+--- a/test/mjsunit/wasm/stack-switching.js
++++ b/test/mjsunit/wasm/stack-switching.js
+@@ -40,7 +40,6 @@ load("test/mjsunit/wasm/wasm-module-builder.js");
+       ]).exportFunc();
+   let suspender = new WebAssembly.Suspender();
+   function js_import() {
+-    // TODO(thibaudm): Return the value as a promise.
+     return new Promise((resolve) => { resolve(42); });
+   };
+   let wasm_js_import = new WebAssembly.Function({parameters: [], results: ['i32']}, js_import);
+diff --git a/tools/v8heapconst.py b/tools/v8heapconst.py
+index 0f47e7ba33..33d51f66b2 100644
+--- a/tools/v8heapconst.py
++++ b/tools/v8heapconst.py
+@@ -162,15 +162,16 @@ INSTANCE_TYPES = {
+   258: "SORT_STATE_TYPE",
+   259: "SWISS_NAME_DICTIONARY_TYPE",
+   260: "WASM_API_FUNCTION_REF_TYPE",
+-  261: "WEAK_ARRAY_LIST_TYPE",
+-  262: "WEAK_CELL_TYPE",
+-  263: "WASM_ARRAY_TYPE",
+-  264: "WASM_STRUCT_TYPE",
+-  265: "JS_PROXY_TYPE",
++  261: "WASM_ON_FULFILLED_DATA_TYPE",
++  262: "WEAK_ARRAY_LIST_TYPE",
++  263: "WEAK_CELL_TYPE",
++  264: "WASM_ARRAY_TYPE",
++  265: "WASM_STRUCT_TYPE",
++  266: "JS_PROXY_TYPE",
+   1057: "JS_OBJECT_TYPE",
+-  266: "JS_GLOBAL_OBJECT_TYPE",
+-  267: "JS_GLOBAL_PROXY_TYPE",
+-  268: "JS_MODULE_NAMESPACE_TYPE",
++  267: "JS_GLOBAL_OBJECT_TYPE",
++  268: "JS_GLOBAL_PROXY_TYPE",
++  269: "JS_MODULE_NAMESPACE_TYPE",
+   1040: "JS_SPECIAL_API_OBJECT_TYPE",
+   1041: "JS_PRIMITIVE_WRAPPER_TYPE",
+   1058: "JS_API_OBJECT_TYPE",
+@@ -269,7 +270,7 @@ KNOWN_MAPS = {
+   ("read_only_space", 0x02131): (248, "MetaMap"),
+   ("read_only_space", 0x02159): (131, "NullMap"),
+   ("read_only_space", 0x02181): (232, "StrongDescriptorArrayMap"),
+-  ("read_only_space", 0x021a9): (261, "WeakArrayListMap"),
++  ("read_only_space", 0x021a9): (262, "WeakArrayListMap"),
+   ("read_only_space", 0x021ed): (157, "EnumCacheMap"),
+   ("read_only_space", 0x02221): (178, "FixedArrayMap"),
+   ("read_only_space", 0x0226d): (8, "OneByteInternalizedStringMap"),
+@@ -339,106 +340,107 @@ KNOWN_MAPS = {
+   ("read_only_space", 0x02ee9): (223, "WasmExportedFunctionDataMap"),
+   ("read_only_space", 0x02f11): (205, "WasmInternalFunctionMap"),
+   ("read_only_space", 0x02f39): (224, "WasmJSFunctionDataMap"),
+-  ("read_only_space", 0x02f61): (206, "WasmTypeInfoMap"),
+-  ("read_only_space", 0x02f89): (235, "WeakFixedArrayMap"),
+-  ("read_only_space", 0x02fb1): (180, "EphemeronHashTableMap"),
+-  ("read_only_space", 0x02fd9): (241, "EmbedderDataArrayMap"),
+-  ("read_only_space", 0x03001): (262, "WeakCellMap"),
+-  ("read_only_space", 0x03029): (32, "StringMap"),
+-  ("read_only_space", 0x03051): (41, "ConsOneByteStringMap"),
+-  ("read_only_space", 0x03079): (33, "ConsStringMap"),
+-  ("read_only_space", 0x030a1): (37, "ThinStringMap"),
+-  ("read_only_space", 0x030c9): (35, "SlicedStringMap"),
+-  ("read_only_space", 0x030f1): (43, "SlicedOneByteStringMap"),
+-  ("read_only_space", 0x03119): (34, "ExternalStringMap"),
+-  ("read_only_space", 0x03141): (42, "ExternalOneByteStringMap"),
+-  ("read_only_space", 0x03169): (50, "UncachedExternalStringMap"),
+-  ("read_only_space", 0x03191): (0, "InternalizedStringMap"),
+-  ("read_only_space", 0x031b9): (2, "ExternalInternalizedStringMap"),
+-  ("read_only_space", 0x031e1): (10, "ExternalOneByteInternalizedStringMap"),
+-  ("read_only_space", 0x03209): (18, "UncachedExternalInternalizedStringMap"),
+-  ("read_only_space", 0x03231): (26, "UncachedExternalOneByteInternalizedStringMap"),
+-  ("read_only_space", 0x03259): (58, "UncachedExternalOneByteStringMap"),
+-  ("read_only_space", 0x03281): (104, "SharedOneByteStringMap"),
+-  ("read_only_space", 0x032a9): (96, "SharedStringMap"),
+-  ("read_only_space", 0x032d1): (109, "SharedThinOneByteStringMap"),
+-  ("read_only_space", 0x032f9): (101, "SharedThinStringMap"),
+-  ("read_only_space", 0x03321): (96, "TwoByteSeqStringMigrationSentinelMap"),
+-  ("read_only_space", 0x03349): (104, "OneByteSeqStringMigrationSentinelMap"),
+-  ("read_only_space", 0x03371): (131, "SelfReferenceMarkerMap"),
+-  ("read_only_space", 0x03399): (131, "BasicBlockCountersMarkerMap"),
+-  ("read_only_space", 0x033dd): (147, "ArrayBoilerplateDescriptionMap"),
+-  ("read_only_space", 0x034dd): (161, "InterceptorInfoMap"),
+-  ("read_only_space", 0x05dfd): (132, "PromiseFulfillReactionJobTaskMap"),
+-  ("read_only_space", 0x05e25): (133, "PromiseRejectReactionJobTaskMap"),
+-  ("read_only_space", 0x05e4d): (134, "CallableTaskMap"),
+-  ("read_only_space", 0x05e75): (135, "CallbackTaskMap"),
+-  ("read_only_space", 0x05e9d): (136, "PromiseResolveThenableJobTaskMap"),
+-  ("read_only_space", 0x05ec5): (139, "FunctionTemplateInfoMap"),
+-  ("read_only_space", 0x05eed): (140, "ObjectTemplateInfoMap"),
+-  ("read_only_space", 0x05f15): (141, "AccessCheckInfoMap"),
+-  ("read_only_space", 0x05f3d): (142, "AccessorInfoMap"),
+-  ("read_only_space", 0x05f65): (143, "AccessorPairMap"),
+-  ("read_only_space", 0x05f8d): (144, "AliasedArgumentsEntryMap"),
+-  ("read_only_space", 0x05fb5): (145, "AllocationMementoMap"),
+-  ("read_only_space", 0x05fdd): (148, "AsmWasmDataMap"),
+-  ("read_only_space", 0x06005): (149, "AsyncGeneratorRequestMap"),
+-  ("read_only_space", 0x0602d): (150, "BreakPointMap"),
+-  ("read_only_space", 0x06055): (151, "BreakPointInfoMap"),
+-  ("read_only_space", 0x0607d): (152, "CachedTemplateObjectMap"),
+-  ("read_only_space", 0x060a5): (154, "CallSiteInfoMap"),
+-  ("read_only_space", 0x060cd): (155, "ClassPositionsMap"),
+-  ("read_only_space", 0x060f5): (156, "DebugInfoMap"),
+-  ("read_only_space", 0x0611d): (158, "ErrorStackDataMap"),
+-  ("read_only_space", 0x06145): (160, "FunctionTemplateRareDataMap"),
+-  ("read_only_space", 0x0616d): (162, "InterpreterDataMap"),
+-  ("read_only_space", 0x06195): (163, "ModuleRequestMap"),
+-  ("read_only_space", 0x061bd): (164, "PromiseCapabilityMap"),
+-  ("read_only_space", 0x061e5): (165, "PromiseReactionMap"),
+-  ("read_only_space", 0x0620d): (166, "PropertyDescriptorObjectMap"),
+-  ("read_only_space", 0x06235): (167, "PrototypeInfoMap"),
+-  ("read_only_space", 0x0625d): (168, "RegExpBoilerplateDescriptionMap"),
+-  ("read_only_space", 0x06285): (169, "ScriptMap"),
+-  ("read_only_space", 0x062ad): (170, "ScriptOrModuleMap"),
+-  ("read_only_space", 0x062d5): (171, "SourceTextModuleInfoEntryMap"),
+-  ("read_only_space", 0x062fd): (172, "StackFrameInfoMap"),
+-  ("read_only_space", 0x06325): (173, "TemplateObjectDescriptionMap"),
+-  ("read_only_space", 0x0634d): (174, "Tuple2Map"),
+-  ("read_only_space", 0x06375): (175, "WasmContinuationObjectMap"),
+-  ("read_only_space", 0x0639d): (176, "WasmExceptionTagMap"),
+-  ("read_only_space", 0x063c5): (177, "WasmIndirectFunctionTableMap"),
+-  ("read_only_space", 0x063ed): (196, "SloppyArgumentsElementsMap"),
+-  ("read_only_space", 0x06415): (231, "DescriptorArrayMap"),
+-  ("read_only_space", 0x0643d): (219, "UncompiledDataWithoutPreparseDataMap"),
+-  ("read_only_space", 0x06465): (217, "UncompiledDataWithPreparseDataMap"),
+-  ("read_only_space", 0x0648d): (220, "UncompiledDataWithoutPreparseDataWithJobMap"),
+-  ("read_only_space", 0x064b5): (218, "UncompiledDataWithPreparseDataAndJobMap"),
+-  ("read_only_space", 0x064dd): (250, "OnHeapBasicBlockProfilerDataMap"),
+-  ("read_only_space", 0x06505): (197, "TurbofanBitsetTypeMap"),
+-  ("read_only_space", 0x0652d): (201, "TurbofanUnionTypeMap"),
+-  ("read_only_space", 0x06555): (200, "TurbofanRangeTypeMap"),
+-  ("read_only_space", 0x0657d): (198, "TurbofanHeapConstantTypeMap"),
+-  ("read_only_space", 0x065a5): (199, "TurbofanOtherNumberConstantTypeMap"),
+-  ("read_only_space", 0x065cd): (246, "InternalClassMap"),
+-  ("read_only_space", 0x065f5): (257, "SmiPairMap"),
+-  ("read_only_space", 0x0661d): (256, "SmiBoxMap"),
+-  ("read_only_space", 0x06645): (225, "ExportedSubClassBaseMap"),
+-  ("read_only_space", 0x0666d): (226, "ExportedSubClassMap"),
+-  ("read_only_space", 0x06695): (202, "AbstractInternalClassSubclass1Map"),
+-  ("read_only_space", 0x066bd): (203, "AbstractInternalClassSubclass2Map"),
+-  ("read_only_space", 0x066e5): (195, "InternalClassWithSmiElementsMap"),
+-  ("read_only_space", 0x0670d): (247, "InternalClassWithStructElementsMap"),
+-  ("read_only_space", 0x06735): (227, "ExportedSubClass2Map"),
+-  ("read_only_space", 0x0675d): (258, "SortStateMap"),
+-  ("read_only_space", 0x06785): (146, "AllocationSiteWithWeakNextMap"),
+-  ("read_only_space", 0x067ad): (146, "AllocationSiteWithoutWeakNextMap"),
+-  ("read_only_space", 0x067d5): (137, "LoadHandler1Map"),
+-  ("read_only_space", 0x067fd): (137, "LoadHandler2Map"),
+-  ("read_only_space", 0x06825): (137, "LoadHandler3Map"),
+-  ("read_only_space", 0x0684d): (138, "StoreHandler0Map"),
+-  ("read_only_space", 0x06875): (138, "StoreHandler1Map"),
+-  ("read_only_space", 0x0689d): (138, "StoreHandler2Map"),
+-  ("read_only_space", 0x068c5): (138, "StoreHandler3Map"),
++  ("read_only_space", 0x02f61): (261, "WasmOnFulfilledDataMap"),
++  ("read_only_space", 0x02f89): (206, "WasmTypeInfoMap"),
++  ("read_only_space", 0x02fb1): (235, "WeakFixedArrayMap"),
++  ("read_only_space", 0x02fd9): (180, "EphemeronHashTableMap"),
++  ("read_only_space", 0x03001): (241, "EmbedderDataArrayMap"),
++  ("read_only_space", 0x03029): (263, "WeakCellMap"),
++  ("read_only_space", 0x03051): (32, "StringMap"),
++  ("read_only_space", 0x03079): (41, "ConsOneByteStringMap"),
++  ("read_only_space", 0x030a1): (33, "ConsStringMap"),
++  ("read_only_space", 0x030c9): (37, "ThinStringMap"),
++  ("read_only_space", 0x030f1): (35, "SlicedStringMap"),
++  ("read_only_space", 0x03119): (43, "SlicedOneByteStringMap"),
++  ("read_only_space", 0x03141): (34, "ExternalStringMap"),
++  ("read_only_space", 0x03169): (42, "ExternalOneByteStringMap"),
++  ("read_only_space", 0x03191): (50, "UncachedExternalStringMap"),
++  ("read_only_space", 0x031b9): (0, "InternalizedStringMap"),
++  ("read_only_space", 0x031e1): (2, "ExternalInternalizedStringMap"),
++  ("read_only_space", 0x03209): (10, "ExternalOneByteInternalizedStringMap"),
++  ("read_only_space", 0x03231): (18, "UncachedExternalInternalizedStringMap"),
++  ("read_only_space", 0x03259): (26, "UncachedExternalOneByteInternalizedStringMap"),
++  ("read_only_space", 0x03281): (58, "UncachedExternalOneByteStringMap"),
++  ("read_only_space", 0x032a9): (104, "SharedOneByteStringMap"),
++  ("read_only_space", 0x032d1): (96, "SharedStringMap"),
++  ("read_only_space", 0x032f9): (109, "SharedThinOneByteStringMap"),
++  ("read_only_space", 0x03321): (101, "SharedThinStringMap"),
++  ("read_only_space", 0x03349): (96, "TwoByteSeqStringMigrationSentinelMap"),
++  ("read_only_space", 0x03371): (104, "OneByteSeqStringMigrationSentinelMap"),
++  ("read_only_space", 0x03399): (131, "SelfReferenceMarkerMap"),
++  ("read_only_space", 0x033c1): (131, "BasicBlockCountersMarkerMap"),
++  ("read_only_space", 0x03405): (147, "ArrayBoilerplateDescriptionMap"),
++  ("read_only_space", 0x03505): (161, "InterceptorInfoMap"),
++  ("read_only_space", 0x05e25): (132, "PromiseFulfillReactionJobTaskMap"),
++  ("read_only_space", 0x05e4d): (133, "PromiseRejectReactionJobTaskMap"),
++  ("read_only_space", 0x05e75): (134, "CallableTaskMap"),
++  ("read_only_space", 0x05e9d): (135, "CallbackTaskMap"),
++  ("read_only_space", 0x05ec5): (136, "PromiseResolveThenableJobTaskMap"),
++  ("read_only_space", 0x05eed): (139, "FunctionTemplateInfoMap"),
++  ("read_only_space", 0x05f15): (140, "ObjectTemplateInfoMap"),
++  ("read_only_space", 0x05f3d): (141, "AccessCheckInfoMap"),
++  ("read_only_space", 0x05f65): (142, "AccessorInfoMap"),
++  ("read_only_space", 0x05f8d): (143, "AccessorPairMap"),
++  ("read_only_space", 0x05fb5): (144, "AliasedArgumentsEntryMap"),
++  ("read_only_space", 0x05fdd): (145, "AllocationMementoMap"),
++  ("read_only_space", 0x06005): (148, "AsmWasmDataMap"),
++  ("read_only_space", 0x0602d): (149, "AsyncGeneratorRequestMap"),
++  ("read_only_space", 0x06055): (150, "BreakPointMap"),
++  ("read_only_space", 0x0607d): (151, "BreakPointInfoMap"),
++  ("read_only_space", 0x060a5): (152, "CachedTemplateObjectMap"),
++  ("read_only_space", 0x060cd): (154, "CallSiteInfoMap"),
++  ("read_only_space", 0x060f5): (155, "ClassPositionsMap"),
++  ("read_only_space", 0x0611d): (156, "DebugInfoMap"),
++  ("read_only_space", 0x06145): (158, "ErrorStackDataMap"),
++  ("read_only_space", 0x0616d): (160, "FunctionTemplateRareDataMap"),
++  ("read_only_space", 0x06195): (162, "InterpreterDataMap"),
++  ("read_only_space", 0x061bd): (163, "ModuleRequestMap"),
++  ("read_only_space", 0x061e5): (164, "PromiseCapabilityMap"),
++  ("read_only_space", 0x0620d): (165, "PromiseReactionMap"),
++  ("read_only_space", 0x06235): (166, "PropertyDescriptorObjectMap"),
++  ("read_only_space", 0x0625d): (167, "PrototypeInfoMap"),
++  ("read_only_space", 0x06285): (168, "RegExpBoilerplateDescriptionMap"),
++  ("read_only_space", 0x062ad): (169, "ScriptMap"),
++  ("read_only_space", 0x062d5): (170, "ScriptOrModuleMap"),
++  ("read_only_space", 0x062fd): (171, "SourceTextModuleInfoEntryMap"),
++  ("read_only_space", 0x06325): (172, "StackFrameInfoMap"),
++  ("read_only_space", 0x0634d): (173, "TemplateObjectDescriptionMap"),
++  ("read_only_space", 0x06375): (174, "Tuple2Map"),
++  ("read_only_space", 0x0639d): (175, "WasmContinuationObjectMap"),
++  ("read_only_space", 0x063c5): (176, "WasmExceptionTagMap"),
++  ("read_only_space", 0x063ed): (177, "WasmIndirectFunctionTableMap"),
++  ("read_only_space", 0x06415): (196, "SloppyArgumentsElementsMap"),
++  ("read_only_space", 0x0643d): (231, "DescriptorArrayMap"),
++  ("read_only_space", 0x06465): (219, "UncompiledDataWithoutPreparseDataMap"),
++  ("read_only_space", 0x0648d): (217, "UncompiledDataWithPreparseDataMap"),
++  ("read_only_space", 0x064b5): (220, "UncompiledDataWithoutPreparseDataWithJobMap"),
++  ("read_only_space", 0x064dd): (218, "UncompiledDataWithPreparseDataAndJobMap"),
++  ("read_only_space", 0x06505): (250, "OnHeapBasicBlockProfilerDataMap"),
++  ("read_only_space", 0x0652d): (197, "TurbofanBitsetTypeMap"),
++  ("read_only_space", 0x06555): (201, "TurbofanUnionTypeMap"),
++  ("read_only_space", 0x0657d): (200, "TurbofanRangeTypeMap"),
++  ("read_only_space", 0x065a5): (198, "TurbofanHeapConstantTypeMap"),
++  ("read_only_space", 0x065cd): (199, "TurbofanOtherNumberConstantTypeMap"),
++  ("read_only_space", 0x065f5): (246, "InternalClassMap"),
++  ("read_only_space", 0x0661d): (257, "SmiPairMap"),
++  ("read_only_space", 0x06645): (256, "SmiBoxMap"),
++  ("read_only_space", 0x0666d): (225, "ExportedSubClassBaseMap"),
++  ("read_only_space", 0x06695): (226, "ExportedSubClassMap"),
++  ("read_only_space", 0x066bd): (202, "AbstractInternalClassSubclass1Map"),
++  ("read_only_space", 0x066e5): (203, "AbstractInternalClassSubclass2Map"),
++  ("read_only_space", 0x0670d): (195, "InternalClassWithSmiElementsMap"),
++  ("read_only_space", 0x06735): (247, "InternalClassWithStructElementsMap"),
++  ("read_only_space", 0x0675d): (227, "ExportedSubClass2Map"),
++  ("read_only_space", 0x06785): (258, "SortStateMap"),
++  ("read_only_space", 0x067ad): (146, "AllocationSiteWithWeakNextMap"),
++  ("read_only_space", 0x067d5): (146, "AllocationSiteWithoutWeakNextMap"),
++  ("read_only_space", 0x067fd): (137, "LoadHandler1Map"),
++  ("read_only_space", 0x06825): (137, "LoadHandler2Map"),
++  ("read_only_space", 0x0684d): (137, "LoadHandler3Map"),
++  ("read_only_space", 0x06875): (138, "StoreHandler0Map"),
++  ("read_only_space", 0x0689d): (138, "StoreHandler1Map"),
++  ("read_only_space", 0x068c5): (138, "StoreHandler2Map"),
++  ("read_only_space", 0x068ed): (138, "StoreHandler3Map"),
+   ("map_space", 0x02131): (1057, "ExternalMap"),
+   ("map_space", 0x02159): (2114, "JSMessageObjectMap"),
+ }
+@@ -464,32 +466,32 @@ KNOWN_OBJECTS = {
+   ("read_only_space", 0x02849): "TerminationException",
+   ("read_only_space", 0x028b1): "OptimizedOut",
+   ("read_only_space", 0x02911): "StaleRegister",
+-  ("read_only_space", 0x033c1): "EmptyPropertyArray",
+-  ("read_only_space", 0x033c9): "EmptyByteArray",
+-  ("read_only_space", 0x033d1): "EmptyObjectBoilerplateDescription",
+-  ("read_only_space", 0x03405): "EmptyArrayBoilerplateDescription",
+-  ("read_only_space", 0x03411): "EmptyClosureFeedbackCellArray",
+-  ("read_only_space", 0x03419): "EmptySlowElementDictionary",
+-  ("read_only_space", 0x0343d): "EmptyOrderedHashMap",
+-  ("read_only_space", 0x03451): "EmptyOrderedHashSet",
+-  ("read_only_space", 0x03465): "EmptyFeedbackMetadata",
+-  ("read_only_space", 0x03471): "EmptyPropertyDictionary",
+-  ("read_only_space", 0x03499): "EmptyOrderedPropertyDictionary",
+-  ("read_only_space", 0x034b1): "EmptySwissPropertyDictionary",
+-  ("read_only_space", 0x03505): "NoOpInterceptorInfo",
+-  ("read_only_space", 0x0352d): "EmptyWeakFixedArray",
+-  ("read_only_space", 0x03535): "InfinityValue",
+-  ("read_only_space", 0x03541): "MinusZeroValue",
+-  ("read_only_space", 0x0354d): "MinusInfinityValue",
+-  ("read_only_space", 0x03559): "SelfReferenceMarker",
+-  ("read_only_space", 0x03599): "BasicBlockCountersMarker",
+-  ("read_only_space", 0x035dd): "OffHeapTrampolineRelocationInfo",
+-  ("read_only_space", 0x035e9): "TrampolineTrivialCodeDataContainer",
+-  ("read_only_space", 0x035f5): "TrampolinePromiseRejectionCodeDataContainer",
+-  ("read_only_space", 0x03601): "GlobalThisBindingScopeInfo",
+-  ("read_only_space", 0x03631): "EmptyFunctionScopeInfo",
+-  ("read_only_space", 0x03655): "NativeScopeInfo",
+-  ("read_only_space", 0x0366d): "HashSeed",
++  ("read_only_space", 0x033e9): "EmptyPropertyArray",
++  ("read_only_space", 0x033f1): "EmptyByteArray",
++  ("read_only_space", 0x033f9): "EmptyObjectBoilerplateDescription",
++  ("read_only_space", 0x0342d): "EmptyArrayBoilerplateDescription",
++  ("read_only_space", 0x03439): "EmptyClosureFeedbackCellArray",
++  ("read_only_space", 0x03441): "EmptySlowElementDictionary",
++  ("read_only_space", 0x03465): "EmptyOrderedHashMap",
++  ("read_only_space", 0x03479): "EmptyOrderedHashSet",
++  ("read_only_space", 0x0348d): "EmptyFeedbackMetadata",
++  ("read_only_space", 0x03499): "EmptyPropertyDictionary",
++  ("read_only_space", 0x034c1): "EmptyOrderedPropertyDictionary",
++  ("read_only_space", 0x034d9): "EmptySwissPropertyDictionary",
++  ("read_only_space", 0x0352d): "NoOpInterceptorInfo",
++  ("read_only_space", 0x03555): "EmptyWeakFixedArray",
++  ("read_only_space", 0x0355d): "InfinityValue",
++  ("read_only_space", 0x03569): "MinusZeroValue",
++  ("read_only_space", 0x03575): "MinusInfinityValue",
++  ("read_only_space", 0x03581): "SelfReferenceMarker",
++  ("read_only_space", 0x035c1): "BasicBlockCountersMarker",
++  ("read_only_space", 0x03605): "OffHeapTrampolineRelocationInfo",
++  ("read_only_space", 0x03611): "TrampolineTrivialCodeDataContainer",
++  ("read_only_space", 0x0361d): "TrampolinePromiseRejectionCodeDataContainer",
++  ("read_only_space", 0x03629): "GlobalThisBindingScopeInfo",
++  ("read_only_space", 0x03659): "EmptyFunctionScopeInfo",
++  ("read_only_space", 0x0367d): "NativeScopeInfo",
++  ("read_only_space", 0x03695): "HashSeed",
+   ("old_space", 0x04229): "ArgumentsIteratorAccessor",
+   ("old_space", 0x0426d): "ArrayLengthAccessor",
+   ("old_space", 0x042b1): "BoundFunctionLengthAccessor",
+-- 
+2.35.1
+

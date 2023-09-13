@@ -1,0 +1,313 @@
+From edc349dbf5a59e3e1e6d77f7be8dea4f7bcf8447 Mon Sep 17 00:00:00 2001
+From: Clemens Backes <clemensb@chromium.org>
+Date: Fri, 23 Jul 2021 20:13:09 +0200
+Subject: [PATCH] [liftoff][arm] Add explicit stack check for large frames
+
+Handle large frames by doing an explicit check to see if there is enough
+remaining stack space before the stack limit.
+The bailout which can be removed then is being triggered on more than 1
+percent of all functions, so this is expected to improve compile time by
+several percent, because we avoid the costly TurboFan compilation for
+those >1%.
+
+R=ahaas@chromium.org
+
+Bug: v8:11235
+Change-Id: I935998f7676647572598b52c989f7d41cc5239a8
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3046180
+Commit-Queue: Clemens Backes <clemensb@chromium.org>
+Reviewed-by: Andreas Haas <ahaas@chromium.org>
+Cr-Commit-Position: refs/heads/master@{#75897}
+---
+ src/wasm/baseline/arm/liftoff-assembler-arm.h | 94 ++++++++++++-------
+ .../baseline/arm64/liftoff-assembler-arm64.h  |  3 +-
+ .../baseline/ia32/liftoff-assembler-ia32.h    |  3 +-
+ src/wasm/baseline/liftoff-assembler.h         |  2 +-
+ src/wasm/baseline/liftoff-compiler.cc         |  9 +-
+ .../baseline/mips/liftoff-assembler-mips.h    |  3 +-
+ .../mips64/liftoff-assembler-mips64.h         |  3 +-
+ src/wasm/baseline/ppc/liftoff-assembler-ppc.h |  3 +-
+ .../riscv64/liftoff-assembler-riscv64.h       |  3 +-
+ .../baseline/s390/liftoff-assembler-s390.h    |  3 +-
+ src/wasm/baseline/x64/liftoff-assembler-x64.h |  3 +-
+ 11 files changed, 83 insertions(+), 46 deletions(-)
+
+diff --git a/src/wasm/baseline/arm/liftoff-assembler-arm.h b/src/wasm/baseline/arm/liftoff-assembler-arm.h
+index e2bd64c88f..012601478c 100644
+--- a/src/wasm/baseline/arm/liftoff-assembler-arm.h
++++ b/src/wasm/baseline/arm/liftoff-assembler-arm.h
+@@ -10,6 +10,7 @@
+ #include "src/heap/memory-chunk.h"
+ #include "src/wasm/baseline/liftoff-assembler.h"
+ #include "src/wasm/baseline/liftoff-register.h"
++#include "src/wasm/wasm-objects.h"
+ 
+ namespace v8 {
+ namespace internal {
+@@ -478,51 +479,78 @@ void LiftoffAssembler::PrepareTailCall(int num_callee_stack_params,
+ 
+ void LiftoffAssembler::AlignFrameSize() {}
+ 
+-void LiftoffAssembler::PatchPrepareStackFrame(int offset) {
++void LiftoffAssembler::PatchPrepareStackFrame(
++    int offset, SafepointTableBuilder* safepoint_table_builder) {
+   // The frame_size includes the frame marker. The frame marker has already been
+   // pushed on the stack though, so we don't need to allocate memory for it
+   // anymore.
+   int frame_size = GetTotalFrameSize() - kSystemPointerSize;
+ 
+-  // When using the simulator, deal with Liftoff which allocates the stack
+-  // before checking it.
+-  // TODO(arm): Remove this when the stack check mechanism will be updated.
+-  // Note: This check is only needed for simulator runs, but we run it
+-  // unconditionally to make sure that the simulator executes the same code
+-  // that's also executed on native hardware (see https://crbug.com/v8/11041).
+-  if (frame_size > KB / 2) {
+-    bailout(kOtherReason,
+-            "Stack limited to 512 bytes to avoid a bug in StackCheck");
+-    return;
+-  }
+-
+   PatchingAssembler patching_assembler(AssemblerOptions{},
+                                        buffer_start_ + offset,
+                                        liftoff::kPatchInstructionsRequired);
+-#if V8_OS_WIN
+-  if (frame_size > kStackPageSize) {
+-    // Generate OOL code (at the end of the function, where the current
+-    // assembler is pointing) to do the explicit stack limit check (see
+-    // https://docs.microsoft.com/en-us/previous-versions/visualstudio/
+-    // visual-studio-6.0/aa227153(v=vs.60)).
+-    // At the function start, emit a jump to that OOL code (from {offset} to
+-    // {pc_offset()}).
+-    int ool_offset = pc_offset() - offset;
+-    patching_assembler.b(ool_offset - Instruction::kPcLoadDelta);
++  if (V8_LIKELY(frame_size < 4 * KB)) {
++    // This is the standard case for small frames: just subtract from SP and be
++    // done with it.
++    patching_assembler.sub(sp, sp, Operand(frame_size));
+     patching_assembler.PadWithNops();
+-
+-    // Now generate the OOL code.
+-    AllocateStackSpace(frame_size);
+-    // Jump back to the start of the function (from {pc_offset()} to {offset +
+-    // liftoff::kPatchInstructionsRequired * kInstrSize}).
+-    int func_start_offset =
+-        offset + liftoff::kPatchInstructionsRequired * kInstrSize - pc_offset();
+-    b(func_start_offset - Instruction::kPcLoadDelta);
+     return;
+   }
+-#endif
+-  patching_assembler.sub(sp, sp, Operand(frame_size));
++
++  // The frame size is bigger than 4KB, so we might overflow the available stack
++  // space if we first allocate the frame and then do the stack check (we will
++  // need some remaining stack space for throwing the exception). That's why we
++  // check the available stack space before we allocate the frame. To do this we
++  // replace the {__ sub(sp, sp, framesize)} with a jump to OOL code that does
++  // this "extended stack check".
++  //
++  // The OOL code can simply be generated here with the normal assembler,
++  // because all other code generation, including OOL code, has already finished
++  // when {PatchPrepareStackFrame} is called. The function prologue then jumps
++  // to the current {pc_offset()} to execute the OOL code for allocating the
++  // large frame.
++
++  // Emit the unconditional branch in the function prologue (from {offset} to
++  // {pc_offset()}).
++  patching_assembler.b(pc_offset() - offset - Instruction::kPcLoadDelta);
+   patching_assembler.PadWithNops();
++
++  // If the frame is bigger than the stack, we throw the stack overflow
++  // exception unconditionally. Thereby we can avoid the integer overflow
++  // check in the condition code.
++  Label continuation;
++  if (frame_size < FLAG_stack_size * 1024) {
++    UseScratchRegisterScope temps(this);
++    Register stack_limit = temps.Acquire();
++    ldr(stack_limit,
++        FieldMemOperand(kWasmInstanceRegister,
++                        WasmInstanceObject::kRealStackLimitAddressOffset));
++    ldr(stack_limit, MemOperand(stack_limit));
++    add(stack_limit, stack_limit, Operand(frame_size));
++    cmp(sp, stack_limit);
++    b(cs /* higher or same */, &continuation);
++  }
++
++  // The instance has not been written to the frame yet (because no frame space
++  // has been allocated), but the runtime call expects it. Hence push it now.
++  Push(kWasmInstanceRegister);
++  Call(wasm::WasmCode::kWasmStackOverflow, RelocInfo::WASM_STUB_CALL);
++  // The call will not return; just define an empty safepoint.
++  safepoint_table_builder->DefineSafepoint(this);
++  if (FLAG_debug_code) stop();
++
++  bind(&continuation);
++
++  // Now allocate the stack space. Note that this might do more than just
++  // decrementing the SP; consult {TurboAssembler::AllocateStackSpace}.
++  AllocateStackSpace(frame_size);
++
++  // Jump back to the start of the function, from {pc_offset()} to
++  // right after the reserved space for the {sub_sp_32} (which is a branch
++  // now).
++  int func_start_offset =
++      offset + liftoff::kPatchInstructionsRequired * kInstrSize;
++  b(func_start_offset - pc_offset() - Instruction::kPcLoadDelta);
+ }
+ 
+ void LiftoffAssembler::FinishCode() { CheckConstPool(true, false); }
+diff --git a/src/wasm/baseline/arm64/liftoff-assembler-arm64.h b/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
+index 356577eaea..8c73e7c824 100644
+--- a/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
++++ b/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
+@@ -307,7 +307,8 @@ void LiftoffAssembler::AlignFrameSize() {
+   }
+ }
+ 
+-void LiftoffAssembler::PatchPrepareStackFrame(int offset) {
++void LiftoffAssembler::PatchPrepareStackFrame(int offset,
++                                              SafepointTableBuilder*) {
+   // The frame_size includes the frame marker. The frame marker has already been
+   // pushed on the stack though, so we don't need to allocate memory for it
+   // anymore.
+diff --git a/src/wasm/baseline/ia32/liftoff-assembler-ia32.h b/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
+index d29963dea1..837b9f4220 100644
+--- a/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
++++ b/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
+@@ -220,7 +220,8 @@ void LiftoffAssembler::PrepareTailCall(int num_callee_stack_params,
+ 
+ void LiftoffAssembler::AlignFrameSize() {}
+ 
+-void LiftoffAssembler::PatchPrepareStackFrame(int offset) {
++void LiftoffAssembler::PatchPrepareStackFrame(int offset,
++                                              SafepointTableBuilder*) {
+   // The frame_size includes the frame marker. The frame marker has already been
+   // pushed on the stack though, so we don't need to allocate memory for it
+   // anymore.
+diff --git a/src/wasm/baseline/liftoff-assembler.h b/src/wasm/baseline/liftoff-assembler.h
+index c27653bb95..19611fb0ee 100644
+--- a/src/wasm/baseline/liftoff-assembler.h
++++ b/src/wasm/baseline/liftoff-assembler.h
+@@ -654,7 +654,7 @@ class LiftoffAssembler : public TurboAssembler {
+   inline void PrepareTailCall(int num_callee_stack_params,
+                               int stack_param_delta);
+   inline void AlignFrameSize();
+-  inline void PatchPrepareStackFrame(int offset);
++  inline void PatchPrepareStackFrame(int offset, SafepointTableBuilder*);
+   inline void FinishCode();
+   inline void AbortCompilation();
+   inline static constexpr int StaticStackFrameSize();
+diff --git a/src/wasm/baseline/liftoff-compiler.cc b/src/wasm/baseline/liftoff-compiler.cc
+index 57b6457c77..ba0e0e1a5e 100644
+--- a/src/wasm/baseline/liftoff-compiler.cc
++++ b/src/wasm/baseline/liftoff-compiler.cc
+@@ -310,9 +310,9 @@ void CheckBailoutAllowed(LiftoffBailoutReason reason, const char* detail,
+   return;
+ #endif
+ 
+-  // TODO(11235): On arm and arm64 there is still a limit on the size of
+-  // supported stack frames.
+-#if V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_ARM64
++  // TODO(11235): On arm64 there is still a limit on the size of supported stack
++  // frames.
++#if V8_TARGET_ARCH_ARM64
+   if (strstr(detail, "Stack limited to 512 bytes")) return;
+ #endif
+ 
+@@ -954,7 +954,8 @@ class LiftoffCompiler {
+       GenerateOutOfLineCode(&ool);
+     }
+     DCHECK_EQ(frame_size, __ GetTotalFrameSize());
+-    __ PatchPrepareStackFrame(pc_offset_stack_frame_construction_);
++    __ PatchPrepareStackFrame(pc_offset_stack_frame_construction_,
++                              &safepoint_table_builder_);
+     __ FinishCode();
+     safepoint_table_builder_.Emit(&asm_, __ GetTotalFrameSlotCountForGC());
+     // Emit the handler table.
+diff --git a/src/wasm/baseline/mips/liftoff-assembler-mips.h b/src/wasm/baseline/mips/liftoff-assembler-mips.h
+index 48891ab08b..94d67ffee1 100644
+--- a/src/wasm/baseline/mips/liftoff-assembler-mips.h
++++ b/src/wasm/baseline/mips/liftoff-assembler-mips.h
+@@ -338,7 +338,8 @@ void LiftoffAssembler::PrepareTailCall(int num_callee_stack_params,
+ 
+ void LiftoffAssembler::AlignFrameSize() {}
+ 
+-void LiftoffAssembler::PatchPrepareStackFrame(int offset) {
++void LiftoffAssembler::PatchPrepareStackFrame(int offset,
++                                              SafepointTableBuilder*) {
+   // The frame_size includes the frame marker. The frame marker has already been
+   // pushed on the stack though, so we don't need to allocate memory for it
+   // anymore.
+diff --git a/src/wasm/baseline/mips64/liftoff-assembler-mips64.h b/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
+index c7a66ca754..590414b38c 100644
+--- a/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
++++ b/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
+@@ -325,7 +325,8 @@ void LiftoffAssembler::PrepareTailCall(int num_callee_stack_params,
+ 
+ void LiftoffAssembler::AlignFrameSize() {}
+ 
+-void LiftoffAssembler::PatchPrepareStackFrame(int offset) {
++void LiftoffAssembler::PatchPrepareStackFrame(int offset,
++                                              SafepointTableBuilder*) {
+   // The frame_size includes the frame marker. The frame marker has already been
+   // pushed on the stack though, so we don't need to allocate memory for it
+   // anymore.
+diff --git a/src/wasm/baseline/ppc/liftoff-assembler-ppc.h b/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
+index 9e6262a4b3..3065754c18 100644
+--- a/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
++++ b/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
+@@ -110,7 +110,8 @@ void LiftoffAssembler::PrepareTailCall(int num_callee_stack_params,
+ 
+ void LiftoffAssembler::AlignFrameSize() {}
+ 
+-void LiftoffAssembler::PatchPrepareStackFrame(int offset) {
++void LiftoffAssembler::PatchPrepareStackFrame(int offset,
++                                              SafepointTableBuilder*) {
+   bailout(kUnsupportedArchitecture, "PatchPrepareStackFrame");
+ }
+ 
+diff --git a/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h b/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
+index 8b7b0b83e1..9432540f3c 100644
+--- a/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
++++ b/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
+@@ -311,7 +311,8 @@ void LiftoffAssembler::PrepareTailCall(int num_callee_stack_params,
+ 
+ void LiftoffAssembler::AlignFrameSize() {}
+ 
+-void LiftoffAssembler::PatchPrepareStackFrame(int offset) {
++void LiftoffAssembler::PatchPrepareStackFrame(int offset,
++                                              SafepointTableBuilder*) {
+   int frame_size = GetTotalFrameSize() - kSystemPointerSize;
+   // We can't run out of space, just pass anything big enough to not cause the
+   // assembler to try to grow the buffer.
+diff --git a/src/wasm/baseline/s390/liftoff-assembler-s390.h b/src/wasm/baseline/s390/liftoff-assembler-s390.h
+index d2b162617d..c7e47ce4a8 100644
+--- a/src/wasm/baseline/s390/liftoff-assembler-s390.h
++++ b/src/wasm/baseline/s390/liftoff-assembler-s390.h
+@@ -122,7 +122,8 @@ void LiftoffAssembler::PrepareTailCall(int num_callee_stack_params,
+ 
+ void LiftoffAssembler::AlignFrameSize() {}
+ 
+-void LiftoffAssembler::PatchPrepareStackFrame(int offset) {
++void LiftoffAssembler::PatchPrepareStackFrame(int offset,
++                                              SafepointTableBuilder*) {
+   int frame_size = GetTotalFrameSize() - kSystemPointerSize;
+ 
+   constexpr int LayInstrSize = 6;
+diff --git a/src/wasm/baseline/x64/liftoff-assembler-x64.h b/src/wasm/baseline/x64/liftoff-assembler-x64.h
+index 0744d2e09b..9308b95189 100644
+--- a/src/wasm/baseline/x64/liftoff-assembler-x64.h
++++ b/src/wasm/baseline/x64/liftoff-assembler-x64.h
+@@ -206,7 +206,8 @@ void LiftoffAssembler::AlignFrameSize() {
+   max_used_spill_offset_ = RoundUp(max_used_spill_offset_, kSystemPointerSize);
+ }
+ 
+-void LiftoffAssembler::PatchPrepareStackFrame(int offset) {
++void LiftoffAssembler::PatchPrepareStackFrame(int offset,
++                                              SafepointTableBuilder*) {
+   // The frame_size includes the frame marker. The frame marker has already been
+   // pushed on the stack though, so we don't need to allocate memory for it
+   // anymore.
+-- 
+2.35.1
+

@@ -1,0 +1,207 @@
+From 21289aa92c80a4161cc5f0d9915a0002a644d8b4 Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Fri, 24 Feb 2023 10:55:33 +0800
+Subject: [PATCH] [riscv64][wasm-relaxed-simd] Add dot/dot_add RISCV
+ implementations
+
+Bug: v8:12284
+
+Change-Id: I4b645b19f16481c51748749a6886ddf3d9032210
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4285830
+Commit-Queue: Yahan Lu <yahan@iscas.ac.cn>
+Reviewed-by: ji qiu <qiuji.odyssey@gmail.com>
+Auto-Submit: Yahan Lu <yahan@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#86052}
+---
+ .../riscv/instruction-selector-riscv.h        | 69 ++++++++++++++++-
+ .../baseline/riscv/liftoff-assembler-riscv.h  | 74 +++++++++++++++----
+ 2 files changed, 128 insertions(+), 15 deletions(-)
+
+diff --git a/src/compiler/backend/riscv/instruction-selector-riscv.h b/src/compiler/backend/riscv/instruction-selector-riscv.h
+index 42cae64f21..28cedf9c44 100644
+--- a/src/compiler/backend/riscv/instruction-selector-riscv.h
++++ b/src/compiler/backend/riscv/instruction-selector-riscv.h
+@@ -1072,6 +1072,8 @@ VISIT_SIMD_QFMOP(F32x4Qfms, kRiscvF32x4Qfms)
+ #undef VISIT_SIMD_QFMOP
+ 
+ void InstructionSelector::VisitI32x4DotI16x8S(Node* node) {
++  constexpr int32_t FIRST_INDEX = 0b01010101;
++  constexpr int32_t SECOND_INDEX = 0b10101010;
+   RiscvOperandGenerator g(this);
+   InstructionOperand temp = g.TempFpRegister(v16);
+   InstructionOperand temp1 = g.TempFpRegister(v14);
+@@ -1080,14 +1082,77 @@ void InstructionSelector::VisitI32x4DotI16x8S(Node* node) {
+   this->Emit(kRiscvVwmul, temp, g.UseRegister(node->InputAt(0)),
+              g.UseRegister(node->InputAt(1)), g.UseImmediate(E16),
+              g.UseImmediate(m1));
+-  this->Emit(kRiscvVcompress, temp2, temp, g.UseImmediate(0b01010101),
++  this->Emit(kRiscvVcompress, temp2, temp, g.UseImmediate(FIRST_INDEX),
+              g.UseImmediate(E32), g.UseImmediate(m2));
+-  this->Emit(kRiscvVcompress, temp1, temp, g.UseImmediate(0b10101010),
++  this->Emit(kRiscvVcompress, temp1, temp, g.UseImmediate(SECOND_INDEX),
+              g.UseImmediate(E32), g.UseImmediate(m2));
+   this->Emit(kRiscvVaddVv, dst, temp1, temp2, g.UseImmediate(E32),
+              g.UseImmediate(m1));
+ }
+ 
++void InstructionSelector::VisitI16x8DotI8x16I7x16S(Node* node) {
++  constexpr int32_t FIRST_INDEX = 0b0101010101010101;
++  constexpr int32_t SECOND_INDEX = 0b1010101010101010;
++  RiscvOperandGenerator g(this);
++  InstructionOperand temp = g.TempFpRegister(v16);
++  InstructionOperand temp1 = g.TempFpRegister(v14);
++  InstructionOperand temp2 = g.TempFpRegister(v30);
++  InstructionOperand dst = g.DefineAsRegister(node);
++  this->Emit(kRiscvVwmul, temp, g.UseRegister(node->InputAt(0)),
++             g.UseRegister(node->InputAt(1)), g.UseImmediate(E8),
++             g.UseImmediate(m1));
++  this->Emit(kRiscvVcompress, temp2, temp, g.UseImmediate(FIRST_INDEX),
++             g.UseImmediate(E16), g.UseImmediate(m2));
++  this->Emit(kRiscvVcompress, temp1, temp, g.UseImmediate(SECOND_INDEX),
++             g.UseImmediate(E16), g.UseImmediate(m2));
++  this->Emit(kRiscvVaddVv, dst, temp1, temp2, g.UseImmediate(E16),
++             g.UseImmediate(m1));
++}
++
++void InstructionSelector::VisitI32x4DotI8x16I7x16AddS(Node* node) {
++  constexpr int32_t FIRST_INDEX = 0b0001000100010001;
++  constexpr int32_t SECOND_INDEX = 0b0010001000100010;
++  constexpr int32_t THIRD_INDEX = 0b0100010001000100;
++  constexpr int32_t FOURTH_INDEX = 0b1000100010001000;
++  RiscvOperandGenerator g(this);
++  InstructionOperand intermediate = g.TempFpRegister(v12);
++  this->Emit(kRiscvVwmul, intermediate, g.UseRegister(node->InputAt(0)),
++             g.UseRegister(node->InputAt(1)), g.UseImmediate(E8),
++             g.UseImmediate(m1));
++
++  InstructionOperand compressedPart1 = g.TempFpRegister(v14);
++  InstructionOperand compressedPart2 = g.TempFpRegister(v16);
++  this->Emit(kRiscvVcompress, compressedPart2, intermediate,
++             g.UseImmediate(FIRST_INDEX), g.UseImmediate(E16),
++             g.UseImmediate(m2));
++  this->Emit(kRiscvVcompress, compressedPart1, intermediate,
++             g.UseImmediate(SECOND_INDEX), g.UseImmediate(E16),
++             g.UseImmediate(m2));
++
++  InstructionOperand compressedPart3 = g.TempFpRegister(v20);
++  InstructionOperand compressedPart4 = g.TempFpRegister(v26);
++  this->Emit(kRiscvVcompress, compressedPart3, intermediate,
++             g.UseImmediate(THIRD_INDEX), g.UseImmediate(E16),
++             g.UseImmediate(m2));
++  this->Emit(kRiscvVcompress, compressedPart4, intermediate,
++             g.UseImmediate(FOURTH_INDEX), g.UseImmediate(E16),
++             g.UseImmediate(m2));
++
++  InstructionOperand temp2 = g.TempFpRegister(v18);
++  InstructionOperand temp = g.TempFpRegister(kSimd128ScratchReg);
++  this->Emit(kRiscvVwadd, temp2, compressedPart1, compressedPart2,
++             g.UseImmediate(E16), g.UseImmediate(m1));
++  this->Emit(kRiscvVwadd, temp, compressedPart3, compressedPart4,
++             g.UseImmediate(E16), g.UseImmediate(m1));
++
++  InstructionOperand mul_result = g.TempFpRegister(v16);
++  InstructionOperand dst = g.DefineAsRegister(node);
++  this->Emit(kRiscvVaddVv, mul_result, temp2, temp, g.UseImmediate(E32),
++             g.UseImmediate(m1));
++  this->Emit(kRiscvVaddVv, dst, mul_result, g.UseRegister(node->InputAt(2)),
++             g.UseImmediate(E32), g.UseImmediate(m1));
++}
++
+ void InstructionSelector::VisitI8x16Shuffle(Node* node) {
+   uint8_t shuffle[kSimd128Size];
+   bool is_swizzle;
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv.h
+index 4afaa71a21..e4017e5ca1 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv.h
+@@ -591,19 +591,6 @@ void LiftoffAssembler::emit_i16x8_relaxed_q15mulr_s(LiftoffRegister dst,
+   vsmul_vv(dst.fp().toV(), src1.fp().toV(), src2.fp().toV());
+ }
+ 
+-void LiftoffAssembler::emit_i16x8_dot_i8x16_i7x16_s(LiftoffRegister dst,
+-                                                    LiftoffRegister lhs,
+-                                                    LiftoffRegister rhs) {
+-  bailout(kSimd, "emit_i16x8_dot_i8x16_i7x16_s");
+-}
+-
+-void LiftoffAssembler::emit_i32x4_dot_i8x16_i7x16_add_s(LiftoffRegister dst,
+-                                                        LiftoffRegister lhs,
+-                                                        LiftoffRegister rhs,
+-                                                        LiftoffRegister acc) {
+-  bailout(kSimd, "emit_i32x4_dot_i8x16_i7x16_add_s");
+-}
+-
+ void LiftoffAssembler::emit_i64x2_bitmask(LiftoffRegister dst,
+                                           LiftoffRegister src) {
+   VU.set(kScratchReg, E64, m1);
+@@ -1381,6 +1368,67 @@ void LiftoffAssembler::emit_i32x4_dot_i16x8_s(LiftoffRegister dst,
+   vadd_vv(dst.fp().toV(), kSimd128ScratchReg, v0);
+ }
+ 
++void LiftoffAssembler::emit_i16x8_dot_i8x16_i7x16_s(LiftoffRegister dst,
++                                                    LiftoffRegister lhs,
++                                                    LiftoffRegister rhs) {
++  VU.set(kScratchReg, E8, m1);
++  vwmul_vv(kSimd128ScratchReg3, lhs.fp().toV(), rhs.fp().toV());
++  VU.set(kScratchReg, E16, m2);
++
++  constexpr int32_t FIRST_INDEX = 0b0101010101010101;
++  constexpr int32_t SECOND_INDEX = 0b1010101010101010;
++  li(kScratchReg, FIRST_INDEX);
++  vmv_sx(v0, kScratchReg);
++  vcompress_vv(kSimd128ScratchReg, kSimd128ScratchReg3, v0);
++
++  li(kScratchReg, SECOND_INDEX);
++  vmv_sx(kSimd128ScratchReg2, kScratchReg);
++  vcompress_vv(v0, kSimd128ScratchReg3, kSimd128ScratchReg2);
++  VU.set(kScratchReg, E16, m1);
++  vadd_vv(dst.fp().toV(), kSimd128ScratchReg, v0);
++}
++
++void LiftoffAssembler::emit_i32x4_dot_i8x16_i7x16_add_s(LiftoffRegister dst,
++                                                        LiftoffRegister lhs,
++                                                        LiftoffRegister rhs,
++                                                        LiftoffRegister acc) {
++  VU.set(kScratchReg, E8, m1);
++  VRegister intermediate = kSimd128ScratchReg3;
++  vwmul_vv(intermediate, lhs.fp().toV(), rhs.fp().toV());  // i16*16 v8 v9
++
++  constexpr int32_t FIRST_INDEX = 0b0001000100010001;
++  constexpr int32_t SECOND_INDEX = 0b0010001000100010;
++  constexpr int32_t THIRD_INDEX = 0b0100010001000100;
++  constexpr int32_t FOURTH_INDEX = 0b1000100010001000;
++
++  VU.set(kScratchReg, E16, m2);
++  li(kScratchReg, FIRST_INDEX);
++  vmv_sx(v0, kScratchReg);
++  vcompress_vv(kSimd128ScratchReg, intermediate, v0);  // i16*4 a
++  li(kScratchReg, SECOND_INDEX);
++  vmv_sx(kSimd128ScratchReg2, kScratchReg);
++  vcompress_vv(v0, intermediate, kSimd128ScratchReg2);  // i16*4 b
++
++  VU.set(kScratchReg, E16, m1);
++  vwadd_vv(dst.fp().toV(), kSimd128ScratchReg, v0);  // i32*4 c
++
++  VU.set(kScratchReg, E16, m2);
++  li(kScratchReg, THIRD_INDEX);
++  vmv_sx(v0, kScratchReg);
++  vcompress_vv(kSimd128ScratchReg, intermediate, v0);  // i16*4 a
++
++  li(kScratchReg, FOURTH_INDEX);
++  vmv_sx(kSimd128ScratchReg2, kScratchReg);
++  vcompress_vv(v0, intermediate, kSimd128ScratchReg2);  // i16*4 b
++
++  VU.set(kScratchReg, E16, m1);
++  vwadd_vv(kSimd128ScratchReg3, kSimd128ScratchReg, v0);  // i32*4 c
++
++  VU.set(kScratchReg, E32, m1);
++  vadd_vv(dst.fp().toV(), dst.fp().toV(), kSimd128ScratchReg3);
++  vadd_vv(dst.fp().toV(), dst.fp().toV(), acc.fp().toV());
++}
++
+ void LiftoffAssembler::emit_i64x2_neg(LiftoffRegister dst,
+                                       LiftoffRegister src) {
+   VU.set(kScratchReg, E64, m1);
+-- 
+2.35.1
+

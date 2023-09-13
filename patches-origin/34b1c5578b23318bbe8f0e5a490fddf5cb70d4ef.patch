@@ -1,0 +1,283 @@
+From 34b1c5578b23318bbe8f0e5a490fddf5cb70d4ef Mon Sep 17 00:00:00 2001
+From: Camillo Bruni <cbruni@chromium.org>
+Date: Tue, 25 May 2021 16:59:06 +0200
+Subject: [PATCH] [codegen] Add more register aliasing checks for RecordWrite
+ helpers
+
+Note: OutOfLineRecordWrite on arm/arm64 only takes "object" and "value"
+as arguments. The currently can be the same and thus we don't add any
+additional DHCECKs there.
+
+Change-Id: I757d1f3ba9c0d0c5994ecedf26728454e32f41a5
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/2916813
+Commit-Queue: Camillo Bruni <cbruni@chromium.org>
+Reviewed-by: Santiago Aboy Solanes <solanes@chromium.org>
+Cr-Commit-Position: refs/heads/master@{#74758}
+---
+ src/codegen/arm/macro-assembler-arm.cc                 | 2 +-
+ src/codegen/ia32/macro-assembler-ia32.cc               | 5 ++---
+ src/codegen/mips/macro-assembler-mips.cc               | 1 +
+ src/codegen/mips64/macro-assembler-mips64.cc           | 1 +
+ src/codegen/ppc/macro-assembler-ppc.cc                 | 3 ++-
+ src/codegen/riscv64/macro-assembler-riscv64.cc         | 2 ++
+ src/codegen/s390/macro-assembler-s390.cc               | 3 ++-
+ src/codegen/x64/macro-assembler-x64.cc                 | 6 +++---
+ src/compiler/backend/ia32/code-generator-ia32.cc       | 2 ++
+ src/compiler/backend/mips/code-generator-mips.cc       | 2 ++
+ src/compiler/backend/mips64/code-generator-mips64.cc   | 2 ++
+ src/compiler/backend/ppc/code-generator-ppc.cc         | 2 ++
+ src/compiler/backend/riscv64/code-generator-riscv64.cc | 5 ++++-
+ src/compiler/backend/s390/code-generator-s390.cc       | 2 ++
+ src/compiler/backend/x64/code-generator-x64.cc         | 2 ++
+ 15 files changed, 30 insertions(+), 10 deletions(-)
+
+diff --git a/src/codegen/arm/macro-assembler-arm.cc b/src/codegen/arm/macro-assembler-arm.cc
+index baa14ebe46..1692f50886 100644
+--- a/src/codegen/arm/macro-assembler-arm.cc
++++ b/src/codegen/arm/macro-assembler-arm.cc
+@@ -806,7 +806,7 @@ void MacroAssembler::RecordWrite(Register object, Operand offset,
+                                  SaveFPRegsMode fp_mode,
+                                  RememberedSetAction remembered_set_action,
+                                  SmiCheck smi_check) {
+-  DCHECK_NE(object, value);
++  DCHECK(!AreAliased(object, value));
+   if (FLAG_debug_code) {
+     {
+       UseScratchRegisterScope temps(this);
+diff --git a/src/codegen/ia32/macro-assembler-ia32.cc b/src/codegen/ia32/macro-assembler-ia32.cc
+index 0ef0a590c7..620ac40569 100644
+--- a/src/codegen/ia32/macro-assembler-ia32.cc
++++ b/src/codegen/ia32/macro-assembler-ia32.cc
+@@ -442,6 +442,7 @@ void TurboAssembler::CallRecordWriteStub(
+     Register object, Register address,
+     RememberedSetAction remembered_set_action, SaveFPRegsMode fp_mode,
+     StubCallMode mode) {
++  DCHECK(!AreAliased(object, address));
+   WriteBarrierDescriptor descriptor;
+   RegList registers = descriptor.allocatable_registers();
+   SaveRegisters(registers);
+@@ -485,9 +486,7 @@ void MacroAssembler::RecordWrite(Register object, Register address,
+                                  Register value, SaveFPRegsMode fp_mode,
+                                  RememberedSetAction remembered_set_action,
+                                  SmiCheck smi_check) {
+-  DCHECK(object != value);
+-  DCHECK(object != address);
+-  DCHECK(value != address);
++  DCHECK(!AreAliased(object, value, address));
+   AssertNotSmi(object);
+ 
+   if ((remembered_set_action == RememberedSetAction::kOmit &&
+diff --git a/src/codegen/mips/macro-assembler-mips.cc b/src/codegen/mips/macro-assembler-mips.cc
+index f3d170d5e4..e5f06dbb0b 100644
+--- a/src/codegen/mips/macro-assembler-mips.cc
++++ b/src/codegen/mips/macro-assembler-mips.cc
+@@ -261,6 +261,7 @@ void TurboAssembler::CallRecordWriteStub(
+     Register object, Register address,
+     RememberedSetAction remembered_set_action, SaveFPRegsMode fp_mode,
+     StubCallMode mode) {
++  DCHECK(!AreAliased(object, address));
+   WriteBarrierDescriptor descriptor;
+   RegList registers = descriptor.allocatable_registers();
+ 
+diff --git a/src/codegen/mips64/macro-assembler-mips64.cc b/src/codegen/mips64/macro-assembler-mips64.cc
+index 5fbb414d3a..f0cf719bd5 100644
+--- a/src/codegen/mips64/macro-assembler-mips64.cc
++++ b/src/codegen/mips64/macro-assembler-mips64.cc
+@@ -259,6 +259,7 @@ void TurboAssembler::CallRecordWriteStub(
+     Register object, Register address,
+     RememberedSetAction remembered_set_action, SaveFPRegsMode fp_mode,
+     StubCallMode mode) {
++  DCHECK(!AreAliased(object, address));
+   WriteBarrierDescriptor descriptor;
+   RegList registers = descriptor.allocatable_registers();
+   SaveRegisters(registers);
+diff --git a/src/codegen/ppc/macro-assembler-ppc.cc b/src/codegen/ppc/macro-assembler-ppc.cc
+index 08671bf4e0..099230d2a7 100644
+--- a/src/codegen/ppc/macro-assembler-ppc.cc
++++ b/src/codegen/ppc/macro-assembler-ppc.cc
+@@ -679,6 +679,7 @@ void TurboAssembler::CallRecordWriteStub(
+     Register object, Register address,
+     RememberedSetAction remembered_set_action, SaveFPRegsMode fp_mode,
+     StubCallMode mode) {
++  DCHECK(!AreAliased(object, address));
+   WriteBarrierDescriptor descriptor;
+   RegList registers = descriptor.allocatable_registers();
+   SaveRegisters(registers);
+@@ -732,7 +733,7 @@ void MacroAssembler::RecordWrite(Register object, Register address,
+                                  SaveFPRegsMode fp_mode,
+                                  RememberedSetAction remembered_set_action,
+                                  SmiCheck smi_check) {
+-  DCHECK(object != value);
++  DCHECK(!AreAliased(object, value, address));
+   if (FLAG_debug_code) {
+     LoadTaggedPointerField(r0, MemOperand(address));
+     cmp(r0, value);
+diff --git a/src/codegen/riscv64/macro-assembler-riscv64.cc b/src/codegen/riscv64/macro-assembler-riscv64.cc
+index 4042f6164f..9e9830b7f8 100644
+--- a/src/codegen/riscv64/macro-assembler-riscv64.cc
++++ b/src/codegen/riscv64/macro-assembler-riscv64.cc
+@@ -260,6 +260,7 @@ void TurboAssembler::CallRecordWriteStub(
+     Register object, Register address,
+     RememberedSetAction remembered_set_action, SaveFPRegsMode fp_mode,
+     StubCallMode mode) {
++  DCHECK(!AreAliased(object, address, value));
+   WriteBarrierDescriptor descriptor;
+   RegList registers = descriptor.allocatable_registers();
+   SaveRegisters(registers);
+@@ -313,6 +314,7 @@ void MacroAssembler::RecordWrite(Register object, Register address,
+                                  SaveFPRegsMode fp_mode,
+                                  RememberedSetAction remembered_set_action,
+                                  SmiCheck smi_check) {
++  DCHECK(!AreAliased(object, address, value));
+   if (FLAG_debug_code) {
+     DCHECK(!AreAliased(object, address, value, kScratchReg));
+     Ld(kScratchReg, MemOperand(address));
+diff --git a/src/codegen/s390/macro-assembler-s390.cc b/src/codegen/s390/macro-assembler-s390.cc
+index 9adf882fc0..67fa27d0df 100644
+--- a/src/codegen/s390/macro-assembler-s390.cc
++++ b/src/codegen/s390/macro-assembler-s390.cc
+@@ -895,6 +895,7 @@ void TurboAssembler::CallRecordWriteStub(
+     Register object, Register address,
+     RememberedSetAction remembered_set_action, SaveFPRegsMode fp_mode,
+     StubCallMode mode) {
++  DCHECK(!AreAliased(object, address, value));
+   WriteBarrierDescriptor descriptor;
+   RegList registers = descriptor.allocatable_registers();
+   SaveRegisters(registers);
+@@ -946,7 +947,7 @@ void MacroAssembler::RecordWrite(Register object, Register address,
+                                  SaveFPRegsMode fp_mode,
+                                  RememberedSetAction remembered_set_action,
+                                  SmiCheck smi_check) {
+-  DCHECK(object != value);
++  DCHECK(!AreAliased(object, address, value));
+   if (FLAG_debug_code) {
+     LoadTaggedPointerField(r0, MemOperand(address));
+     CmpS64(value, r0);
+diff --git a/src/codegen/x64/macro-assembler-x64.cc b/src/codegen/x64/macro-assembler-x64.cc
+index e59b11a075..26956fdab7 100644
+--- a/src/codegen/x64/macro-assembler-x64.cc
++++ b/src/codegen/x64/macro-assembler-x64.cc
+@@ -409,6 +409,7 @@ void TurboAssembler::RestoreRegisters(RegList registers) {
+ 
+ void TurboAssembler::CallEphemeronKeyBarrier(Register object, Register address,
+                                              SaveFPRegsMode fp_mode) {
++  DCHECK(!AreAliased(object, address));
+   WriteBarrierDescriptor descriptor;
+   RegList registers = descriptor.allocatable_registers();
+ 
+@@ -430,6 +431,7 @@ void TurboAssembler::CallRecordWriteStub(
+     Register object, Register address,
+     RememberedSetAction remembered_set_action, SaveFPRegsMode fp_mode,
+     StubCallMode mode) {
++  DCHECK(!AreAliased(object, address));
+   WriteBarrierDescriptor descriptor;
+   RegList registers = descriptor.allocatable_registers();
+   SaveRegisters(registers);
+@@ -508,9 +510,7 @@ void MacroAssembler::RecordWrite(Register object, Register address,
+                                  Register value, SaveFPRegsMode fp_mode,
+                                  RememberedSetAction remembered_set_action,
+                                  SmiCheck smi_check) {
+-  DCHECK(object != value);
+-  DCHECK(object != address);
+-  DCHECK(value != address);
++  DCHECK(!AreAliased(object, value, address));
+   AssertNotSmi(object);
+ 
+   if ((remembered_set_action == RememberedSetAction::kOmit &&
+diff --git a/src/compiler/backend/ia32/code-generator-ia32.cc b/src/compiler/backend/ia32/code-generator-ia32.cc
+index cf255557fd..d57b95142e 100644
+--- a/src/compiler/backend/ia32/code-generator-ia32.cc
++++ b/src/compiler/backend/ia32/code-generator-ia32.cc
+@@ -317,6 +317,8 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
+         stub_mode_(stub_mode),
+ #endif  // V8_ENABLE_WEBASSEMBLY
+         zone_(gen->zone()) {
++    DCHECK(!AreAliased(object, scratch0, scratch1));
++    DCHECK(!AreAliased(value, scratch0, scratch1));
+   }
+ 
+   void Generate() final {
+diff --git a/src/compiler/backend/mips/code-generator-mips.cc b/src/compiler/backend/mips/code-generator-mips.cc
+index 198571c69d..abb8d5d7cd 100644
+--- a/src/compiler/backend/mips/code-generator-mips.cc
++++ b/src/compiler/backend/mips/code-generator-mips.cc
+@@ -158,6 +158,8 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
+ #endif  // V8_ENABLE_WEBASSEMBLY
+         must_save_lr_(!gen->frame_access_state()->has_frame()),
+         zone_(gen->zone()) {
++    DCHECK(!AreAliased(object, index, scratch0, scratch1));
++    DCHECK(!AreAliased(value, index, scratch0, scratch1));
+   }
+ 
+   void Generate() final {
+diff --git a/src/compiler/backend/mips64/code-generator-mips64.cc b/src/compiler/backend/mips64/code-generator-mips64.cc
+index 60c7b9511c..6897ff8955 100644
+--- a/src/compiler/backend/mips64/code-generator-mips64.cc
++++ b/src/compiler/backend/mips64/code-generator-mips64.cc
+@@ -160,6 +160,8 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
+ #endif  // V8_ENABLE_WEBASSEMBLY
+         must_save_lr_(!gen->frame_access_state()->has_frame()),
+         zone_(gen->zone()) {
++    DCHECK(!AreAliased(object, index, scratch0, scratch1));
++    DCHECK(!AreAliased(value, index, scratch0, scratch1));
+   }
+ 
+   void Generate() final {
+diff --git a/src/compiler/backend/ppc/code-generator-ppc.cc b/src/compiler/backend/ppc/code-generator-ppc.cc
+index c80ae55a9f..944d27d30e 100644
+--- a/src/compiler/backend/ppc/code-generator-ppc.cc
++++ b/src/compiler/backend/ppc/code-generator-ppc.cc
+@@ -150,6 +150,8 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
+         must_save_lr_(!gen->frame_access_state()->has_frame()),
+         unwinding_info_writer_(unwinding_info_writer),
+         zone_(gen->zone()) {
++    DCHECK(!AreAliased(object, offset, scratch0, scratch1));
++    DCHECK(!AreAliased(value, offset, scratch0, scratch1));
+   }
+ 
+   OutOfLineRecordWrite(CodeGenerator* gen, Register object, int32_t offset,
+diff --git a/src/compiler/backend/riscv64/code-generator-riscv64.cc b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+index 16a8afa21e..57b62f1434 100644
+--- a/src/compiler/backend/riscv64/code-generator-riscv64.cc
++++ b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+@@ -154,7 +154,10 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
+         mode_(mode),
+         stub_mode_(stub_mode),
+         must_save_lr_(!gen->frame_access_state()->has_frame()),
+-        zone_(gen->zone()) {}
++        zone_(gen->zone()) {
++    DCHECK(!AreAliased(object, index, scratch0, scratch1));
++    DCHECK(!AreAliased(value, index, scratch0, scratch1));
++  }
+ 
+   void Generate() final {
+     __ CheckPageFlag(value_, scratch0_,
+diff --git a/src/compiler/backend/s390/code-generator-s390.cc b/src/compiler/backend/s390/code-generator-s390.cc
+index 19fb6e6339..af4836d74c 100644
+--- a/src/compiler/backend/s390/code-generator-s390.cc
++++ b/src/compiler/backend/s390/code-generator-s390.cc
+@@ -186,6 +186,8 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
+         must_save_lr_(!gen->frame_access_state()->has_frame()),
+         unwinding_info_writer_(unwinding_info_writer),
+         zone_(gen->zone()) {
++    DCHECK(!AreAliased(object, offset, scratch0, scratch1));
++    DCHECK(!AreAliased(value, offset, scratch0, scratch1));
+   }
+ 
+   OutOfLineRecordWrite(CodeGenerator* gen, Register object, int32_t offset,
+diff --git a/src/compiler/backend/x64/code-generator-x64.cc b/src/compiler/backend/x64/code-generator-x64.cc
+index 539d04e142..025883e359 100644
+--- a/src/compiler/backend/x64/code-generator-x64.cc
++++ b/src/compiler/backend/x64/code-generator-x64.cc
+@@ -273,6 +273,8 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
+         stub_mode_(stub_mode),
+ #endif  // V8_ENABLE_WEBASSEMBLY
+         zone_(gen->zone()) {
++    DCHECK(!AreAliased(object, scratch0, scratch1));
++    DCHECK(!AreAliased(value, scratch0, scratch1));
+   }
+ 
+   void Generate() final {
+-- 
+2.35.1
+

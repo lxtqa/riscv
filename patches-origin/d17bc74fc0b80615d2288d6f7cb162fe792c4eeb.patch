@@ -1,0 +1,62 @@
+From d17bc74fc0b80615d2288d6f7cb162fe792c4eeb Mon Sep 17 00:00:00 2001
+From: Ting Chou <ting.chou@sifive.com>
+Date: Thu, 8 Sep 2022 16:06:37 +0800
+Subject: [PATCH] [riscv] Fix cctest/test-assembler-riscv64/RISCV_UTEST_swlwu.
+
+32-bit values are held in a sign-extended format in 64-bit registers. Which
+the vaule 0x856AF894 becomes 0xFFFFFFFF856AF894 and failed equality comparison
+with lwu's result 0x00000000856AF894. XOR the result with 0xFFFFFFFF00000000
+before comparison.
+
+R=yahan@iscas.ac.cn
+
+Change-Id: I4d225ff653070022023ac7f10257ad0c30c24e5b
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3881601
+Commit-Queue: Yahan Lu <yahan@iscas.ac.cn>
+Reviewed-by: Yahan Lu <yahan@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#83109}
+---
+ test/cctest/test-helper-riscv64.h | 13 +++++++++----
+ 1 file changed, 9 insertions(+), 4 deletions(-)
+
+diff --git a/test/cctest/test-helper-riscv64.h b/test/cctest/test-helper-riscv64.h
+index 3cfc5427c6..6bd2c996e5 100644
+--- a/test/cctest/test-helper-riscv64.h
++++ b/test/cctest/test-helper-riscv64.h
+@@ -177,6 +177,10 @@ template <typename T>
+ void GenAndRunTestForLoadStore(T value, Func test_generator) {
+   DCHECK(sizeof(T) == 4 || sizeof(T) == 8);
+ 
++  using INT_T = typename std::conditional<
++      std::is_integral<T>::value, T,
++      typename std::conditional<sizeof(T) == 4, int32_t, int64_t>::type>::type;
++
+   Isolate* isolate = CcTest::i_isolate();
+   HandleScope scope(isolate);
+ 
+@@ -194,6 +198,11 @@ void GenAndRunTestForLoadStore(T value, Func test_generator) {
+     assm.fmv_x_w(a0, fa0);
+   } else if (std::is_same<double, T>::value) {
+     assm.fmv_x_d(a0, fa0);
++  } else if (std::is_same<uint32_t, T>::value) {
++    if (base::bit_cast<INT_T>(value) & 0x80000000) {
++      assm.RV_li(t5, 0xffffffff00000000);
++      assm.xor_(a0, a0, t5);
++    }
+   }
+   assm.jr(ra);
+ 
+@@ -202,10 +211,6 @@ void GenAndRunTestForLoadStore(T value, Func test_generator) {
+   Handle<Code> code =
+       Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
+ 
+-  using INT_T = typename std::conditional<
+-      std::is_integral<T>::value, T,
+-      typename std::conditional<sizeof(T) == 4, int32_t, int64_t>::type>::type;
+-
+   auto f = GeneratedCode<INT_T(void* base, INT_T val)>::FromCode(*code);
+ 
+   int64_t tmp = 0;
+-- 
+2.35.1
+

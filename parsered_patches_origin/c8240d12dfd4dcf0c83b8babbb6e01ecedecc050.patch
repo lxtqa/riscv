@@ -1,0 +1,182 @@
+From c8240d12dfd4dcf0c83b8babbb6e01ecedecc050 Mon Sep 17 00:00:00 2001
+From: Yahan Lu <yahan@iscas.ac.cn>
+Date: Fri, 2 Dec 2022 11:35:21 +0000
+Subject: [PATCH] Revert "[riscv] Add tracepoint instructions to help simulator
+ debug"
+
+This reverts commit af3678d122e29bd0b15194e403c3c4fceea65dde.
+
+Reason for revert: kDebuggerTracingDirectivesMask is error
+                   kDebuggerTracingDirectivesMask should be 0b111 << 3
+Original change's description:
+> [riscv] Add tracepoint instructions to help simulator debug
+>
+> Change-Id: I92f2c8600ab6ff2be3c0566f8dd5602cb47252cb
+> Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4050059
+> Auto-Submit: Yahan Lu <yahan@iscas.ac.cn>
+> Reviewed-by: ji qiu <qiuji@iscas.ac.cn>
+> Commit-Queue: ji qiu <qiuji@iscas.ac.cn>
+> Cr-Commit-Position: refs/heads/main@{#84441}
+
+Change-Id: I05d237e5ca1ca001d237b344e5cc4e06a0c133ba
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4075385
+Commit-Queue: ji qiu <qiuji@iscas.ac.cn>
+Auto-Submit: Yahan Lu <yahan@iscas.ac.cn>
+Reviewed-by: ji qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#84623}
+---
+ src/codegen/riscv/assembler-riscv.cc      |  4 +--
+ src/codegen/riscv/base-constants-riscv.h  | 24 -----------------
+ src/codegen/riscv/macro-assembler-riscv.h |  5 +---
+ src/execution/riscv/simulator-riscv.cc    | 32 ++---------------------
+ src/execution/riscv/simulator-riscv.h     |  1 -
+ 5 files changed, 5 insertions(+), 61 deletions(-)
+
+diff --git a/src/codegen/riscv/assembler-riscv.cc b/src/codegen/riscv/assembler-riscv.cc
+index 668e3fa9a8..f8c2e33051 100644
+--- a/src/codegen/riscv/assembler-riscv.cc
++++ b/src/codegen/riscv/assembler-riscv.cc
+@@ -1250,8 +1250,8 @@ void Assembler::break_(uint32_t code, bool break_as_stop) {
+   // simulator expects a char pointer after the stop instruction.
+   // See constants-mips.h for explanation.
+   DCHECK(
+-      (break_as_stop && code <= kMaxStopCode && code > kMaxTracepointCode) ||
+-      (!break_as_stop && (code > kMaxStopCode || code <= kMaxTracepointCode)));
++      (break_as_stop && code <= kMaxStopCode && code > kMaxWatchpointCode) ||
++      (!break_as_stop && (code > kMaxStopCode || code <= kMaxWatchpointCode)));
+ 
+   // since ebreak does not allow additional immediate field, we use the
+   // immediate field of lui instruction immediately following the ebreak to
+diff --git a/src/codegen/riscv/base-constants-riscv.h b/src/codegen/riscv/base-constants-riscv.h
+index 2d664a906c..968fbb2fc9 100644
+--- a/src/codegen/riscv/base-constants-riscv.h
++++ b/src/codegen/riscv/base-constants-riscv.h
+@@ -198,33 +198,9 @@ enum SoftwareInterruptCodes {
+ //   instructions (see Assembler::stop()).
+ // - Breaks larger than kMaxStopCode are simple breaks, dropping you into the
+ //   debugger.
+-const uint32_t kMaxTracepointCode = 63;
+ const uint32_t kMaxWatchpointCode = 31;
+ const uint32_t kMaxStopCode = 127;
+ static_assert(kMaxWatchpointCode < kMaxStopCode);
+-static_assert(kMaxTracepointCode < kMaxStopCode);
+-
+-// Debug parameters.
+-//
+-// For example:
+-//
+-// __ Debug(TRACE_ENABLE | LOG_TRACE);
+-// starts tracing: set v8_flags.trace-sim is true.
+-// __ Debug(TRACE_ENABLE | LOG_REGS);
+-// PrintAllregs.
+-// __ Debug(TRACE_DISABLE | LOG_TRACE);
+-// stops tracing: set v8_flags.trace-sim is false.
+-const unsigned kDebuggerTracingDirectivesMask = 0x111 << 3;
+-enum DebugParameters : uint32_t {
+-  NO_PARAM = 1 << 5,
+-  BREAK = 1 << 0,
+-  LOG_TRACE = 1 << 1,
+-  LOG_REGS = 1 << 2,
+-  LOG_ALL = LOG_TRACE,
+-  // Trace control.
+-  TRACE_ENABLE = 1 << 3 | NO_PARAM,
+-  TRACE_DISABLE = 1 << 4 | NO_PARAM,
+-};
+ 
+ // ----- Fields offset and length.
+ // RISCV constants
+diff --git a/src/codegen/riscv/macro-assembler-riscv.h b/src/codegen/riscv/macro-assembler-riscv.h
+index f7870ca7b2..7baf65844c 100644
+--- a/src/codegen/riscv/macro-assembler-riscv.h
++++ b/src/codegen/riscv/macro-assembler-riscv.h
+@@ -123,10 +123,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+ 
+   void Trap();
+   void DebugBreak();
+-#ifdef USE_SIMULATOR
+-  // See src/codegen/riscv/base-constants-riscv.h DebugParameters.
+-  void Debug(uint32_t parameters) { break_(parameters, false); }
+-#endif
++
+   // Calls Abort(msg) if the condition cc is not satisfied.
+   // Use --debug_code to enable.
+   void Assert(Condition cc, AbortReason reason, Register rs, Operand rt);
+diff --git a/src/execution/riscv/simulator-riscv.cc b/src/execution/riscv/simulator-riscv.cc
+index 7b7b233d0b..3d5d6ba10d 100644
+--- a/src/execution/riscv/simulator-riscv.cc
++++ b/src/execution/riscv/simulator-riscv.cc
+@@ -3208,31 +3208,6 @@ void Simulator::SoftwareInterrupt() {
+     if (code != -1 && static_cast<uint32_t>(code) <= kMaxStopCode) {
+       if (IsWatchpoint(code)) {
+         PrintWatchpoint(code);
+-      } else if (IsTracepoint(code)) {
+-        if (!v8_flags.debug_sim) {
+-          PrintF("Add --debug-sim when tracepoint instruction is used.\n");
+-          abort();
+-        }
+-        printf("%d %d %d %d\n", code, code & LOG_TRACE, code & LOG_REGS,
+-               code & kDebuggerTracingDirectivesMask);
+-        switch (code & kDebuggerTracingDirectivesMask) {
+-          case TRACE_ENABLE:
+-            if (code & LOG_TRACE) {
+-              v8_flags.trace_sim = true;
+-            }
+-            if (code & LOG_REGS) {
+-              RiscvDebugger dbg(this);
+-              dbg.PrintAllRegs();
+-            }
+-            break;
+-          case TRACE_DISABLE:
+-            if (code & LOG_TRACE) {
+-              v8_flags.trace_sim = false;
+-            }
+-            break;
+-          default:
+-            UNREACHABLE();
+-        }
+       } else {
+         IncreaseStopCounter(code);
+         HandleStop(code);
+@@ -3252,10 +3227,6 @@ bool Simulator::IsWatchpoint(reg_t code) {
+   return (code <= kMaxWatchpointCode);
+ }
+ 
+-bool Simulator::IsTracepoint(reg_t code) {
+-  return (code <= kMaxTracepointCode && code > kMaxWatchpointCode);
+-}
+-
+ void Simulator::PrintWatchpoint(reg_t code) {
+   RiscvDebugger dbg(this);
+   ++break_count_;
+@@ -7214,7 +7185,7 @@ void Simulator::InstructionDecode(Instruction* instr) {
+ 
+   v8::base::EmbeddedVector<char, 256> buffer;
+ 
+-  if (v8_flags.trace_sim || v8_flags.debug_sim) {
++  if (v8_flags.trace_sim) {
+     SNPrintF(trace_buf_, " ");
+     disasm::NameConverter converter;
+     disasm::Disassembler dasm(converter);
+@@ -7224,6 +7195,7 @@ void Simulator::InstructionDecode(Instruction* instr) {
+     // PrintF("EXECUTING  0x%08" PRIxPTR "   %-44s\n",
+     //        reinterpret_cast<intptr_t>(instr), buffer.begin());
+   }
++
+   instr_ = instr;
+   switch (instr_.InstructionType()) {
+     case Instruction::kRType:
+diff --git a/src/execution/riscv/simulator-riscv.h b/src/execution/riscv/simulator-riscv.h
+index 3464a0f523..f3b022b36f 100644
+--- a/src/execution/riscv/simulator-riscv.h
++++ b/src/execution/riscv/simulator-riscv.h
+@@ -1035,7 +1035,6 @@ class Simulator : public SimulatorBase {
+ 
+   // Stop helper functions.
+   bool IsWatchpoint(reg_t code);
+-  bool IsTracepoint(reg_t code);
+   void PrintWatchpoint(reg_t code);
+   void HandleStop(reg_t code);
+   bool IsStopInstruction(Instruction* instr);
+-- 
+2.35.1
+

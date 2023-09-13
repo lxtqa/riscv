@@ -1,0 +1,2534 @@
+From 4ae67baf3c5708a716962bffe28b0a7e144ff831 Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Tue, 7 Dec 2021 17:47:46 +0800
+Subject: [PATCH] [riscv64]Implement webassembly simd
+ swizzle/TruncSat/extadd/S128LOAD
+
+Add func UseImmediate64(int64_t imm) into instruction-selector-impl
+Bug: v8:11976
+
+Change-Id: I274ab59cc6d9a9cdc8b4081a7c418c56c3e8f5b7
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3312453
+Reviewed-by: ji qiu <qiuji@iscas.ac.cn>
+Reviewed-by: Maya Lekova <mslekova@chromium.org>
+Commit-Queue: Yahan Lu <yahan@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#78288}
+---
+ src/codegen/riscv64/assembler-riscv64.cc      | 189 +++++-------
+ src/codegen/riscv64/assembler-riscv64.h       |  33 ++
+ src/codegen/riscv64/constants-riscv64.h       |  34 ++-
+ .../riscv64/macro-assembler-riscv64.cc        |  58 ++++
+ src/codegen/riscv64/macro-assembler-riscv64.h |   3 +
+ src/codegen/riscv64/register-riscv64.h        |   9 +-
+ .../backend/instruction-selector-impl.h       |   4 +
+ .../backend/riscv64/code-generator-riscv64.cc | 283 ++++++++++++++++--
+ .../riscv64/instruction-codes-riscv64.h       |  26 +-
+ .../riscv64/instruction-scheduler-riscv64.cc  |  26 +-
+ .../riscv64/instruction-selector-riscv64.cc   | 217 +++++++++++---
+ src/diagnostics/riscv64/disasm-riscv64.cc     |  55 +++-
+ src/execution/riscv64/simulator-riscv64.cc    | 248 +++++++++++++--
+ src/execution/riscv64/simulator-riscv64.h     |   4 +-
+ .../riscv64/liftoff-assembler-riscv64.h       | 246 ++++++++++++---
+ test/cctest/test-assembler-riscv64.cc         |   2 +-
+ 16 files changed, 1167 insertions(+), 270 deletions(-)
+
+diff --git a/src/codegen/riscv64/assembler-riscv64.cc b/src/codegen/riscv64/assembler-riscv64.cc
+index 55dfe63dcb..9304f012d0 100644
+--- a/src/codegen/riscv64/assembler-riscv64.cc
++++ b/src/codegen/riscv64/assembler-riscv64.cc
+@@ -2562,6 +2562,10 @@ void Assembler::vwaddu_wx(VRegister vd, VRegister vs2, Register rs1,
+   GenInstrV(VWADDUW_FUNCT6, OP_MVX, vd, rs1, vs2, mask);
+ }
+ 
++void Assembler::vid_v(VRegister vd, MaskType mask) {
++  GenInstrV(VMUNARY0_FUNCT6, OP_MVV, vd, VID_V, v0, mask);
++}
++
+ #define DEFINE_OPIVV(name, funct6)                                      \
+   void Assembler::name##_vv(VRegister vd, VRegister vs2, VRegister vs1, \
+                             MaskType mask) {                            \
+@@ -2658,8 +2662,12 @@ DEFINE_OPMVV(vdivu, VDIVU_FUNCT6)
+ DEFINE_OPMVV(vmul, VMUL_FUNCT6)
+ DEFINE_OPMVV(vmulhu, VMULHU_FUNCT6)
+ DEFINE_OPMVV(vmulhsu, VMULHSU_FUNCT6)
++DEFINE_OPMVV(vwmul, VWMUL_FUNCT6)
++DEFINE_OPMVV(vwmulu, VWMULU_FUNCT6)
+ DEFINE_OPMVV(vmulh, VMULH_FUNCT6)
++DEFINE_OPMVV(vwadd, VWADD_FUNCT6)
+ DEFINE_OPMVV(vwaddu, VWADDU_FUNCT6)
++DEFINE_OPMVV(vcompress, VCOMPRESS_FUNCT6)
+ DEFINE_OPIVX(vsadd, VSADD_FUNCT6)
+ DEFINE_OPIVV(vsadd, VSADD_FUNCT6)
+ DEFINE_OPIVI(vsadd, VSADD_FUNCT6)
+@@ -2843,19 +2851,7 @@ uint8_t vsew_switch(VSew vsew) {
+     case E32:
+       width = 0b110;
+       break;
+-    case E64:
+-      width = 0b111;
+-      break;
+-    case E128:
+-      width = 0b000;
+-      break;
+-    case E256:
+-      width = 0b101;
+-      break;
+-    case E512:
+-      width = 0b110;
+-      break;
+-    case E1024:
++    default:
+       width = 0b111;
+       break;
+   }
+@@ -2864,308 +2860,259 @@ uint8_t vsew_switch(VSew vsew) {
+ 
+ void Assembler::vl(VRegister vd, Register rs1, uint8_t lumop, VSew vsew,
+                    MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(LOAD_FP, width, vd, rs1, lumop, mask, 0b00, IsMew, 0b000);
++  GenInstrV(LOAD_FP, width, vd, rs1, lumop, mask, 0b00, 0, 0b000);
+ }
+ void Assembler::vls(VRegister vd, Register rs1, Register rs2, VSew vsew,
+                     MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(LOAD_FP, width, vd, rs1, rs2, mask, 0b10, IsMew, 0b000);
++  GenInstrV(LOAD_FP, width, vd, rs1, rs2, mask, 0b10, 0, 0b000);
+ }
+ void Assembler::vlx(VRegister vd, Register rs1, VRegister vs2, VSew vsew,
+                     MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(LOAD_FP, width, vd, rs1, vs2, mask, 0b11, IsMew, 0);
++  GenInstrV(LOAD_FP, width, vd, rs1, vs2, mask, 0b11, 0, 0);
+ }
+ 
+ void Assembler::vs(VRegister vd, Register rs1, uint8_t sumop, VSew vsew,
+                    MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(STORE_FP, width, vd, rs1, sumop, mask, 0b00, IsMew, 0b000);
++  GenInstrV(STORE_FP, width, vd, rs1, sumop, mask, 0b00, 0, 0b000);
+ }
+ void Assembler::vss(VRegister vs3, Register rs1, Register rs2, VSew vsew,
+                     MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(STORE_FP, width, vs3, rs1, rs2, mask, 0b10, IsMew, 0b000);
++  GenInstrV(STORE_FP, width, vs3, rs1, rs2, mask, 0b10, 0, 0b000);
+ }
+ 
+ void Assembler::vsx(VRegister vd, Register rs1, VRegister vs2, VSew vsew,
+                     MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(STORE_FP, width, vd, rs1, vs2, mask, 0b11, IsMew, 0b000);
++  GenInstrV(STORE_FP, width, vd, rs1, vs2, mask, 0b11, 0, 0b000);
+ }
+ void Assembler::vsu(VRegister vd, Register rs1, VRegister vs2, VSew vsew,
+                     MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(STORE_FP, width, vd, rs1, vs2, mask, 0b01, IsMew, 0b000);
++  GenInstrV(STORE_FP, width, vd, rs1, vs2, mask, 0b01, 0, 0b000);
+ }
+ 
+ void Assembler::vlseg2(VRegister vd, Register rs1, uint8_t lumop, VSew vsew,
+                        MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(LOAD_FP, width, vd, rs1, lumop, mask, 0b00, IsMew, 0b001);
++  GenInstrV(LOAD_FP, width, vd, rs1, lumop, mask, 0b00, 0, 0b001);
+ }
+ 
+ void Assembler::vlseg3(VRegister vd, Register rs1, uint8_t lumop, VSew vsew,
+                        MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(LOAD_FP, width, vd, rs1, lumop, mask, 0b00, IsMew, 0b010);
++  GenInstrV(LOAD_FP, width, vd, rs1, lumop, mask, 0b00, 0, 0b010);
+ }
+ 
+ void Assembler::vlseg4(VRegister vd, Register rs1, uint8_t lumop, VSew vsew,
+                        MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(LOAD_FP, width, vd, rs1, lumop, mask, 0b00, IsMew, 0b011);
++  GenInstrV(LOAD_FP, width, vd, rs1, lumop, mask, 0b00, 0, 0b011);
+ }
+ 
+ void Assembler::vlseg5(VRegister vd, Register rs1, uint8_t lumop, VSew vsew,
+                        MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(LOAD_FP, width, vd, rs1, lumop, mask, 0b00, IsMew, 0b100);
++  GenInstrV(LOAD_FP, width, vd, rs1, lumop, mask, 0b00, 0, 0b100);
+ }
+ 
+ void Assembler::vlseg6(VRegister vd, Register rs1, uint8_t lumop, VSew vsew,
+                        MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(LOAD_FP, width, vd, rs1, lumop, mask, 0b00, IsMew, 0b101);
++  GenInstrV(LOAD_FP, width, vd, rs1, lumop, mask, 0b00, 0, 0b101);
+ }
+ 
+ void Assembler::vlseg7(VRegister vd, Register rs1, uint8_t lumop, VSew vsew,
+                        MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(LOAD_FP, width, vd, rs1, lumop, mask, 0b00, IsMew, 0b110);
++  GenInstrV(LOAD_FP, width, vd, rs1, lumop, mask, 0b00, 0, 0b110);
+ }
+ 
+ void Assembler::vlseg8(VRegister vd, Register rs1, uint8_t lumop, VSew vsew,
+                        MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(LOAD_FP, width, vd, rs1, lumop, mask, 0b00, IsMew, 0b111);
++  GenInstrV(LOAD_FP, width, vd, rs1, lumop, mask, 0b00, 0, 0b111);
+ }
+ void Assembler::vsseg2(VRegister vd, Register rs1, uint8_t sumop, VSew vsew,
+                        MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(STORE_FP, width, vd, rs1, sumop, mask, 0b00, IsMew, 0b001);
++  GenInstrV(STORE_FP, width, vd, rs1, sumop, mask, 0b00, 0, 0b001);
+ }
+ void Assembler::vsseg3(VRegister vd, Register rs1, uint8_t sumop, VSew vsew,
+                        MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(STORE_FP, width, vd, rs1, sumop, mask, 0b00, IsMew, 0b010);
++  GenInstrV(STORE_FP, width, vd, rs1, sumop, mask, 0b00, 0, 0b010);
+ }
+ void Assembler::vsseg4(VRegister vd, Register rs1, uint8_t sumop, VSew vsew,
+                        MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(STORE_FP, width, vd, rs1, sumop, mask, 0b00, IsMew, 0b011);
++  GenInstrV(STORE_FP, width, vd, rs1, sumop, mask, 0b00, 0, 0b011);
+ }
+ void Assembler::vsseg5(VRegister vd, Register rs1, uint8_t sumop, VSew vsew,
+                        MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(STORE_FP, width, vd, rs1, sumop, mask, 0b00, IsMew, 0b100);
++  GenInstrV(STORE_FP, width, vd, rs1, sumop, mask, 0b00, 0, 0b100);
+ }
+ void Assembler::vsseg6(VRegister vd, Register rs1, uint8_t sumop, VSew vsew,
+                        MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(STORE_FP, width, vd, rs1, sumop, mask, 0b00, IsMew, 0b101);
++  GenInstrV(STORE_FP, width, vd, rs1, sumop, mask, 0b00, 0, 0b101);
+ }
+ void Assembler::vsseg7(VRegister vd, Register rs1, uint8_t sumop, VSew vsew,
+                        MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(STORE_FP, width, vd, rs1, sumop, mask, 0b00, IsMew, 0b110);
++  GenInstrV(STORE_FP, width, vd, rs1, sumop, mask, 0b00, 0, 0b110);
+ }
+ void Assembler::vsseg8(VRegister vd, Register rs1, uint8_t sumop, VSew vsew,
+                        MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(STORE_FP, width, vd, rs1, sumop, mask, 0b00, IsMew, 0b111);
++  GenInstrV(STORE_FP, width, vd, rs1, sumop, mask, 0b00, 0, 0b111);
+ }
+ 
+ void Assembler::vlsseg2(VRegister vd, Register rs1, Register rs2, VSew vsew,
+                         MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(LOAD_FP, width, vd, rs1, rs2, mask, 0b10, IsMew, 0b001);
++  GenInstrV(LOAD_FP, width, vd, rs1, rs2, mask, 0b10, 0, 0b001);
+ }
+ void Assembler::vlsseg3(VRegister vd, Register rs1, Register rs2, VSew vsew,
+                         MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(LOAD_FP, width, vd, rs1, rs2, mask, 0b10, IsMew, 0b010);
++  GenInstrV(LOAD_FP, width, vd, rs1, rs2, mask, 0b10, 0, 0b010);
+ }
+ void Assembler::vlsseg4(VRegister vd, Register rs1, Register rs2, VSew vsew,
+                         MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(LOAD_FP, width, vd, rs1, rs2, mask, 0b10, IsMew, 0b011);
++  GenInstrV(LOAD_FP, width, vd, rs1, rs2, mask, 0b10, 0, 0b011);
+ }
+ void Assembler::vlsseg5(VRegister vd, Register rs1, Register rs2, VSew vsew,
+                         MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(LOAD_FP, width, vd, rs1, rs2, mask, 0b10, IsMew, 0b100);
++  GenInstrV(LOAD_FP, width, vd, rs1, rs2, mask, 0b10, 0, 0b100);
+ }
+ void Assembler::vlsseg6(VRegister vd, Register rs1, Register rs2, VSew vsew,
+                         MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(LOAD_FP, width, vd, rs1, rs2, mask, 0b10, IsMew, 0b101);
++  GenInstrV(LOAD_FP, width, vd, rs1, rs2, mask, 0b10, 0, 0b101);
+ }
+ void Assembler::vlsseg7(VRegister vd, Register rs1, Register rs2, VSew vsew,
+                         MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(LOAD_FP, width, vd, rs1, rs2, mask, 0b10, IsMew, 0b110);
++  GenInstrV(LOAD_FP, width, vd, rs1, rs2, mask, 0b10, 0, 0b110);
+ }
+ void Assembler::vlsseg8(VRegister vd, Register rs1, Register rs2, VSew vsew,
+                         MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(LOAD_FP, width, vd, rs1, rs2, mask, 0b10, IsMew, 0b111);
++  GenInstrV(LOAD_FP, width, vd, rs1, rs2, mask, 0b10, 0, 0b111);
+ }
+ void Assembler::vssseg2(VRegister vd, Register rs1, Register rs2, VSew vsew,
+                         MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(STORE_FP, width, vd, rs1, rs2, mask, 0b10, IsMew, 0b001);
++  GenInstrV(STORE_FP, width, vd, rs1, rs2, mask, 0b10, 0, 0b001);
+ }
+ void Assembler::vssseg3(VRegister vd, Register rs1, Register rs2, VSew vsew,
+                         MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(STORE_FP, width, vd, rs1, rs2, mask, 0b10, IsMew, 0b010);
++  GenInstrV(STORE_FP, width, vd, rs1, rs2, mask, 0b10, 0, 0b010);
+ }
+ void Assembler::vssseg4(VRegister vd, Register rs1, Register rs2, VSew vsew,
+                         MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(STORE_FP, width, vd, rs1, rs2, mask, 0b10, IsMew, 0b011);
++  GenInstrV(STORE_FP, width, vd, rs1, rs2, mask, 0b10, 0, 0b011);
+ }
+ void Assembler::vssseg5(VRegister vd, Register rs1, Register rs2, VSew vsew,
+                         MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(STORE_FP, width, vd, rs1, rs2, mask, 0b10, IsMew, 0b100);
++  GenInstrV(STORE_FP, width, vd, rs1, rs2, mask, 0b10, 0, 0b100);
+ }
+ void Assembler::vssseg6(VRegister vd, Register rs1, Register rs2, VSew vsew,
+                         MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(STORE_FP, width, vd, rs1, rs2, mask, 0b10, IsMew, 0b101);
++  GenInstrV(STORE_FP, width, vd, rs1, rs2, mask, 0b10, 0, 0b101);
+ }
+ void Assembler::vssseg7(VRegister vd, Register rs1, Register rs2, VSew vsew,
+                         MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(STORE_FP, width, vd, rs1, rs2, mask, 0b10, IsMew, 0b110);
++  GenInstrV(STORE_FP, width, vd, rs1, rs2, mask, 0b10, 0, 0b110);
+ }
+ void Assembler::vssseg8(VRegister vd, Register rs1, Register rs2, VSew vsew,
+                         MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(STORE_FP, width, vd, rs1, rs2, mask, 0b10, IsMew, 0b111);
++  GenInstrV(STORE_FP, width, vd, rs1, rs2, mask, 0b10, 0, 0b111);
+ }
+ 
+ void Assembler::vlxseg2(VRegister vd, Register rs1, VRegister rs2, VSew vsew,
+                         MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(LOAD_FP, width, vd, rs1, rs2, mask, 0b11, IsMew, 0b001);
++  GenInstrV(LOAD_FP, width, vd, rs1, rs2, mask, 0b11, 0, 0b001);
+ }
+ void Assembler::vlxseg3(VRegister vd, Register rs1, VRegister rs2, VSew vsew,
+                         MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(LOAD_FP, width, vd, rs1, rs2, mask, 0b11, IsMew, 0b010);
++  GenInstrV(LOAD_FP, width, vd, rs1, rs2, mask, 0b11, 0, 0b010);
+ }
+ void Assembler::vlxseg4(VRegister vd, Register rs1, VRegister rs2, VSew vsew,
+                         MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(LOAD_FP, width, vd, rs1, rs2, mask, 0b11, IsMew, 0b011);
++  GenInstrV(LOAD_FP, width, vd, rs1, rs2, mask, 0b11, 0, 0b011);
+ }
+ void Assembler::vlxseg5(VRegister vd, Register rs1, VRegister rs2, VSew vsew,
+                         MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(LOAD_FP, width, vd, rs1, rs2, mask, 0b11, IsMew, 0b100);
++  GenInstrV(LOAD_FP, width, vd, rs1, rs2, mask, 0b11, 0, 0b100);
+ }
+ void Assembler::vlxseg6(VRegister vd, Register rs1, VRegister rs2, VSew vsew,
+                         MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(LOAD_FP, width, vd, rs1, rs2, mask, 0b11, IsMew, 0b101);
++  GenInstrV(LOAD_FP, width, vd, rs1, rs2, mask, 0b11, 0, 0b101);
+ }
+ void Assembler::vlxseg7(VRegister vd, Register rs1, VRegister rs2, VSew vsew,
+                         MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(LOAD_FP, width, vd, rs1, rs2, mask, 0b11, IsMew, 0b110);
++  GenInstrV(LOAD_FP, width, vd, rs1, rs2, mask, 0b11, 0, 0b110);
+ }
+ void Assembler::vlxseg8(VRegister vd, Register rs1, VRegister rs2, VSew vsew,
+                         MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(LOAD_FP, width, vd, rs1, rs2, mask, 0b11, IsMew, 0b111);
++  GenInstrV(LOAD_FP, width, vd, rs1, rs2, mask, 0b11, 0, 0b111);
+ }
+ void Assembler::vsxseg2(VRegister vd, Register rs1, VRegister rs2, VSew vsew,
+                         MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(STORE_FP, width, vd, rs1, rs2, mask, 0b11, IsMew, 0b001);
++  GenInstrV(STORE_FP, width, vd, rs1, rs2, mask, 0b11, 0, 0b001);
+ }
+ void Assembler::vsxseg3(VRegister vd, Register rs1, VRegister rs2, VSew vsew,
+                         MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(STORE_FP, width, vd, rs1, rs2, mask, 0b11, IsMew, 0b010);
++  GenInstrV(STORE_FP, width, vd, rs1, rs2, mask, 0b11, 0, 0b010);
+ }
+ void Assembler::vsxseg4(VRegister vd, Register rs1, VRegister rs2, VSew vsew,
+                         MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(STORE_FP, width, vd, rs1, rs2, mask, 0b11, IsMew, 0b011);
++  GenInstrV(STORE_FP, width, vd, rs1, rs2, mask, 0b11, 0, 0b011);
+ }
+ void Assembler::vsxseg5(VRegister vd, Register rs1, VRegister rs2, VSew vsew,
+                         MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(STORE_FP, width, vd, rs1, rs2, mask, 0b11, IsMew, 0b100);
++  GenInstrV(STORE_FP, width, vd, rs1, rs2, mask, 0b11, 0, 0b100);
+ }
+ void Assembler::vsxseg6(VRegister vd, Register rs1, VRegister rs2, VSew vsew,
+                         MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(STORE_FP, width, vd, rs1, rs2, mask, 0b11, IsMew, 0b101);
++  GenInstrV(STORE_FP, width, vd, rs1, rs2, mask, 0b11, 0, 0b101);
+ }
+ void Assembler::vsxseg7(VRegister vd, Register rs1, VRegister rs2, VSew vsew,
+                         MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(STORE_FP, width, vd, rs1, rs2, mask, 0b11, IsMew, 0b110);
++  GenInstrV(STORE_FP, width, vd, rs1, rs2, mask, 0b11, 0, 0b110);
+ }
+ void Assembler::vsxseg8(VRegister vd, Register rs1, VRegister rs2, VSew vsew,
+                         MaskType mask) {
+-  bool IsMew = vsew >= E128 ? true : false;
+   uint8_t width = vsew_switch(vsew);
+-  GenInstrV(STORE_FP, width, vd, rs1, rs2, mask, 0b11, IsMew, 0b111);
++  GenInstrV(STORE_FP, width, vd, rs1, rs2, mask, 0b11, 0, 0b111);
+ }
+ 
+ // Privileged
+@@ -4045,6 +3992,26 @@ void ConstantPool::Check(Emission force_emit, Jump require_jump,
+   SetNextCheckIn(ConstantPool::kCheckInterval);
+ }
+ 
++LoadStoreLaneParams::LoadStoreLaneParams(MachineRepresentation rep,
++                                         uint8_t laneidx) {
++  switch (rep) {
++    case MachineRepresentation::kWord8:
++      *this = LoadStoreLaneParams(laneidx, 8, kRvvVLEN / 16);
++      break;
++    case MachineRepresentation::kWord16:
++      *this = LoadStoreLaneParams(laneidx, 16, kRvvVLEN / 8);
++      break;
++    case MachineRepresentation::kWord32:
++      *this = LoadStoreLaneParams(laneidx, 32, kRvvVLEN / 4);
++      break;
++    case MachineRepresentation::kWord64:
++      *this = LoadStoreLaneParams(laneidx, 64, kRvvVLEN / 2);
++      break;
++    default:
++      UNREACHABLE();
++  }
++}
++
+ // Pool entries are accessed with pc relative load therefore this cannot be more
+ // than 1 * MB. Since constant pool emission checks are interval based, and we
+ // want to keep entries close to the code, we try to emit every 64KB.
+diff --git a/src/codegen/riscv64/assembler-riscv64.h b/src/codegen/riscv64/assembler-riscv64.h
+index 110545f339..63e5dde19e 100644
+--- a/src/codegen/riscv64/assembler-riscv64.h
++++ b/src/codegen/riscv64/assembler-riscv64.h
+@@ -762,6 +762,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+ 
+   void vwaddu_wx(VRegister vd, VRegister vs2, Register rs1,
+                  MaskType mask = NoMask);
++  void vid_v(VRegister vd, MaskType mask = Mask);
+ 
+ #define DEFINE_OPIVV(name, funct6)                           \
+   void name##_vv(VRegister vd, VRegister vs2, VRegister vs1, \
+@@ -823,7 +824,11 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   DEFINE_OPMVV(vmulhu, VMULHU_FUNCT6)
+   DEFINE_OPMVV(vmulhsu, VMULHSU_FUNCT6)
+   DEFINE_OPMVV(vmulh, VMULH_FUNCT6)
++  DEFINE_OPMVV(vwmul, VWMUL_FUNCT6)
++  DEFINE_OPMVV(vwmulu, VWMULU_FUNCT6)
+   DEFINE_OPMVV(vwaddu, VWADDU_FUNCT6)
++  DEFINE_OPMVV(vwadd, VWADD_FUNCT6)
++  DEFINE_OPMVV(vcompress, VCOMPRESS_FUNCT6)
+   DEFINE_OPIVX(vsadd, VSADD_FUNCT6)
+   DEFINE_OPIVV(vsadd, VSADD_FUNCT6)
+   DEFINE_OPIVI(vsadd, VSADD_FUNCT6)
+@@ -984,7 +989,15 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   DEFINE_VFUNARY(vfcvt_x_f_v, VFUNARY0_FUNCT6, VFCVT_X_F_V)
+   DEFINE_VFUNARY(vfcvt_f_x_v, VFUNARY0_FUNCT6, VFCVT_F_X_V)
+   DEFINE_VFUNARY(vfcvt_f_xu_v, VFUNARY0_FUNCT6, VFCVT_F_XU_V)
++  DEFINE_VFUNARY(vfwcvt_xu_f_v, VFUNARY0_FUNCT6, VFWCVT_XU_F_V)
++  DEFINE_VFUNARY(vfwcvt_x_f_v, VFUNARY0_FUNCT6, VFWCVT_X_F_V)
++  DEFINE_VFUNARY(vfwcvt_f_x_v, VFUNARY0_FUNCT6, VFWCVT_F_X_V)
++  DEFINE_VFUNARY(vfwcvt_f_xu_v, VFUNARY0_FUNCT6, VFWCVT_F_XU_V)
++  DEFINE_VFUNARY(vfwcvt_f_f_v, VFUNARY0_FUNCT6, VFWCVT_F_F_V)
++
+   DEFINE_VFUNARY(vfncvt_f_f_w, VFUNARY0_FUNCT6, VFNCVT_F_F_W)
++  DEFINE_VFUNARY(vfncvt_x_f_w, VFUNARY0_FUNCT6, VFNCVT_X_F_W)
++  DEFINE_VFUNARY(vfncvt_xu_f_w, VFUNARY0_FUNCT6, VFNCVT_XU_F_W)
+ 
+   DEFINE_VFUNARY(vfclass_v, VFUNARY1_FUNCT6, VFCLASS_V)
+   DEFINE_VFUNARY(vfsqrt_v, VFUNARY1_FUNCT6, VFSQRT_V)
+@@ -1303,6 +1316,14 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+       }
+     }
+ 
++    void set(Register rd, int8_t sew, int8_t lmul) {
++      DCHECK_GE(sew, E8);
++      DCHECK_LE(sew, E64);
++      DCHECK_GE(lmul, m1);
++      DCHECK_LE(lmul, mf2);
++      set(rd, VSew(sew), Vlmul(lmul));
++    }
++
+     void set(RoundingMode mode) {
+       if (mode_ != mode) {
+         assm_->addi(kScratchReg, zero_reg, mode << kFcsrFrmShift);
+@@ -1741,6 +1762,18 @@ class V8_EXPORT_PRIVATE UseScratchRegisterScope {
+   RegList old_available_;
+ };
+ 
++class LoadStoreLaneParams {
++ public:
++  int sz;
++  uint8_t laneidx;
++
++  LoadStoreLaneParams(MachineRepresentation rep, uint8_t laneidx);
++
++ private:
++  LoadStoreLaneParams(uint8_t laneidx, int sz, int lanes)
++      : sz(sz), laneidx(laneidx % lanes) {}
++};
++
+ }  // namespace internal
+ }  // namespace v8
+ 
+diff --git a/src/codegen/riscv64/constants-riscv64.h b/src/codegen/riscv64/constants-riscv64.h
+index d62447ff2a..b5afe9b1df 100644
+--- a/src/codegen/riscv64/constants-riscv64.h
++++ b/src/codegen/riscv64/constants-riscv64.h
+@@ -736,6 +736,14 @@ enum Opcode : uint32_t {
+   RO_V_VMUL_VX = OP_MVX | (VMUL_FUNCT6 << kRvvFunct6Shift),
+   RO_V_VMUL_VV = OP_MVV | (VMUL_FUNCT6 << kRvvFunct6Shift),
+ 
++  VWMUL_FUNCT6 = 0b111011,
++  RO_V_VWMUL_VX = OP_MVX | (VWMUL_FUNCT6 << kRvvFunct6Shift),
++  RO_V_VWMUL_VV = OP_MVV | (VWMUL_FUNCT6 << kRvvFunct6Shift),
++
++  VWMULU_FUNCT6 = 0b111000,
++  RO_V_VWMULU_VX = OP_MVX | (VWMULU_FUNCT6 << kRvvFunct6Shift),
++  RO_V_VWMULU_VV = OP_MVV | (VWMULU_FUNCT6 << kRvvFunct6Shift),
++
+   VMULHSU_FUNCT6 = 0b100110,
+   RO_V_VMULHSU_VX = OP_MVX | (VMULHSU_FUNCT6 << kRvvFunct6Shift),
+   RO_V_VMULHSU_VV = OP_MVV | (VMULHSU_FUNCT6 << kRvvFunct6Shift),
+@@ -744,6 +752,10 @@ enum Opcode : uint32_t {
+   RO_V_VMULH_VX = OP_MVX | (VMULH_FUNCT6 << kRvvFunct6Shift),
+   RO_V_VMULH_VV = OP_MVV | (VMULH_FUNCT6 << kRvvFunct6Shift),
+ 
++  VWADD_FUNCT6 = 0b110001,
++  RO_V_VWADD_VV = OP_MVV | (VWADD_FUNCT6 << kRvvFunct6Shift),
++  RO_V_VWADD_VX = OP_MVX | (VWADD_FUNCT6 << kRvvFunct6Shift),
++
+   VWADDU_FUNCT6 = 0b110000,
+   RO_V_VWADDU_VV = OP_MVV | (VWADDU_FUNCT6 << kRvvFunct6Shift),
+   RO_V_VWADDU_VX = OP_MVX | (VWADDU_FUNCT6 << kRvvFunct6Shift),
+@@ -752,6 +764,9 @@ enum Opcode : uint32_t {
+   RO_V_VWADDUW_VX = OP_MVX | (VWADDUW_FUNCT6 << kRvvFunct6Shift),
+   RO_V_VWADDUW_VV = OP_MVV | (VWADDUW_FUNCT6 << kRvvFunct6Shift),
+ 
++  VCOMPRESS_FUNCT6 = 0b010111,
++  RO_V_VCOMPRESS_VV = OP_MVV | (VCOMPRESS_FUNCT6 << kRvvFunct6Shift),
++
+   VSADDU_FUNCT6 = 0b100000,
+   RO_V_VSADDU_VI = OP_IVI | (VSADDU_FUNCT6 << kRvvFunct6Shift),
+   RO_V_VSADDU_VV = OP_IVV | (VSADDU_FUNCT6 << kRvvFunct6Shift),
+@@ -895,9 +910,13 @@ enum Opcode : uint32_t {
+ 
+   VWXUNARY0_FUNCT6 = 0b010000,
+   VRXUNARY0_FUNCT6 = 0b010000,
++  VMUNARY0_FUNCT6 = 0b010100,
+ 
+   RO_V_VWXUNARY0 = OP_MVV | (VWXUNARY0_FUNCT6 << kRvvFunct6Shift),
+   RO_V_VRXUNARY0 = OP_MVX | (VRXUNARY0_FUNCT6 << kRvvFunct6Shift),
++  RO_V_VMUNARY0 = OP_MVV | (VMUNARY0_FUNCT6 << kRvvFunct6Shift),
++
++  VID_V = 0b10001,
+ 
+   VXUNARY0_FUNCT6 = 0b010010,
+   RO_V_VXUNARY0 = OP_MVV | (VXUNARY0_FUNCT6 << kRvvFunct6Shift),
+@@ -927,7 +946,14 @@ enum Opcode : uint32_t {
+   VFCVT_X_F_V = 0b00001,
+   VFCVT_F_XU_V = 0b00010,
+   VFCVT_F_X_V = 0b00011,
++  VFWCVT_XU_F_V = 0b01000,
++  VFWCVT_X_F_V = 0b01001,
++  VFWCVT_F_XU_V = 0b01010,
++  VFWCVT_F_X_V = 0b01011,
++  VFWCVT_F_F_V = 0b01100,
+   VFNCVT_F_F_W = 0b10100,
++  VFNCVT_X_F_W = 0b10001,
++  VFNCVT_XU_F_W = 0b10000,
+ 
+   VFCLASS_V = 0b10000,
+   VFSQRT_V = 0b00000,
+@@ -1193,14 +1219,10 @@ enum FClassFlag {
+   V(E8)            \
+   V(E16)           \
+   V(E32)           \
+-  V(E64)           \
+-  V(E128)          \
+-  V(E256)          \
+-  V(E512)          \
+-  V(E1024)
++  V(E64)
+ 
+-enum VSew {
+ #define DEFINE_FLAG(name) name,
++enum VSew {
+   RVV_SEW(DEFINE_FLAG)
+ #undef DEFINE_FLAG
+ };
+diff --git a/src/codegen/riscv64/macro-assembler-riscv64.cc b/src/codegen/riscv64/macro-assembler-riscv64.cc
+index ec302a8866..8b3b76da32 100644
+--- a/src/codegen/riscv64/macro-assembler-riscv64.cc
++++ b/src/codegen/riscv64/macro-assembler-riscv64.cc
+@@ -4028,6 +4028,64 @@ void TurboAssembler::WasmRvvS128const(VRegister dst, const uint8_t imms[16]) {
+   vsll_vi(v0, v0, 1);
+   vmerge_vx(dst, kScratchReg, dst);
+ }
++
++void TurboAssembler::LoadLane(int ts, VRegister dst, uint8_t laneidx,
++                              MemOperand src) {
++  if (ts == 8) {
++    Lbu(kScratchReg2, src);
++    VU.set(kScratchReg, E64, m1);
++    li(kScratchReg, 0x1 << laneidx);
++    vmv_sx(v0, kScratchReg);
++    VU.set(kScratchReg, E8, m1);
++    vmerge_vx(dst, kScratchReg2, dst);
++  } else if (ts == 16) {
++    Lhu(kScratchReg2, src);
++    VU.set(kScratchReg, E16, m1);
++    li(kScratchReg, 0x1 << laneidx);
++    vmv_sx(v0, kScratchReg);
++    vmerge_vx(dst, kScratchReg2, dst);
++  } else if (ts == 32) {
++    Lwu(kScratchReg2, src);
++    VU.set(kScratchReg, E32, m1);
++    li(kScratchReg, 0x1 << laneidx);
++    vmv_sx(v0, kScratchReg);
++    vmerge_vx(dst, kScratchReg2, dst);
++  } else if (ts == 64) {
++    Ld(kScratchReg2, src);
++    VU.set(kScratchReg, E64, m1);
++    li(kScratchReg, 0x1 << laneidx);
++    vmv_sx(v0, kScratchReg);
++    vmerge_vx(dst, kScratchReg2, dst);
++  } else {
++    UNREACHABLE();
++  }
++}
++
++void TurboAssembler::StoreLane(int sz, VRegister src, uint8_t laneidx,
++                               MemOperand dst) {
++  if (sz == 8) {
++    VU.set(kScratchReg, E8, m1);
++    vslidedown_vi(kSimd128ScratchReg, src, laneidx);
++    vmv_xs(kScratchReg, kSimd128ScratchReg);
++    Sb(kScratchReg, dst);
++  } else if (sz == 16) {
++    VU.set(kScratchReg, E16, m1);
++    vslidedown_vi(kSimd128ScratchReg, src, laneidx);
++    vmv_xs(kScratchReg, kSimd128ScratchReg);
++    Sh(kScratchReg, dst);
++  } else if (sz == 32) {
++    VU.set(kScratchReg, E32, m1);
++    vslidedown_vi(kSimd128ScratchReg, src, laneidx);
++    vmv_xs(kScratchReg, kSimd128ScratchReg);
++    Sw(kScratchReg, dst);
++  } else {
++    DCHECK_EQ(sz, 64);
++    VU.set(kScratchReg, E64, m1);
++    vslidedown_vi(kSimd128ScratchReg, src, laneidx);
++    vmv_xs(kScratchReg, kSimd128ScratchReg);
++    Sd(kScratchReg, dst);
++  }
++}
+ // -----------------------------------------------------------------------------
+ // Runtime calls.
+ 
+diff --git a/src/codegen/riscv64/macro-assembler-riscv64.h b/src/codegen/riscv64/macro-assembler-riscv64.h
+index eb91fc986f..89d88f7af2 100644
+--- a/src/codegen/riscv64/macro-assembler-riscv64.h
++++ b/src/codegen/riscv64/macro-assembler-riscv64.h
+@@ -961,6 +961,9 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+                   Vlmul lmul);
+   void WasmRvvS128const(VRegister dst, const uint8_t imms[16]);
+ 
++  void LoadLane(int sz, VRegister dst, uint8_t laneidx, MemOperand src);
++  void StoreLane(int sz, VRegister src, uint8_t laneidx, MemOperand dst);
++
+  protected:
+   inline Register GetRtAsRegisterHelper(const Operand& rt, Register scratch);
+   inline int32_t GetOffset(int32_t offset, Label* L, OffsetSize bits);
+diff --git a/src/codegen/riscv64/register-riscv64.h b/src/codegen/riscv64/register-riscv64.h
+index 62ca13f40f..2b1e4d3d65 100644
+--- a/src/codegen/riscv64/register-riscv64.h
++++ b/src/codegen/riscv64/register-riscv64.h
+@@ -55,8 +55,13 @@ namespace internal {
+   V(v16) V(v17) V(v18) V(v19) V(v20) V(v21) V(v22) V(v23) \
+   V(v24) V(v25) V(v26) V(v27) V(v28) V(v29) V(v30) V(v31)
+ 
+-#define ALLOCATABLE_DOUBLE_REGISTERS(V)                         \
+-  V(ft1)  V(ft2) V(ft3) V(ft4)  V(ft5) V(ft6) V(ft7) V(ft8)      \
++#define UNALLOACTABLE_VECTOR_REGISTERS(V)                 \
++  V(v9)  V(v10) V(v11) V(v12) V(v13) V(v14) V(v15)        \
++  V(v18) V(v19) V(v20) V(v21) V(v22) V(v23)               \
++  V(v24) V(v25)
++
++#define ALLOCATABLE_DOUBLE_REGISTERS(V)                              \
++  V(ft1)  V(ft2) V(ft3) V(ft4)  V(ft5) V(ft6) V(ft7) V(ft8)          \
+   V(ft9)  V(ft10) V(ft11) V(fa0) V(fa1) V(fa2) V(fa3) V(fa4) V(fa5)  \
+   V(fa6)  V(fa7)
+ 
+diff --git a/src/compiler/backend/instruction-selector-impl.h b/src/compiler/backend/instruction-selector-impl.h
+index 5deef6e76b..4b5780b66c 100644
+--- a/src/compiler/backend/instruction-selector-impl.h
++++ b/src/compiler/backend/instruction-selector-impl.h
+@@ -204,6 +204,10 @@ class OperandGenerator {
+     return sequence()->AddImmediate(Constant(immediate));
+   }
+ 
++  InstructionOperand UseImmediate64(int64_t immediate) {
++    return sequence()->AddImmediate(Constant(immediate));
++  }
++
+   InstructionOperand UseImmediate(Node* node) {
+     return sequence()->AddImmediate(ToConstant(node));
+   }
+diff --git a/src/compiler/backend/riscv64/code-generator-riscv64.cc b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+index e88cc27984..94bcbb6244 100644
+--- a/src/compiler/backend/riscv64/code-generator-riscv64.cc
++++ b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+@@ -1959,6 +1959,71 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       __ vmv_vx(dst, zero_reg);
+       break;
+     }
++    case kRiscvS128Load32Zero: {
++      Simd128Register dst = i.OutputSimd128Register();
++      __ VU.set(kScratchReg, E32, m1);
++      __ Lwu(kScratchReg, i.MemoryOperand());
++      __ vmv_sx(dst, kScratchReg);
++      break;
++    }
++    case kRiscvS128Load64Zero: {
++      Simd128Register dst = i.OutputSimd128Register();
++      __ VU.set(kScratchReg, E64, m1);
++      __ Ld(kScratchReg, i.MemoryOperand());
++      __ vmv_sx(dst, kScratchReg);
++      break;
++    }
++    case kRiscvS128LoadLane: {
++      Simd128Register dst = i.OutputSimd128Register();
++      DCHECK_EQ(dst, i.InputSimd128Register(0));
++      auto sz = static_cast<int>(MiscField::decode(instr->opcode()));
++      __ LoadLane(sz, dst, i.InputUint8(1), i.MemoryOperand(2));
++      break;
++    }
++    case kRiscvS128StoreLane: {
++      Simd128Register src = i.InputSimd128Register(0);
++      DCHECK_EQ(src, i.InputSimd128Register(0));
++      auto sz = static_cast<int>(MiscField::decode(instr->opcode()));
++      __ StoreLane(sz, src, i.InputUint8(1), i.MemoryOperand(2));
++      break;
++    }
++    case kRiscvS128Load64ExtendS: {
++      __ VU.set(kScratchReg, E64, m1);
++      __ Ld(kScratchReg, i.MemoryOperand());
++      __ vmv_vx(kSimd128ScratchReg, kScratchReg);
++      __ VU.set(kScratchReg, i.InputInt8(2), m1);
++      __ vsext_vf2(i.OutputSimd128Register(), kSimd128ScratchReg);
++      break;
++    }
++    case kRiscvS128Load64ExtendU: {
++      __ VU.set(kScratchReg, E64, m1);
++      __ Ld(kScratchReg, i.MemoryOperand());
++      __ vmv_vx(kSimd128ScratchReg, kScratchReg);
++      __ VU.set(kScratchReg, i.InputInt8(2), m1);
++      __ vzext_vf2(i.OutputSimd128Register(), kSimd128ScratchReg);
++      break;
++    }
++    case kRiscvS128LoadSplat: {
++      __ VU.set(kScratchReg, i.InputInt8(2), i.InputInt8(3));
++      switch (i.InputInt8(2)) {
++        case E8:
++          __ Lb(kScratchReg, i.MemoryOperand());
++          break;
++        case E16:
++          __ Lh(kScratchReg, i.MemoryOperand());
++          break;
++        case E32:
++          __ Lw(kScratchReg, i.MemoryOperand());
++          break;
++        case E64:
++          __ Ld(kScratchReg, i.MemoryOperand());
++          break;
++        default:
++          UNREACHABLE();
++      }
++      __ vmv_vx(i.OutputSimd128Register(), kScratchReg);
++      break;
++    }
+     case kRiscvS128AllOnes: {
+       __ VU.set(kScratchReg, E8, m1);
+       __ vmv_vx(i.OutputSimd128Register(), zero_reg);
+@@ -2028,6 +2093,38 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+                  i.InputSimd128Register(1));
+       break;
+     }
++    case kRiscvVrgather: {
++      Simd128Register index = i.InputSimd128Register(0);
++      if (!(instr->InputAt(1)->IsImmediate())) {
++        index = i.InputSimd128Register(1);
++      } else {
++        __ VU.set(kScratchReg, E64, m1);
++        __ li(kScratchReg, i.InputInt64(1));
++        __ vmv_sx(kSimd128ScratchReg3, kScratchReg);
++        index = kSimd128ScratchReg3;
++      }
++      __ VU.set(kScratchReg, i.InputInt8(2), i.InputInt8(3));
++      if (i.OutputSimd128Register() == i.InputSimd128Register(0)) {
++        __ vrgather_vv(kSimd128ScratchReg, i.InputSimd128Register(0), index);
++        __ vmv_vv(i.OutputSimd128Register(), kSimd128ScratchReg);
++      } else {
++        __ vrgather_vv(i.OutputSimd128Register(), i.InputSimd128Register(0),
++                       index);
++      }
++      break;
++    }
++    case kRiscvVslidedown: {
++      __ VU.set(kScratchReg, i.InputInt8(2), i.InputInt8(3));
++      if (instr->InputAt(1)->IsImmediate()) {
++        DCHECK(is_uint5(i.InputInt32(1)));
++        __ vslidedown_vi(i.OutputSimd128Register(), i.InputSimd128Register(0),
++                         i.InputInt5(1));
++      } else {
++        __ vslidedown_vx(i.OutputSimd128Register(), i.InputSimd128Register(0),
++                         i.InputRegister(1));
++      }
++      break;
++    }
+     case kRiscvI8x16RoundingAverageU: {
+       __ VU.set(kScratchReg2, E8, m1);
+       __ vwaddu_vv(kSimd128ScratchReg, i.InputSimd128Register(0),
+@@ -2177,6 +2274,34 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       }
+       break;
+     }
++    case kRiscvI32x4Mul: {
++      __ VU.set(kScratchReg, E32, m1);
++      __ vmul_vv(i.OutputSimd128Register(), i.InputSimd128Register(0),
++                 i.InputSimd128Register(1));
++      break;
++    }
++    case kRiscvI32x4TruncSatF64x2SZero: {
++      __ VU.set(kScratchReg, E64, m1);
++      __ vmv_vx(kSimd128ScratchReg, zero_reg);
++      __ vmfeq_vv(v0, i.InputSimd128Register(0), i.InputSimd128Register(0));
++      __ vmv_vv(kSimd128ScratchReg3, i.InputSimd128Register(0));
++      __ VU.set(kScratchReg, E32, m1);
++      __ VU.set(RoundingMode::RTZ);
++      __ vfncvt_x_f_w(kSimd128ScratchReg, kSimd128ScratchReg3, MaskType::Mask);
++      __ vmv_vv(i.OutputSimd128Register(), kSimd128ScratchReg);
++      break;
++    }
++    case kRiscvI32x4TruncSatF64x2UZero: {
++      __ VU.set(kScratchReg, E64, m1);
++      __ vmv_vx(kSimd128ScratchReg, zero_reg);
++      __ vmfeq_vv(v0, i.InputSimd128Register(0), i.InputSimd128Register(0));
++      __ vmv_vv(kSimd128ScratchReg3, i.InputSimd128Register(0));
++      __ VU.set(kScratchReg, E32, m1);
++      __ VU.set(RoundingMode::RTZ);
++      __ vfncvt_xu_f_w(kSimd128ScratchReg, kSimd128ScratchReg3, MaskType::Mask);
++      __ vmv_vv(i.OutputSimd128Register(), kSimd128ScratchReg);
++      break;
++    }
+     case kRiscvI32x4ShrU: {
+       __ VU.set(kScratchReg, E32, m1);
+       if (instr->InputAt(1)->IsRegister()) {
+@@ -2302,6 +2427,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+                  MaskType::Mask);
+       break;
+     }
++    case kRiscvI64x2ExtractLane: {
++      __ WasmRvvExtractLane(i.OutputRegister(), i.InputSimd128Register(0),
++                            i.InputInt8(1), E64, m1);
++      break;
++    }
+     case kRiscvI8x16Eq: {
+       __ WasmRvvEq(i.OutputSimd128Register(), i.InputSimd128Register(0),
+                    i.InputSimd128Register(1), E8, m1);
+@@ -2637,8 +2767,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       }
+       __ vrgather_vv(dst, src0, kSimd128ScratchReg);
+       __ vadd_vi(kSimd128ScratchReg, kSimd128ScratchReg, -16);
+-      __ vrgather_vv(kSimd128ScratchReg, src1, kSimd128ScratchReg);
+-      __ vor_vv(dst, dst, kSimd128ScratchReg);
++      __ vrgather_vv(kSimd128ScratchReg3, src1, kSimd128ScratchReg);
++      __ vor_vv(dst, dst, kSimd128ScratchReg3);
+       break;
+     }
+     case kRiscvF64x2NearestInt: {
+@@ -2799,6 +2929,39 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       __ vfmv_fs(i.OutputDoubleRegister(), kSimd128ScratchReg);
+       break;
+     }
++    case kRiscvF64x2PromoteLowF32x4: {
++      __ VU.set(kScratchReg, E32, mf2);
++      if (i.OutputSimd128Register() != i.InputSimd128Register(0)) {
++        __ vfwcvt_f_f_v(i.OutputSimd128Register(), i.InputSimd128Register(0));
++      } else {
++        __ vfwcvt_f_f_v(kSimd128ScratchReg3, i.InputSimd128Register(0));
++        __ VU.set(kScratchReg, E64, m1);
++        __ vmv_vv(i.OutputSimd128Register(), kSimd128ScratchReg3);
++      }
++      break;
++    }
++    case kRiscvF64x2ConvertLowI32x4S: {
++      __ VU.set(kScratchReg, E32, mf2);
++      if (i.OutputSimd128Register() != i.InputSimd128Register(0)) {
++        __ vfwcvt_f_x_v(i.OutputSimd128Register(), i.InputSimd128Register(0));
++      } else {
++        __ vfwcvt_f_x_v(kSimd128ScratchReg3, i.InputSimd128Register(0));
++        __ VU.set(kScratchReg, E64, m1);
++        __ vmv_vv(i.OutputSimd128Register(), kSimd128ScratchReg3);
++      }
++      break;
++    }
++    case kRiscvF64x2ConvertLowI32x4U: {
++      __ VU.set(kScratchReg, E32, mf2);
++      if (i.OutputSimd128Register() != i.InputSimd128Register(0)) {
++        __ vfwcvt_f_xu_v(i.OutputSimd128Register(), i.InputSimd128Register(0));
++      } else {
++        __ vfwcvt_f_xu_v(kSimd128ScratchReg3, i.InputSimd128Register(0));
++        __ VU.set(kScratchReg, E64, m1);
++        __ vmv_vv(i.OutputSimd128Register(), kSimd128ScratchReg3);
++      }
++      break;
++    }
+     case kRiscvF32x4ExtractLane: {
+       __ VU.set(kScratchReg, E32, m1);
+       __ vslidedown_vi(kSimd128ScratchReg, i.InputSimd128Register(0),
+@@ -2817,8 +2980,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       break;
+     }
+     case kRiscvF32x4DemoteF64x2Zero: {
+-      __ VU.set(kScratchReg, E32, m1);
++      __ VU.set(kScratchReg, E32, mf2);
+       __ vfncvt_f_f_w(i.OutputSimd128Register(), i.InputSimd128Register(0));
++      __ VU.set(kScratchReg, E32, m1);
+       __ vmv_vi(v0, 12);
+       __ vmerge_vx(i.OutputSimd128Register(), zero_reg,
+                    i.OutputSimd128Register());
+@@ -3012,6 +3176,36 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       __ vsext_vf2(i.OutputSimd128Register(), kSimd128ScratchReg);
+       break;
+     }
++    case kRiscvI32x4SConvertF32x4: {
++      __ VU.set(kScratchReg, E32, m1);
++      __ VU.set(RoundingMode::RTZ);
++      __ vmfeq_vv(v0, i.InputSimd128Register(0), i.InputSimd128Register(0));
++      if (i.OutputSimd128Register() != i.InputSimd128Register(0)) {
++        __ vmv_vx(i.OutputSimd128Register(), zero_reg);
++        __ vfcvt_x_f_v(i.OutputSimd128Register(), i.InputSimd128Register(0),
++                       Mask);
++      } else {
++        __ vmv_vx(kSimd128ScratchReg, zero_reg);
++        __ vfcvt_x_f_v(kSimd128ScratchReg, i.InputSimd128Register(0), Mask);
++        __ vmv_vv(i.OutputSimd128Register(), kSimd128ScratchReg);
++      }
++      break;
++    }
++    case kRiscvI32x4UConvertF32x4: {
++      __ VU.set(kScratchReg, E32, m1);
++      __ VU.set(RoundingMode::RTZ);
++      __ vmfeq_vv(v0, i.InputSimd128Register(0), i.InputSimd128Register(0));
++      if (i.OutputSimd128Register() != i.InputSimd128Register(0)) {
++        __ vmv_vx(i.OutputSimd128Register(), zero_reg);
++        __ vfcvt_xu_f_v(i.OutputSimd128Register(), i.InputSimd128Register(0),
++                        Mask);
++      } else {
++        __ vmv_vx(kSimd128ScratchReg, zero_reg);
++        __ vfcvt_xu_f_v(kSimd128ScratchReg, i.InputSimd128Register(0), Mask);
++        __ vmv_vv(i.OutputSimd128Register(), kSimd128ScratchReg);
++      }
++      break;
++    }
+     case kRiscvI32x4UConvertI16x8Low: {
+       __ VU.set(kScratchReg, E32, m1);
+       __ vmv_vv(kSimd128ScratchReg, i.InputSimd128Register(0));
+@@ -3053,42 +3247,42 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+     }
+     case kRiscvI8x16SConvertI16x8: {
+       __ VU.set(kScratchReg, E16, m1);
+-      __ vmv_vv(kSimd128ScratchReg2, i.InputSimd128Register(0));
+-      __ vmv_vv(kSimd128ScratchReg, i.InputSimd128Register(1));
++      __ vmv_vv(v26, i.InputSimd128Register(0));
++      __ vmv_vv(v27, i.InputSimd128Register(1));
+       __ VU.set(kScratchReg, E8, m1);
+       __ VU.set(RoundingMode::RNE);
+-      __ vnclip_vi(i.OutputSimd128Register(), kSimd128ScratchReg2, 0);
++      __ vnclip_vi(i.OutputSimd128Register(), v26, 0);
+       break;
+     }
+     case kRiscvI8x16UConvertI16x8: {
+       __ VU.set(kScratchReg, E16, m1);
+-      __ vmv_vv(kSimd128ScratchReg2, i.InputSimd128Register(0));
+-      __ vmv_vv(kSimd128ScratchReg, i.InputSimd128Register(1));
++      __ vmv_vv(v26, i.InputSimd128Register(0));
++      __ vmv_vv(v27, i.InputSimd128Register(1));
+       __ VU.set(kScratchReg, E16, m2);
+-      __ vmax_vx(kSimd128ScratchReg2, kSimd128ScratchReg2, zero_reg);
++      __ vmax_vx(v26, v26, zero_reg);
+       __ VU.set(kScratchReg, E8, m1);
+       __ VU.set(RoundingMode::RNE);
+-      __ vnclipu_vi(i.OutputSimd128Register(), kSimd128ScratchReg2, 0);
++      __ vnclipu_vi(i.OutputSimd128Register(), v26, 0);
+       break;
+     }
+     case kRiscvI16x8SConvertI32x4: {
+       __ VU.set(kScratchReg, E32, m1);
+-      __ vmv_vv(kSimd128ScratchReg2, i.InputSimd128Register(0));
+-      __ vmv_vv(kSimd128ScratchReg, i.InputSimd128Register(1));
++      __ vmv_vv(v26, i.InputSimd128Register(0));
++      __ vmv_vv(v27, i.InputSimd128Register(1));
+       __ VU.set(kScratchReg, E16, m1);
+       __ VU.set(RoundingMode::RNE);
+-      __ vnclip_vi(i.OutputSimd128Register(), kSimd128ScratchReg2, 0);
++      __ vnclip_vi(i.OutputSimd128Register(), v26, 0);
+       break;
+     }
+     case kRiscvI16x8UConvertI32x4: {
+       __ VU.set(kScratchReg, E32, m1);
+-      __ vmv_vv(kSimd128ScratchReg2, i.InputSimd128Register(0));
+-      __ vmv_vv(kSimd128ScratchReg, i.InputSimd128Register(1));
++      __ vmv_vv(v26, i.InputSimd128Register(0));
++      __ vmv_vv(v27, i.InputSimd128Register(1));
+       __ VU.set(kScratchReg, E32, m2);
+-      __ vmax_vx(kSimd128ScratchReg2, kSimd128ScratchReg2, zero_reg);
++      __ vmax_vx(v26, v26, zero_reg);
+       __ VU.set(kScratchReg, E16, m1);
+       __ VU.set(RoundingMode::RNE);
+-      __ vnclipu_vi(i.OutputSimd128Register(), kSimd128ScratchReg2, 0);
++      __ vnclipu_vi(i.OutputSimd128Register(), v26, 0);
+       break;
+     }
+       ASSEMBLE_RVV_UNOP_INTEGER_VV(Neg, vneg_vv)
+@@ -3099,6 +3293,61 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       ASSEMBLE_RVV_UNOP_INTEGER_VR(Splat, vmv_vx)
+       ASSEMBLE_RVV_BINOP_INTEGER(Add, vadd_vv)
+       ASSEMBLE_RVV_BINOP_INTEGER(Sub, vsub_vv)
++    case kRiscvVwadd: {
++      __ VU.set(kScratchReg, i.InputInt8(2), i.InputInt8(3));
++      __ vwadd_vv(i.OutputSimd128Register(), i.InputSimd128Register(0),
++                  i.InputSimd128Register(1));
++      break;
++    }
++    case kRiscvVwaddu: {
++      __ VU.set(kScratchReg, i.InputInt8(2), i.InputInt8(3));
++      __ vwaddu_vv(i.OutputSimd128Register(), i.InputSimd128Register(0),
++                   i.InputSimd128Register(1));
++      break;
++    }
++    case kRiscvVwmul: {
++      __ VU.set(kScratchReg, i.InputInt8(2), i.InputInt8(3));
++      __ vwmul_vv(i.OutputSimd128Register(), i.InputSimd128Register(0),
++                  i.InputSimd128Register(1));
++      break;
++    }
++    case kRiscvVwmulu: {
++      __ VU.set(kScratchReg, i.InputInt8(2), i.InputInt8(3));
++      __ vwmulu_vv(i.OutputSimd128Register(), i.InputSimd128Register(0),
++                   i.InputSimd128Register(1));
++      break;
++    }
++    case kRiscvVmvSx: {
++      __ VU.set(kScratchReg, i.InputInt8(2), i.InputInt8(3));
++      if (instr->InputAt(0)->IsRegister()) {
++        __ vmv_sx(i.OutputSimd128Register(), i.InputRegister(0));
++      } else {
++        DCHECK(instr->InputAt(0)->IsImmediate());
++        __ li(kScratchReg, i.InputInt64(0));
++        __ vmv_sx(i.OutputSimd128Register(), kScratchReg);
++      }
++      break;
++    }
++    case kRiscvVcompress: {
++      __ VU.set(kScratchReg, i.InputInt8(2), i.InputInt8(3));
++      if (instr->InputAt(1)->IsSimd128Register()) {
++        __ vcompress_vv(i.OutputSimd128Register(), i.InputSimd128Register(0),
++                        i.InputSimd128Register(1));
++      } else {
++        DCHECK(instr->InputAt(1)->IsImmediate());
++        __ li(kScratchReg, i.InputInt64(1));
++        __ vmv_sx(v0, kScratchReg);
++        __ vcompress_vv(i.OutputSimd128Register(), i.InputSimd128Register(0),
++                        v0);
++      }
++      break;
++    }
++    case kRiscvVaddVv: {
++      __ VU.set(kScratchReg, i.InputInt8(2), i.InputInt8(3));
++      __ vadd_vv(i.OutputSimd128Register(), i.InputSimd128Register(0),
++                 i.InputSimd128Register(1));
++      break;
++    }
+     default:
+ #ifdef DEBUG
+       switch (arch_opcode) {
+diff --git a/src/compiler/backend/riscv64/instruction-codes-riscv64.h b/src/compiler/backend/riscv64/instruction-codes-riscv64.h
+index 0c8d99a8e8..307379be32 100644
+--- a/src/compiler/backend/riscv64/instruction-codes-riscv64.h
++++ b/src/compiler/backend/riscv64/instruction-codes-riscv64.h
+@@ -263,7 +263,6 @@ namespace compiler {
+   V(RiscvI32x4GeU)                          \
+   V(RiscvI32x4Abs)                          \
+   V(RiscvI32x4BitMask)                      \
+-  V(RiscvI32x4DotI16x8S)                    \
+   V(RiscvI32x4TruncSatF64x2SZero)           \
+   V(RiscvI32x4TruncSatF64x2UZero)           \
+   V(RiscvI16x8Splat)                        \
+@@ -329,6 +328,8 @@ namespace compiler {
+   V(RiscvS128Not)                           \
+   V(RiscvS128Select)                        \
+   V(RiscvS128AndNot)                        \
++  V(RiscvS128Load64Zero)                    \
++  V(RiscvS128Load32Zero)                    \
+   V(RiscvI32x4AllTrue)                      \
+   V(RiscvI16x8AllTrue)                      \
+   V(RiscvV128AnyTrue)                       \
+@@ -356,21 +357,13 @@ namespace compiler {
+   V(RiscvS8x16InterleaveEven)               \
+   V(RiscvS8x16InterleaveOdd)                \
+   V(RiscvI8x16Shuffle)                      \
+-  V(RiscvI8x16Swizzle)                      \
+   V(RiscvS8x16Concat)                       \
+   V(RiscvS8x8Reverse)                       \
+   V(RiscvS8x4Reverse)                       \
+   V(RiscvS8x2Reverse)                       \
+-  V(RiscvS128Load8Splat)                    \
+-  V(RiscvS128Load16Splat)                   \
+-  V(RiscvS128Load32Splat)                   \
+-  V(RiscvS128Load64Splat)                   \
+-  V(RiscvS128Load8x8S)                      \
+-  V(RiscvS128Load8x8U)                      \
+-  V(RiscvS128Load16x4S)                     \
+-  V(RiscvS128Load16x4U)                     \
+-  V(RiscvS128Load32x2S)                     \
+-  V(RiscvS128Load32x2U)                     \
++  V(RiscvS128LoadSplat)                     \
++  V(RiscvS128Load64ExtendS)                 \
++  V(RiscvS128Load64ExtendU)                 \
+   V(RiscvS128LoadLane)                      \
+   V(RiscvS128StoreLane)                     \
+   V(RiscvRvvLd)                             \
+@@ -387,6 +380,15 @@ namespace compiler {
+   V(RiscvI16x8UConvertI8x16High)            \
+   V(RiscvI8x16SConvertI16x8)                \
+   V(RiscvI8x16UConvertI16x8)                \
++  V(RiscvVwmul)                             \
++  V(RiscvVwmulu)                            \
++  V(RiscvVmvSx)                             \
++  V(RiscvVcompress)                         \
++  V(RiscvVaddVv)                            \
++  V(RiscvVwadd)                             \
++  V(RiscvVwaddu)                            \
++  V(RiscvVrgather)                          \
++  V(RiscvVslidedown)                        \
+   V(RiscvWord64AtomicLoadUint64)            \
+   V(RiscvWord64AtomicStoreWord64)           \
+   V(RiscvWord64AtomicAddUint64)             \
+diff --git a/src/compiler/backend/riscv64/instruction-scheduler-riscv64.cc b/src/compiler/backend/riscv64/instruction-scheduler-riscv64.cc
+index 54d9a98663..7d4e31ce92 100644
+--- a/src/compiler/backend/riscv64/instruction-scheduler-riscv64.cc
++++ b/src/compiler/backend/riscv64/instruction-scheduler-riscv64.cc
+@@ -228,7 +228,6 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kRiscvI32x4UConvertI16x8Low:
+     case kRiscvI32x4Abs:
+     case kRiscvI32x4BitMask:
+-    case kRiscvI32x4DotI16x8S:
+     case kRiscvI8x16Add:
+     case kRiscvI8x16AddSatS:
+     case kRiscvI8x16AddSatU:
+@@ -287,6 +286,8 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kRiscvS128Xor:
+     case kRiscvS128Const:
+     case kRiscvS128Zero:
++    case kRiscvS128Load32Zero:
++    case kRiscvS128Load64Zero:
+     case kRiscvS128AllOnes:
+     case kRiscvS16x8InterleaveEven:
+     case kRiscvS16x8InterleaveOdd:
+@@ -319,7 +320,15 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kRiscvS8x4Reverse:
+     case kRiscvS8x8Reverse:
+     case kRiscvI8x16Shuffle:
+-    case kRiscvI8x16Swizzle:
++    case kRiscvVwmul:
++    case kRiscvVwmulu:
++    case kRiscvVmvSx:
++    case kRiscvVcompress:
++    case kRiscvVaddVv:
++    case kRiscvVwadd:
++    case kRiscvVwaddu:
++    case kRiscvVrgather:
++    case kRiscvVslidedown:
+     case kRiscvSar32:
+     case kRiscvSignExtendByte:
+     case kRiscvSignExtendShort:
+@@ -361,16 +370,9 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kRiscvUlw:
+     case kRiscvUlwu:
+     case kRiscvULoadFloat:
+-    case kRiscvS128Load8Splat:
+-    case kRiscvS128Load16Splat:
+-    case kRiscvS128Load32Splat:
+-    case kRiscvS128Load64Splat:
+-    case kRiscvS128Load8x8S:
+-    case kRiscvS128Load8x8U:
+-    case kRiscvS128Load16x4S:
+-    case kRiscvS128Load16x4U:
+-    case kRiscvS128Load32x2S:
+-    case kRiscvS128Load32x2U:
++    case kRiscvS128LoadSplat:
++    case kRiscvS128Load64ExtendU:
++    case kRiscvS128Load64ExtendS:
+     case kRiscvS128LoadLane:
+     case kRiscvWord64AtomicLoadUint64:
+     case kRiscvLoadDecompressTaggedSigned:
+diff --git a/src/compiler/backend/riscv64/instruction-selector-riscv64.cc b/src/compiler/backend/riscv64/instruction-selector-riscv64.cc
+index caf8459507..6ec4df95c2 100644
+--- a/src/compiler/backend/riscv64/instruction-selector-riscv64.cc
++++ b/src/compiler/backend/riscv64/instruction-selector-riscv64.cc
+@@ -389,50 +389,107 @@ void EmitLoad(InstructionSelector* selector, Node* node, InstructionCode opcode,
+   }
+ }
+ 
+-void InstructionSelector::VisitStoreLane(Node* node) { UNIMPLEMENTED(); }
++void EmitS128Load(InstructionSelector* selector, Node* node,
++                  InstructionCode opcode, VSew sew, Vlmul lmul) {
++  RiscvOperandGenerator g(selector);
++  Node* base = node->InputAt(0);
++  Node* index = node->InputAt(1);
++
++  if (g.CanBeImmediate(index, opcode)) {
++    selector->Emit(opcode | AddressingModeField::encode(kMode_MRI),
++                   g.DefineAsRegister(node), g.UseRegister(base),
++                   g.UseImmediate(index), g.UseImmediate(sew),
++                   g.UseImmediate(lmul));
++  } else {
++    InstructionOperand addr_reg = g.TempRegister();
++    selector->Emit(kRiscvAdd64 | AddressingModeField::encode(kMode_None),
++                   addr_reg, g.UseRegister(index), g.UseRegister(base));
++    // Emit desired load opcode, using temp addr_reg.
++    selector->Emit(opcode | AddressingModeField::encode(kMode_MRI),
++                   g.DefineAsRegister(node), addr_reg, g.TempImmediate(0),
++                   g.UseImmediate(sew), g.UseImmediate(lmul));
++  }
++}
+ 
+-void InstructionSelector::VisitLoadLane(Node* node) { UNIMPLEMENTED(); }
++void InstructionSelector::VisitStoreLane(Node* node) {
++  StoreLaneParameters params = StoreLaneParametersOf(node->op());
++  LoadStoreLaneParams f(params.rep, params.laneidx);
++  InstructionCode opcode = kRiscvS128StoreLane;
++  opcode |= MiscField::encode(f.sz);
++
++  RiscvOperandGenerator g(this);
++  Node* base = node->InputAt(0);
++  Node* index = node->InputAt(1);
++  InstructionOperand addr_reg = g.TempRegister();
++  Emit(kRiscvAdd64, addr_reg, g.UseRegister(base), g.UseRegister(index));
++  InstructionOperand inputs[4] = {
++      g.UseRegister(node->InputAt(2)),
++      g.UseImmediate(f.laneidx),
++      addr_reg,
++      g.TempImmediate(0),
++  };
++  opcode |= AddressingModeField::encode(kMode_MRI);
++  Emit(opcode, 0, nullptr, 4, inputs);
++}
++void InstructionSelector::VisitLoadLane(Node* node) {
++  LoadLaneParameters params = LoadLaneParametersOf(node->op());
++  LoadStoreLaneParams f(params.rep.representation(), params.laneidx);
++  InstructionCode opcode = kRiscvS128LoadLane;
++  opcode |= MiscField::encode(f.sz);
++
++  RiscvOperandGenerator g(this);
++  Node* base = node->InputAt(0);
++  Node* index = node->InputAt(1);
++  InstructionOperand addr_reg = g.TempRegister();
++  Emit(kRiscvAdd64, addr_reg, g.UseRegister(base), g.UseRegister(index));
++  opcode |= AddressingModeField::encode(kMode_MRI);
++  Emit(opcode, g.DefineSameAsFirst(node), g.UseRegister(node->InputAt(2)),
++       g.UseImmediate(params.laneidx), addr_reg, g.TempImmediate(0));
++}
+ 
+ void InstructionSelector::VisitLoadTransform(Node* node) {
+   LoadTransformParameters params = LoadTransformParametersOf(node->op());
+ 
+-  InstructionCode opcode = kArchNop;
+   switch (params.transformation) {
+     case LoadTransformation::kS128Load8Splat:
+-      opcode = kRiscvS128Load8Splat;
++      EmitS128Load(this, node, kRiscvS128LoadSplat, E8, m1);
+       break;
+     case LoadTransformation::kS128Load16Splat:
+-      opcode = kRiscvS128Load16Splat;
++      EmitS128Load(this, node, kRiscvS128LoadSplat, E16, m1);
+       break;
+     case LoadTransformation::kS128Load32Splat:
+-      opcode = kRiscvS128Load32Splat;
++      EmitS128Load(this, node, kRiscvS128LoadSplat, E32, m1);
+       break;
+     case LoadTransformation::kS128Load64Splat:
+-      opcode = kRiscvS128Load64Splat;
++      EmitS128Load(this, node, kRiscvS128LoadSplat, E64, m1);
+       break;
+     case LoadTransformation::kS128Load8x8S:
+-      opcode = kRiscvS128Load8x8S;
++      EmitS128Load(this, node, kRiscvS128Load64ExtendS, E16, m1);
+       break;
+     case LoadTransformation::kS128Load8x8U:
+-      opcode = kRiscvS128Load8x8U;
++      EmitS128Load(this, node, kRiscvS128Load64ExtendU, E16, m1);
+       break;
+     case LoadTransformation::kS128Load16x4S:
+-      opcode = kRiscvS128Load16x4S;
++      EmitS128Load(this, node, kRiscvS128Load64ExtendS, E32, m1);
+       break;
+     case LoadTransformation::kS128Load16x4U:
+-      opcode = kRiscvS128Load16x4U;
++      EmitS128Load(this, node, kRiscvS128Load64ExtendU, E32, m1);
+       break;
+     case LoadTransformation::kS128Load32x2S:
+-      opcode = kRiscvS128Load32x2S;
++      EmitS128Load(this, node, kRiscvS128Load64ExtendS, E64, m1);
+       break;
+     case LoadTransformation::kS128Load32x2U:
+-      opcode = kRiscvS128Load32x2U;
++      EmitS128Load(this, node, kRiscvS128Load64ExtendU, E64, m1);
++      break;
++    case LoadTransformation::kS128Load32Zero:
++      EmitS128Load(this, node, kRiscvS128Load32Zero, E32, m1);
++      break;
++    case LoadTransformation::kS128Load64Zero:
++      EmitS128Load(this, node, kRiscvS128Load64Zero, E64, m1);
+       break;
+     default:
+       UNIMPLEMENTED();
+   }
+-
+-  EmitLoad(this, node, opcode);
+ }
+ 
+ void InstructionSelector::VisitLoad(Node* node) {
+@@ -913,19 +970,55 @@ void InstructionSelector::VisitInt32Mul(Node* node) {
+ }
+ 
+ void InstructionSelector::VisitI32x4ExtAddPairwiseI16x8S(Node* node) {
+-  UNIMPLEMENTED();
++  RiscvOperandGenerator g(this);
++  InstructionOperand src1 = g.TempSimd128Register();
++  InstructionOperand src2 = g.TempSimd128Register();
++  InstructionOperand src = g.UseUniqueRegister(node->InputAt(0));
++  Emit(kRiscvVrgather, src1, src, g.UseImmediate64(0x0006000400020000),
++       g.UseImmediate(int8_t(E16)), g.UseImmediate(int8_t(m1)));
++  Emit(kRiscvVrgather, src2, src, g.UseImmediate64(0x0007000500030001),
++       g.UseImmediate(int8_t(E16)), g.UseImmediate(int8_t(m1)));
++  Emit(kRiscvVwadd, g.DefineAsRegister(node), src1, src2,
++       g.UseImmediate(int8_t(E16)), g.UseImmediate(int8_t(mf2)));
+ }
+ 
+ void InstructionSelector::VisitI32x4ExtAddPairwiseI16x8U(Node* node) {
+-  UNIMPLEMENTED();
++  RiscvOperandGenerator g(this);
++  InstructionOperand src1 = g.TempSimd128Register();
++  InstructionOperand src2 = g.TempSimd128Register();
++  InstructionOperand src = g.UseUniqueRegister(node->InputAt(0));
++  Emit(kRiscvVrgather, src1, src, g.UseImmediate64(0x0006000400020000),
++       g.UseImmediate(int8_t(E16)), g.UseImmediate(int8_t(m1)));
++  Emit(kRiscvVrgather, src2, src, g.UseImmediate64(0x0007000500030001),
++       g.UseImmediate(int8_t(E16)), g.UseImmediate(int8_t(m1)));
++  Emit(kRiscvVwaddu, g.DefineAsRegister(node), src1, src2,
++       g.UseImmediate(int8_t(E16)), g.UseImmediate(int8_t(mf2)));
+ }
+ 
+ void InstructionSelector::VisitI16x8ExtAddPairwiseI8x16S(Node* node) {
+-  UNIMPLEMENTED();
++  RiscvOperandGenerator g(this);
++  InstructionOperand src1 = g.TempSimd128Register();
++  InstructionOperand src2 = g.TempSimd128Register();
++  InstructionOperand src = g.UseUniqueRegister(node->InputAt(0));
++  Emit(kRiscvVrgather, src1, src, g.UseImmediate64(0x0E0C0A0806040200),
++       g.UseImmediate(int8_t(E8)), g.UseImmediate(int8_t(m1)));
++  Emit(kRiscvVrgather, src2, src, g.UseImmediate64(0x0F0D0B0907050301),
++       g.UseImmediate(int8_t(E8)), g.UseImmediate(int8_t(m1)));
++  Emit(kRiscvVwadd, g.DefineAsRegister(node), src1, src2,
++       g.UseImmediate(int8_t(E8)), g.UseImmediate(int8_t(mf2)));
+ }
+ 
+ void InstructionSelector::VisitI16x8ExtAddPairwiseI8x16U(Node* node) {
+-  UNIMPLEMENTED();
++  RiscvOperandGenerator g(this);
++  InstructionOperand src1 = g.TempSimd128Register();
++  InstructionOperand src2 = g.TempSimd128Register();
++  InstructionOperand src = g.UseUniqueRegister(node->InputAt(0));
++  Emit(kRiscvVrgather, src1, src, g.UseImmediate64(0x0E0C0A0806040200),
++       g.UseImmediate(int8_t(E8)), g.UseImmediate(int8_t(m1)));
++  Emit(kRiscvVrgather, src2, src, g.UseImmediate64(0x0F0D0B0907050301),
++       g.UseImmediate(int8_t(E8)), g.UseImmediate(int8_t(m1)));
++  Emit(kRiscvVwaddu, g.DefineAsRegister(node), src1, src2,
++       g.UseImmediate(int8_t(E8)), g.UseImmediate(int8_t(mf2)));
+ }
+ 
+ void InstructionSelector::VisitInt32MulHigh(Node* node) {
+@@ -2806,7 +2899,6 @@ void InstructionSelector::VisitInt64AbsWithOverflow(Node* node) {
+   V(I32x4GeS, kRiscvI32x4GeS)                           \
+   V(I32x4GtU, kRiscvI32x4GtU)                           \
+   V(I32x4GeU, kRiscvI32x4GeU)                           \
+-  V(I32x4DotI16x8S, kRiscvI32x4DotI16x8S)               \
+   V(I16x8Add, kRiscvI16x8Add)                           \
+   V(I16x8AddSatS, kRiscvI16x8AddSatS)                   \
+   V(I16x8AddSatU, kRiscvI16x8AddSatU)                   \
+@@ -2932,6 +3024,23 @@ void InstructionSelector::VisitS128Select(Node* node) {
+   VisitRRRR(this, kRiscvS128Select, node);
+ }
+ 
++void InstructionSelector::VisitI32x4DotI16x8S(Node* node) {
++  RiscvOperandGenerator g(this);
++  InstructionOperand temp = g.TempFpRegister(v14);
++  InstructionOperand temp1 = g.TempFpRegister(v10);
++  InstructionOperand temp2 = g.TempFpRegister(v18);
++  InstructionOperand dst = g.DefineAsRegister(node);
++  this->Emit(kRiscvVwmul, temp, g.UseRegister(node->InputAt(0)),
++             g.UseRegister(node->InputAt(1)), g.UseImmediate(E16),
++             g.UseImmediate(m1));
++  this->Emit(kRiscvVcompress, temp2, temp, g.UseImmediate(0b01010101),
++             g.UseImmediate(E32), g.UseImmediate(m2));
++  this->Emit(kRiscvVcompress, temp1, temp, g.UseImmediate(0b10101010),
++             g.UseImmediate(E32), g.UseImmediate(m2));
++  this->Emit(kRiscvVaddVv, dst, temp1, temp2, g.UseImmediate(E32),
++             g.UseImmediate(m1));
++}
++
+ namespace {
+ 
+ struct ShuffleEntry {
+@@ -3050,9 +3159,10 @@ void InstructionSelector::VisitI8x16Swizzle(Node* node) {
+   InstructionOperand temps[] = {g.TempSimd128Register()};
+   // We don't want input 0 or input 1 to be the same as output, since we will
+   // modify output before do the calculation.
+-  Emit(kRiscvI8x16Swizzle, g.DefineAsRegister(node),
++  Emit(kRiscvVrgather, g.DefineAsRegister(node),
+        g.UseUniqueRegister(node->InputAt(0)),
+-       g.UseUniqueRegister(node->InputAt(1)), arraysize(temps), temps);
++       g.UseUniqueRegister(node->InputAt(1)), g.UseImmediate(E8),
++       g.UseImmediate(m1), arraysize(temps), temps);
+ }
+ 
+ void InstructionSelector::VisitSignExtendWord8ToInt32(Node* node) {
+@@ -3101,20 +3211,55 @@ void InstructionSelector::VisitF64x2Pmax(Node* node) {
+   VisitUniqueRRR(this, kRiscvF64x2Pmax, node);
+ }
+ 
+-#define VISIT_EXT_MUL(OPCODE1, OPCODE2)                                       \
+-  void InstructionSelector::Visit##OPCODE1##ExtMulLow##OPCODE2(Node* node) {  \
+-    UNREACHABLE();                                                            \
+-  }                                                                           \
+-  void InstructionSelector::Visit##OPCODE1##ExtMulHigh##OPCODE2(Node* node) { \
+-    UNREACHABLE();                                                            \
+-  }
+-
+-VISIT_EXT_MUL(I64x2, I32x4S)
+-VISIT_EXT_MUL(I64x2, I32x4U)
+-VISIT_EXT_MUL(I32x4, I16x8S)
+-VISIT_EXT_MUL(I32x4, I16x8U)
+-VISIT_EXT_MUL(I16x8, I8x16S)
+-VISIT_EXT_MUL(I16x8, I8x16U)
++#define VISIT_EXT_MUL(OPCODE1, OPCODE2, TYPE)                            \
++  void InstructionSelector::Visit##OPCODE1##ExtMulLow##OPCODE2##S(       \
++      Node* node) {                                                      \
++    RiscvOperandGenerator g(this);                                       \
++    Emit(kRiscvVwmul, g.DefineAsRegister(node),                          \
++         g.UseUniqueRegister(node->InputAt(0)),                          \
++         g.UseUniqueRegister(node->InputAt(1)), g.UseImmediate(E##TYPE), \
++         g.UseImmediate(mf2));                                           \
++  }                                                                      \
++  void InstructionSelector::Visit##OPCODE1##ExtMulHigh##OPCODE2##S(      \
++      Node* node) {                                                      \
++    RiscvOperandGenerator g(this);                                       \
++    InstructionOperand t1 = g.TempFpRegister(v10);                       \
++    Emit(kRiscvVslidedown, t1, g.UseUniqueRegister(node->InputAt(0)),    \
++         g.UseImmediate(kRvvVLEN / TYPE / 2), g.UseImmediate(E##TYPE),   \
++         g.UseImmediate(m1));                                            \
++    InstructionOperand t2 = g.TempFpRegister(v9);                        \
++    Emit(kRiscvVslidedown, t2, g.UseUniqueRegister(node->InputAt(1)),    \
++         g.UseImmediate(kRvvVLEN / TYPE / 2), g.UseImmediate(E##TYPE),   \
++         g.UseImmediate(m1));                                            \
++    Emit(kRiscvVwmul, g.DefineAsRegister(node), t1, t2,                  \
++         g.UseImmediate(E##TYPE), g.UseImmediate(mf2));                  \
++  }                                                                      \
++  void InstructionSelector::Visit##OPCODE1##ExtMulLow##OPCODE2##U(       \
++      Node* node) {                                                      \
++    RiscvOperandGenerator g(this);                                       \
++    Emit(kRiscvVwmulu, g.DefineAsRegister(node),                         \
++         g.UseUniqueRegister(node->InputAt(0)),                          \
++         g.UseUniqueRegister(node->InputAt(1)), g.UseImmediate(E##TYPE), \
++         g.UseImmediate(mf2));                                           \
++  }                                                                      \
++  void InstructionSelector::Visit##OPCODE1##ExtMulHigh##OPCODE2##U(      \
++      Node* node) {                                                      \
++    RiscvOperandGenerator g(this);                                       \
++    InstructionOperand t1 = g.TempFpRegister(v10);                       \
++    Emit(kRiscvVslidedown, t1, g.UseUniqueRegister(node->InputAt(0)),    \
++         g.UseImmediate(kRvvVLEN / TYPE / 2), g.UseImmediate(E##TYPE),   \
++         g.UseImmediate(m1));                                            \
++    InstructionOperand t2 = g.TempFpRegister(v9);                        \
++    Emit(kRiscvVslidedown, t2, g.UseUniqueRegister(node->InputAt(1)),    \
++         g.UseImmediate(kRvvVLEN / TYPE / 2), g.UseImmediate(E##TYPE),   \
++         g.UseImmediate(m1));                                            \
++    Emit(kRiscvVwmulu, g.DefineAsRegister(node), t1, t2,                 \
++         g.UseImmediate(E##TYPE), g.UseImmediate(mf2));                  \
++  }
++
++VISIT_EXT_MUL(I64x2, I32x4, 32)
++VISIT_EXT_MUL(I32x4, I16x8, 16)
++VISIT_EXT_MUL(I16x8, I8x16, 8)
+ #undef VISIT_EXT_MUL
+ 
+ void InstructionSelector::AddOutputToSelectContinuation(OperandGenerator* g,
+diff --git a/src/diagnostics/riscv64/disasm-riscv64.cc b/src/diagnostics/riscv64/disasm-riscv64.cc
+index 74a06fc937..02d3bbd9cd 100644
+--- a/src/diagnostics/riscv64/disasm-riscv64.cc
++++ b/src/diagnostics/riscv64/disasm-riscv64.cc
+@@ -398,7 +398,7 @@ void Decoder::PrintRvcImm8B(Instruction* instr) {
+ void Decoder::PrintRvvVm(Instruction* instr) {
+   uint8_t imm = instr->RvvVM();
+   if (imm == 0) {
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "  vm");
++    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "  v0.t");
+   }
+ }
+ 
+@@ -2223,6 +2223,14 @@ void Decoder::DecodeRvvIVX(Instruction* instr) {
+ void Decoder::DecodeRvvMVV(Instruction* instr) {
+   DCHECK_EQ(instr->InstructionBits() & (kBaseOpcodeMask | kFunct3Mask), OP_MVV);
+   switch (instr->InstructionBits() & kVTypeMask) {
++    case RO_V_VMUNARY0: {
++      if (instr->Vs1Value() == VID_V) {
++        Format(instr, "vid.v   'rd, 'vs2'vm");
++      } else {
++        UNSUPPORTED_RISCV();
++      }
++      break;
++    }
+     case RO_V_VWXUNARY0:
+       if (instr->Vs1Value() == 0x0) {
+         Format(instr, "vmv.x.s   'rd, 'vs2");
+@@ -2259,6 +2267,12 @@ void Decoder::DecodeRvvMVV(Instruction* instr) {
+         UNSUPPORTED_RISCV();
+       }
+       break;
++    case RO_V_VWMUL_VV:
++      Format(instr, "vwmul.vv   'vd, 'vs2, 'vs1'vm");
++      break;
++    case RO_V_VWMULU_VV:
++      Format(instr, "vwmulu.vv   'vd, 'vs2, 'vs1'vm");
++      break;
+     case RO_V_VMUL_VV:
+       Format(instr, "vmul.vv   'vd, 'vs2, 'vs1'vm");
+       break;
+@@ -2274,6 +2288,12 @@ void Decoder::DecodeRvvMVV(Instruction* instr) {
+     case RO_V_VWADDU_VV:
+       Format(instr, "vwaddu.vv  'vd, 'vs2, 'vs1'vm");
+       break;
++    case RO_V_VWADD_VV:
++      Format(instr, "vwadd.vv  'vd, 'vs2, 'vs1'vm");
++      break;
++    case RO_V_VCOMPRESS_VV:
++      Format(instr, "vcompress.vm 'vd, 'vs2, 'vs1'vm");
++      break;
+     default:
+       UNSUPPORTED_RISCV();
+       break;
+@@ -2290,6 +2310,12 @@ void Decoder::DecodeRvvMVX(Instruction* instr) {
+         UNSUPPORTED_RISCV();
+       }
+       break;
++    case RO_V_VWMUL_VX:
++      Format(instr, "vwmul.vx   'vd, 'vs2, 'rs1'vm");
++      break;
++    case RO_V_VWMULU_VX:
++      Format(instr, "vwmulu.vx   'vd, 'vs2, 'rs1'vm");
++      break;
+     case RO_V_VMUL_VX:
+       Format(instr, "vmul.vx   'vd, 'vs2, 'rs1'vm");
+       break;
+@@ -2305,6 +2331,12 @@ void Decoder::DecodeRvvMVX(Instruction* instr) {
+     case RO_V_VWADDUW_VX:
+       Format(instr, "vwaddu.wx 'vd, 'vs2, 'rs1'vm");
+       break;
++    case RO_V_VWADDU_VX:
++      Format(instr, "vwaddu.vx 'vd, 'vs2, 'rs1'vm");
++      break;
++    case RO_V_VWADD_VX:
++      Format(instr, "vwadd.vx 'vd, 'vs2, 'rs1'vm");
++      break;
+     default:
+       UNSUPPORTED_RISCV();
+       break;
+@@ -2325,12 +2357,33 @@ void Decoder::DecodeRvvFVV(Instruction* instr) {
+         case VFNCVT_F_F_W:
+           Format(instr, "vfncvt.f.f.w  'vd, 'vs2'vm");
+           break;
++        case VFNCVT_X_F_W:
++          Format(instr, "vfncvt.x.f.w  'vd, 'vs2'vm");
++          break;
++        case VFNCVT_XU_F_W:
++          Format(instr, "vfncvt.xu.f.w  'vd, 'vs2'vm");
++          break;
+         case VFCVT_F_X_V:
+           Format(instr, "vfcvt.f.x.v   'vd, 'vs2'vm");
+           break;
+         case VFCVT_F_XU_V:
+           Format(instr, "vfcvt.f.xu.v  'vd, 'vs2'vm");
+           break;
++        case VFWCVT_XU_F_V:
++          Format(instr, "vfwcvt.xu.f.v  'vd, 'vs2'vm");
++          break;
++        case VFWCVT_X_F_V:
++          Format(instr, "vfwcvt.x.f.v   'vd, 'vs2'vm");
++          break;
++        case VFWCVT_F_X_V:
++          Format(instr, "vfwcvt.f.x.v   'vd, 'vs2'vm");
++          break;
++        case VFWCVT_F_XU_V:
++          Format(instr, "vfwcvt.f.xu.v  'vd, 'vs2'vm");
++          break;
++        case VFWCVT_F_F_V:
++          Format(instr, "vfwcvt.f.f.v  'vd, 'vs2'vm");
++          break;
+         default:
+           UNSUPPORTED_RISCV();
+           break;
+diff --git a/src/execution/riscv64/simulator-riscv64.cc b/src/execution/riscv64/simulator-riscv64.cc
+index 5540f1d6ba..479c4b6a2f 100644
+--- a/src/execution/riscv64/simulator-riscv64.cc
++++ b/src/execution/riscv64/simulator-riscv64.cc
+@@ -117,7 +117,16 @@ static inline bool is_overlapped_widen(const int astart, int asize,
+   }
+ }
+ 
++#ifdef DEBUG
++#define require_align(val, pos)                  \
++  if (!is_aligned(val, pos)) {                   \
++    std::cout << val << " " << pos << std::endl; \
++  }                                              \
++  CHECK_EQ(is_aligned(val, pos), true)
++#else
+ #define require_align(val, pos) CHECK_EQ(is_aligned(val, pos), true)
++#endif
++
+ #define require_noover(astart, asize, bstart, bsize) \
+   CHECK_EQ(!is_overlapped(astart, asize, bstart, bsize), true)
+ #define require_noover_widen(astart, asize, bstart, bsize) \
+@@ -157,9 +166,6 @@ static inline bool is_overlapped_widen(const int astart, int asize,
+   } else if (rvv_vsew() == E64) {  \
+     VV_PARAMS(64);                 \
+     BODY                           \
+-  } else if (rvv_vsew() == E128) { \
+-    VV_PARAMS(128);                \
+-    BODY                           \
+   } else {                         \
+     UNREACHABLE();                 \
+   }                                \
+@@ -181,9 +187,6 @@ static inline bool is_overlapped_widen(const int astart, int asize,
+   } else if (rvv_vsew() == E64) {  \
+     VV_UPARAMS(64);                \
+     BODY                           \
+-  } else if (rvv_vsew() == E128) { \
+-    VV_UPARAMS(128);               \
+-    BODY                           \
+   } else {                         \
+     UNREACHABLE();                 \
+   }                                \
+@@ -205,9 +208,6 @@ static inline bool is_overlapped_widen(const int astart, int asize,
+   } else if (rvv_vsew() == E64) {  \
+     VX_PARAMS(64);                 \
+     BODY                           \
+-  } else if (rvv_vsew() == E128) { \
+-    VX_PARAMS(128);                \
+-    BODY                           \
+   } else {                         \
+     UNREACHABLE();                 \
+   }                                \
+@@ -229,9 +229,6 @@ static inline bool is_overlapped_widen(const int astart, int asize,
+   } else if (rvv_vsew() == E64) {  \
+     VX_UPARAMS(64);                \
+     BODY                           \
+-  } else if (rvv_vsew() == E128) { \
+-    VX_UPARAMS(128);               \
+-    BODY                           \
+   } else {                         \
+     UNREACHABLE();                 \
+   }                                \
+@@ -253,9 +250,6 @@ static inline bool is_overlapped_widen(const int astart, int asize,
+   } else if (rvv_vsew() == E64) {  \
+     VI_PARAMS(64);                 \
+     BODY                           \
+-  } else if (rvv_vsew() == E128) { \
+-    VI_PARAMS(128);                \
+-    BODY                           \
+   } else {                         \
+     UNREACHABLE();                 \
+   }                                \
+@@ -277,9 +271,6 @@ static inline bool is_overlapped_widen(const int astart, int asize,
+   } else if (rvv_vsew() == E64) {  \
+     VI_UPARAMS(64);                \
+     BODY                           \
+-  } else if (rvv_vsew() == E128) { \
+-    VI_UPARAMS(128);               \
+-    BODY                           \
+   } else {                         \
+     UNREACHABLE();                 \
+   }                                \
+@@ -294,6 +285,19 @@ static inline bool is_overlapped_widen(const int astart, int asize,
+   require_align(rvv_vd_reg(), rvv_vflmul() * 2); \
+   require_vm;
+ 
++#define VI_NARROW_CHECK_COMMON                    \
++  CHECK_LE(rvv_vflmul(), 4);                      \
++  CHECK_LE(rvv_vsew() * 2, kRvvELEN);             \
++  require_align(rvv_vs2_reg(), rvv_vflmul() * 2); \
++  require_align(rvv_vd_reg(), rvv_vflmul());      \
++  require_vm;
++
++#define RVV_VI_CHECK_SLIDE(is_over)           \
++  require_align(rvv_vs2_reg(), rvv_vflmul()); \
++  require_align(rvv_vd_reg(), rvv_vflmul());  \
++  require_vm;                                 \
++  if (is_over) require(rvv_vd_reg() != rvv_vs2_reg());
++
+ #define RVV_VI_CHECK_DDS(is_rs)                                           \
+   VI_WIDE_CHECK_COMMON;                                                   \
+   require_align(rvv_vs2_reg(), rvv_vflmul() * 2);                         \
+@@ -329,6 +333,13 @@ static inline bool is_overlapped_widen(const int astart, int asize,
+     }                                                                     \
+   }
+ 
++#define RVV_VI_CHECK_SDS(is_vs1)                              \
++  VI_NARROW_CHECK_COMMON;                                     \
++  if (rvv_vd_reg() != rvv_vs2_reg())                          \
++    require_noover(rvv_vd_reg(), rvv_vflmul(), rvv_vs2_reg(), \
++                   rvv_vflmul() * 2);                         \
++  if (is_vs1) require_align(rvv_vs1_reg(), rvv_vflmul());
++
+ #define RVV_VI_VV_LOOP_WIDEN(BODY) \
+   RVV_VI_GENERAL_LOOP_BASE         \
+   RVV_VI_LOOP_MASK_SKIP()          \
+@@ -412,9 +423,6 @@ static inline bool is_overlapped_widen(const int astart, int asize,
+   } else if (rvv_vsew() == E64) {    \
+     VXI_PARAMS(64);                  \
+     BODY;                            \
+-  } else if (rvv_vsew() == E128) {   \
+-    VXI_PARAMS(128);                 \
+-    BODY                             \
+   }                                  \
+   RVV_VI_LOOP_END                    \
+   rvv_trace_vd();
+@@ -957,6 +965,11 @@ static inline bool is_overlapped_widen(const int astart, int asize,
+ 
+ #define RVV_VI_VFP_CVT_SCALE(BODY8, BODY16, BODY32, CHECK8, CHECK16, CHECK32, \
+                              is_widen, eew_check)                             \
++  if (is_widen) {                                                             \
++    RVV_VI_CHECK_DSS(false);                                                  \
++  } else {                                                                    \
++    RVV_VI_CHECK_SDS(false);                                                  \
++  }                                                                           \
+   CHECK(eew_check);                                                           \
+   switch (rvv_vsew()) {                                                       \
+     case E8: {                                                                \
+@@ -5000,22 +5013,26 @@ void Simulator::DecodeRvvIVV() {
+       if (rvv_vsew() == E8) {
+         VV_PARAMS(8);
+         int16_t result = (int16_t)vs1 * (int16_t)vs2;
+-        result += get_round(static_cast<int>(rvv_vxrm()), result, 7);
++        uint8_t round = get_round(static_cast<int>(rvv_vxrm()), result, 7);
++        result = (result >> 7) + round;
+         vd = signed_saturation<int16_t, int8_t>(result, 8);
+       } else if (rvv_vsew() == E16) {
+         VV_PARAMS(16);
+         int32_t result = (int32_t)vs1 * (int32_t)vs2;
+-        result += get_round(static_cast<int>(rvv_vxrm()), result, 15);
++        uint8_t round = get_round(static_cast<int>(rvv_vxrm()), result, 15);
++        result = (result >> 15) + round;
+         vd = signed_saturation<int32_t, int16_t>(result, 16);
+       } else if (rvv_vsew() == E32) {
+         VV_PARAMS(32);
+         int64_t result = (int64_t)vs1 * (int64_t)vs2;
+-        result += get_round(static_cast<int>(rvv_vxrm()), result, 31);
++        uint8_t round = get_round(static_cast<int>(rvv_vxrm()), result, 31);
++        result = (result >> 31) + round;
+         vd = signed_saturation<int64_t, int32_t>(result, 32);
+       } else if (rvv_vsew() == E64) {
+         VV_PARAMS(64);
+         __int128_t result = (__int128_t)vs1 * (__int128_t)vs2;
+-        result += get_round(static_cast<int>(rvv_vxrm()), result, 63);
++        uint8_t round = get_round(static_cast<int>(rvv_vxrm()), result, 63);
++        result = (result >> 63) + round;
+         vd = signed_saturation<__int128_t, int64_t>(result, 64);
+       } else {
+         UNREACHABLE();
+@@ -5056,6 +5073,7 @@ void Simulator::DecodeRvvIVV() {
+         }
+       }
+       RVV_VI_LOOP_END;
++      rvv_trace_vd();
+       break;
+     }
+     default:
+@@ -5166,6 +5184,7 @@ void Simulator::DecodeRvvIVI() {
+       RVV_VI_VI_LOOP_CMP({ res = vs2 > simm5; })
+       break;
+     case RO_V_VSLIDEDOWN_VI: {
++      RVV_VI_CHECK_SLIDE(false);
+       const uint8_t sh = instr_.RvvUimm5();
+       RVV_VI_GENERAL_LOOP_BASE
+ 
+@@ -5195,6 +5214,7 @@ void Simulator::DecodeRvvIVI() {
+         } break;
+       }
+       RVV_VI_LOOP_END
++      rvv_trace_vd();
+     } break;
+     case RO_V_VSRL_VI:
+       RVV_VI_VI_ULOOP({ vd = vs2 >> uimm5; })
+@@ -5436,10 +5456,63 @@ void Simulator::DecodeRvvIVX() {
+ void Simulator::DecodeRvvMVV() {
+   DCHECK_EQ(instr_.InstructionBits() & (kBaseOpcodeMask | kFunct3Mask), OP_MVV);
+   switch (instr_.InstructionBits() & kVTypeMask) {
++    case RO_V_VMUNARY0: {
++      if (instr_.Vs1Value() == VID_V) {
++        CHECK(rvv_vsew() >= E8 && rvv_vsew() <= E64);
++        uint8_t rd_num = rvv_vd_reg();
++        require_align(rd_num, rvv_vflmul());
++        require_vm;
++        for (uint8_t i = rvv_vstart(); i < rvv_vl(); ++i) {
++          RVV_VI_LOOP_MASK_SKIP();
++          switch (rvv_vsew()) {
++            case E8:
++              Rvvelt<uint8_t>(rd_num, i, true) = i;
++              break;
++            case E16:
++              Rvvelt<uint16_t>(rd_num, i, true) = i;
++              break;
++            case E32:
++              Rvvelt<uint32_t>(rd_num, i, true) = i;
++              break;
++            default:
++              Rvvelt<uint64_t>(rd_num, i, true) = i;
++              break;
++          }
++        }
++        set_rvv_vstart(0);
++      } else {
++        UNIMPLEMENTED_RISCV();
++      }
++      break;
++    }
+     case RO_V_VMUL_VV: {
+       RVV_VI_VV_LOOP({ vd = vs2 * vs1; })
+       break;
+     }
++    case RO_V_VWMUL_VV: {
++      RVV_VI_CHECK_DSS(true);
++      RVV_VI_VV_LOOP_WIDEN({
++        VI_WIDE_OP_AND_ASSIGN(vs2, vs1, 0, *, +, int);
++        USE(vd);
++      })
++      break;
++    }
++    case RO_V_VWMULU_VV: {
++      RVV_VI_CHECK_DSS(true);
++      RVV_VI_VV_LOOP_WIDEN({
++        VI_WIDE_OP_AND_ASSIGN(vs2, vs1, 0, *, +, uint);
++        USE(vd);
++      })
++      break;
++    }
++    case RO_V_VMULHU_VV: {
++      RVV_VI_VV_LOOP({ vd = ((__uint128_t)vs2 * vs1) >> rvv_sew(); })
++      break;
++    }
++    case RO_V_VMULH_VV: {
++      RVV_VI_VV_LOOP({ vd = ((__int128_t)vs2 * vs1) >> rvv_sew(); })
++      break;
++    }
+     case RO_V_VDIV_VV: {
+       RVV_VI_VV_LOOP({ vd = vs2 / vs1; })
+       break;
+@@ -5518,6 +5591,52 @@ void Simulator::DecodeRvvMVV() {
+         USE(vd);
+       })
+       break;
++    case RO_V_VWADD_VV:
++      RVV_VI_CHECK_DSS(true);
++      RVV_VI_VV_LOOP_WIDEN({
++        VI_WIDE_OP_AND_ASSIGN(vs2, vs1, 0, +, +, int);
++        USE(vd);
++      })
++      break;
++    case RO_V_VCOMPRESS_VV: {
++      CHECK_EQ(rvv_vstart(), 0);
++      require_align(rvv_vd_reg(), rvv_vflmul());
++      require_align(rvv_vs2_reg(), rvv_vflmul());
++      require(rvv_vd_reg() != rvv_vs2_reg());
++      require_noover(rvv_vd_reg(), rvv_vflmul(), rvv_vs1_reg(), 1);
++
++      reg_t pos = 0;
++
++      RVV_VI_GENERAL_LOOP_BASE
++      const uint64_t midx = i / 64;
++      const uint64_t mpos = i % 64;
++
++      bool do_mask = (Rvvelt<uint64_t>(rvv_vs1_reg(), midx) >> mpos) & 0x1;
++      if (do_mask) {
++        switch (rvv_vsew()) {
++          case E8:
++            Rvvelt<uint8_t>(rvv_vd_reg(), pos, true) =
++                Rvvelt<uint8_t>(rvv_vs2_reg(), i);
++            break;
++          case E16:
++            Rvvelt<uint16_t>(rvv_vd_reg(), pos, true) =
++                Rvvelt<uint16_t>(rvv_vs2_reg(), i);
++            break;
++          case E32:
++            Rvvelt<uint32_t>(rvv_vd_reg(), pos, true) =
++                Rvvelt<uint32_t>(rvv_vs2_reg(), i);
++            break;
++          default:
++            Rvvelt<uint64_t>(rvv_vd_reg(), pos, true) =
++                Rvvelt<uint64_t>(rvv_vs2_reg(), i);
++            break;
++        }
++
++        ++pos;
++      }
++      RVV_VI_LOOP_END;
++      rvv_trace_vd();
++    } break;
+     default:
+       v8::base::EmbeddedVector<char, 256> buffer;
+       disasm::NameConverter converter;
+@@ -5776,6 +5895,81 @@ void Simulator::DecodeRvvFVV() {
+               },
+               { ; }, { ; }, { ; }, false, (rvv_vsew() >= E16))
+           break;
++        case VFNCVT_X_F_W:
++          RVV_VI_VFP_CVT_SCALE(
++              { UNREACHABLE(); }, { UNREACHABLE(); },
++              {
++                auto vs2 = Rvvelt<double>(rvv_vs2_reg(), i);
++                int32_t& vd = Rvvelt<int32_t>(rvv_vd_reg(), i, true);
++                vd = RoundF2IHelper<int32_t>(vs2, read_csr_value(csr_frm));
++              },
++              { ; }, { ; }, { ; }, false, (rvv_vsew() <= E32))
++          break;
++        case VFNCVT_XU_F_W:
++          RVV_VI_VFP_CVT_SCALE(
++              { UNREACHABLE(); }, { UNREACHABLE(); },
++              {
++                auto vs2 = Rvvelt<double>(rvv_vs2_reg(), i);
++                uint32_t& vd = Rvvelt<uint32_t>(rvv_vd_reg(), i, true);
++                vd = RoundF2IHelper<uint32_t>(vs2, read_csr_value(csr_frm));
++              },
++              { ; }, { ; }, { ; }, false, (rvv_vsew() <= E32))
++          break;
++        case VFWCVT_F_X_V:
++          RVV_VI_VFP_CVT_SCALE({ UNREACHABLE(); },
++                               {
++                                 auto vs2 = Rvvelt<int16_t>(rvv_vs2_reg(), i);
++                                 Rvvelt<float32_t>(rvv_vd_reg(), i, true) =
++                                     static_cast<float>(vs2);
++                               },
++                               {
++                                 auto vs2 = Rvvelt<int32_t>(rvv_vs2_reg(), i);
++                                 Rvvelt<double>(rvv_vd_reg(), i, true) =
++                                     static_cast<double>(vs2);
++                               },
++                               { ; }, { ; }, { ; }, true, (rvv_vsew() >= E8))
++          break;
++        case VFWCVT_F_XU_V:
++          RVV_VI_VFP_CVT_SCALE({ UNREACHABLE(); },
++                               {
++                                 auto vs2 = Rvvelt<uint16_t>(rvv_vs2_reg(), i);
++                                 Rvvelt<float32_t>(rvv_vd_reg(), i, true) =
++                                     static_cast<float>(vs2);
++                               },
++                               {
++                                 auto vs2 = Rvvelt<uint32_t>(rvv_vs2_reg(), i);
++                                 Rvvelt<double>(rvv_vd_reg(), i, true) =
++                                     static_cast<double>(vs2);
++                               },
++                               { ; }, { ; }, { ; }, true, (rvv_vsew() >= E8))
++          break;
++        case VFWCVT_XU_F_V:
++          RVV_VI_VFP_CVT_SCALE({ UNREACHABLE(); }, { UNREACHABLE(); },
++                               {
++                                 auto vs2 = Rvvelt<float32_t>(rvv_vs2_reg(), i);
++                                 Rvvelt<uint64_t>(rvv_vd_reg(), i, true) =
++                                     static_cast<uint64_t>(vs2);
++                               },
++                               { ; }, { ; }, { ; }, true, (rvv_vsew() >= E16))
++          break;
++        case VFWCVT_X_F_V:
++          RVV_VI_VFP_CVT_SCALE({ UNREACHABLE(); }, { UNREACHABLE(); },
++                               {
++                                 auto vs2 = Rvvelt<float32_t>(rvv_vs2_reg(), i);
++                                 Rvvelt<int64_t>(rvv_vd_reg(), i, true) =
++                                     static_cast<int64_t>(vs2);
++                               },
++                               { ; }, { ; }, { ; }, true, (rvv_vsew() >= E16))
++          break;
++        case VFWCVT_F_F_V:
++          RVV_VI_VFP_CVT_SCALE({ UNREACHABLE(); }, { UNREACHABLE(); },
++                               {
++                                 auto vs2 = Rvvelt<float32_t>(rvv_vs2_reg(), i);
++                                 Rvvelt<double>(rvv_vd_reg(), i, true) =
++                                     static_cast<double>(vs2);
++                               },
++                               { ; }, { ; }, { ; }, true, (rvv_vsew() >= E16))
++          break;
+         default:
+           UNSUPPORTED_RISCV();
+           break;
+@@ -6108,6 +6302,8 @@ void Simulator::DecodeVType() {
+     case RO_V_VSETVLI: {
+       uint64_t avl;
+       set_rvv_vtype(rvv_zimm());
++      CHECK_GE(rvv_vsew(), E8);
++      CHECK_LE(rvv_vsew(), E64);
+       if (rs1_reg() != zero_reg) {
+         avl = rs1();
+       } else if (rd_reg() != zero_reg) {
+@@ -6125,6 +6321,8 @@ void Simulator::DecodeVType() {
+       if (!(instr_.InstructionBits() & 0x40000000)) {
+         uint64_t avl;
+         set_rvv_vtype(rs2());
++        CHECK_GE(rvv_sew(), E8);
++        CHECK_LE(rvv_sew(), E64);
+         if (rs1_reg() != zero_reg) {
+           avl = rs1();
+         } else if (rd_reg() != zero_reg) {
+diff --git a/src/execution/riscv64/simulator-riscv64.h b/src/execution/riscv64/simulator-riscv64.h
+index 8eb0e420a6..4d2cd460c4 100644
+--- a/src/execution/riscv64/simulator-riscv64.h
++++ b/src/execution/riscv64/simulator-riscv64.h
+@@ -396,7 +396,7 @@ class Simulator : public SimulatorBase {
+     if ((rvv_vtype() & 0b100) == 0) {
+       return static_cast<float>(0x1 << (rvv_vtype() & 0x7));
+     } else {
+-      return 1.0 / static_cast<float>(0x1 << (4 - rvv_vtype() & 0x7));
++      return 1.0 / static_cast<float>(0x1 << (4 - rvv_vtype() & 0x3));
+     }
+   }
+   inline uint32_t rvv_vsew() const { return ((rvv_vtype() >> 3) & 0x7); }
+@@ -434,7 +434,7 @@ class Simulator : public SimulatorBase {
+   }
+   inline uint64_t rvv_vlmax() const {
+     if ((rvv_vlmul() & 0b100) != 0) {
+-      return (rvv_vlen() / rvv_sew()) >> (rvv_vlmul() & 0b11);
++      return (rvv_vlen() / rvv_sew()) >> (4 - (rvv_vlmul() & 0b11));
+     } else {
+       return ((rvv_vlen() << rvv_vlmul()) / rvv_sew());
+     }
+diff --git a/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h b/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
+index b3e7446ac5..e53797ff74 100644
+--- a/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
++++ b/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
+@@ -1778,9 +1778,10 @@ void LiftoffAssembler::LoadLane(LiftoffRegister dst, LiftoffRegister src,
+   *protected_load_pc = pc_offset();
+   if (mem_type == MachineType::Int8()) {
+     Lbu(scratch, src_op);
+-    VU.set(kScratchReg, E8, m1);
++    VU.set(kScratchReg, E64, m1);
+     li(kScratchReg, 0x1 << laneidx);
+     vmv_sx(v0, kScratchReg);
++    VU.set(kScratchReg, E8, m1);
+     vmerge_vx(dst.fp().toV(), scratch, dst.fp().toV());
+   } else if (mem_type == MachineType::Int16()) {
+     Lhu(scratch, src_op);
+@@ -1882,7 +1883,13 @@ void LiftoffAssembler::emit_i8x16_popcnt(LiftoffRegister dst,
+ void LiftoffAssembler::emit_i8x16_swizzle(LiftoffRegister dst,
+                                           LiftoffRegister lhs,
+                                           LiftoffRegister rhs) {
+-  bailout(kSimd, "emit_i8x16_swizzle");
++  VU.set(kScratchReg, E8, m1);
++  if (dst == lhs) {
++    vrgather_vv(kSimd128ScratchReg, lhs.fp().toV(), rhs.fp().toV());
++    vmv_vv(dst.fp().toV(), kSimd128ScratchReg);
++  } else {
++    vrgather_vv(dst.fp().toV(), lhs.fp().toV(), rhs.fp().toV());
++  }
+ }
+ 
+ void LiftoffAssembler::emit_i8x16_splat(LiftoffRegister dst,
+@@ -1946,85 +1953,151 @@ void LiftoffAssembler::emit_f64x2_splat(LiftoffRegister dst,
+ void LiftoffAssembler::emit_i64x2_extmul_low_i32x4_s(LiftoffRegister dst,
+                                                      LiftoffRegister src1,
+                                                      LiftoffRegister src2) {
+-  VU.set(kScratchReg, E32, m1);
+-  vmul_vv(dst.fp().toV(), src1.fp().toV(), src2.fp().toV());
++  VU.set(kScratchReg, E32, mf2);
++  VRegister dst_v = dst.fp().toV();
++  if (dst == src1 || dst == src2) {
++    dst_v = kSimd128ScratchReg3;
++  }
++  vwmul_vv(dst_v, src2.fp().toV(), src1.fp().toV());
++  if (dst == src1 || dst == src2) {
++    VU.set(kScratchReg, E64, m1);
++    vmv_vv(dst.fp().toV(), dst_v);
++  }
+ }
+ 
+ void LiftoffAssembler::emit_i64x2_extmul_low_i32x4_u(LiftoffRegister dst,
+                                                      LiftoffRegister src1,
+                                                      LiftoffRegister src2) {
+-  VU.set(kScratchReg, E32, m1);
+-  vmul_vv(dst.fp().toV(), src1.fp().toV(), src2.fp().toV());
++  VU.set(kScratchReg, E32, mf2);
++  VRegister dst_v = dst.fp().toV();
++  if (dst == src1 || dst == src2) {
++    dst_v = kSimd128ScratchReg3;
++  }
++  vwmulu_vv(dst_v, src2.fp().toV(), src1.fp().toV());
++  if (dst == src1 || dst == src2) {
++    VU.set(kScratchReg, E64, m1);
++    vmv_vv(dst.fp().toV(), dst_v);
++  }
+ }
+ 
+ void LiftoffAssembler::emit_i64x2_extmul_high_i32x4_s(LiftoffRegister dst,
+                                                       LiftoffRegister src1,
+                                                       LiftoffRegister src2) {
+   VU.set(kScratchReg, E32, m1);
+-  vmulh_vv(dst.fp().toV(), src1.fp().toV(), src2.fp().toV());
++  vslidedown_vi(kSimd128ScratchReg, src1.fp().toV(), 2);
++  vslidedown_vi(kSimd128ScratchReg2, src2.fp().toV(), 2);
++  VU.set(kScratchReg, E32, mf2);
++  vwmul_vv(dst.fp().toV(), kSimd128ScratchReg, kSimd128ScratchReg2);
+ }
+ 
+ void LiftoffAssembler::emit_i64x2_extmul_high_i32x4_u(LiftoffRegister dst,
+                                                       LiftoffRegister src1,
+                                                       LiftoffRegister src2) {
+   VU.set(kScratchReg, E32, m1);
+-  vmulhu_vv(dst.fp().toV(), src1.fp().toV(), src2.fp().toV());
++  vslidedown_vi(kSimd128ScratchReg, src1.fp().toV(), 2);
++  vslidedown_vi(kSimd128ScratchReg2, src2.fp().toV(), 2);
++  VU.set(kScratchReg, E32, mf2);
++  vwmulu_vv(dst.fp().toV(), kSimd128ScratchReg, kSimd128ScratchReg2);
+ }
+ 
+ void LiftoffAssembler::emit_i32x4_extmul_low_i16x8_s(LiftoffRegister dst,
+                                                      LiftoffRegister src1,
+                                                      LiftoffRegister src2) {
+-  VU.set(kScratchReg, E16, m1);
+-  vmul_vv(dst.fp().toV(), src1.fp().toV(), src2.fp().toV());
++  VU.set(kScratchReg, E16, mf2);
++  VRegister dst_v = dst.fp().toV();
++  if (dst == src1 || dst == src2) {
++    dst_v = kSimd128ScratchReg3;
++  }
++  vwmul_vv(dst_v, src2.fp().toV(), src1.fp().toV());
++  if (dst == src1 || dst == src2) {
++    VU.set(kScratchReg, E16, m1);
++    vmv_vv(dst.fp().toV(), dst_v);
++  }
+ }
+ 
+ void LiftoffAssembler::emit_i32x4_extmul_low_i16x8_u(LiftoffRegister dst,
+                                                      LiftoffRegister src1,
+                                                      LiftoffRegister src2) {
+-  VU.set(kScratchReg, E16, m1);
+-  vmul_vv(dst.fp().toV(), src1.fp().toV(), src2.fp().toV());
++  VU.set(kScratchReg, E16, mf2);
++  VRegister dst_v = dst.fp().toV();
++  if (dst == src1 || dst == src2) {
++    dst_v = kSimd128ScratchReg3;
++  }
++  vwmulu_vv(dst_v, src2.fp().toV(), src1.fp().toV());
++  if (dst == src1 || dst == src2) {
++    VU.set(kScratchReg, E16, m1);
++    vmv_vv(dst.fp().toV(), dst_v);
++  }
+ }
+ 
+ void LiftoffAssembler::emit_i32x4_extmul_high_i16x8_s(LiftoffRegister dst,
+                                                       LiftoffRegister src1,
+                                                       LiftoffRegister src2) {
+   VU.set(kScratchReg, E16, m1);
+-  vmulh_vv(dst.fp().toV(), src1.fp().toV(), src2.fp().toV());
++  vslidedown_vi(kSimd128ScratchReg, src1.fp().toV(), 4);
++  vslidedown_vi(kSimd128ScratchReg2, src2.fp().toV(), 4);
++  VU.set(kScratchReg, E16, mf2);
++  vwmul_vv(dst.fp().toV(), kSimd128ScratchReg, kSimd128ScratchReg2);
+ }
+ 
+ void LiftoffAssembler::emit_i32x4_extmul_high_i16x8_u(LiftoffRegister dst,
+                                                       LiftoffRegister src1,
+                                                       LiftoffRegister src2) {
+   VU.set(kScratchReg, E16, m1);
+-  vmulhu_vv(dst.fp().toV(), src1.fp().toV(), src2.fp().toV());
++  vslidedown_vi(kSimd128ScratchReg, src1.fp().toV(), 4);
++  vslidedown_vi(kSimd128ScratchReg2, src2.fp().toV(), 4);
++  VU.set(kScratchReg, E16, mf2);
++  vwmulu_vv(dst.fp().toV(), kSimd128ScratchReg, kSimd128ScratchReg2);
+ }
+ 
+ void LiftoffAssembler::emit_i16x8_extmul_low_i8x16_s(LiftoffRegister dst,
+                                                      LiftoffRegister src1,
+                                                      LiftoffRegister src2) {
+-  VU.set(kScratchReg, E8, m1);
+-  vmul_vv(dst.fp().toV(), src1.fp().toV(), src2.fp().toV());
++  VU.set(kScratchReg, E8, mf2);
++  VRegister dst_v = dst.fp().toV();
++  if (dst == src1 || dst == src2) {
++    dst_v = kSimd128ScratchReg3;
++  }
++  vwmul_vv(dst_v, src2.fp().toV(), src1.fp().toV());
++  if (dst == src1 || dst == src2) {
++    VU.set(kScratchReg, E8, m1);
++    vmv_vv(dst.fp().toV(), dst_v);
++  }
+ }
+ 
+ void LiftoffAssembler::emit_i16x8_extmul_low_i8x16_u(LiftoffRegister dst,
+                                                      LiftoffRegister src1,
+                                                      LiftoffRegister src2) {
+-  VU.set(kScratchReg, E8, m1);
+-  vmul_vv(dst.fp().toV(), src1.fp().toV(), src2.fp().toV());
++  VU.set(kScratchReg, E8, mf2);
++  VRegister dst_v = dst.fp().toV();
++  if (dst == src1 || dst == src2) {
++    dst_v = kSimd128ScratchReg3;
++  }
++  vwmulu_vv(dst_v, src2.fp().toV(), src1.fp().toV());
++  if (dst == src1 || dst == src2) {
++    VU.set(kScratchReg, E8, m1);
++    vmv_vv(dst.fp().toV(), dst_v);
++  }
+ }
+ 
+ void LiftoffAssembler::emit_i16x8_extmul_high_i8x16_s(LiftoffRegister dst,
+                                                       LiftoffRegister src1,
+                                                       LiftoffRegister src2) {
+   VU.set(kScratchReg, E8, m1);
+-  vmulh_vv(dst.fp().toV(), src1.fp().toV(), src2.fp().toV());
++  vslidedown_vi(kSimd128ScratchReg, src1.fp().toV(), 8);
++  vslidedown_vi(kSimd128ScratchReg2, src2.fp().toV(), 8);
++  VU.set(kScratchReg, E8, mf2);
++  vwmul_vv(dst.fp().toV(), kSimd128ScratchReg, kSimd128ScratchReg2);
+ }
+ 
+ void LiftoffAssembler::emit_i16x8_extmul_high_i8x16_u(LiftoffRegister dst,
+                                                       LiftoffRegister src1,
+                                                       LiftoffRegister src2) {
+   VU.set(kScratchReg, E8, m1);
+-  vmulhu_vv(dst.fp().toV(), src1.fp().toV(), src2.fp().toV());
++  vslidedown_vi(kSimd128ScratchReg, src1.fp().toV(), 8);
++  vslidedown_vi(kSimd128ScratchReg2, src2.fp().toV(), 8);
++  VU.set(kScratchReg, E8, mf2);
++  vwmulu_vv(dst.fp().toV(), kSimd128ScratchReg, kSimd128ScratchReg2);
+ }
+ 
+ #undef SIMD_BINOP
+@@ -2199,35 +2272,71 @@ void LiftoffAssembler::emit_f32x4_le(LiftoffRegister dst, LiftoffRegister lhs,
+ 
+ void LiftoffAssembler::emit_f64x2_convert_low_i32x4_s(LiftoffRegister dst,
+                                                       LiftoffRegister src) {
+-  bailout(kSimd, "f64x2.convert_low_i32x4_s");
++  VU.set(kScratchReg, E32, mf2);
++  if (dst.fp().toV() != src.fp().toV()) {
++    vfwcvt_f_x_v(dst.fp().toV(), src.fp().toV());
++  } else {
++    vfwcvt_f_x_v(kSimd128ScratchReg3, src.fp().toV());
++    VU.set(kScratchReg, E64, m1);
++    vmv_vv(dst.fp().toV(), kSimd128ScratchReg3);
++  }
+ }
+ 
+ void LiftoffAssembler::emit_f64x2_convert_low_i32x4_u(LiftoffRegister dst,
+                                                       LiftoffRegister src) {
+-  bailout(kSimd, "f64x2.convert_low_i32x4_u");
++  VU.set(kScratchReg, E32, mf2);
++  if (dst.fp().toV() != src.fp().toV()) {
++    vfwcvt_f_xu_v(dst.fp().toV(), src.fp().toV());
++  } else {
++    vfwcvt_f_xu_v(kSimd128ScratchReg3, src.fp().toV());
++    VU.set(kScratchReg, E64, m1);
++    vmv_vv(dst.fp().toV(), kSimd128ScratchReg3);
++  }
+ }
+ 
+ void LiftoffAssembler::emit_f64x2_promote_low_f32x4(LiftoffRegister dst,
+                                                     LiftoffRegister src) {
+-  bailout(kSimd, "f64x2.promote_low_f32x4");
++  VU.set(kScratchReg, E32, mf2);
++  if (dst.fp().toV() != src.fp().toV()) {
++    vfwcvt_f_f_v(dst.fp().toV(), src.fp().toV());
++  } else {
++    vfwcvt_f_f_v(kSimd128ScratchReg3, src.fp().toV());
++    VU.set(kScratchReg, E64, m1);
++    vmv_vv(dst.fp().toV(), kSimd128ScratchReg3);
++  }
+ }
+ 
+ void LiftoffAssembler::emit_f32x4_demote_f64x2_zero(LiftoffRegister dst,
+                                                     LiftoffRegister src) {
+-  VU.set(kScratchReg, E32, m1);
++  VU.set(kScratchReg, E32, mf2);
+   vfncvt_f_f_w(dst.fp().toV(), src.fp().toV());
++  VU.set(kScratchReg, E32, m1);
+   vmv_vi(v0, 12);
+   vmerge_vx(dst.fp().toV(), zero_reg, dst.fp().toV());
+ }
+ 
+ void LiftoffAssembler::emit_i32x4_trunc_sat_f64x2_s_zero(LiftoffRegister dst,
+                                                          LiftoffRegister src) {
+-  bailout(kSimd, "i32x4.trunc_sat_f64x2_s_zero");
++  VU.set(kScratchReg, E64, m1);
++  vmv_vx(kSimd128ScratchReg, zero_reg);
++  vmfeq_vv(v0, src.fp().toV(), src.fp().toV());
++  vmv_vv(kSimd128ScratchReg3, src.fp().toV());
++  VU.set(kScratchReg, E32, m1);
++  VU.set(RoundingMode::RTZ);
++  vfncvt_x_f_w(kSimd128ScratchReg, kSimd128ScratchReg3, MaskType::Mask);
++  vmv_vv(dst.fp().toV(), kSimd128ScratchReg);
+ }
+ 
+ void LiftoffAssembler::emit_i32x4_trunc_sat_f64x2_u_zero(LiftoffRegister dst,
+                                                          LiftoffRegister src) {
+-  bailout(kSimd, "i32x4.trunc_sat_f64x2_u_zero");
++  VU.set(kScratchReg, E64, m1);
++  vmv_vx(kSimd128ScratchReg, zero_reg);
++  vmfeq_vv(v0, src.fp().toV(), src.fp().toV());
++  vmv_vv(kSimd128ScratchReg3, src.fp().toV());
++  VU.set(kScratchReg, E32, m1);
++  VU.set(RoundingMode::RTZ);
++  vfncvt_xu_f_w(kSimd128ScratchReg, kSimd128ScratchReg3, MaskType::Mask);
++  vmv_vv(dst.fp().toV(), kSimd128ScratchReg);
+ }
+ 
+ void LiftoffAssembler::emit_f64x2_eq(LiftoffRegister dst, LiftoffRegister lhs,
+@@ -2734,7 +2843,18 @@ void LiftoffAssembler::emit_i32x4_max_u(LiftoffRegister dst,
+ void LiftoffAssembler::emit_i32x4_dot_i16x8_s(LiftoffRegister dst,
+                                               LiftoffRegister lhs,
+                                               LiftoffRegister rhs) {
+-  bailout(kSimd, "emit_i32x4_dot_i16x8_s");
++  VU.set(kScratchReg, E16, m1);
++  vwmul_vv(kSimd128ScratchReg3, lhs.fp().toV(), rhs.fp().toV());
++  VU.set(kScratchReg, E32, m2);
++  li(kScratchReg, 0b01010101);
++  vmv_sx(v0, kScratchReg);
++  vcompress_vv(kSimd128ScratchReg, kSimd128ScratchReg3, v0);
++
++  li(kScratchReg, 0b10101010);
++  vmv_sx(kSimd128ScratchReg2, kScratchReg);
++  vcompress_vv(v0, kSimd128ScratchReg3, kSimd128ScratchReg2);
++  VU.set(kScratchReg, E32, m1);
++  vadd_vv(dst.fp().toV(), kSimd128ScratchReg, v0);
+ }
+ 
+ void LiftoffAssembler::emit_i64x2_neg(LiftoffRegister dst,
+@@ -3083,48 +3203,48 @@ void LiftoffAssembler::emit_i8x16_sconvert_i16x8(LiftoffRegister dst,
+                                                  LiftoffRegister lhs,
+                                                  LiftoffRegister rhs) {
+   VU.set(kScratchReg, E16, m1);
+-  vmv_vv(kSimd128ScratchReg2, lhs.fp().toV());
+-  vmv_vv(kSimd128ScratchReg, lhs.fp().toV());
++  vmv_vv(v26, lhs.fp().toV());
++  vmv_vv(v27, lhs.fp().toV());
+   VU.set(kScratchReg, E8, m1);
+   VU.set(RoundingMode::RNE);
+-  vnclip_vi(dst.fp().toV(), kSimd128ScratchReg2, 0);
++  vnclip_vi(dst.fp().toV(), v26, 0);
+ }
+ 
+ void LiftoffAssembler::emit_i8x16_uconvert_i16x8(LiftoffRegister dst,
+                                                  LiftoffRegister lhs,
+                                                  LiftoffRegister rhs) {
+   VU.set(kScratchReg, E16, m1);
+-  vmv_vv(kSimd128ScratchReg2, lhs.fp().toV());
+-  vmv_vv(kSimd128ScratchReg, lhs.fp().toV());
++  vmv_vv(v26, lhs.fp().toV());
++  vmv_vv(v27, lhs.fp().toV());
+   VU.set(kScratchReg, E16, m2);
+-  vmax_vx(kSimd128ScratchReg2, kSimd128ScratchReg2, zero_reg);
++  vmax_vx(v26, v26, zero_reg);
+   VU.set(kScratchReg, E8, m1);
+   VU.set(RoundingMode::RNE);
+-  vnclipu_vi(dst.fp().toV(), kSimd128ScratchReg2, 0);
++  vnclipu_vi(dst.fp().toV(), v26, 0);
+ }
+ 
+ void LiftoffAssembler::emit_i16x8_sconvert_i32x4(LiftoffRegister dst,
+                                                  LiftoffRegister lhs,
+                                                  LiftoffRegister rhs) {
+   VU.set(kScratchReg, E32, m1);
+-  vmv_vv(kSimd128ScratchReg2, lhs.fp().toV());
+-  vmv_vv(kSimd128ScratchReg, lhs.fp().toV());
++  vmv_vv(v26, lhs.fp().toV());
++  vmv_vv(v27, lhs.fp().toV());
+   VU.set(kScratchReg, E16, m1);
+   VU.set(RoundingMode::RNE);
+-  vnclip_vi(dst.fp().toV(), kSimd128ScratchReg2, 0);
++  vnclip_vi(dst.fp().toV(), v26, 0);
+ }
+ 
+ void LiftoffAssembler::emit_i16x8_uconvert_i32x4(LiftoffRegister dst,
+                                                  LiftoffRegister lhs,
+                                                  LiftoffRegister rhs) {
+   VU.set(kScratchReg, E32, m1);
+-  vmv_vv(kSimd128ScratchReg2, lhs.fp().toV());
+-  vmv_vv(kSimd128ScratchReg, lhs.fp().toV());
++  vmv_vv(v26, lhs.fp().toV());
++  vmv_vv(v27, lhs.fp().toV());
+   VU.set(kScratchReg, E32, m2);
+-  vmax_vx(kSimd128ScratchReg2, kSimd128ScratchReg2, zero_reg);
++  vmax_vx(v26, v26, zero_reg);
+   VU.set(kScratchReg, E16, m1);
+   VU.set(RoundingMode::RNE);
+-  vnclipu_vi(dst.fp().toV(), kSimd128ScratchReg2, 0);
++  vnclipu_vi(dst.fp().toV(), v26, 0);
+ }
+ 
+ void LiftoffAssembler::emit_i16x8_sconvert_i8x16_low(LiftoffRegister dst,
+@@ -3243,22 +3363,58 @@ void LiftoffAssembler::emit_i64x2_abs(LiftoffRegister dst,
+ 
+ void LiftoffAssembler::emit_i32x4_extadd_pairwise_i16x8_s(LiftoffRegister dst,
+                                                           LiftoffRegister src) {
+-  bailout(kSimd, "i32x4.extadd_pairwise_i16x8_s");
++  VU.set(kScratchReg, E64, m1);
++  li(kScratchReg, 0x0006000400020000);
++  vmv_sx(kSimd128ScratchReg, kScratchReg);
++  li(kScratchReg, 0x0007000500030001);
++  vmv_sx(kSimd128ScratchReg3, kScratchReg);
++  VU.set(kScratchReg, E16, m1);
++  vrgather_vv(kSimd128ScratchReg2, src.fp().toV(), kSimd128ScratchReg);
++  vrgather_vv(kSimd128ScratchReg, src.fp().toV(), kSimd128ScratchReg3);
++  VU.set(kScratchReg, E16, mf2);
++  vwadd_vv(dst.fp().toV(), kSimd128ScratchReg, kSimd128ScratchReg2);
+ }
+ 
+ void LiftoffAssembler::emit_i32x4_extadd_pairwise_i16x8_u(LiftoffRegister dst,
+                                                           LiftoffRegister src) {
+-  bailout(kSimd, "i32x4.extadd_pairwise_i16x8_u");
++  VU.set(kScratchReg, E64, m1);
++  li(kScratchReg, 0x0006000400020000);
++  vmv_sx(kSimd128ScratchReg, kScratchReg);
++  li(kScratchReg, 0x0007000500030001);
++  vmv_sx(kSimd128ScratchReg3, kScratchReg);
++  VU.set(kScratchReg, E16, m1);
++  vrgather_vv(kSimd128ScratchReg2, src.fp().toV(), kSimd128ScratchReg);
++  vrgather_vv(kSimd128ScratchReg, src.fp().toV(), kSimd128ScratchReg3);
++  VU.set(kScratchReg, E16, mf2);
++  vwaddu_vv(dst.fp().toV(), kSimd128ScratchReg, kSimd128ScratchReg2);
+ }
+ 
+ void LiftoffAssembler::emit_i16x8_extadd_pairwise_i8x16_s(LiftoffRegister dst,
+                                                           LiftoffRegister src) {
+-  bailout(kSimd, "i16x8.extadd_pairwise_i8x16_s");
++  VU.set(kScratchReg, E64, m1);
++  li(kScratchReg, 0x0E0C0A0806040200);
++  vmv_sx(kSimd128ScratchReg, kScratchReg);
++  li(kScratchReg, 0x0F0D0B0907050301);
++  vmv_sx(kSimd128ScratchReg3, kScratchReg);
++  VU.set(kScratchReg, E8, m1);
++  vrgather_vv(kSimd128ScratchReg2, src.fp().toV(), kSimd128ScratchReg);
++  vrgather_vv(kSimd128ScratchReg, src.fp().toV(), kSimd128ScratchReg3);
++  VU.set(kScratchReg, E8, mf2);
++  vwadd_vv(dst.fp().toV(), kSimd128ScratchReg, kSimd128ScratchReg2);
+ }
+ 
+ void LiftoffAssembler::emit_i16x8_extadd_pairwise_i8x16_u(LiftoffRegister dst,
+                                                           LiftoffRegister src) {
+-  bailout(kSimd, "i16x8.extadd_pairwise_i8x16_u");
++  VU.set(kScratchReg, E64, m1);
++  li(kScratchReg, 0x0E0C0A0806040200);
++  vmv_sx(kSimd128ScratchReg, kScratchReg);
++  li(kScratchReg, 0x0F0D0B0907050301);
++  vmv_sx(kSimd128ScratchReg3, kScratchReg);
++  VU.set(kScratchReg, E8, m1);
++  vrgather_vv(kSimd128ScratchReg2, src.fp().toV(), kSimd128ScratchReg);
++  vrgather_vv(kSimd128ScratchReg, src.fp().toV(), kSimd128ScratchReg3);
++  VU.set(kScratchReg, E8, mf2);
++  vwaddu_vv(dst.fp().toV(), kSimd128ScratchReg, kSimd128ScratchReg2);
+ }
+ 
+ void LiftoffAssembler::emit_i32x4_abs(LiftoffRegister dst,
+diff --git a/test/cctest/test-assembler-riscv64.cc b/test/cctest/test-assembler-riscv64.cc
+index 3272096c82..a9940c09d8 100644
+--- a/test/cctest/test-assembler-riscv64.cc
++++ b/test/cctest/test-assembler-riscv64.cc
+@@ -2003,7 +2003,7 @@ TEST(RVV_VSETIVLI) {
+   HandleScope scope(isolate);
+   auto fn = [](MacroAssembler& assm) {
+     __ VU.set(t0, VSew::E8, Vlmul::m1);
+-    __ vsetivli(t0, 16, VSew::E128, Vlmul::m1);
++    __ vsetivli(t0, 16, VSew::E64, Vlmul::m1);
+   };
+   GenAndRunTest(fn);
+ }
+-- 
+2.35.1
+

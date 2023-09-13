@@ -1,0 +1,457 @@
+From e62f556862624103ea1da5b9dcef9b216832033b Mon Sep 17 00:00:00 2001
+From: Yuxiang Cao <caoyxsh@outlook.com>
+Date: Wed, 16 Mar 2022 15:05:18 -0700
+Subject: [PATCH] [riscv64] Fix build error which is introduced by CL:3516747
+
+Bug: v8:12707
+Change-Id: I411950dc92336f73f10614e75bd64647d4137857
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3523995
+Reviewed-by: ji qiu <qiuji@iscas.ac.cn>
+Reviewed-by: Yahan Lu <yahan@iscas.ac.cn>
+Commit-Queue: Yahan Lu <yahan@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#79503}
+---
+ src/builtins/riscv64/builtins-riscv64.cc      |  8 +-
+ src/codegen/riscv64/assembler-riscv64.cc      | 11 ++-
+ src/codegen/riscv64/assembler-riscv64.h       |  4 +-
+ .../interface-descriptors-riscv64-inl.h       |  3 +-
+ .../riscv64/macro-assembler-riscv64.cc        | 32 ++++----
+ src/codegen/riscv64/macro-assembler-riscv64.h |  4 +-
+ src/codegen/riscv64/register-riscv64.h        | 79 -------------------
+ src/codegen/riscv64/reglist-riscv64.h         | 10 +--
+ .../backend/riscv64/code-generator-riscv64.cc | 12 +--
+ .../riscv64/frame-constants-riscv64.h         | 12 +--
+ .../riscv64/regexp-macro-assembler-riscv64.cc |  2 +-
+ 11 files changed, 50 insertions(+), 127 deletions(-)
+
+diff --git a/src/builtins/riscv64/builtins-riscv64.cc b/src/builtins/riscv64/builtins-riscv64.cc
+index ff6610de2f..11a8f5156c 100644
+--- a/src/builtins/riscv64/builtins-riscv64.cc
++++ b/src/builtins/riscv64/builtins-riscv64.cc
+@@ -2777,7 +2777,7 @@ void Builtins::Generate_WasmCompileLazy(MacroAssembler* masm) {
+     // Ensure that A1 will not be repeated.
+     CHECK_EQ(0, gp_regs.Count() % 2);
+ 
+-    RegList fp_regs;
++    DoubleRegList fp_regs;
+     for (DoubleRegister fp_param_reg : wasm::kFpParamRegisters) {
+       fp_regs.set(fp_param_reg);
+     }
+@@ -3504,7 +3504,7 @@ void Generate_DeoptimizationEntry(MacroAssembler* masm,
+   // Leave gaps for other registers.
+   __ Sub64(sp, sp, kNumberOfRegisters * kSystemPointerSize);
+   for (int16_t i = kNumberOfRegisters - 1; i >= 0; i--) {
+-    if ((saved_regs & (1 << i)) != 0) {
++    if ((saved_regs.bits() & (1 << i)) != 0) {
+       __ Sd(ToRegister(i), MemOperand(sp, kSystemPointerSize * i));
+     }
+   }
+@@ -3555,7 +3555,7 @@ void Generate_DeoptimizationEntry(MacroAssembler* masm,
+   for (int i = 0; i < kNumberOfRegisters; i++) {
+     int offset =
+         (i * kSystemPointerSize) + FrameDescription::registers_offset();
+-    if ((saved_regs & (1 << i)) != 0) {
++    if ((saved_regs.bits() & (1 << i)) != 0) {
+       __ Ld(a2, MemOperand(sp, i * kSystemPointerSize));
+       __ Sd(a2, MemOperand(a1, offset));
+     } else if (FLAG_debug_code) {
+@@ -3657,7 +3657,7 @@ void Generate_DeoptimizationEntry(MacroAssembler* masm,
+   for (int i = kNumberOfRegisters - 1; i >= 0; i--) {
+     int offset =
+         (i * kSystemPointerSize) + FrameDescription::registers_offset();
+-    if ((restored_regs & (1 << i)) != 0) {
++    if ((restored_regs.bits() & (1 << i)) != 0) {
+       __ Ld(ToRegister(i), MemOperand(t3, offset));
+     }
+   }
+diff --git a/src/codegen/riscv64/assembler-riscv64.cc b/src/codegen/riscv64/assembler-riscv64.cc
+index 50a0518a14..a5809286ef 100644
+--- a/src/codegen/riscv64/assembler-riscv64.cc
++++ b/src/codegen/riscv64/assembler-riscv64.cc
+@@ -3928,14 +3928,17 @@ UseScratchRegisterScope::~UseScratchRegisterScope() {
+ 
+ Register UseScratchRegisterScope::Acquire() {
+   DCHECK_NOT_NULL(available_);
+-  DCHECK_NE(*available_, 0);
+-  int index = static_cast<int>(base::bits::CountTrailingZeros32(*available_));
+-  *available_ &= ~(1UL << index);
++  DCHECK(!available_->is_empty());
++  int index =
++      static_cast<int>(base::bits::CountTrailingZeros32(available_->bits()));
++  *available_ &= RegList::FromBits(~(1U << index));
+ 
+   return Register::from_code(index);
+ }
+ 
+-bool UseScratchRegisterScope::hasAvailable() const { return *available_ != 0; }
++bool UseScratchRegisterScope::hasAvailable() const {
++  return !available_->is_empty();
++}
+ 
+ bool Assembler::IsConstantPoolAt(Instruction* instr) {
+   // The constant pool marker is made of two instructions. These instructions
+diff --git a/src/codegen/riscv64/assembler-riscv64.h b/src/codegen/riscv64/assembler-riscv64.h
+index 8d80065dd3..2b0d262369 100644
+--- a/src/codegen/riscv64/assembler-riscv64.h
++++ b/src/codegen/riscv64/assembler-riscv64.h
+@@ -1794,7 +1794,9 @@ class V8_EXPORT_PRIVATE UseScratchRegisterScope {
+   Register Acquire();
+   bool hasAvailable() const;
+   void Include(const RegList& list) { *available_ |= list; }
+-  void Exclude(const RegList& list) { *available_ &= ~list; }
++  void Exclude(const RegList& list) {
++    *available_ &= RegList::FromBits(~list.bits());
++  }
+   void Include(const Register& reg1, const Register& reg2 = no_reg) {
+     RegList list({reg1, reg2});
+     Include(list);
+diff --git a/src/codegen/riscv64/interface-descriptors-riscv64-inl.h b/src/codegen/riscv64/interface-descriptors-riscv64-inl.h
+index b5595d01d7..62587b74f9 100644
+--- a/src/codegen/riscv64/interface-descriptors-riscv64-inl.h
++++ b/src/codegen/riscv64/interface-descriptors-riscv64-inl.h
+@@ -39,7 +39,8 @@ void StaticCallInterfaceDescriptor<DerivedDescriptor>::
+ 
+ // static
+ constexpr auto WriteBarrierDescriptor::registers() {
+-  return RegisterArray(a1, a5, a4, a2, a0, a3);
++  // TODO(Yuxiang): Remove a7 which is just there for padding.
++  return RegisterArray(a1, a5, a4, a2, a0, a3, kContextRegister, a7);
+ }
+ 
+ // static
+diff --git a/src/codegen/riscv64/macro-assembler-riscv64.cc b/src/codegen/riscv64/macro-assembler-riscv64.cc
+index d7d576558e..3efba1211e 100644
+--- a/src/codegen/riscv64/macro-assembler-riscv64.cc
++++ b/src/codegen/riscv64/macro-assembler-riscv64.cc
+@@ -1658,7 +1658,7 @@ static RegList a_regs = {a0, a1, a2, a3, a4, a5, a6, a7};
+ static RegList s_regs = {s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11};
+ 
+ void TurboAssembler::MultiPush(RegList regs) {
+-  int16_t num_to_push = base::bits::CountPopulation(regs);
++  int16_t num_to_push = regs.Count();
+   int16_t stack_offset = num_to_push * kSystemPointerSize;
+ 
+ #define TEST_AND_PUSH_REG(reg)             \
+@@ -1683,17 +1683,17 @@ void TurboAssembler::MultiPush(RegList regs) {
+   TEST_AND_PUSH_REG(sp);
+   TEST_AND_PUSH_REG(gp);
+   TEST_AND_PUSH_REG(tp);
+-  if ((regs & s_regs) != 0) {
++  if (!(regs & s_regs).is_empty()) {
+     S_REGS(TEST_AND_PUSH_REG)
+   }
+-  if ((regs & a_regs) != 0) {
++  if (!(regs & a_regs).is_empty()) {
+     A_REGS(TEST_AND_PUSH_REG)
+   }
+-  if ((regs & t_regs) != 0) {
++  if (!(regs & t_regs).is_empty()) {
+     T_REGS(TEST_AND_PUSH_REG)
+   }
+ 
+-  DCHECK_EQ(regs, 0);
++  DCHECK(regs.is_empty());
+ 
+ #undef TEST_AND_PUSH_REG
+ #undef T_REGS
+@@ -1717,13 +1717,13 @@ void TurboAssembler::MultiPop(RegList regs) {
+   V(s1) V(s2) V(s3) V(s4) V(s5) V(s6) V(s7) V(s8) V(s9) V(s10) V(s11)
+ 
+   // MultiPop pops from the stack in reverse order as MultiPush
+-  if ((regs & t_regs) != 0) {
++  if (!(regs & t_regs).is_empty()) {
+     T_REGS(TEST_AND_POP_REG)
+   }
+-  if ((regs & a_regs) != 0) {
++  if (!(regs & a_regs).is_empty()) {
+     A_REGS(TEST_AND_POP_REG)
+   }
+-  if ((regs & s_regs) != 0) {
++  if (!(regs & s_regs).is_empty()) {
+     S_REGS(TEST_AND_POP_REG)
+   }
+   TEST_AND_POP_REG(tp);
+@@ -1732,7 +1732,7 @@ void TurboAssembler::MultiPop(RegList regs) {
+   TEST_AND_POP_REG(fp);
+   TEST_AND_POP_REG(ra);
+ 
+-  DCHECK_EQ(regs, 0);
++  DCHECK(regs.is_empty());
+ 
+   addi(sp, sp, stack_offset);
+ 
+@@ -1742,24 +1742,24 @@ void TurboAssembler::MultiPop(RegList regs) {
+ #undef A_REGS
+ }
+ 
+-void TurboAssembler::MultiPushFPU(RegList regs) {
+-  int16_t num_to_push = base::bits::CountPopulation(regs);
++void TurboAssembler::MultiPushFPU(DoubleRegList regs) {
++  int16_t num_to_push = regs.Count();
+   int16_t stack_offset = num_to_push * kDoubleSize;
+ 
+   Sub64(sp, sp, Operand(stack_offset));
+   for (int16_t i = kNumRegisters - 1; i >= 0; i--) {
+-    if ((regs & (1 << i)) != 0) {
++    if ((regs.bits() & (1 << i)) != 0) {
+       stack_offset -= kDoubleSize;
+       StoreDouble(FPURegister::from_code(i), MemOperand(sp, stack_offset));
+     }
+   }
+ }
+ 
+-void TurboAssembler::MultiPopFPU(RegList regs) {
++void TurboAssembler::MultiPopFPU(DoubleRegList regs) {
+   int16_t stack_offset = 0;
+ 
+   for (int16_t i = 0; i < kNumRegisters; i++) {
+-    if ((regs & (1 << i)) != 0) {
++    if ((regs.bits() & (1 << i)) != 0) {
+       LoadDouble(FPURegister::from_code(i), MemOperand(sp, stack_offset));
+       stack_offset += kDoubleSize;
+     }
+@@ -4407,7 +4407,7 @@ void MacroAssembler::EnterExitFrame(bool save_doubles, int stack_space,
+     Sub64(sp, sp, Operand(space));
+     int count = 0;
+     for (int i = 0; i < kNumFPURegisters; i++) {
+-      if (kCallerSavedFPU & (1 << i)) {
++      if (kCallerSavedFPU.bits() & (1 << i)) {
+         FPURegister reg = FPURegister::from_code(i);
+         StoreDouble(reg, MemOperand(sp, count * kDoubleSize));
+         count++;
+@@ -4448,7 +4448,7 @@ void MacroAssembler::LeaveExitFrame(bool save_doubles, Register argument_count,
+                   kNumCallerSavedFPU * kDoubleSize));
+     int cout = 0;
+     for (int i = 0; i < kNumFPURegisters; i++) {
+-      if (kCalleeSavedFPU & (1 << i)) {
++      if (kCalleeSavedFPU.bits() & (1 << i)) {
+         FPURegister reg = FPURegister::from_code(i);
+         LoadDouble(reg, MemOperand(scratch, cout * kDoubleSize));
+         cout++;
+diff --git a/src/codegen/riscv64/macro-assembler-riscv64.h b/src/codegen/riscv64/macro-assembler-riscv64.h
+index 7d8501834d..1b04c73e6a 100644
+--- a/src/codegen/riscv64/macro-assembler-riscv64.h
++++ b/src/codegen/riscv64/macro-assembler-riscv64.h
+@@ -358,7 +358,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   // Registers are saved in numerical order, with higher numbered registers
+   // saved in higher memory addresses.
+   void MultiPush(RegList regs);
+-  void MultiPushFPU(RegList regs);
++  void MultiPushFPU(DoubleRegList regs);
+ 
+   // Calculate how much stack space (in bytes) are required to store caller
+   // registers excluding those specified in the arguments.
+@@ -407,7 +407,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   // Pops multiple values from the stack and load them in the
+   // registers specified in regs. Pop order is the opposite as in MultiPush.
+   void MultiPop(RegList regs);
+-  void MultiPopFPU(RegList regs);
++  void MultiPopFPU(DoubleRegList regs);
+ 
+ #define DEFINE_INSTRUCTION(instr)                          \
+   void instr(Register rd, Register rs, const Operand& rt); \
+diff --git a/src/codegen/riscv64/register-riscv64.h b/src/codegen/riscv64/register-riscv64.h
+index 7468938d36..fa5ffe4043 100644
+--- a/src/codegen/riscv64/register-riscv64.h
++++ b/src/codegen/riscv64/register-riscv64.h
+@@ -77,85 +77,6 @@ constexpr int ArgumentPaddingSlots(int argument_count) {
+ // encoding.
+ const int kNumRegs = 32;
+ 
+-const RegList kJSCallerSaved = 1 << 5 |   // t0
+-                               1 << 6 |   // t1
+-                               1 << 7 |   // t2
+-                               1 << 10 |  // a0
+-                               1 << 11 |  // a1
+-                               1 << 12 |  // a2
+-                               1 << 13 |  // a3
+-                               1 << 14 |  // a4
+-                               1 << 15 |  // a5
+-                               1 << 16 |  // a6
+-                               1 << 17 |  // a7
+-                               1 << 29;   // t4
+-
+-const int kNumJSCallerSaved = 12;
+-
+-// Callee-saved registers preserved when switching from C to JavaScript.
+-const RegList kCalleeSaved = 1 << 8 |   // fp/s0
+-                             1 << 9 |   // s1
+-                             1 << 18 |  // s2
+-                             1 << 19 |  // s3 scratch register
+-                             1 << 20 |  // s4 scratch register 2
+-                             1 << 21 |  // s5
+-                             1 << 22 |  // s6 (roots in Javascript code)
+-                             1 << 23 |  // s7 (cp in Javascript code)
+-                             1 << 24 |  // s8
+-                             1 << 25 |  // s9
+-                             1 << 26 |  // s10
+-                             1 << 27;   // s11
+-
+-const int kNumCalleeSaved = 12;
+-
+-const RegList kCalleeSavedFPU = 1 << 8 |   // fs0
+-                                1 << 9 |   // fs1
+-                                1 << 18 |  // fs2
+-                                1 << 19 |  // fs3
+-                                1 << 20 |  // fs4
+-                                1 << 21 |  // fs5
+-                                1 << 22 |  // fs6
+-                                1 << 23 |  // fs7
+-                                1 << 24 |  // fs8
+-                                1 << 25 |  // fs9
+-                                1 << 26 |  // fs10
+-                                1 << 27;   // fs11
+-
+-const int kNumCalleeSavedFPU = kCalleeSavedFPU.Count();
+-
+-const RegList kCallerSavedFPU = 1 << 0 |   // ft0
+-                                1 << 1 |   // ft1
+-                                1 << 2 |   // ft2
+-                                1 << 3 |   // ft3
+-                                1 << 4 |   // ft4
+-                                1 << 5 |   // ft5
+-                                1 << 6 |   // ft6
+-                                1 << 7 |   // ft7
+-                                1 << 10 |  // fa0
+-                                1 << 11 |  // fa1
+-                                1 << 12 |  // fa2
+-                                1 << 13 |  // fa3
+-                                1 << 14 |  // fa4
+-                                1 << 15 |  // fa5
+-                                1 << 16 |  // fa6
+-                                1 << 17 |  // fa7
+-                                1 << 28 |  // ft8
+-                                1 << 29 |  // ft9
+-                                1 << 30 |  // ft10
+-                                1 << 31;   // ft11
+-
+-const int kNumCallerSavedFPU = kCallerSavedFPU.Count();
+-
+-// Number of registers for which space is reserved in safepoints. Must be a
+-// multiple of 8.
+-const int kNumSafepointRegisters = 32;
+-
+-// Define the list of registers actually saved at safepoints.
+-// Note that the number of saved registers may be smaller than the reserved
+-// space, i.e. kNumSafepointSavedRegisters <= kNumSafepointRegisters.
+-const RegList kSafepointSavedRegisters = kJSCallerSaved | kCalleeSaved;
+-const int kNumSafepointSavedRegisters = kNumJSCallerSaved + kNumCalleeSaved;
+-
+ const int kUndefIndex = -1;
+ // Map with indexes on stack that corresponds to codes of saved registers.
+ const int kSafepointRegisterStackIndexMap[kNumRegs] = {kUndefIndex,  // zero_reg
+diff --git a/src/codegen/riscv64/reglist-riscv64.h b/src/codegen/riscv64/reglist-riscv64.h
+index d56363bce5..363dd46181 100644
+--- a/src/codegen/riscv64/reglist-riscv64.h
++++ b/src/codegen/riscv64/reglist-riscv64.h
+@@ -37,14 +37,14 @@ const RegList kCalleeSaved = {fp,    // fp/s0
+ 
+ const int kNumCalleeSaved = 12;
+ 
+-const RegList kCalleeSavedFPU = {fs0, fs1, fs2, fs3, fs4,  fs5,
+-                                 fs6, fs7, fs8, fs9, fs10, fs11};
++const DoubleRegList kCalleeSavedFPU = {fs0, fs1, fs2, fs3, fs4,  fs5,
++                                       fs6, fs7, fs8, fs9, fs10, fs11};
+ 
+ const int kNumCalleeSavedFPU = kCalleeSavedFPU.Count();
+ 
+-const RegList kCallerSavedFPU = {ft0, ft1, ft2, ft3, ft4,  ft5, ft6,
+-                                 ft7, fa0, fa1, fa2, fa3,  fa4, fa5,
+-                                 fa6, fa7, ft8, ft9, ft10, ft11};
++const DoubleRegList kCallerSavedFPU = {ft0, ft1, ft2, ft3, ft4,  ft5, ft6,
++                                       ft7, fa0, fa1, fa2, fa3,  fa4, fa5,
++                                       fa6, fa7, ft8, ft9, ft10, ft11};
+ 
+ const int kNumCallerSavedFPU = kCallerSavedFPU.Count();
+ 
+diff --git a/src/compiler/backend/riscv64/code-generator-riscv64.cc b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+index 051aa9c77a..56bb8c6879 100644
+--- a/src/compiler/backend/riscv64/code-generator-riscv64.cc
++++ b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+@@ -3851,8 +3851,8 @@ void CodeGenerator::FinishFrame(Frame* frame) {
+   auto call_descriptor = linkage()->GetIncomingDescriptor();
+ 
+   const DoubleRegList saves_fpu = call_descriptor->CalleeSavedFPRegisters();
+-  if (saves_fpu != 0) {
+-    int count = base::bits::CountPopulation(saves_fpu);
++  if (!saves_fpu.is_empty()) {
++    int count = saves_fpu.Count();
+     DCHECK_EQ(kNumCalleeSavedFPU, count);
+     frame->AllocateSavedCalleeRegisterSlots(count *
+                                             (kDoubleSize / kSystemPointerSize));
+@@ -3952,16 +3952,16 @@ void CodeGenerator::AssembleConstructFrame() {
+ 
+   // Skip callee-saved and return slots, which are pushed below.
+   required_slots -= saves.Count();
+-  required_slots -= base::bits::CountPopulation(saves_fpu);
++  required_slots -= saves_fpu.Count();
+   required_slots -= returns;
+   if (required_slots > 0) {
+     __ Sub64(sp, sp, Operand(required_slots * kSystemPointerSize));
+   }
+ 
+-  if (saves_fpu != 0) {
++  if (!saves_fpu.is_empty()) {
+     // Save callee-saved FPU registers.
+     __ MultiPushFPU(saves_fpu);
+-    DCHECK_EQ(kNumCalleeSavedFPU, base::bits::CountPopulation(saves_fpu));
++    DCHECK_EQ(kNumCalleeSavedFPU, saves_fpu.Count());
+   }
+ 
+   if (!saves.is_empty()) {
+@@ -3991,7 +3991,7 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+ 
+   // Restore FPU registers.
+   const DoubleRegList saves_fpu = call_descriptor->CalleeSavedFPRegisters();
+-  if (saves_fpu != 0) {
++  if (!saves_fpu.is_empty()) {
+     __ MultiPopFPU(saves_fpu);
+   }
+ 
+diff --git a/src/execution/riscv64/frame-constants-riscv64.h b/src/execution/riscv64/frame-constants-riscv64.h
+index 4c9286db62..6b70815ea4 100644
+--- a/src/execution/riscv64/frame-constants-riscv64.h
++++ b/src/execution/riscv64/frame-constants-riscv64.h
+@@ -45,14 +45,10 @@ class WasmCompileLazyFrameConstants : public TypedFrameConstants {
+ // registers (see liftoff-assembler-defs.h).
+ class WasmDebugBreakFrameConstants : public TypedFrameConstants {
+  public:
+-  // constexpr RegList kLiftoffAssemblerGpCacheRegs =
+-  //    {a0, a1, a2, a3, a4, a5, a6, a7, t0, t1, t2, s7};
+-  static constexpr uint32_t kPushedGpRegs = wasm::kLiftoffAssemblerGpCacheRegs;
++  static constexpr RegList kPushedGpRegs = wasm::kLiftoffAssemblerGpCacheRegs;
+ 
+-  //   constexpr RegList kLiftoffAssemblerFpCacheRegs = {
+-  //       ft0, ft1, ft2, ft3, ft4, ft5, ft6, ft7, fa0, fa1, fa2, fa3, fa4, fa5,
+-  //       fa6, fa7, ft8, ft9, ft10, ft11};
+-  static constexpr uint32_t kPushedFpRegs = wasm::kLiftoffAssemblerFpCacheRegs;
++  static constexpr DoubleRegList kPushedFpRegs =
++      wasm::kLiftoffAssemblerFpCacheRegs;
+ 
+   static constexpr int kNumPushedGpRegisters = kPushedGpRegs.Count();
+   static constexpr int kNumPushedFpRegisters = kPushedFpRegs.Count();
+@@ -76,7 +72,7 @@ class WasmDebugBreakFrameConstants : public TypedFrameConstants {
+     uint32_t lower_regs =
+         kPushedFpRegs.bits() & ((uint32_t{1} << reg_code) - 1);
+     return kLastPushedFpRegisterOffset +
+-           base::bits::CountPopulation(lower_regs) * kSimd128Size;
++           base::bits::CountPopulation(lower_regs) * kDoubleSize;
+   }
+ };
+ 
+diff --git a/src/regexp/riscv64/regexp-macro-assembler-riscv64.cc b/src/regexp/riscv64/regexp-macro-assembler-riscv64.cc
+index 1031fe7da5..8f6b5e278d 100644
+--- a/src/regexp/riscv64/regexp-macro-assembler-riscv64.cc
++++ b/src/regexp/riscv64/regexp-macro-assembler-riscv64.cc
+@@ -716,7 +716,7 @@ Handle<HeapObject> RegExpMacroAssemblerRISCV::GetCode(Handle<String> source) {
+ 
+     // According to MultiPush implementation, registers will be pushed in the
+     // order of ra, fp, then s8, ..., s1, and finally a7,...a0
+-    __ MultiPush({ra}, registers_to_retain | argument_registers);
++    __ MultiPush(RegList{ra} | registers_to_retain | argument_registers);
+ 
+     // Set frame pointer in space for it if this is not a direct call
+     // from generated code.
+-- 
+2.35.1
+

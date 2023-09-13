@@ -1,0 +1,86 @@
+From 870981928511681028dade7bebf726246ffd5b2d Mon Sep 17 00:00:00 2001
+From: Deepti Gandluri <gdeepti@chromium.org>
+Date: Wed, 11 May 2022 15:00:12 -0700
+Subject: [PATCH] [wasm-simd][Arm]Prototype Relaxed Rounding Q-format
+ Multiplication
+
+Bug: v8:12284
+Change-Id: I9d8f9da8ed736d5119e7af4354e1ddd8a255713d
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3640925
+Commit-Queue: Deepti Gandluri <gdeepti@chromium.org>
+Reviewed-by: Thibaud Michaud <thibaudm@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#80497}
+---
+ src/compiler/backend/arm/instruction-selector-arm.cc | 1 +
+ src/compiler/backend/instruction-selector.cc         | 4 ++--
+ src/wasm/baseline/arm/liftoff-assembler-arm.h        | 4 +++-
+ test/cctest/wasm/test-run-wasm-relaxed-simd.cc       | 4 ++--
+ 4 files changed, 8 insertions(+), 5 deletions(-)
+
+diff --git a/src/compiler/backend/arm/instruction-selector-arm.cc b/src/compiler/backend/arm/instruction-selector-arm.cc
+index 536485f8d3..b18d75ae64 100644
+--- a/src/compiler/backend/arm/instruction-selector-arm.cc
++++ b/src/compiler/backend/arm/instruction-selector-arm.cc
+@@ -2692,6 +2692,7 @@ void InstructionSelector::VisitWord32AtomicPairCompareExchange(Node* node) {
+   V(I16x8GeU, kArmI16x8GeU)                           \
+   V(I16x8RoundingAverageU, kArmI16x8RoundingAverageU) \
+   V(I16x8Q15MulRSatS, kArmI16x8Q15MulRSatS)           \
++  V(I16x8RelaxedQ15MulRS, kArmI16x8Q15MulRSatS)       \
+   V(I8x16SConvertI16x8, kArmI8x16SConvertI16x8)       \
+   V(I8x16Add, kArmI8x16Add)                           \
+   V(I8x16AddSatS, kArmI8x16AddSatS)                   \
+diff --git a/src/compiler/backend/instruction-selector.cc b/src/compiler/backend/instruction-selector.cc
+index 09e135edec..b211728ad8 100644
+--- a/src/compiler/backend/instruction-selector.cc
++++ b/src/compiler/backend/instruction-selector.cc
+@@ -2824,11 +2824,11 @@ void InstructionSelector::VisitI32x4RelaxedTruncF32x4U(Node* node) {
+ #endif  // !V8_TARGET_ARCH_X64 && !V8_TARGET_ARCH_IA32 && !V8_TARGET_ARCH_ARM64
+         // && !V8_TARGET_ARCH_RISCV64 && !V8_TARGET_ARM
+ 
+-#if !V8_TARGET_ARCH_ARM64
++#if !V8_TARGET_ARCH_ARM64 && !V8_TARGET_ARCH_ARM
+ void InstructionSelector::VisitI16x8RelaxedQ15MulRS(Node* node) {
+   UNIMPLEMENTED();
+ }
+-#endif  // !V8_TARGET_ARCH_ARM64
++#endif  // !V8_TARGET_ARCH_ARM6 && !V8_TARGET_ARCH_ARM
+ 
+ void InstructionSelector::VisitFinishRegion(Node* node) { EmitIdentity(node); }
+ 
+diff --git a/src/wasm/baseline/arm/liftoff-assembler-arm.h b/src/wasm/baseline/arm/liftoff-assembler-arm.h
+index 6e069f3f50..c159f0bba5 100644
+--- a/src/wasm/baseline/arm/liftoff-assembler-arm.h
++++ b/src/wasm/baseline/arm/liftoff-assembler-arm.h
+@@ -3456,7 +3456,9 @@ void LiftoffAssembler::emit_i16x8_q15mulr_sat_s(LiftoffRegister dst,
+ void LiftoffAssembler::emit_relaxed_i16x8_q15mulr_s(LiftoffRegister dst,
+                                                     LiftoffRegister src1,
+                                                     LiftoffRegister src2) {
+-  bailout(kSimd, "emit_relaxed_i16x8_q15mulr_s");
++  vqrdmulh(NeonS16, liftoff::GetSimd128Register(dst),
++           liftoff::GetSimd128Register(src1),
++           liftoff::GetSimd128Register(src2));
+ }
+ 
+ void LiftoffAssembler::emit_i8x16_shuffle(LiftoffRegister dst,
+diff --git a/test/cctest/wasm/test-run-wasm-relaxed-simd.cc b/test/cctest/wasm/test-run-wasm-relaxed-simd.cc
+index 0e598a7c4d..341314cd2a 100644
+--- a/test/cctest/wasm/test-run-wasm-relaxed-simd.cc
++++ b/test/cctest/wasm/test-run-wasm-relaxed-simd.cc
+@@ -410,12 +410,12 @@ WASM_RELAXED_SIMD_TEST(I8x16RelaxedSwizzle) {
+ #endif  // V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_IA32 || V8_TARGET_ARCH_ARM64 ||
+         // V8_TARGET_ARCH_RISCV64
+ 
+-#if V8_TARGET_ARCH_ARM64
++#if V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_ARM
+ WASM_RELAXED_SIMD_TEST(I16x8RelaxedQ15MulRS) {
+   RunI16x8BinOpTest<int16_t>(execution_tier, kExprI16x8RelaxedQ15MulRS,
+                              SaturateRoundingQMul<int16_t>);
+ }
+-#endif  // V8_TARGET_ARCH_ARM64
++#endif  // V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_ARM
+ 
+ #undef WASM_RELAXED_SIMD_TEST
+ }  // namespace test_run_wasm_relaxed_simd
+-- 
+2.35.1
+

@@ -1,0 +1,763 @@
+From e87388d3d4aa5256858f4c6132055b514e90d28c Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Dominik=20Inf=C3=BChr?= <dinfuehr@chromium.org>
+Date: Tue, 28 Feb 2023 10:08:22 +0100
+Subject: [PATCH] [heap] Avoid barrier slow path for references within the
+ shared heap
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Outside of marking the POINTERS_FROM_HERE_ARE_INTERESTING flag doesn't
+need to be set for pages in the shared space. Not setting that flag
+lets us avoid the barrier slow path for every store of references
+within the shared heap.
+
+This allows the slow path of the combined generational and shared heap
+barrier to record a slot unconditionally.
+
+Drive-by: Remove unused is_off_thread() method in LargeObjectSpace.
+
+Bug: v8:13267
+Change-Id: Ic82e558205fe9d2157d2e0fcb745994c77b8f8f8
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4295416
+Reviewed-by: Andreas Haas <ahaas@chromium.org>
+Reviewed-by: Michael Lippautz <mlippautz@chromium.org>
+Commit-Queue: Dominik Inführ <dinfuehr@chromium.org>
+Reviewed-by: Jakob Linke <jgruber@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#86144}
+---
+ src/codegen/arm/macro-assembler-arm.cc        |  5 ++--
+ src/codegen/arm64/macro-assembler-arm64.cc    |  5 ++--
+ src/codegen/ia32/macro-assembler-ia32.cc      |  4 +--
+ .../loong64/macro-assembler-loong64.cc        |  5 ++--
+ src/codegen/mips64/macro-assembler-mips64.cc  |  3 +-
+ src/codegen/ppc/macro-assembler-ppc.cc        |  3 +-
+ src/codegen/riscv/macro-assembler-riscv.cc    |  2 +-
+ src/codegen/s390/macro-assembler-s390.cc      |  3 +-
+ src/codegen/x64/macro-assembler-x64.cc        |  4 +--
+ .../backend/arm/code-generator-arm.cc         |  5 ++--
+ .../backend/arm64/code-generator-arm64.cc     |  5 ++--
+ .../backend/ia32/code-generator-ia32.cc       |  7 ++---
+ .../backend/loong64/code-generator-loong64.cc |  5 ++--
+ .../backend/mips64/code-generator-mips64.cc   |  7 ++---
+ .../backend/ppc/code-generator-ppc.cc         |  7 ++---
+ .../backend/riscv/code-generator-riscv.cc     |  7 ++---
+ .../backend/s390/code-generator-s390.cc       |  7 ++---
+ .../backend/x64/code-generator-x64.cc         |  7 ++---
+ src/heap/basic-memory-chunk.h                 |  5 ----
+ src/heap/heap-verifier.cc                     |  3 ++
+ src/heap/heap-write-barrier-inl.h             | 12 +++++---
+ src/heap/heap.cc                              | 15 +++-------
+ src/heap/large-spaces.cc                      |  3 +-
+ src/heap/large-spaces.h                       |  2 --
+ src/heap/memory-chunk.cc                      | 11 ++++++--
+ src/maglev/arm64/maglev-ir-arm64.cc           | 18 ++++--------
+ src/maglev/x64/maglev-ir-x64.cc               | 28 ++++++++-----------
+ src/wasm/baseline/arm/liftoff-assembler-arm.h |  5 ++--
+ .../baseline/arm64/liftoff-assembler-arm64.h  |  5 ++--
+ .../baseline/ia32/liftoff-assembler-ia32.h    |  4 +--
+ .../loong64/liftoff-assembler-loong64.h       |  5 ++--
+ .../mips64/liftoff-assembler-mips64.h         |  3 +-
+ src/wasm/baseline/ppc/liftoff-assembler-ppc.h |  3 +-
+ .../riscv/liftoff-assembler-riscv32.h         |  3 +-
+ .../riscv/liftoff-assembler-riscv64.h         |  3 +-
+ .../baseline/s390/liftoff-assembler-s390.h    |  3 +-
+ src/wasm/baseline/x64/liftoff-assembler-x64.h |  4 +--
+ 37 files changed, 96 insertions(+), 130 deletions(-)
+
+diff --git a/src/codegen/arm/macro-assembler-arm.cc b/src/codegen/arm/macro-assembler-arm.cc
+index 201f0acec8..c1581e4157 100644
+--- a/src/codegen/arm/macro-assembler-arm.cc
++++ b/src/codegen/arm/macro-assembler-arm.cc
+@@ -803,9 +803,8 @@ void MacroAssembler::RecordWrite(Register object, Operand offset,
+     JumpIfSmi(value, &done);
+   }
+ 
+-  CheckPageFlag(value,
+-                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
+-                eq, &done);
++  CheckPageFlag(value, MemoryChunk::kPointersToHereAreInterestingMask, eq,
++                &done);
+   CheckPageFlag(object, MemoryChunk::kPointersFromHereAreInterestingMask, eq,
+                 &done);
+ 
+diff --git a/src/codegen/arm64/macro-assembler-arm64.cc b/src/codegen/arm64/macro-assembler-arm64.cc
+index 913915a8a6..e139259762 100644
+--- a/src/codegen/arm64/macro-assembler-arm64.cc
++++ b/src/codegen/arm64/macro-assembler-arm64.cc
+@@ -3495,9 +3495,8 @@ void MacroAssembler::RecordWrite(Register object, Operand offset,
+     DCHECK_EQ(0, kSmiTag);
+     JumpIfSmi(value, &done);
+   }
+-  CheckPageFlag(value,
+-                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
+-                eq, &done);
++  CheckPageFlag(value, MemoryChunk::kPointersToHereAreInterestingMask, eq,
++                &done);
+ 
+   CheckPageFlag(object, MemoryChunk::kPointersFromHereAreInterestingMask, eq,
+                 &done);
+diff --git a/src/codegen/ia32/macro-assembler-ia32.cc b/src/codegen/ia32/macro-assembler-ia32.cc
+index 389484a6e9..ecbefc58bb 100644
+--- a/src/codegen/ia32/macro-assembler-ia32.cc
++++ b/src/codegen/ia32/macro-assembler-ia32.cc
+@@ -526,8 +526,8 @@ void MacroAssembler::RecordWrite(Register object, Register slot_address,
+ 
+   CheckPageFlag(value,
+                 value,  // Used as scratch.
+-                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
+-                zero, &done, Label::kNear);
++                MemoryChunk::kPointersToHereAreInterestingMask, zero, &done,
++                Label::kNear);
+   CheckPageFlag(object,
+                 value,  // Used as scratch.
+                 MemoryChunk::kPointersFromHereAreInterestingMask, zero, &done,
+diff --git a/src/codegen/loong64/macro-assembler-loong64.cc b/src/codegen/loong64/macro-assembler-loong64.cc
+index 0db9d01727..b8d2c80d0c 100644
+--- a/src/codegen/loong64/macro-assembler-loong64.cc
++++ b/src/codegen/loong64/macro-assembler-loong64.cc
+@@ -298,9 +298,8 @@ void MacroAssembler::RecordWrite(Register object, Operand offset,
+     JumpIfSmi(value, &done);
+   }
+ 
+-  CheckPageFlag(value,
+-                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
+-                eq, &done);
++  CheckPageFlag(value, MemoryChunk::kPointersToHereAreInterestingMask, eq,
++                &done);
+ 
+   CheckPageFlag(object, MemoryChunk::kPointersFromHereAreInterestingMask, eq,
+                 &done);
+diff --git a/src/codegen/mips64/macro-assembler-mips64.cc b/src/codegen/mips64/macro-assembler-mips64.cc
+index 79954e268b..da38cd632f 100644
+--- a/src/codegen/mips64/macro-assembler-mips64.cc
++++ b/src/codegen/mips64/macro-assembler-mips64.cc
+@@ -286,8 +286,7 @@ void MacroAssembler::RecordWrite(Register object, Register address,
+ 
+   CheckPageFlag(value,
+                 value,  // Used as scratch.
+-                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
+-                eq, &done);
++                MemoryChunk::kPointersToHereAreInterestingMask, eq, &done);
+   CheckPageFlag(object,
+                 value,  // Used as scratch.
+                 MemoryChunk::kPointersFromHereAreInterestingMask, eq, &done);
+diff --git a/src/codegen/ppc/macro-assembler-ppc.cc b/src/codegen/ppc/macro-assembler-ppc.cc
+index ab9c0b9590..55ecda7763 100644
+--- a/src/codegen/ppc/macro-assembler-ppc.cc
++++ b/src/codegen/ppc/macro-assembler-ppc.cc
+@@ -852,8 +852,7 @@ void MacroAssembler::RecordWrite(Register object, Register slot_address,
+ 
+   CheckPageFlag(value,
+                 value,  // Used as scratch.
+-                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
+-                eq, &done);
++                MemoryChunk::kPointersToHereAreInterestingMask, eq, &done);
+   CheckPageFlag(object,
+                 value,  // Used as scratch.
+                 MemoryChunk::kPointersFromHereAreInterestingMask, eq, &done);
+diff --git a/src/codegen/riscv/macro-assembler-riscv.cc b/src/codegen/riscv/macro-assembler-riscv.cc
+index 4b7586c9be..e7bbcc6831 100644
+--- a/src/codegen/riscv/macro-assembler-riscv.cc
++++ b/src/codegen/riscv/macro-assembler-riscv.cc
+@@ -435,7 +435,7 @@ void MacroAssembler::RecordWrite(Register object, Operand offset,
+     Register temp = temps.Acquire();
+     CheckPageFlag(value,
+                   temp,  // Used as scratch.
+-                  MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
++                  MemoryChunk::kPointersToHereAreInterestingMask,
+                   eq,  // In RISC-V, it uses cc for a comparison with 0, so if
+                        // no bits are set, and cc is eq, it will branch to done
+                   &done);
+diff --git a/src/codegen/s390/macro-assembler-s390.cc b/src/codegen/s390/macro-assembler-s390.cc
+index 3c494467da..bd7fce5599 100644
+--- a/src/codegen/s390/macro-assembler-s390.cc
++++ b/src/codegen/s390/macro-assembler-s390.cc
+@@ -1089,8 +1089,7 @@ void MacroAssembler::RecordWrite(Register object, Register slot_address,
+ 
+   CheckPageFlag(value,
+                 value,  // Used as scratch.
+-                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
+-                eq, &done);
++                MemoryChunk::kPointersToHereAreInterestingMask, eq, &done);
+   CheckPageFlag(object,
+                 value,  // Used as scratch.
+                 MemoryChunk::kPointersFromHereAreInterestingMask, eq, &done);
+diff --git a/src/codegen/x64/macro-assembler-x64.cc b/src/codegen/x64/macro-assembler-x64.cc
+index 5dcd03a29e..fed26c752f 100644
+--- a/src/codegen/x64/macro-assembler-x64.cc
++++ b/src/codegen/x64/macro-assembler-x64.cc
+@@ -643,8 +643,8 @@ void MacroAssembler::RecordWrite(Register object, Register slot_address,
+ 
+   CheckPageFlag(value,
+                 value,  // Used as scratch.
+-                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
+-                zero, &done, Label::kNear);
++                MemoryChunk::kPointersToHereAreInterestingMask, zero, &done,
++                Label::kNear);
+ 
+   CheckPageFlag(object,
+                 value,  // Used as scratch.
+diff --git a/src/compiler/backend/arm/code-generator-arm.cc b/src/compiler/backend/arm/code-generator-arm.cc
+index a461736ae4..75c4f7a2e3 100644
+--- a/src/compiler/backend/arm/code-generator-arm.cc
++++ b/src/compiler/backend/arm/code-generator-arm.cc
+@@ -193,9 +193,8 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
+   }
+ 
+   void Generate() final {
+-    __ CheckPageFlag(
+-        value_, MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
+-        eq, exit());
++    __ CheckPageFlag(value_, MemoryChunk::kPointersToHereAreInterestingMask, eq,
++                     exit());
+     SaveFPRegsMode const save_fp_mode = frame()->DidAllocateDoubleRegisters()
+                                             ? SaveFPRegsMode::kSave
+                                             : SaveFPRegsMode::kIgnore;
+diff --git a/src/compiler/backend/arm64/code-generator-arm64.cc b/src/compiler/backend/arm64/code-generator-arm64.cc
+index 1faeaeeff8..740810907c 100644
+--- a/src/compiler/backend/arm64/code-generator-arm64.cc
++++ b/src/compiler/backend/arm64/code-generator-arm64.cc
+@@ -299,9 +299,8 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
+     if (COMPRESS_POINTERS_BOOL) {
+       __ DecompressTagged(value_, value_);
+     }
+-    __ CheckPageFlag(
+-        value_, MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
+-        eq, exit());
++    __ CheckPageFlag(value_, MemoryChunk::kPointersToHereAreInterestingMask, eq,
++                     exit());
+     SaveFPRegsMode const save_fp_mode = frame()->DidAllocateDoubleRegisters()
+                                             ? SaveFPRegsMode::kSave
+                                             : SaveFPRegsMode::kIgnore;
+diff --git a/src/compiler/backend/ia32/code-generator-ia32.cc b/src/compiler/backend/ia32/code-generator-ia32.cc
+index f153ec049d..768207a959 100644
+--- a/src/compiler/backend/ia32/code-generator-ia32.cc
++++ b/src/compiler/backend/ia32/code-generator-ia32.cc
+@@ -318,10 +318,9 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
+   }
+ 
+   void Generate() final {
+-    __ CheckPageFlag(
+-        value_, scratch0_,
+-        MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask, zero,
+-        exit());
++    __ CheckPageFlag(value_, scratch0_,
++                     MemoryChunk::kPointersToHereAreInterestingMask, zero,
++                     exit());
+     __ lea(scratch1_, operand_);
+     SaveFPRegsMode const save_fp_mode = frame()->DidAllocateDoubleRegisters()
+                                             ? SaveFPRegsMode::kSave
+diff --git a/src/compiler/backend/loong64/code-generator-loong64.cc b/src/compiler/backend/loong64/code-generator-loong64.cc
+index 8bfc300951..71200c5c10 100644
+--- a/src/compiler/backend/loong64/code-generator-loong64.cc
++++ b/src/compiler/backend/loong64/code-generator-loong64.cc
+@@ -162,9 +162,8 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
+     if (COMPRESS_POINTERS_BOOL) {
+       __ DecompressTagged(value_, value_);
+     }
+-    __ CheckPageFlag(
+-        value_, MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
+-        eq, exit());
++    __ CheckPageFlag(value_, MemoryChunk::kPointersToHereAreInterestingMask, eq,
++                     exit());
+     SaveFPRegsMode const save_fp_mode = frame()->DidAllocateDoubleRegisters()
+                                             ? SaveFPRegsMode::kSave
+                                             : SaveFPRegsMode::kIgnore;
+diff --git a/src/compiler/backend/mips64/code-generator-mips64.cc b/src/compiler/backend/mips64/code-generator-mips64.cc
+index 8757782513..05a71bf30a 100644
+--- a/src/compiler/backend/mips64/code-generator-mips64.cc
++++ b/src/compiler/backend/mips64/code-generator-mips64.cc
+@@ -162,10 +162,9 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
+   }
+ 
+   void Generate() final {
+-    __ CheckPageFlag(
+-        value_, scratch0_,
+-        MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask, eq,
+-        exit());
++    __ CheckPageFlag(value_, scratch0_,
++                     MemoryChunk::kPointersToHereAreInterestingMask, eq,
++                     exit());
+     __ Daddu(scratch1_, object_, index_);
+     SaveFPRegsMode const save_fp_mode = frame()->DidAllocateDoubleRegisters()
+                                             ? SaveFPRegsMode::kSave
+diff --git a/src/compiler/backend/ppc/code-generator-ppc.cc b/src/compiler/backend/ppc/code-generator-ppc.cc
+index 10f2482a73..61e7392d1c 100644
+--- a/src/compiler/backend/ppc/code-generator-ppc.cc
++++ b/src/compiler/backend/ppc/code-generator-ppc.cc
+@@ -174,10 +174,9 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
+     if (COMPRESS_POINTERS_BOOL) {
+       __ DecompressTagged(value_, value_);
+     }
+-    __ CheckPageFlag(
+-        value_, scratch0_,
+-        MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask, eq,
+-        exit());
++    __ CheckPageFlag(value_, scratch0_,
++                     MemoryChunk::kPointersToHereAreInterestingMask, eq,
++                     exit());
+     if (offset_ == no_reg) {
+       __ addi(scratch1_, object_, Operand(offset_immediate_));
+     } else {
+diff --git a/src/compiler/backend/riscv/code-generator-riscv.cc b/src/compiler/backend/riscv/code-generator-riscv.cc
+index 78493e70f1..71c9330b08 100644
+--- a/src/compiler/backend/riscv/code-generator-riscv.cc
++++ b/src/compiler/backend/riscv/code-generator-riscv.cc
+@@ -176,10 +176,9 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
+       __ DecompressTagged(value_, value_);
+     }
+ #endif
+-    __ CheckPageFlag(
+-        value_, scratch0_,
+-        MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask, eq,
+-        exit());
++    __ CheckPageFlag(value_, scratch0_,
++                     MemoryChunk::kPointersToHereAreInterestingMask, eq,
++                     exit());
+     __ AddWord(scratch1_, object_, index_);
+     SaveFPRegsMode const save_fp_mode = frame()->DidAllocateDoubleRegisters()
+                                             ? SaveFPRegsMode::kSave
+diff --git a/src/compiler/backend/s390/code-generator-s390.cc b/src/compiler/backend/s390/code-generator-s390.cc
+index 65641a6dbf..23fb8a099d 100644
+--- a/src/compiler/backend/s390/code-generator-s390.cc
++++ b/src/compiler/backend/s390/code-generator-s390.cc
+@@ -211,10 +211,9 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
+     if (COMPRESS_POINTERS_BOOL) {
+       __ DecompressTagged(value_, value_);
+     }
+-    __ CheckPageFlag(
+-        value_, scratch0_,
+-        MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask, eq,
+-        exit());
++    __ CheckPageFlag(value_, scratch0_,
++                     MemoryChunk::kPointersToHereAreInterestingMask, eq,
++                     exit());
+     if (offset_ == no_reg) {
+       __ AddS64(scratch1_, object_, Operand(offset_immediate_));
+     } else {
+diff --git a/src/compiler/backend/x64/code-generator-x64.cc b/src/compiler/backend/x64/code-generator-x64.cc
+index ff06431605..caeac76f7b 100644
+--- a/src/compiler/backend/x64/code-generator-x64.cc
++++ b/src/compiler/backend/x64/code-generator-x64.cc
+@@ -306,10 +306,9 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
+     if (COMPRESS_POINTERS_BOOL) {
+       __ DecompressTagged(value_, value_);
+     }
+-    __ CheckPageFlag(
+-        value_, scratch0_,
+-        MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask, zero,
+-        exit());
++    __ CheckPageFlag(value_, scratch0_,
++                     MemoryChunk::kPointersToHereAreInterestingMask, zero,
++                     exit());
+     __ leaq(scratch1_, operand_);
+ 
+     SaveFPRegsMode const save_fp_mode = frame()->DidAllocateDoubleRegisters()
+diff --git a/src/heap/basic-memory-chunk.h b/src/heap/basic-memory-chunk.h
+index e325a381cb..1d43deaa18 100644
+--- a/src/heap/basic-memory-chunk.h
++++ b/src/heap/basic-memory-chunk.h
+@@ -119,11 +119,6 @@ class BasicMemoryChunk {
+   static constexpr MainThreadFlags kPointersToHereAreInterestingMask =
+       POINTERS_TO_HERE_ARE_INTERESTING;
+ 
+-  static constexpr MainThreadFlags
+-      kPointersToHereAreInterestingOrInSharedHeapMask =
+-          MainThreadFlags(POINTERS_TO_HERE_ARE_INTERESTING) |
+-          MainThreadFlags(IN_SHARED_HEAP);
+-
+   static constexpr MainThreadFlags kPointersFromHereAreInterestingMask =
+       POINTERS_FROM_HERE_ARE_INTERESTING;
+ 
+diff --git a/src/heap/heap-verifier.cc b/src/heap/heap-verifier.cc
+index 6b55681bb1..86a8eee472 100644
+--- a/src/heap/heap-verifier.cc
++++ b/src/heap/heap-verifier.cc
+@@ -669,6 +669,9 @@ void HeapVerification::VerifyRememberedSetFor(HeapObject object) {
+   if (object.InSharedWritableHeap()) {
+     CHECK_NULL(chunk->slot_set<OLD_TO_SHARED>());
+     CHECK_NULL(chunk->typed_slot_set<OLD_TO_SHARED>());
++
++    CHECK_NULL(chunk->slot_set<OLD_TO_NEW>());
++    CHECK_NULL(chunk->typed_slot_set<OLD_TO_NEW>());
+   }
+ 
+   if (Heap::InYoungGeneration(object)) {
+diff --git a/src/heap/heap-write-barrier-inl.h b/src/heap/heap-write-barrier-inl.h
+index 34b26762cc..88645f8ac3 100644
+--- a/src/heap/heap-write-barrier-inl.h
++++ b/src/heap/heap-write-barrier-inl.h
+@@ -106,10 +106,12 @@ inline void CombinedWriteBarrierInternal(HeapObject host, HeapObjectSlot slot,
+   heap_internals::MemoryChunk* value_chunk =
+       heap_internals::MemoryChunk::FromHeapObject(value);
+ 
+-  const bool host_in_young_gen = host_chunk->InYoungGeneration();
++  const bool pointers_from_here_are_interesting =
++      !host_chunk->IsYoungOrSharedChunk();
+   const bool is_marking = host_chunk->IsMarking();
+ 
+-  if (!host_in_young_gen && value_chunk->IsYoungOrSharedChunk()) {
++  if (pointers_from_here_are_interesting &&
++      value_chunk->IsYoungOrSharedChunk()) {
+     // Generational or shared heap write barrier (old-to-new or old-to-shared).
+     Heap_CombinedGenerationalAndSharedBarrierSlow(host, slot.address(), value);
+   }
+@@ -190,10 +192,12 @@ inline void CombinedEphemeronWriteBarrier(EphemeronHashTable host,
+   heap_internals::MemoryChunk* value_chunk =
+       heap_internals::MemoryChunk::FromHeapObject(heap_object_value);
+ 
+-  const bool host_in_young_gen = host_chunk->InYoungGeneration();
++  const bool pointers_from_here_are_interesting =
++      !host_chunk->IsYoungOrSharedChunk();
+   const bool is_marking = host_chunk->IsMarking();
+ 
+-  if (!host_in_young_gen && value_chunk->IsYoungOrSharedChunk()) {
++  if (pointers_from_here_are_interesting &&
++      value_chunk->IsYoungOrSharedChunk()) {
+     Heap_CombinedGenerationalAndSharedEphemeronBarrierSlow(host, slot.address(),
+                                                            heap_object_value);
+   }
+diff --git a/src/heap/heap.cc b/src/heap/heap.cc
+index 12f3a80b61..5af99eac2b 100644
+--- a/src/heap/heap.cc
++++ b/src/heap/heap.cc
+@@ -6857,11 +6857,8 @@ void Heap::CombinedGenerationalAndSharedBarrierSlow(HeapObject object,
+ 
+   } else {
+     DCHECK(value_chunk->InSharedHeap());
+-
+-    heap_internals::MemoryChunk* object_chunk =
+-        heap_internals::MemoryChunk::FromHeapObject(object);
+-    if (!object_chunk->InSharedHeap())
+-      Heap::SharedHeapBarrierSlow(object, slot);
++    DCHECK(!object.InSharedWritableHeap());
++    Heap::SharedHeapBarrierSlow(object, slot);
+   }
+ }
+ 
+@@ -6875,12 +6872,8 @@ void Heap::CombinedGenerationalAndSharedEphemeronBarrierSlow(
+ 
+   } else {
+     DCHECK(value_chunk->InSharedHeap());
+-
+-    heap_internals::MemoryChunk* table_chunk =
+-        heap_internals::MemoryChunk::FromHeapObject(table);
+-    if (!table_chunk->InSharedHeap()) {
+-      Heap::SharedHeapBarrierSlow(table, slot);
+-    }
++    DCHECK(!table.InSharedWritableHeap());
++    Heap::SharedHeapBarrierSlow(table, slot);
+   }
+ }
+ 
+diff --git a/src/heap/large-spaces.cc b/src/heap/large-spaces.cc
+index 6237df2be6..c0edf43e36 100644
+--- a/src/heap/large-spaces.cc
++++ b/src/heap/large-spaces.cc
+@@ -278,8 +278,7 @@ void LargeObjectSpace::AddPage(LargePage* page, size_t object_size) {
+   page_count_++;
+   memory_chunk_list_.PushBack(page);
+   page->set_owner(this);
+-  page->SetOldGenerationPageFlags(!is_off_thread() &&
+-                                  heap()->incremental_marking()->IsMarking());
++  page->SetOldGenerationPageFlags(heap()->incremental_marking()->IsMarking());
+   for (size_t i = 0; i < ExternalBackingStoreType::kNumTypes; i++) {
+     ExternalBackingStoreType t = static_cast<ExternalBackingStoreType>(i);
+     IncrementExternalBackingStoreBytes(t, page->ExternalBackingStoreBytes(t));
+diff --git a/src/heap/large-spaces.h b/src/heap/large-spaces.h
+index 90b3c7766d..7cdd8771e5 100644
+--- a/src/heap/large-spaces.h
++++ b/src/heap/large-spaces.h
+@@ -114,8 +114,6 @@ class V8_EXPORT_PRIVATE LargeObjectSpace : public Space {
+ 
+   std::unique_ptr<ObjectIterator> GetObjectIterator(Heap* heap) override;
+ 
+-  virtual bool is_off_thread() const { return false; }
+-
+ #ifdef VERIFY_HEAP
+   void Verify(Isolate* isolate, SpaceVerificationVisitor* visitor) const final;
+ #endif
+diff --git a/src/heap/memory-chunk.cc b/src/heap/memory-chunk.cc
+index 613b0d6a50..df787f02c8 100644
+--- a/src/heap/memory-chunk.cc
++++ b/src/heap/memory-chunk.cc
+@@ -208,8 +208,15 @@ void MemoryChunk::SetOldGenerationPageFlags(bool is_marking) {
+     SetFlag(MemoryChunk::POINTERS_FROM_HERE_ARE_INTERESTING);
+     SetFlag(MemoryChunk::INCREMENTAL_MARKING);
+   } else {
+-    ClearFlag(MemoryChunk::POINTERS_TO_HERE_ARE_INTERESTING);
+-    SetFlag(MemoryChunk::POINTERS_FROM_HERE_ARE_INTERESTING);
++    if (owner_identity() == SHARED_SPACE) {
++      // We need to track pointers into the SHARED_SPACE for OLD_TO_SHARED.
++      SetFlag(MemoryChunk::POINTERS_TO_HERE_ARE_INTERESTING);
++      // No need to track OLD_TO_NEW or OLD_TO_SHARED within the shared space.
++      ClearFlag(MemoryChunk::POINTERS_FROM_HERE_ARE_INTERESTING);
++    } else {
++      ClearFlag(MemoryChunk::POINTERS_TO_HERE_ARE_INTERESTING);
++      SetFlag(MemoryChunk::POINTERS_FROM_HERE_ARE_INTERESTING);
++    }
+     ClearFlag(MemoryChunk::INCREMENTAL_MARKING);
+   }
+ }
+diff --git a/src/maglev/arm64/maglev-ir-arm64.cc b/src/maglev/arm64/maglev-ir-arm64.cc
+index 8734a80cac..ed8c77944b 100644
+--- a/src/maglev/arm64/maglev-ir-arm64.cc
++++ b/src/maglev/arm64/maglev-ir-arm64.cc
+@@ -1404,9 +1404,7 @@ void GeneratorStore::GenerateCode(MaglevAssembler* masm,
+            Register array, GeneratorStore* node, int32_t offset) {
+           ASM_CODE_COMMENT_STRING(masm, "Write barrier slow path");
+           __ CheckPageFlag(
+-              value,
+-              MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask, eq,
+-              *done);
++              value, MemoryChunk::kPointersToHereAreInterestingMask, eq, *done);
+ 
+           Register slot_reg = WriteBarrierDescriptor::SlotAddressRegister();
+           __ Add(slot_reg, array, offset - kHeapObjectTag);
+@@ -1450,9 +1448,7 @@ void GeneratorStore::GenerateCode(MaglevAssembler* masm,
+         // old-space, consider moving this check to the fast path, maybe even
+         // as the first bailout.
+         __ CheckPageFlag(
+-            context,
+-            MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask, eq,
+-            *done);
++            context, MemoryChunk::kPointersToHereAreInterestingMask, eq, *done);
+ 
+         __ Move(WriteBarrierDescriptor::ObjectRegister(), generator);
+         generator = WriteBarrierDescriptor::ObjectRegister();
+@@ -1861,9 +1857,8 @@ void StoreMap::GenerateCode(MaglevAssembler* masm,
+       [](MaglevAssembler* masm, ZoneLabelRef done, Register value,
+          Register object, StoreMap* node) {
+         ASM_CODE_COMMENT_STRING(masm, "Write barrier slow path");
+-        __ CheckPageFlag(
+-            value, MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
+-            eq, *done);
++        __ CheckPageFlag(value, MemoryChunk::kPointersToHereAreInterestingMask,
++                         eq, *done);
+ 
+         Register slot_reg = WriteBarrierDescriptor::SlotAddressRegister();
+         RegList saved;
+@@ -2151,9 +2146,8 @@ void StoreTaggedFieldWithWriteBarrier::GenerateCode(
+       [](MaglevAssembler* masm, ZoneLabelRef done, Register value,
+          Register object, StoreTaggedFieldWithWriteBarrier* node) {
+         ASM_CODE_COMMENT_STRING(masm, "Write barrier slow path");
+-        __ CheckPageFlag(
+-            value, MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
+-            eq, *done);
++        __ CheckPageFlag(value, MemoryChunk::kPointersToHereAreInterestingMask,
++                         eq, *done);
+ 
+         Register slot_reg = WriteBarrierDescriptor::SlotAddressRegister();
+         RegList saved;
+diff --git a/src/maglev/x64/maglev-ir-x64.cc b/src/maglev/x64/maglev-ir-x64.cc
+index bc363f34dc..7ce89e1b79 100644
+--- a/src/maglev/x64/maglev-ir-x64.cc
++++ b/src/maglev/x64/maglev-ir-x64.cc
+@@ -78,10 +78,9 @@ void GeneratorStore::GenerateCode(MaglevAssembler* masm,
+           ASM_CODE_COMMENT_STRING(masm, "Write barrier slow path");
+           // Use WriteBarrierDescriptor::SlotAddressRegister() as the scratch
+           // register, see comment above.
+-          __ CheckPageFlag(
+-              value, WriteBarrierDescriptor::SlotAddressRegister(),
+-              MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
+-              zero, *done);
++          __ CheckPageFlag(value, WriteBarrierDescriptor::SlotAddressRegister(),
++                           MemoryChunk::kPointersToHereAreInterestingMask, zero,
++                           *done);
+ 
+           Register slot_reg = WriteBarrierDescriptor::SlotAddressRegister();
+ 
+@@ -128,10 +127,9 @@ void GeneratorStore::GenerateCode(MaglevAssembler* masm,
+         // TODO(leszeks): The context is almost always going to be in
+         // old-space, consider moving this check to the fast path, maybe even
+         // as the first bailout.
+-        __ CheckPageFlag(
+-            context, WriteBarrierDescriptor::SlotAddressRegister(),
+-            MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask, zero,
+-            *done);
++        __ CheckPageFlag(context, WriteBarrierDescriptor::SlotAddressRegister(),
++                         MemoryChunk::kPointersToHereAreInterestingMask, zero,
++                         *done);
+ 
+         __ Move(WriteBarrierDescriptor::ObjectRegister(), generator);
+         generator = WriteBarrierDescriptor::ObjectRegister();
+@@ -1086,10 +1084,9 @@ void StoreMap::GenerateCode(MaglevAssembler* masm,
+       [](MaglevAssembler* masm, ZoneLabelRef done, Register value,
+          Register object, StoreMap* node) {
+         ASM_CODE_COMMENT_STRING(masm, "Write barrier slow path");
+-        __ CheckPageFlag(
+-            value, kScratchRegister,
+-            MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask, zero,
+-            *done);
++        __ CheckPageFlag(value, kScratchRegister,
++                         MemoryChunk::kPointersToHereAreInterestingMask, zero,
++                         *done);
+ 
+         Register slot_reg = WriteBarrierDescriptor::SlotAddressRegister();
+         RegList saved;
+@@ -1143,10 +1140,9 @@ void StoreTaggedFieldWithWriteBarrier::GenerateCode(
+       [](MaglevAssembler* masm, ZoneLabelRef done, Register value,
+          Register object, StoreTaggedFieldWithWriteBarrier* node) {
+         ASM_CODE_COMMENT_STRING(masm, "Write barrier slow path");
+-        __ CheckPageFlag(
+-            value, kScratchRegister,
+-            MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask, zero,
+-            *done);
++        __ CheckPageFlag(value, kScratchRegister,
++                         MemoryChunk::kPointersToHereAreInterestingMask, zero,
++                         *done);
+ 
+         Register slot_reg = WriteBarrierDescriptor::SlotAddressRegister();
+         RegList saved;
+diff --git a/src/wasm/baseline/arm/liftoff-assembler-arm.h b/src/wasm/baseline/arm/liftoff-assembler-arm.h
+index 5fd80a4067..442169bd24 100644
+--- a/src/wasm/baseline/arm/liftoff-assembler-arm.h
++++ b/src/wasm/baseline/arm/liftoff-assembler-arm.h
+@@ -784,9 +784,8 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+   CheckPageFlag(dst_addr, MemoryChunk::kPointersFromHereAreInterestingMask,
+                 kZero, &exit);
+   JumpIfSmi(src.gp(), &exit);
+-  CheckPageFlag(src.gp(),
+-                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
+-                eq, &exit);
++  CheckPageFlag(src.gp(), MemoryChunk::kPointersToHereAreInterestingMask, eq,
++                &exit);
+   CallRecordWriteStubSaveRegisters(
+       dst_addr,
+       actual_offset_reg == no_reg ? Operand(offset_imm)
+diff --git a/src/wasm/baseline/arm64/liftoff-assembler-arm64.h b/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
+index 83a522252a..199c351225 100644
+--- a/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
++++ b/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
+@@ -498,9 +498,8 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+   CheckPageFlag(dst_addr, MemoryChunk::kPointersFromHereAreInterestingMask,
+                 kZero, &exit);
+   JumpIfSmi(src.gp(), &exit);
+-  CheckPageFlag(src.gp(),
+-                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
+-                eq, &exit);
++  CheckPageFlag(src.gp(), MemoryChunk::kPointersToHereAreInterestingMask, eq,
++                &exit);
+   CallRecordWriteStubSaveRegisters(dst_addr, offset_op, SaveFPRegsMode::kSave,
+                                    StubCallMode::kCallWasmRuntimeStub);
+   bind(&exit);
+diff --git a/src/wasm/baseline/ia32/liftoff-assembler-ia32.h b/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
+index fabf214a6a..4af551e4eb 100644
+--- a/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
++++ b/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
+@@ -411,8 +411,8 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+                 Label::kNear);
+   JumpIfSmi(src.gp(), &exit, Label::kNear);
+   CheckPageFlag(src.gp(), scratch,
+-                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
+-                zero, &exit, Label::kNear);
++                MemoryChunk::kPointersToHereAreInterestingMask, zero, &exit,
++                Label::kNear);
+   lea(scratch, dst_op);
+   CallRecordWriteStubSaveRegisters(dst_addr, scratch, SaveFPRegsMode::kSave,
+                                    StubCallMode::kCallWasmRuntimeStub);
+diff --git a/src/wasm/baseline/loong64/liftoff-assembler-loong64.h b/src/wasm/baseline/loong64/liftoff-assembler-loong64.h
+index 1ff4a58a87..706874120b 100644
+--- a/src/wasm/baseline/loong64/liftoff-assembler-loong64.h
++++ b/src/wasm/baseline/loong64/liftoff-assembler-loong64.h
+@@ -413,9 +413,8 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+   if (COMPRESS_POINTERS_BOOL) {
+     DecompressTagged(src.gp(), src.gp());
+   }
+-  CheckPageFlag(src.gp(),
+-                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
+-                eq, &exit);
++  CheckPageFlag(src.gp(), MemoryChunk::kPointersToHereAreInterestingMask, eq,
++                &exit);
+   CallRecordWriteStubSaveRegisters(dst_addr, offset_op, SaveFPRegsMode::kSave,
+                                    StubCallMode::kCallWasmRuntimeStub);
+   bind(&exit);
+diff --git a/src/wasm/baseline/mips64/liftoff-assembler-mips64.h b/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
+index 22eda69815..2696a4d7c7 100644
+--- a/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
++++ b/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
+@@ -518,8 +518,7 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+   bind(&write_barrier);
+   JumpIfSmi(src.gp(), &exit);
+   CheckPageFlag(src.gp(), scratch,
+-                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
+-                eq, &exit);
++                MemoryChunk::kPointersToHereAreInterestingMask, eq, &exit);
+   Daddu(scratch, dst_op.rm(), dst_op.offset());
+   CallRecordWriteStubSaveRegisters(dst_addr, scratch, SaveFPRegsMode::kSave,
+                                    StubCallMode::kCallWasmRuntimeStub);
+diff --git a/src/wasm/baseline/ppc/liftoff-assembler-ppc.h b/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
+index b64402da84..05c70f5042 100644
+--- a/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
++++ b/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
+@@ -309,8 +309,7 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+   if (COMPRESS_POINTERS_BOOL) {
+     DecompressTagged(src.gp(), src.gp());
+   }
+-  CheckPageFlag(src.gp(), ip,
+-                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
++  CheckPageFlag(src.gp(), ip, MemoryChunk::kPointersToHereAreInterestingMask,
+                 eq, &exit);
+   mov(ip, Operand(offset_imm));
+   add(ip, ip, dst_addr);
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h
+index 0cf8825391..8a8297748f 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h
+@@ -238,8 +238,7 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+   bind(&write_barrier);
+   JumpIfSmi(src.gp(), &exit);
+   CheckPageFlag(src.gp(), kScratchReg,
+-                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
+-                eq, &exit);
++                MemoryChunk::kPointersToHereAreInterestingMask, eq, &exit);
+   AddWord(scratch, dst_op.rm(), dst_op.offset());
+   CallRecordWriteStubSaveRegisters(dst_addr, scratch, SaveFPRegsMode::kSave,
+                                    StubCallMode::kCallWasmRuntimeStub);
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
+index afdc3e6a1c..e415d110b0 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
+@@ -208,8 +208,7 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+   bind(&write_barrier);
+   JumpIfSmi(src.gp(), &exit);
+   CheckPageFlag(src.gp(), scratch,
+-                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
+-                eq, &exit);
++                MemoryChunk::kPointersToHereAreInterestingMask, eq, &exit);
+   AddWord(scratch, dst_op.rm(), dst_op.offset());
+   CallRecordWriteStubSaveRegisters(dst_addr, scratch, SaveFPRegsMode::kSave,
+                                    StubCallMode::kCallWasmRuntimeStub);
+diff --git a/src/wasm/baseline/s390/liftoff-assembler-s390.h b/src/wasm/baseline/s390/liftoff-assembler-s390.h
+index 88a9c31c4f..5759fb7e7c 100644
+--- a/src/wasm/baseline/s390/liftoff-assembler-s390.h
++++ b/src/wasm/baseline/s390/liftoff-assembler-s390.h
+@@ -294,8 +294,7 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+   if (COMPRESS_POINTERS_BOOL) {
+     DecompressTagged(src.gp(), src.gp());
+   }
+-  CheckPageFlag(src.gp(), r1,
+-                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
++  CheckPageFlag(src.gp(), r1, MemoryChunk::kPointersToHereAreInterestingMask,
+                 eq, &exit);
+   lay(r1, dst_op);
+   CallRecordWriteStubSaveRegisters(dst_addr, r1, SaveFPRegsMode::kSave,
+diff --git a/src/wasm/baseline/x64/liftoff-assembler-x64.h b/src/wasm/baseline/x64/liftoff-assembler-x64.h
+index fbb464de7f..02de3f8630 100644
+--- a/src/wasm/baseline/x64/liftoff-assembler-x64.h
++++ b/src/wasm/baseline/x64/liftoff-assembler-x64.h
+@@ -411,8 +411,8 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+                 Label::kNear);
+   JumpIfSmi(src.gp(), &exit, Label::kNear);
+   CheckPageFlag(src.gp(), scratch,
+-                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
+-                zero, &exit, Label::kNear);
++                MemoryChunk::kPointersToHereAreInterestingMask, zero, &exit,
++                Label::kNear);
+   leaq(scratch, dst_op);
+ 
+   CallRecordWriteStubSaveRegisters(dst_addr, scratch, SaveFPRegsMode::kSave,
+-- 
+2.35.1
+

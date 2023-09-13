@@ -1,0 +1,554 @@
+From 0eebf3fc6bae8d5921de28b98fa5dc5bfbf10f0a Mon Sep 17 00:00:00 2001
+From: jiepan <jie.pan@intel.com>
+Date: Thu, 21 Apr 2022 16:13:23 +0800
+Subject: [PATCH] [wasm-simd][revec] Add simd256 representation
+
+WASM only supports simd128, but modern CPUs support
+up to 256 bit vector register or more, we will add an
+experimental feature to do 256 bit re-vectorization
+in Turbofan pipeline, this patch add simd256 machine
+representation.
+
+Bug: v8:12716
+Change-Id: I1e6a3f2afa0a457fca2c261216f4113d0ed5b818
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3534456
+Reviewed-by: Deepti Gandluri <gdeepti@chromium.org>
+Commit-Queue: Jie Pan <jie.pan@intel.com>
+Reviewed-by: Tobias Tebbi <tebbi@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#80361}
+---
+ src/codegen/machine-type.cc                      |  2 ++
+ src/codegen/machine-type.h                       | 13 +++++++++++--
+ src/common/globals.h                             |  3 +++
+ .../backend/arm/instruction-selector-arm.cc      |  2 ++
+ .../backend/arm64/instruction-selector-arm64.cc  |  2 ++
+ .../backend/ia32/instruction-selector-ia32.cc    |  2 ++
+ src/compiler/backend/instruction.cc              |  4 ++++
+ src/compiler/backend/instruction.h               |  1 +
+ .../loong64/instruction-selector-loong64.cc      | 10 ++++++----
+ .../backend/mips/instruction-selector-mips.cc    |  4 ++++
+ .../mips64/instruction-selector-mips64.cc        |  4 ++++
+ .../backend/ppc/instruction-selector-ppc.cc      |  2 ++
+ src/compiler/backend/register-allocation.h       |  2 ++
+ .../riscv64/instruction-selector-riscv64.cc      | 16 ++++++++++------
+ .../backend/s390/instruction-selector-s390.cc    |  2 ++
+ .../backend/x64/instruction-selector-x64.cc      |  6 ++++--
+ src/compiler/js-native-context-specialization.cc |  1 +
+ src/compiler/load-elimination.cc                 |  3 +++
+ src/compiler/machine-graph-verifier.cc           |  1 +
+ src/compiler/machine-operator.cc                 |  6 ++++--
+ src/compiler/representation-change.cc            |  1 +
+ src/compiler/simplified-lowering.cc              |  1 +
+ 22 files changed, 72 insertions(+), 16 deletions(-)
+
+diff --git a/src/codegen/machine-type.cc b/src/codegen/machine-type.cc
+index 2059f05b87..bde4742b8d 100644
+--- a/src/codegen/machine-type.cc
++++ b/src/codegen/machine-type.cc
+@@ -45,6 +45,8 @@ const char* MachineReprToString(MachineRepresentation rep) {
+       return "kRepFloat64";
+     case MachineRepresentation::kSimd128:
+       return "kRepSimd128";
++    case MachineRepresentation::kSimd256:
++      return "kRepSimd256";
+     case MachineRepresentation::kTaggedSigned:
+       return "kRepTaggedSigned";
+     case MachineRepresentation::kTaggedPointer:
+diff --git a/src/codegen/machine-type.h b/src/codegen/machine-type.h
+index 26d04f5852..92969707eb 100644
+--- a/src/codegen/machine-type.h
++++ b/src/codegen/machine-type.h
+@@ -49,8 +49,9 @@ enum class MachineRepresentation : uint8_t {
+   kFloat32,
+   kFloat64,
+   kSimd128,
++  kSimd256,
+   kFirstFPRepresentation = kFloat32,
+-  kLastRepresentation = kSimd128
++  kLastRepresentation = kSimd256
+ };
+ 
+ bool IsSubtype(MachineRepresentation rep1, MachineRepresentation rep2);
+@@ -65,10 +66,11 @@ ASSERT_CONSECUTIVE(Word16, Word32)
+ ASSERT_CONSECUTIVE(Word32, Word64)
+ ASSERT_CONSECUTIVE(Float32, Float64)
+ ASSERT_CONSECUTIVE(Float64, Simd128)
++ASSERT_CONSECUTIVE(Simd128, Simd256)
+ #undef ASSERT_CONSECUTIVE
+ 
+ static_assert(MachineRepresentation::kLastRepresentation ==
+-                  MachineRepresentation::kSimd128,
++                  MachineRepresentation::kSimd256,
+               "FP and SIMD representations must be last.");
+ 
+ static_assert(static_cast<int>(MachineRepresentation::kLastRepresentation) <
+@@ -202,6 +204,9 @@ class MachineType {
+   constexpr static MachineType Simd128() {
+     return MachineType(MachineRepresentation::kSimd128, MachineSemantic::kNone);
+   }
++  constexpr static MachineType Simd256() {
++    return MachineType(MachineRepresentation::kSimd256, MachineSemantic::kNone);
++  }
+   constexpr static MachineType Pointer() {
+     return MachineType(PointerRepresentation(), MachineSemantic::kNone);
+   }
+@@ -259,6 +264,8 @@ class MachineType {
+         return MachineType::Float64();
+       case MachineRepresentation::kSimd128:
+         return MachineType::Simd128();
++      case MachineRepresentation::kSimd256:
++        return MachineType::Simd256();
+       case MachineRepresentation::kTagged:
+         return MachineType::AnyTagged();
+       case MachineRepresentation::kTaggedSigned:
+@@ -390,6 +397,8 @@ V8_EXPORT_PRIVATE inline constexpr int ElementSizeLog2Of(
+       return 3;
+     case MachineRepresentation::kSimd128:
+       return 4;
++    case MachineRepresentation::kSimd256:
++      return 5;
+     case MachineRepresentation::kTaggedSigned:
+     case MachineRepresentation::kTaggedPointer:
+     case MachineRepresentation::kTagged:
+diff --git a/src/common/globals.h b/src/common/globals.h
+index 9143b1e613..0f4c61e2fe 100644
+--- a/src/common/globals.h
++++ b/src/common/globals.h
+@@ -447,6 +447,9 @@ constexpr int kOneByteSize = kCharSize;
+ // 128 bit SIMD value size.
+ constexpr int kSimd128Size = 16;
+ 
++// 256 bit SIMD value size.
++constexpr int kSimd256Size = 32;
++
+ // Maximum ordinal used for tracking asynchronous module evaluation order.
+ constexpr unsigned kMaxModuleAsyncEvaluatingOrdinal = (1 << 30) - 1;
+ 
+diff --git a/src/compiler/backend/arm/instruction-selector-arm.cc b/src/compiler/backend/arm/instruction-selector-arm.cc
+index add7650438..10bb4af995 100644
+--- a/src/compiler/backend/arm/instruction-selector-arm.cc
++++ b/src/compiler/backend/arm/instruction-selector-arm.cc
+@@ -624,6 +624,7 @@ void InstructionSelector::VisitLoad(Node* node) {
+     case MachineRepresentation::kSimd128:
+       opcode = kArmVld1S128;
+       break;
++    case MachineRepresentation::kSimd256:            // Fall through.
+     case MachineRepresentation::kCompressedPointer:  // Fall through.
+     case MachineRepresentation::kCompressed:         // Fall through.
+     case MachineRepresentation::kSandboxedPointer:   // Fall through.
+@@ -662,6 +663,7 @@ ArchOpcode GetStoreOpcode(MachineRepresentation rep) {
+       return kArmStr;
+     case MachineRepresentation::kSimd128:
+       return kArmVst1S128;
++    case MachineRepresentation::kSimd256:            // Fall through.
+     case MachineRepresentation::kCompressedPointer:  // Fall through.
+     case MachineRepresentation::kCompressed:         // Fall through.
+     case MachineRepresentation::kSandboxedPointer:   // Fall through.
+diff --git a/src/compiler/backend/arm64/instruction-selector-arm64.cc b/src/compiler/backend/arm64/instruction-selector-arm64.cc
+index f76ab0012d..4531acfb68 100644
+--- a/src/compiler/backend/arm64/instruction-selector-arm64.cc
++++ b/src/compiler/backend/arm64/instruction-selector-arm64.cc
+@@ -847,6 +847,7 @@ void InstructionSelector::VisitLoad(Node* node) {
+       opcode = kArm64LdrQ;
+       immediate_mode = kNoImmediate;
+       break;
++    case MachineRepresentation::kSimd256:  // Fall through.
+     case MachineRepresentation::kMapWord:  // Fall through.
+     case MachineRepresentation::kNone:
+       UNREACHABLE();
+@@ -955,6 +956,7 @@ void InstructionSelector::VisitStore(Node* node) {
+         opcode = kArm64StrQ;
+         immediate_mode = kNoImmediate;
+         break;
++      case MachineRepresentation::kSimd256:  // Fall through.
+       case MachineRepresentation::kMapWord:  // Fall through.
+       case MachineRepresentation::kNone:
+         UNREACHABLE();
+diff --git a/src/compiler/backend/ia32/instruction-selector-ia32.cc b/src/compiler/backend/ia32/instruction-selector-ia32.cc
+index 7cd9297efb..bc87c3d5e5 100644
+--- a/src/compiler/backend/ia32/instruction-selector-ia32.cc
++++ b/src/compiler/backend/ia32/instruction-selector-ia32.cc
+@@ -276,6 +276,7 @@ ArchOpcode GetLoadOpcode(LoadRepresentation load_rep) {
+     case MachineRepresentation::kSimd128:
+       opcode = kIA32Movdqu;
+       break;
++    case MachineRepresentation::kSimd256:            // Fall through.
+     case MachineRepresentation::kCompressedPointer:  // Fall through.
+     case MachineRepresentation::kCompressed:         // Fall through.
+     case MachineRepresentation::kSandboxedPointer:   // Fall through.
+@@ -632,6 +633,7 @@ ArchOpcode GetStoreOpcode(MachineRepresentation rep) {
+       return kIA32Movl;
+     case MachineRepresentation::kSimd128:
+       return kIA32Movdqu;
++    case MachineRepresentation::kSimd256:            // Fall through.
+     case MachineRepresentation::kCompressedPointer:  // Fall through.
+     case MachineRepresentation::kCompressed:         // Fall through.
+     case MachineRepresentation::kSandboxedPointer:   // Fall through.
+diff --git a/src/compiler/backend/instruction.cc b/src/compiler/backend/instruction.cc
+index f904a9c20c..1748d6176c 100644
+--- a/src/compiler/backend/instruction.cc
++++ b/src/compiler/backend/instruction.cc
+@@ -249,6 +249,9 @@ std::ostream& operator<<(std::ostream& os, const InstructionOperand& op) {
+         case MachineRepresentation::kSimd128:
+           os << "|s128";
+           break;
++        case MachineRepresentation::kSimd256:
++          os << "|s256";
++          break;
+         case MachineRepresentation::kTaggedSigned:
+           os << "|ts";
+           break;
+@@ -936,6 +939,7 @@ static MachineRepresentation FilterRepresentation(MachineRepresentation rep) {
+     case MachineRepresentation::kFloat32:
+     case MachineRepresentation::kFloat64:
+     case MachineRepresentation::kSimd128:
++    case MachineRepresentation::kSimd256:
+     case MachineRepresentation::kCompressedPointer:
+     case MachineRepresentation::kCompressed:
+     case MachineRepresentation::kSandboxedPointer:
+diff --git a/src/compiler/backend/instruction.h b/src/compiler/backend/instruction.h
+index 89394b2c24..a29991d42d 100644
+--- a/src/compiler/backend/instruction.h
++++ b/src/compiler/backend/instruction.h
+@@ -549,6 +549,7 @@ class LocationOperand : public InstructionOperand {
+       case MachineRepresentation::kFloat32:
+       case MachineRepresentation::kFloat64:
+       case MachineRepresentation::kSimd128:
++      case MachineRepresentation::kSimd256:
+       case MachineRepresentation::kTaggedSigned:
+       case MachineRepresentation::kTaggedPointer:
+       case MachineRepresentation::kTagged:
+diff --git a/src/compiler/backend/loong64/instruction-selector-loong64.cc b/src/compiler/backend/loong64/instruction-selector-loong64.cc
+index c6c809c1c5..3fd3c09a9f 100644
+--- a/src/compiler/backend/loong64/instruction-selector-loong64.cc
++++ b/src/compiler/backend/loong64/instruction-selector-loong64.cc
+@@ -469,8 +469,9 @@ void InstructionSelector::VisitLoad(Node* node) {
+     case MachineRepresentation::kCompressed:         // Fall through.
+     case MachineRepresentation::kSandboxedPointer:   // Fall through.
+     case MachineRepresentation::kMapWord:            // Fall through.
+-    case MachineRepresentation::kNone:
+-    case MachineRepresentation::kSimd128:
++    case MachineRepresentation::kNone:               // Fall through.
++    case MachineRepresentation::kSimd128:            // Fall through.
++    case MachineRepresentation::kSimd256:
+       UNREACHABLE();
+   }
+ 
+@@ -548,8 +549,9 @@ void InstructionSelector::VisitStore(Node* node) {
+       case MachineRepresentation::kCompressed:         // Fall through.
+       case MachineRepresentation::kSandboxedPointer:   // Fall through.
+       case MachineRepresentation::kMapWord:            // Fall through.
+-      case MachineRepresentation::kNone:
+-      case MachineRepresentation::kSimd128:
++      case MachineRepresentation::kNone:               // Fall through.
++      case MachineRepresentation::kSimd128:            // Fall through.
++      case MachineRepresentation::kSimd256:
+         UNREACHABLE();
+     }
+ 
+diff --git a/src/compiler/backend/mips/instruction-selector-mips.cc b/src/compiler/backend/mips/instruction-selector-mips.cc
+index 4d22056dde..b073c854e6 100644
+--- a/src/compiler/backend/mips/instruction-selector-mips.cc
++++ b/src/compiler/backend/mips/instruction-selector-mips.cc
+@@ -368,6 +368,7 @@ void InstructionSelector::VisitLoad(Node* node) {
+     case MachineRepresentation::kSimd128:
+       opcode = kMipsMsaLd;
+       break;
++    case MachineRepresentation::kSimd256:            // Fall through.
+     case MachineRepresentation::kCompressedPointer:  // Fall through.
+     case MachineRepresentation::kCompressed:         // Fall through.
+     case MachineRepresentation::kSandboxedPointer:   // Fall through.
+@@ -449,6 +450,7 @@ void InstructionSelector::VisitStore(Node* node) {
+       case MachineRepresentation::kSimd128:
+         opcode = kMipsMsaSt;
+         break;
++      case MachineRepresentation::kSimd256:            // Fall through.
+       case MachineRepresentation::kCompressedPointer:  // Fall through.
+       case MachineRepresentation::kCompressed:         // Fall through.
+       case MachineRepresentation::kSandboxedPointer:   // Fall through.
+@@ -1430,6 +1432,7 @@ void InstructionSelector::VisitUnalignedLoad(Node* node) {
+     case MachineRepresentation::kSimd128:
+       opcode = kMipsMsaLd;
+       break;
++    case MachineRepresentation::kSimd256:            // Fall through.
+     case MachineRepresentation::kBit:                // Fall through.
+     case MachineRepresentation::kCompressedPointer:  // Fall through.
+     case MachineRepresentation::kCompressed:         // Fall through.
+@@ -1485,6 +1488,7 @@ void InstructionSelector::VisitUnalignedStore(Node* node) {
+     case MachineRepresentation::kSimd128:
+       opcode = kMipsMsaSt;
+       break;
++    case MachineRepresentation::kSimd256:            // Fall through.
+     case MachineRepresentation::kBit:                // Fall through.
+     case MachineRepresentation::kCompressedPointer:  // Fall through.
+     case MachineRepresentation::kCompressed:         // Fall through.
+diff --git a/src/compiler/backend/mips64/instruction-selector-mips64.cc b/src/compiler/backend/mips64/instruction-selector-mips64.cc
+index ddfda59803..d8f023c4a2 100644
+--- a/src/compiler/backend/mips64/instruction-selector-mips64.cc
++++ b/src/compiler/backend/mips64/instruction-selector-mips64.cc
+@@ -502,6 +502,7 @@ void InstructionSelector::VisitLoad(Node* node) {
+     case MachineRepresentation::kSimd128:
+       opcode = kMips64MsaLd;
+       break;
++    case MachineRepresentation::kSimd256:            // Fall through.
+     case MachineRepresentation::kCompressedPointer:  // Fall through.
+     case MachineRepresentation::kSandboxedPointer:   // Fall through.
+     case MachineRepresentation::kCompressed:         // Fall through.
+@@ -575,6 +576,7 @@ void InstructionSelector::VisitStore(Node* node) {
+       case MachineRepresentation::kSimd128:
+         opcode = kMips64MsaSt;
+         break;
++      case MachineRepresentation::kSimd256:            // Fall through.
+       case MachineRepresentation::kCompressedPointer:  // Fall through.
+       case MachineRepresentation::kCompressed:         // Fall through.
+       case MachineRepresentation::kSandboxedPointer:   // Fall through.
+@@ -1863,6 +1865,7 @@ void InstructionSelector::VisitUnalignedLoad(Node* node) {
+     case MachineRepresentation::kSimd128:
+       opcode = kMips64MsaLd;
+       break;
++    case MachineRepresentation::kSimd256:            // Fall through.
+     case MachineRepresentation::kBit:                // Fall through.
+     case MachineRepresentation::kCompressedPointer:  // Fall through.
+     case MachineRepresentation::kCompressed:         // Fall through.
+@@ -1918,6 +1921,7 @@ void InstructionSelector::VisitUnalignedStore(Node* node) {
+     case MachineRepresentation::kSimd128:
+       opcode = kMips64MsaSt;
+       break;
++    case MachineRepresentation::kSimd256:            // Fall through.
+     case MachineRepresentation::kBit:                // Fall through.
+     case MachineRepresentation::kCompressedPointer:  // Fall through.
+     case MachineRepresentation::kCompressed:         // Fall through.
+diff --git a/src/compiler/backend/ppc/instruction-selector-ppc.cc b/src/compiler/backend/ppc/instruction-selector-ppc.cc
+index 9dc51a149c..4881910cec 100644
+--- a/src/compiler/backend/ppc/instruction-selector-ppc.cc
++++ b/src/compiler/backend/ppc/instruction-selector-ppc.cc
+@@ -233,6 +233,7 @@ static void VisitLoadCommon(InstructionSelector* selector, Node* node,
+       // Vectors do not support MRI mode, only MRR is available.
+       mode = kNoImmediate;
+       break;
++    case MachineRepresentation::kSimd256:  // Fall through.
+     case MachineRepresentation::kMapWord:  // Fall through.
+     case MachineRepresentation::kNone:
+       UNREACHABLE();
+@@ -374,6 +375,7 @@ void VisitStoreCommon(InstructionSelector* selector, Node* node,
+         // Vectors do not support MRI mode, only MRR is available.
+         mode = kNoImmediate;
+         break;
++      case MachineRepresentation::kSimd256:  // Fall through.
+       case MachineRepresentation::kMapWord:  // Fall through.
+       case MachineRepresentation::kNone:
+         UNREACHABLE();
+diff --git a/src/compiler/backend/register-allocation.h b/src/compiler/backend/register-allocation.h
+index 4c0bfe1baa..6893aa4277 100644
+--- a/src/compiler/backend/register-allocation.h
++++ b/src/compiler/backend/register-allocation.h
+@@ -71,6 +71,8 @@ inline int ByteWidthForStackSlot(MachineRepresentation rep) {
+       return kDoubleSize;
+     case MachineRepresentation::kSimd128:
+       return kSimd128Size;
++    case MachineRepresentation::kSimd256:
++      return kSimd256Size;
+     case MachineRepresentation::kNone:
+     case MachineRepresentation::kMapWord:
+       break;
+diff --git a/src/compiler/backend/riscv64/instruction-selector-riscv64.cc b/src/compiler/backend/riscv64/instruction-selector-riscv64.cc
+index b6e3b51b4f..f3584812f4 100644
+--- a/src/compiler/backend/riscv64/instruction-selector-riscv64.cc
++++ b/src/compiler/backend/riscv64/instruction-selector-riscv64.cc
+@@ -560,8 +560,9 @@ void InstructionSelector::VisitLoad(Node* node) {
+ #else
+                                                  // Fall through.
+ #endif
+-    case MachineRepresentation::kSandboxedPointer:
+-    case MachineRepresentation::kMapWord:  // Fall through.
++    case MachineRepresentation::kSimd256:           // Fall through.
++    case MachineRepresentation::kSandboxedPointer:  // Fall through.
++    case MachineRepresentation::kMapWord:           // Fall through.
+     case MachineRepresentation::kNone:
+       UNREACHABLE();
+   }
+@@ -640,8 +641,9 @@ void InstructionSelector::VisitStore(Node* node) {
+ #else
+         UNREACHABLE();
+ #endif
+-      case MachineRepresentation::kSandboxedPointer:
+-      case MachineRepresentation::kMapWord:            // Fall through.
++      case MachineRepresentation::kSimd256:           // Fall through.
++      case MachineRepresentation::kSandboxedPointer:  // Fall through.
++      case MachineRepresentation::kMapWord:           // Fall through.
+       case MachineRepresentation::kNone:
+         UNREACHABLE();
+     }
+@@ -1801,10 +1803,11 @@ void InstructionSelector::VisitUnalignedLoad(Node* node) {
+     case MachineRepresentation::kSimd128:
+       opcode = kRiscvRvvLd;
+       break;
++    case MachineRepresentation::kSimd256:            // Fall through.
+     case MachineRepresentation::kBit:                // Fall through.
+     case MachineRepresentation::kCompressedPointer:  // Fall through.
+     case MachineRepresentation::kCompressed:         // Fall through.
+-    case MachineRepresentation::kSandboxedPointer:
++    case MachineRepresentation::kSandboxedPointer:   // Fall through.
+     case MachineRepresentation::kMapWord:            // Fall through.
+     case MachineRepresentation::kNone:
+       UNREACHABLE();
+@@ -1856,10 +1859,11 @@ void InstructionSelector::VisitUnalignedStore(Node* node) {
+     case MachineRepresentation::kSimd128:
+       opcode = kRiscvRvvSt;
+       break;
++    case MachineRepresentation::kSimd256:            // Fall through.
+     case MachineRepresentation::kBit:                // Fall through.
+     case MachineRepresentation::kCompressedPointer:  // Fall through.
+     case MachineRepresentation::kCompressed:         // Fall through.
+-    case MachineRepresentation::kSandboxedPointer:
++    case MachineRepresentation::kSandboxedPointer:   // Fall through.
+     case MachineRepresentation::kMapWord:            // Fall through.
+     case MachineRepresentation::kNone:
+       UNREACHABLE();
+diff --git a/src/compiler/backend/s390/instruction-selector-s390.cc b/src/compiler/backend/s390/instruction-selector-s390.cc
+index 578e769ea8..11b93303c4 100644
+--- a/src/compiler/backend/s390/instruction-selector-s390.cc
++++ b/src/compiler/backend/s390/instruction-selector-s390.cc
+@@ -320,6 +320,7 @@ ArchOpcode SelectLoadOpcode(LoadRepresentation load_rep) {
+     case MachineRepresentation::kSimd128:
+       opcode = kS390_LoadSimd128;
+       break;
++    case MachineRepresentation::kSimd256:  // Fall through.
+     case MachineRepresentation::kMapWord:  // Fall through.
+     case MachineRepresentation::kNone:
+     default:
+@@ -801,6 +802,7 @@ static void VisitGeneralStore(
+           value = value->InputAt(0);
+         }
+         break;
++      case MachineRepresentation::kSimd256:  // Fall through.
+       case MachineRepresentation::kMapWord:  // Fall through.
+       case MachineRepresentation::kNone:
+         UNREACHABLE();
+diff --git a/src/compiler/backend/x64/instruction-selector-x64.cc b/src/compiler/backend/x64/instruction-selector-x64.cc
+index 089b3afdab..a32dd2b01d 100644
+--- a/src/compiler/backend/x64/instruction-selector-x64.cc
++++ b/src/compiler/backend/x64/instruction-selector-x64.cc
+@@ -303,7 +303,8 @@ ArchOpcode GetLoadOpcode(LoadRepresentation load_rep) {
+     case MachineRepresentation::kSimd128:
+       opcode = kX64Movdqu;
+       break;
+-    case MachineRepresentation::kNone:  // Fall through.
++    case MachineRepresentation::kSimd256:  // Fall through.
++    case MachineRepresentation::kNone:     // Fall through.
+     case MachineRepresentation::kMapWord:
+       UNREACHABLE();
+   }
+@@ -340,7 +341,8 @@ ArchOpcode GetStoreOpcode(StoreRepresentation store_rep) {
+       return kX64MovqEncodeSandboxedPointer;
+     case MachineRepresentation::kSimd128:
+       return kX64Movdqu;
+-    case MachineRepresentation::kNone:  // Fall through.
++    case MachineRepresentation::kSimd256:  // Fall through.
++    case MachineRepresentation::kNone:     // Fall through.
+     case MachineRepresentation::kMapWord:
+       UNREACHABLE();
+   }
+diff --git a/src/compiler/js-native-context-specialization.cc b/src/compiler/js-native-context-specialization.cc
+index 7a92f5125e..c94cbc0a52 100644
+--- a/src/compiler/js-native-context-specialization.cc
++++ b/src/compiler/js-native-context-specialization.cc
+@@ -2616,6 +2616,7 @@ JSNativeContextSpecialization::BuildPropertyStore(
+       case MachineRepresentation::kWord64:
+       case MachineRepresentation::kFloat32:
+       case MachineRepresentation::kSimd128:
++      case MachineRepresentation::kSimd256:
+       case MachineRepresentation::kMapWord:
+         UNREACHABLE();
+     }
+diff --git a/src/compiler/load-elimination.cc b/src/compiler/load-elimination.cc
+index 7f0dee2125..0cc4a47563 100644
+--- a/src/compiler/load-elimination.cc
++++ b/src/compiler/load-elimination.cc
+@@ -1075,6 +1075,7 @@ Reduction LoadElimination::ReduceLoadElement(Node* node) {
+       break;
+     case MachineRepresentation::kFloat64:
+     case MachineRepresentation::kSimd128:
++    case MachineRepresentation::kSimd256:
+     case MachineRepresentation::kTaggedSigned:
+     case MachineRepresentation::kTaggedPointer:
+     case MachineRepresentation::kTagged:
+@@ -1132,6 +1133,7 @@ Reduction LoadElimination::ReduceStoreElement(Node* node) {
+       break;
+     case MachineRepresentation::kFloat64:
+     case MachineRepresentation::kSimd128:
++    case MachineRepresentation::kSimd256:
+     case MachineRepresentation::kTaggedSigned:
+     case MachineRepresentation::kTaggedPointer:
+     case MachineRepresentation::kTagged:
+@@ -1417,6 +1419,7 @@ LoadElimination::IndexRange LoadElimination::FieldIndexOf(
+     case MachineRepresentation::kNone:
+     case MachineRepresentation::kBit:
+     case MachineRepresentation::kSimd128:
++    case MachineRepresentation::kSimd256:
+       UNREACHABLE();
+     case MachineRepresentation::kWord8:
+     case MachineRepresentation::kWord16:
+diff --git a/src/compiler/machine-graph-verifier.cc b/src/compiler/machine-graph-verifier.cc
+index 56486b9405..5b6185e421 100644
+--- a/src/compiler/machine-graph-verifier.cc
++++ b/src/compiler/machine-graph-verifier.cc
+@@ -1004,6 +1004,7 @@ class MachineRepresentationChecker {
+       case MachineRepresentation::kFloat32:
+       case MachineRepresentation::kFloat64:
+       case MachineRepresentation::kSimd128:
++      case MachineRepresentation::kSimd256:
+       case MachineRepresentation::kBit:
+       case MachineRepresentation::kWord8:
+       case MachineRepresentation::kWord16:
+diff --git a/src/compiler/machine-operator.cc b/src/compiler/machine-operator.cc
+index 7efdab0512..7afefb77af 100644
+--- a/src/compiler/machine-operator.cc
++++ b/src/compiler/machine-operator.cc
+@@ -666,7 +666,8 @@ std::ostream& operator<<(std::ostream& os, TruncateKind kind) {
+   V(AnyTagged)               \
+   V(CompressedPointer)       \
+   V(SandboxedPointer)        \
+-  V(AnyCompressed)
++  V(AnyCompressed)           \
++  V(Simd256)
+ 
+ #define MACHINE_REPRESENTATION_LIST(V) \
+   V(kFloat32)                          \
+@@ -682,7 +683,8 @@ std::ostream& operator<<(std::ostream& os, TruncateKind kind) {
+   V(kTagged)                           \
+   V(kCompressedPointer)                \
+   V(kSandboxedPointer)                 \
+-  V(kCompressed)
++  V(kCompressed)                       \
++  V(kSimd256)
+ 
+ #define LOAD_TRANSFORM_LIST(V) \
+   V(S128Load8Splat)            \
+diff --git a/src/compiler/representation-change.cc b/src/compiler/representation-change.cc
+index 96b0a40707..fcefde37e0 100644
+--- a/src/compiler/representation-change.cc
++++ b/src/compiler/representation-change.cc
+@@ -241,6 +241,7 @@ Node* RepresentationChanger::GetRepresentationFor(
+       return GetWord64RepresentationFor(node, output_rep, output_type, use_node,
+                                         use_info);
+     case MachineRepresentation::kSimd128:
++    case MachineRepresentation::kSimd256:
+     case MachineRepresentation::kNone:
+       return node;
+     case MachineRepresentation::kCompressed:
+diff --git a/src/compiler/simplified-lowering.cc b/src/compiler/simplified-lowering.cc
+index 5c51f2ac8c..b77508321c 100644
+--- a/src/compiler/simplified-lowering.cc
++++ b/src/compiler/simplified-lowering.cc
+@@ -165,6 +165,7 @@ UseInfo TruncatingUseInfoFromRepresentation(MachineRepresentation rep) {
+     case MachineRepresentation::kCompressed:
+     case MachineRepresentation::kSandboxedPointer:
+     case MachineRepresentation::kSimd128:
++    case MachineRepresentation::kSimd256:
+     case MachineRepresentation::kNone:
+       break;
+   }
+-- 
+2.35.1
+

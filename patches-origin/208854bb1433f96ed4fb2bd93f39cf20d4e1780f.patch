@@ -1,0 +1,458 @@
+From 208854bb1433f96ed4fb2bd93f39cf20d4e1780f Mon Sep 17 00:00:00 2001
+From: Victor Gomes <victorgomes@chromium.org>
+Date: Thu, 5 Aug 2021 12:27:25 +0200
+Subject: [PATCH] [baseline] Skip fix reference if no GC
+
+If no GC happens when we grow the assembler buffer (this could happen
+since we allocate a new Code object), we do not need to fix references
+to full-embedded-objects.
+
+Bug: v8:11872
+Change-Id: I11fb1abcb4c53e124bb7659c9f9995ccb18cf296
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3073741
+Auto-Submit: Victor Gomes <victorgomes@chromium.org>
+Reviewed-by: Leszek Swirski <leszeks@chromium.org>
+Commit-Queue: Victor Gomes <victorgomes@chromium.org>
+Cr-Commit-Position: refs/heads/master@{#76122}
+---
+ src/codegen/arm/assembler-arm.cc         |  7 +++++--
+ src/codegen/arm/assembler-arm.h          |  2 +-
+ src/codegen/arm64/assembler-arm64.cc     | 15 ++++++++++-----
+ src/codegen/arm64/assembler-arm64.h      |  2 +-
+ src/codegen/ia32/assembler-ia32.cc       |  7 +++++--
+ src/codegen/ia32/assembler-ia32.h        |  2 +-
+ src/codegen/mips/assembler-mips.cc       |  7 +++++--
+ src/codegen/mips/assembler-mips.h        |  2 +-
+ src/codegen/mips64/assembler-mips64.cc   | 10 ++++++++--
+ src/codegen/mips64/assembler-mips64.h    |  2 +-
+ src/codegen/ppc/assembler-ppc.cc         |  2 +-
+ src/codegen/ppc/assembler-ppc.h          |  2 +-
+ src/codegen/riscv64/assembler-riscv64.cc |  4 +++-
+ src/codegen/riscv64/assembler-riscv64.h  |  2 +-
+ src/codegen/s390/assembler-s390.cc       |  2 +-
+ src/codegen/s390/assembler-s390.h        |  2 +-
+ src/codegen/x64/assembler-x64.cc         | 15 ++++++++++-----
+ src/codegen/x64/assembler-x64.h          |  2 +-
+ 18 files changed, 57 insertions(+), 30 deletions(-)
+
+diff --git a/src/codegen/arm/assembler-arm.cc b/src/codegen/arm/assembler-arm.cc
+index 3ee9f11c59..970386be72 100644
+--- a/src/codegen/arm/assembler-arm.cc
++++ b/src/codegen/arm/assembler-arm.cc
+@@ -5172,7 +5172,8 @@ void Assembler::RecordConstPool(int size) {
+   RecordRelocInfo(RelocInfo::CONST_POOL, static_cast<intptr_t>(size));
+ }
+ 
+-void Assembler::FixOnHeapReferences() {
++void Assembler::FixOnHeapReferences(bool update_embedded_objects) {
++  if (!update_embedded_objects) return;
+   Address base = reinterpret_cast<Address>(buffer_->start());
+   for (auto p : saved_handles_for_raw_object_ptr_) {
+     Handle<HeapObject> object(reinterpret_cast<Address*>(p.second));
+@@ -5185,12 +5186,14 @@ void Assembler::FixOnHeapReferencesToHandles() {
+   for (auto p : saved_handles_for_raw_object_ptr_) {
+     WriteUnalignedValue(base + p.first, p.second);
+   }
++  saved_handles_for_raw_object_ptr_.clear();
+ }
+ 
+ void Assembler::GrowBuffer() {
+   DCHECK_EQ(buffer_start_, buffer_->start());
+ 
+   bool previously_on_heap = buffer_->IsOnHeap();
++  int previous_on_heap_gc_count = OnHeapGCCount();
+ 
+   // Compute new buffer size.
+   int old_size = buffer_->size();
+@@ -5227,7 +5230,7 @@ void Assembler::GrowBuffer() {
+   // Fix on-heap references.
+   if (previously_on_heap) {
+     if (buffer_->IsOnHeap()) {
+-      FixOnHeapReferences();
++      FixOnHeapReferences(previous_on_heap_gc_count != OnHeapGCCount());
+     } else {
+       FixOnHeapReferencesToHandles();
+     }
+diff --git a/src/codegen/arm/assembler-arm.h b/src/codegen/arm/assembler-arm.h
+index 11b39615f4..7c5e549995 100644
+--- a/src/codegen/arm/assembler-arm.h
++++ b/src/codegen/arm/assembler-arm.h
+@@ -331,7 +331,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // This function is called when on-heap-compilation invariants are
+   // invalidated. For instance, when the assembler buffer grows or a GC happens
+   // between Code object allocation and Code object finalization.
+-  void FixOnHeapReferences();
++  void FixOnHeapReferences(bool update_embedded_objects = true);
+ 
+   // This function is called when we fallback from on-heap to off-heap
+   // compilation and patch on-heap references to handles.
+diff --git a/src/codegen/arm64/assembler-arm64.cc b/src/codegen/arm64/assembler-arm64.cc
+index c5328646bc..aefe04b2e2 100644
+--- a/src/codegen/arm64/assembler-arm64.cc
++++ b/src/codegen/arm64/assembler-arm64.cc
+@@ -4275,11 +4275,13 @@ bool Assembler::IsImmFP64(double imm) {
+   return true;
+ }
+ 
+-void Assembler::FixOnHeapReferences() {
++void Assembler::FixOnHeapReferences(bool update_embedded_objects) {
+   Address base = reinterpret_cast<Address>(buffer_->start());
+-  for (auto p : saved_handles_for_raw_object_ptr_) {
+-    Handle<HeapObject> object = GetEmbeddedObject(p.second);
+-    WriteUnalignedValue(base + p.first, object->ptr());
++  if (update_embedded_objects) {
++    for (auto p : saved_handles_for_raw_object_ptr_) {
++      Handle<HeapObject> object = GetEmbeddedObject(p.second);
++      WriteUnalignedValue(base + p.first, object->ptr());
++    }
+   }
+   for (auto p : saved_offsets_for_runtime_entries_) {
+     Instruction* instr = reinterpret_cast<Instruction*>(base + p.first);
+@@ -4295,16 +4297,19 @@ void Assembler::FixOnHeapReferencesToHandles() {
+   for (auto p : saved_handles_for_raw_object_ptr_) {
+     WriteUnalignedValue(base + p.first, p.second);
+   }
++  saved_handles_for_raw_object_ptr_.clear();
+   for (auto p : saved_offsets_for_runtime_entries_) {
+     Instruction* instr = reinterpret_cast<Instruction*>(base + p.first);
+     DCHECK(is_int26(p.second));
+     DCHECK(instr->IsBranchAndLink() || instr->IsUnconditionalBranch());
+     instr->SetInstructionBits(instr->Mask(UnconditionalBranchMask) | p.second);
+   }
++  saved_offsets_for_runtime_entries_.clear();
+ }
+ 
+ void Assembler::GrowBuffer() {
+   bool previously_on_heap = buffer_->IsOnHeap();
++  int previous_on_heap_gc_count = OnHeapGCCount();
+ 
+   // Compute new buffer size.
+   int old_size = buffer_->size();
+@@ -4351,7 +4356,7 @@ void Assembler::GrowBuffer() {
+   // Fix on-heap references.
+   if (previously_on_heap) {
+     if (buffer_->IsOnHeap()) {
+-      FixOnHeapReferences();
++      FixOnHeapReferences(previous_on_heap_gc_count != OnHeapGCCount());
+     } else {
+       FixOnHeapReferencesToHandles();
+     }
+diff --git a/src/codegen/arm64/assembler-arm64.h b/src/codegen/arm64/assembler-arm64.h
+index a8431bb42a..da3f7d54bd 100644
+--- a/src/codegen/arm64/assembler-arm64.h
++++ b/src/codegen/arm64/assembler-arm64.h
+@@ -207,7 +207,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // This function is called when on-heap-compilation invariants are
+   // invalidated. For instance, when the assembler buffer grows or a GC happens
+   // between Code object allocation and Code object finalization.
+-  void FixOnHeapReferences();
++  void FixOnHeapReferences(bool update_embedded_objects = true);
+ 
+   // This function is called when we fallback from on-heap to off-heap
+   // compilation and patch on-heap references to handles.
+diff --git a/src/codegen/ia32/assembler-ia32.cc b/src/codegen/ia32/assembler-ia32.cc
+index 20ad36cb7e..90f8e8b70c 100644
+--- a/src/codegen/ia32/assembler-ia32.cc
++++ b/src/codegen/ia32/assembler-ia32.cc
+@@ -3341,7 +3341,8 @@ void Assembler::emit_vex_prefix(Register vreg, VectorLength l, SIMDPrefix pp,
+   emit_vex_prefix(ivreg, l, pp, mm, w);
+ }
+ 
+-void Assembler::FixOnHeapReferences() {
++void Assembler::FixOnHeapReferences(bool update_embedded_objects) {
++  if (!update_embedded_objects) return;
+   Address base = reinterpret_cast<Address>(buffer_->start());
+   for (auto p : saved_handles_for_raw_object_ptr_) {
+     Handle<HeapObject> object(reinterpret_cast<Address*>(p.second));
+@@ -3354,6 +3355,7 @@ void Assembler::FixOnHeapReferencesToHandles() {
+   for (auto p : saved_handles_for_raw_object_ptr_) {
+     WriteUnalignedValue<uint32_t>(base + p.first, p.second);
+   }
++  saved_handles_for_raw_object_ptr_.clear();
+ }
+ 
+ void Assembler::GrowBuffer() {
+@@ -3361,6 +3363,7 @@ void Assembler::GrowBuffer() {
+   DCHECK_EQ(buffer_start_, buffer_->start());
+ 
+   bool previously_on_heap = buffer_->IsOnHeap();
++  int previous_on_heap_gc_count = OnHeapGCCount();
+ 
+   // Compute new buffer size.
+   int old_size = buffer_->size();
+@@ -3412,7 +3415,7 @@ void Assembler::GrowBuffer() {
+   // Fix on-heap references.
+   if (previously_on_heap) {
+     if (buffer_->IsOnHeap()) {
+-      FixOnHeapReferences();
++      FixOnHeapReferences(previous_on_heap_gc_count != OnHeapGCCount());
+     } else {
+       FixOnHeapReferencesToHandles();
+     }
+diff --git a/src/codegen/ia32/assembler-ia32.h b/src/codegen/ia32/assembler-ia32.h
+index 94366e15ee..e699bd2125 100644
+--- a/src/codegen/ia32/assembler-ia32.h
++++ b/src/codegen/ia32/assembler-ia32.h
+@@ -395,7 +395,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // This function is called when on-heap-compilation invariants are
+   // invalidated. For instance, when the assembler buffer grows or a GC happens
+   // between Code object allocation and Code object finalization.
+-  void FixOnHeapReferences();
++  void FixOnHeapReferences(bool update_embedded_objects = true);
+ 
+   // This function is called when we fallback from on-heap to off-heap
+   // compilation and patch on-heap references to handles.
+diff --git a/src/codegen/mips/assembler-mips.cc b/src/codegen/mips/assembler-mips.cc
+index 2afe356fac..0d5a8710e5 100644
+--- a/src/codegen/mips/assembler-mips.cc
++++ b/src/codegen/mips/assembler-mips.cc
+@@ -3537,7 +3537,8 @@ void Assembler::RelocateRelativeReference(RelocInfo::Mode rmode, Address pc,
+   }
+ }
+ 
+-void Assembler::FixOnHeapReferences() {
++void Assembler::FixOnHeapReferences(bool update_embedded_objects) {
++  if (!update_embedded_objects) return;
+   for (auto p : saved_handles_for_raw_object_ptr_) {
+     Address address = reinterpret_cast<Address>(buffer_->start() + p.first);
+     Handle<HeapObject> object(reinterpret_cast<Address*>(p.second));
+@@ -3550,10 +3551,12 @@ void Assembler::FixOnHeapReferencesToHandles() {
+     Address address = reinterpret_cast<Address>(buffer_->start() + p.first);
+     set_target_value_at(address, p.second);
+   }
++  saved_handles_for_raw_object_ptr_.clear();
+ }
+ 
+ void Assembler::GrowBuffer() {
+   bool previously_on_heap = buffer_->IsOnHeap();
++  int previous_on_heap_gc_count = OnHeapGCCount();
+ 
+   // Compute new buffer size.
+   int old_size = buffer_->size();
+@@ -3601,7 +3604,7 @@ void Assembler::GrowBuffer() {
+   // Fix on-heap references.
+   if (previously_on_heap) {
+     if (buffer_->IsOnHeap()) {
+-      FixOnHeapReferences();
++      FixOnHeapReferences(previous_on_heap_gc_count != OnHeapGCCount());
+     } else {
+       FixOnHeapReferencesToHandles();
+     }
+diff --git a/src/codegen/mips/assembler-mips.h b/src/codegen/mips/assembler-mips.h
+index 23c3c6cfff..2dff92eec6 100644
+--- a/src/codegen/mips/assembler-mips.h
++++ b/src/codegen/mips/assembler-mips.h
+@@ -170,7 +170,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // This function is called when on-heap-compilation invariants are
+   // invalidated. For instance, when the assembler buffer grows or a GC happens
+   // between Code object allocation and Code object finalization.
+-  void FixOnHeapReferences();
++  void FixOnHeapReferences(bool update_embedded_objects = true);
+ 
+   // This function is called when we fallback from on-heap to off-heap
+   // compilation and patch on-heap references to handles.
+diff --git a/src/codegen/mips64/assembler-mips64.cc b/src/codegen/mips64/assembler-mips64.cc
+index cba9bab3a3..0379cd65ce 100644
+--- a/src/codegen/mips64/assembler-mips64.cc
++++ b/src/codegen/mips64/assembler-mips64.cc
+@@ -3736,7 +3736,8 @@ int Assembler::RelocateInternalReference(RelocInfo::Mode rmode, Address pc,
+   }
+ }
+ 
+-void Assembler::FixOnHeapReferences() {
++void Assembler::FixOnHeapReferences(bool update_embedded_objects) {
++  if (!update_embedded_objects) return;
+   for (auto p : saved_handles_for_raw_object_ptr_) {
+     Address address = reinterpret_cast<Address>(buffer_->start() + p.first);
+     Handle<HeapObject> object(reinterpret_cast<Address*>(p.second));
+@@ -3749,10 +3750,12 @@ void Assembler::FixOnHeapReferencesToHandles() {
+     Address address = reinterpret_cast<Address>(buffer_->start() + p.first);
+     set_target_value_at(address, p.second);
+   }
++  saved_handles_for_raw_object_ptr_.clear();
+ }
+ 
+ void Assembler::GrowBuffer() {
+   bool previously_on_heap = buffer_->IsOnHeap();
++  int previous_on_heap_gc_count = OnHeapGCCount();
+ 
+   // Compute new buffer size.
+   int old_size = buffer_->size();
+@@ -3795,14 +3798,17 @@ void Assembler::GrowBuffer() {
+       RelocateInternalReference(rmode, it.rinfo()->pc(), pc_delta);
+     }
+   }
++
+   // Fix on-heap references.
+   if (previously_on_heap) {
+     if (buffer_->IsOnHeap()) {
+-      FixOnHeapReferences();
++      FixOnHeapReferences(previous_on_heap_gc_count != OnHeapGCCount());
+     } else {
+       FixOnHeapReferencesToHandles();
+     }
+   }
++
++  DCHECK(!overflow());
+ }
+ 
+ void Assembler::db(uint8_t data) {
+diff --git a/src/codegen/mips64/assembler-mips64.h b/src/codegen/mips64/assembler-mips64.h
+index 68306f4252..37a4e174a5 100644
+--- a/src/codegen/mips64/assembler-mips64.h
++++ b/src/codegen/mips64/assembler-mips64.h
+@@ -170,7 +170,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // This function is called when on-heap-compilation invariants are
+   // invalidated. For instance, when the assembler buffer grows or a GC happens
+   // between Code object allocation and Code object finalization.
+-  void FixOnHeapReferences();
++  void FixOnHeapReferences(bool update_embedded_objects = true);
+ 
+   // This function is called when we fallback from on-heap to off-heap
+   // compilation and patch on-heap references to handles.
+diff --git a/src/codegen/ppc/assembler-ppc.cc b/src/codegen/ppc/assembler-ppc.cc
+index dfb2509099..2c568b3f3f 100644
+--- a/src/codegen/ppc/assembler-ppc.cc
++++ b/src/codegen/ppc/assembler-ppc.cc
+@@ -1931,7 +1931,7 @@ bool Assembler::IsNop(Instr instr, int type) {
+   return instr == (ORI | reg * B21 | reg * B16);
+ }
+ 
+-void Assembler::FixOnHeapReferences() {
++void Assembler::FixOnHeapReferences(bool update_embedded_objects) {
+   // TODO(v8:11872) This function should never be called if Sparkplug on heap
+   // compilation is not supported.
+   UNREACHABLE();
+diff --git a/src/codegen/ppc/assembler-ppc.h b/src/codegen/ppc/assembler-ppc.h
+index 1b3290fbe1..e26ae3199f 100644
+--- a/src/codegen/ppc/assembler-ppc.h
++++ b/src/codegen/ppc/assembler-ppc.h
+@@ -199,7 +199,7 @@ class Assembler : public AssemblerBase {
+   // This function is called when on-heap-compilation invariants are
+   // invalidated. For instance, when the assembler buffer grows or a GC happens
+   // between Code object allocation and Code object finalization.
+-  void FixOnHeapReferences();
++  void FixOnHeapReferences(bool update_embedded_objects = true);
+ 
+   // This function is called when we fallback from on-heap to off-heap
+   // compilation and patch on-heap references to handles.
+diff --git a/src/codegen/riscv64/assembler-riscv64.cc b/src/codegen/riscv64/assembler-riscv64.cc
+index ef06240ffa..3bdbe40770 100644
+--- a/src/codegen/riscv64/assembler-riscv64.cc
++++ b/src/codegen/riscv64/assembler-riscv64.cc
+@@ -2758,7 +2758,9 @@ void Assembler::RelocateRelativeReference(RelocInfo::Mode rmode, Address pc,
+   }
+ }
+ 
+-void Assembler::FixOnHeapReferences() { UNIMPLEMENTED(); }
++void Assembler::FixOnHeapReferences(bool update_embedded_objects) {
++  UNIMPLEMENTED();
++}
+ 
+ void Assembler::FixOnHeapReferencesToHandles() { UNIMPLEMENTED(); }
+ 
+diff --git a/src/codegen/riscv64/assembler-riscv64.h b/src/codegen/riscv64/assembler-riscv64.h
+index 77fbbc7c1c..9de5355036 100644
+--- a/src/codegen/riscv64/assembler-riscv64.h
++++ b/src/codegen/riscv64/assembler-riscv64.h
+@@ -357,7 +357,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // This function is called when on-heap-compilation invariants are
+   // invalidated. For instance, when the assembler buffer grows or a GC happens
+   // between Code object allocation and Code object finalization.
+-  void FixOnHeapReferences();
++  void FixOnHeapReferences(bool update_embedded_objects = true);
+ 
+   // This function is called when we fallback from on-heap to off-heap
+   // compilation and patch on-heap references to handles.
+diff --git a/src/codegen/s390/assembler-s390.cc b/src/codegen/s390/assembler-s390.cc
+index fbd136b0a3..511096e0db 100644
+--- a/src/codegen/s390/assembler-s390.cc
++++ b/src/codegen/s390/assembler-s390.cc
+@@ -750,7 +750,7 @@ void Assembler::dumy(int r1, int x2, int b2, int d2) {
+ #endif
+ }
+ 
+-void Assembler::FixOnHeapReferences() {
++void Assembler::FixOnHeapReferences(bool update_embedded_objects) {
+   // TODO(v8:11872) This function should never be called if Sparkplug on heap
+   // compilation is not supported.
+   UNREACHABLE();
+diff --git a/src/codegen/s390/assembler-s390.h b/src/codegen/s390/assembler-s390.h
+index 0f3fc270eb..7a99750151 100644
+--- a/src/codegen/s390/assembler-s390.h
++++ b/src/codegen/s390/assembler-s390.h
+@@ -244,7 +244,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // This function is called when on-heap-compilation invariants are
+   // invalidated. For instance, when the assembler buffer grows or a GC happens
+   // between Code object allocation and Code object finalization.
+-  void FixOnHeapReferences();
++  void FixOnHeapReferences(bool update_embedded_objects = true);
+ 
+   // This function is called when we fallback from on-heap to off-heap
+   // compilation and patch on-heap references to handles.
+diff --git a/src/codegen/x64/assembler-x64.cc b/src/codegen/x64/assembler-x64.cc
+index 81c7354ee7..1e66311d95 100644
+--- a/src/codegen/x64/assembler-x64.cc
++++ b/src/codegen/x64/assembler-x64.cc
+@@ -537,11 +537,13 @@ bool Assembler::is_optimizable_farjmp(int idx) {
+   return !!(bitmap[idx / 32] & (1 << (idx & 31)));
+ }
+ 
+-void Assembler::FixOnHeapReferences() {
++void Assembler::FixOnHeapReferences(bool update_embedded_objects) {
+   Address base = reinterpret_cast<Address>(buffer_->start());
+-  for (auto p : saved_handles_for_raw_object_ptr_) {
+-    Handle<HeapObject> object(reinterpret_cast<Address*>(p.second));
+-    WriteUnalignedValue(base + p.first, *object);
++  if (update_embedded_objects) {
++    for (auto p : saved_handles_for_raw_object_ptr_) {
++      Handle<HeapObject> object(reinterpret_cast<Address*>(p.second));
++      WriteUnalignedValue(base + p.first, *object);
++    }
+   }
+   for (auto p : saved_offsets_for_runtime_entries_) {
+     Address pc = base + p.first;
+@@ -555,15 +557,18 @@ void Assembler::FixOnHeapReferencesToHandles() {
+   for (auto p : saved_handles_for_raw_object_ptr_) {
+     WriteUnalignedValue(base + p.first, p.second);
+   }
++  saved_handles_for_raw_object_ptr_.clear();
+   for (auto p : saved_offsets_for_runtime_entries_) {
+     WriteUnalignedValue<uint32_t>(base + p.first, p.second);
+   }
++  saved_offsets_for_runtime_entries_.clear();
+ }
+ 
+ void Assembler::GrowBuffer() {
+   DCHECK(buffer_overflow());
+ 
+   bool previously_on_heap = buffer_->IsOnHeap();
++  int previous_on_heap_gc_count = OnHeapGCCount();
+ 
+   // Compute new buffer size.
+   DCHECK_EQ(buffer_start_, buffer_->start());
+@@ -605,7 +610,7 @@ void Assembler::GrowBuffer() {
+   // Fix on-heap references.
+   if (previously_on_heap) {
+     if (buffer_->IsOnHeap()) {
+-      FixOnHeapReferences();
++      FixOnHeapReferences(previous_on_heap_gc_count != OnHeapGCCount());
+     } else {
+       FixOnHeapReferencesToHandles();
+     }
+diff --git a/src/codegen/x64/assembler-x64.h b/src/codegen/x64/assembler-x64.h
+index 1555fc04e2..f2f7aa781c 100644
+--- a/src/codegen/x64/assembler-x64.h
++++ b/src/codegen/x64/assembler-x64.h
+@@ -424,7 +424,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // This function is called when on-heap-compilation invariants are
+   // invalidated. For instance, when the assembler buffer grows or a GC happens
+   // between Code object allocation and Code object finalization.
+-  void FixOnHeapReferences();
++  void FixOnHeapReferences(bool update_embedded_objects = true);
+ 
+   // This function is called when we fallback from on-heap to off-heap
+   // compilation and patch on-heap references to handles.
+-- 
+2.35.1
+

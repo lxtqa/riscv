@@ -1,0 +1,91 @@
+From 9fab8195c92b71ba73949b3582c534303157dc0c Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Mon, 21 Nov 2022 08:50:47 +0800
+Subject: [PATCH] [riscv][regalloc] Resolve tail-call gap moves
+
+Port commit 2f4397d652f200501f65b913e8a8a2cc5e4a9404
+
+Change-Id: I0e2e9fc743ff6d0e1a5270e39ded68a6c70e103a
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4041646
+Reviewed-by: ji qiu <qiuji@iscas.ac.cn>
+Auto-Submit: Yahan Lu <yahan@iscas.ac.cn>
+Commit-Queue: ji qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#84376}
+---
+ .../backend/riscv/code-generator-riscv.cc     | 60 +++++++++++++++++++
+ 1 file changed, 60 insertions(+)
+
+diff --git a/src/compiler/backend/riscv/code-generator-riscv.cc b/src/compiler/backend/riscv/code-generator-riscv.cc
+index 0f227a3fc6..ee7eeee7c5 100644
+--- a/src/compiler/backend/riscv/code-generator-riscv.cc
++++ b/src/compiler/backend/riscv/code-generator-riscv.cc
+@@ -4782,6 +4782,66 @@ void CodeGenerator::AssembleSwap(InstructionOperand* source,
+   }
+ }
+ 
++AllocatedOperand CodeGenerator::Push(InstructionOperand* source) {
++  auto rep = LocationOperand::cast(source)->representation();
++  int new_slots = RoundUp<2>(ElementSizeInPointers(rep));
++  RiscvOperandConverter g(this, nullptr);
++  int last_frame_slot_id =
++      frame_access_state_->frame()->GetTotalFrameSlotCount() - 1;
++  int sp_delta = frame_access_state_->sp_delta();
++  int slot_id = last_frame_slot_id + sp_delta + new_slots;
++  AllocatedOperand stack_slot(LocationOperand::STACK_SLOT, rep, slot_id);
++  if (source->IsRegister()) {
++    __ Push(g.ToRegister(source));
++    frame_access_state()->IncreaseSPDelta(new_slots);
++  } else if (source->IsStackSlot()) {
++    UseScratchRegisterScope temps(tasm());
++    Register scratch = temps.Acquire();
++    __ LoadWord(scratch, g.ToMemOperand(source));
++    __ Push(scratch);
++    frame_access_state()->IncreaseSPDelta(new_slots);
++  } else {
++    // No push instruction for this operand type. Bump the stack pointer and
++    // assemble the move.
++    __ SubWord(sp, sp, Operand(new_slots * kSystemPointerSize));
++    frame_access_state()->IncreaseSPDelta(new_slots);
++    AssembleMove(source, &stack_slot);
++  }
++  temp_slots_ += new_slots;
++  return stack_slot;
++}
++
++void CodeGenerator::Pop(InstructionOperand* dest, MachineRepresentation rep) {
++  int new_slots = RoundUp<2>(ElementSizeInPointers(rep));
++  frame_access_state()->IncreaseSPDelta(-new_slots);
++  RiscvOperandConverter g(this, nullptr);
++  if (dest->IsRegister()) {
++    __ Pop(g.ToRegister(dest));
++  } else if (dest->IsStackSlot()) {
++    UseScratchRegisterScope temps(tasm());
++    Register scratch = temps.Acquire();
++    __ Pop(scratch);
++    __ StoreWord(scratch, g.ToMemOperand(dest));
++  } else {
++    int last_frame_slot_id =
++        frame_access_state_->frame()->GetTotalFrameSlotCount() - 1;
++    int sp_delta = frame_access_state_->sp_delta();
++    int slot_id = last_frame_slot_id + sp_delta + new_slots;
++    AllocatedOperand stack_slot(LocationOperand::STACK_SLOT, rep, slot_id);
++    AssembleMove(&stack_slot, dest);
++    __ AddWord(sp, sp, Operand(new_slots * kSystemPointerSize));
++  }
++  temp_slots_ -= new_slots;
++}
++
++void CodeGenerator::PopTempStackSlots() {
++  if (temp_slots_ > 0) {
++    frame_access_state()->IncreaseSPDelta(-temp_slots_);
++    __ AddWord(sp, sp, Operand(temp_slots_ * kSystemPointerSize));
++    temp_slots_ = 0;
++  }
++}
++
+ void CodeGenerator::AssembleJumpTable(Label** targets, size_t target_count) {
+   // On 64-bit RISC-V we emit the jump tables inline.
+   UNREACHABLE();
+-- 
+2.35.1
+

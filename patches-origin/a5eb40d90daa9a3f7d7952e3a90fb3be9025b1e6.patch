@@ -1,0 +1,2108 @@
+From a5eb40d90daa9a3f7d7952e3a90fb3be9025b1e6 Mon Sep 17 00:00:00 2001
+From: Victor Gomes <victorgomes@chromium.org>
+Date: Wed, 1 Feb 2023 17:39:31 +0100
+Subject: [PATCH] [liftoff] Use cross-platform conditions
+
+Bug: v8:11461
+Change-Id: I4434cb68e3d7f1cb700f9f8db7b4bf3477e6b4da
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4212404
+Commit-Queue: Victor Gomes <victorgomes@chromium.org>
+Reviewed-by: Andreas Haas <ahaas@chromium.org>
+Auto-Submit: Victor Gomes <victorgomes@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#85604}
+---
+ src/wasm/baseline/arm/liftoff-assembler-arm.h |  87 ++++-------
+ .../baseline/arm64/liftoff-assembler-arm64.h  |  61 ++------
+ .../baseline/ia32/liftoff-assembler-ia32.h    |  77 +++-------
+ src/wasm/baseline/liftoff-assembler.h         |  98 ++++++------
+ src/wasm/baseline/liftoff-compiler.cc         | 142 +++++++++---------
+ .../loong64/liftoff-assembler-loong64.h       |  76 +++-------
+ .../mips64/liftoff-assembler-mips64.h         |  76 +++-------
+ src/wasm/baseline/ppc/liftoff-assembler-ppc.h |  89 ++++-------
+ .../baseline/riscv/liftoff-assembler-riscv.h  |  45 ++----
+ .../riscv/liftoff-assembler-riscv32.h         |  44 +++---
+ .../riscv/liftoff-assembler-riscv64.h         |  27 ++--
+ .../baseline/s390/liftoff-assembler-s390.h    |  87 ++++-------
+ src/wasm/baseline/x64/liftoff-assembler-x64.h |  61 ++------
+ 13 files changed, 332 insertions(+), 638 deletions(-)
+
+diff --git a/src/wasm/baseline/arm/liftoff-assembler-arm.h b/src/wasm/baseline/arm/liftoff-assembler-arm.h
+index 422f9f5134..c4727f8134 100644
+--- a/src/wasm/baseline/arm/liftoff-assembler-arm.h
++++ b/src/wasm/baseline/arm/liftoff-assembler-arm.h
+@@ -19,31 +19,6 @@ namespace wasm {
+ 
+ namespace liftoff {
+ 
+-inline constexpr Condition ToCondition(LiftoffCondition liftoff_cond) {
+-  switch (liftoff_cond) {
+-    case kEqual:
+-      return eq;
+-    case kUnequal:
+-      return ne;
+-    case kSignedLessThan:
+-      return lt;
+-    case kSignedLessEqual:
+-      return le;
+-    case kSignedGreaterThan:
+-      return gt;
+-    case kSignedGreaterEqual:
+-      return ge;
+-    case kUnsignedLessThan:
+-      return lo;
+-    case kUnsignedLessEqual:
+-      return ls;
+-    case kUnsignedGreaterThan:
+-      return hi;
+-    case kUnsignedGreaterEqual:
+-      return hs;
+-  }
+-}
+-
+ //  half
+ //  slot        Frame
+ //  -----+--------------------+---------------------------
+@@ -132,22 +107,22 @@ inline Register CalculateActualAddress(LiftoffAssembler* assm,
+   return actual_addr_reg;
+ }
+ 
+-inline LiftoffCondition MakeUnsigned(LiftoffCondition cond) {
++inline Condition MakeUnsigned(Condition cond) {
+   switch (cond) {
+-    case kSignedLessThan:
++    case kLessThan:
+       return kUnsignedLessThan;
+-    case kSignedLessEqual:
+-      return kUnsignedLessEqual;
+-    case kSignedGreaterThan:
++    case kLessThanEqual:
++      return kUnsignedLessThanEqual;
++    case kGreaterThan:
+       return kUnsignedGreaterThan;
+-    case kSignedGreaterEqual:
+-      return kUnsignedGreaterEqual;
++    case kGreaterThanEqual:
++      return kUnsignedGreaterThanEqual;
+     case kEqual:
+-    case kUnequal:
++    case kNotEqual:
+     case kUnsignedLessThan:
+-    case kUnsignedLessEqual:
++    case kUnsignedLessThanEqual:
+     case kUnsignedGreaterThan:
+-    case kUnsignedGreaterEqual:
++    case kUnsignedGreaterThanEqual:
+       return cond;
+     default:
+       UNREACHABLE();
+@@ -2305,28 +2280,24 @@ void LiftoffAssembler::emit_jump(Label* label) { b(label); }
+ 
+ void LiftoffAssembler::emit_jump(Register target) { bx(target); }
+ 
+-void LiftoffAssembler::emit_cond_jump(LiftoffCondition liftoff_cond,
+-                                      Label* label, ValueKind kind,
+-                                      Register lhs, Register rhs,
++void LiftoffAssembler::emit_cond_jump(Condition cond, Label* label,
++                                      ValueKind kind, Register lhs,
++                                      Register rhs,
+                                       const FreezeCacheState& frozen) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+-
+   if (rhs == no_reg) {
+     DCHECK_EQ(kind, kI32);
+     cmp(lhs, Operand(0));
+   } else {
+-    DCHECK(kind == kI32 || (is_reference(kind) && (liftoff_cond == kEqual ||
+-                                                   liftoff_cond == kUnequal)));
++    DCHECK(kind == kI32 ||
++           (is_reference(kind) && (cond == kEqual || cond == kNotEqual)));
+     cmp(lhs, rhs);
+   }
+   b(label, cond);
+ }
+ 
+-void LiftoffAssembler::emit_i32_cond_jumpi(LiftoffCondition liftoff_cond,
+-                                           Label* label, Register lhs,
+-                                           int32_t imm,
++void LiftoffAssembler::emit_i32_cond_jumpi(Condition cond, Label* label,
++                                           Register lhs, int32_t imm,
+                                            const FreezeCacheState& frozen) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   cmp(lhs, Operand(imm));
+   b(label, cond);
+ }
+@@ -2343,10 +2314,8 @@ void LiftoffAssembler::emit_i32_eqz(Register dst, Register src) {
+   mov(dst, Operand(dst, LSR, kRegSizeInBitsLog2));
+ }
+ 
+-void LiftoffAssembler::emit_i32_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, Register lhs,
+-                                         Register rhs) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
++void LiftoffAssembler::emit_i32_set_cond(Condition cond, Register dst,
++                                         Register lhs, Register rhs) {
+   cmp(lhs, rhs);
+   mov(dst, Operand(0), LeaveCC);
+   mov(dst, Operand(1), LeaveCC, cond);
+@@ -2358,15 +2327,13 @@ void LiftoffAssembler::emit_i64_eqz(Register dst, LiftoffRegister src) {
+   mov(dst, Operand(dst, LSR, 5));
+ }
+ 
+-void LiftoffAssembler::emit_i64_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, LiftoffRegister lhs,
++void LiftoffAssembler::emit_i64_set_cond(Condition cond, Register dst,
++                                         LiftoffRegister lhs,
+                                          LiftoffRegister rhs) {
+   // For signed i64 comparisons, we still need to use unsigned comparison for
+   // the low word (the only bit carrying signedness information is the MSB in
+   // the high word).
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+-  Condition unsigned_cond =
+-      liftoff::ToCondition(liftoff::MakeUnsigned(liftoff_cond));
++  Condition unsigned_cond = liftoff::MakeUnsigned(cond);
+   Label set_cond;
+   Label cont;
+   LiftoffRegister dest = LiftoffRegister(dst);
+@@ -2402,10 +2369,9 @@ void LiftoffAssembler::emit_i64_set_cond(LiftoffCondition liftoff_cond,
+   }
+ }
+ 
+-void LiftoffAssembler::emit_f32_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, DoubleRegister lhs,
++void LiftoffAssembler::emit_f32_set_cond(Condition cond, Register dst,
++                                         DoubleRegister lhs,
+                                          DoubleRegister rhs) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   VFPCompareAndSetFlags(liftoff::GetFloatRegister(lhs),
+                         liftoff::GetFloatRegister(rhs));
+   mov(dst, Operand(0), LeaveCC);
+@@ -2416,10 +2382,9 @@ void LiftoffAssembler::emit_f32_set_cond(LiftoffCondition liftoff_cond,
+   }
+ }
+ 
+-void LiftoffAssembler::emit_f64_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, DoubleRegister lhs,
++void LiftoffAssembler::emit_f64_set_cond(Condition cond, Register dst,
++                                         DoubleRegister lhs,
+                                          DoubleRegister rhs) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   VFPCompareAndSetFlags(lhs, rhs);
+   mov(dst, Operand(0), LeaveCC);
+   mov(dst, Operand(1), LeaveCC, cond);
+diff --git a/src/wasm/baseline/arm64/liftoff-assembler-arm64.h b/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
+index 673f0b7f20..1bc42ed72a 100644
+--- a/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
++++ b/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
+@@ -16,31 +16,6 @@ namespace wasm {
+ 
+ namespace liftoff {
+ 
+-inline constexpr Condition ToCondition(LiftoffCondition liftoff_cond) {
+-  switch (liftoff_cond) {
+-    case kEqual:
+-      return eq;
+-    case kUnequal:
+-      return ne;
+-    case kSignedLessThan:
+-      return lt;
+-    case kSignedLessEqual:
+-      return le;
+-    case kSignedGreaterThan:
+-      return gt;
+-    case kSignedGreaterEqual:
+-      return ge;
+-    case kUnsignedLessThan:
+-      return lo;
+-    case kUnsignedLessEqual:
+-      return ls;
+-    case kUnsignedGreaterThan:
+-      return hi;
+-    case kUnsignedGreaterEqual:
+-      return hs;
+-  }
+-}
+-
+ // Liftoff Frames.
+ //
+ //  slot      Frame
+@@ -1581,11 +1556,10 @@ void LiftoffAssembler::emit_jump(Label* label) { B(label); }
+ 
+ void LiftoffAssembler::emit_jump(Register target) { Br(target); }
+ 
+-void LiftoffAssembler::emit_cond_jump(LiftoffCondition liftoff_cond,
+-                                      Label* label, ValueKind kind,
+-                                      Register lhs, Register rhs,
++void LiftoffAssembler::emit_cond_jump(Condition cond, Label* label,
++                                      ValueKind kind, Register lhs,
++                                      Register rhs,
+                                       const FreezeCacheState& frozen) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   switch (kind) {
+     case kI32:
+       if (rhs.is_valid()) {
+@@ -1598,7 +1572,7 @@ void LiftoffAssembler::emit_cond_jump(LiftoffCondition liftoff_cond,
+     case kRefNull:
+     case kRtt:
+       DCHECK(rhs.is_valid());
+-      DCHECK(liftoff_cond == kEqual || liftoff_cond == kUnequal);
++      DCHECK(cond == kEqual || cond == kNotEqual);
+ #if defined(V8_COMPRESS_POINTERS)
+       Cmp(lhs.W(), rhs.W());
+ #else
+@@ -1618,11 +1592,9 @@ void LiftoffAssembler::emit_cond_jump(LiftoffCondition liftoff_cond,
+   B(label, cond);
+ }
+ 
+-void LiftoffAssembler::emit_i32_cond_jumpi(LiftoffCondition liftoff_cond,
+-                                           Label* label, Register lhs,
+-                                           int32_t imm,
++void LiftoffAssembler::emit_i32_cond_jumpi(Condition cond, Label* label,
++                                           Register lhs, int32_t imm,
+                                            const FreezeCacheState& frozen) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   Cmp(lhs.W(), Operand(imm));
+   B(label, cond);
+ }
+@@ -1639,10 +1611,8 @@ void LiftoffAssembler::emit_i32_eqz(Register dst, Register src) {
+   Cset(dst.W(), eq);
+ }
+ 
+-void LiftoffAssembler::emit_i32_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, Register lhs,
+-                                         Register rhs) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
++void LiftoffAssembler::emit_i32_set_cond(Condition cond, Register dst,
++                                         Register lhs, Register rhs) {
+   Cmp(lhs.W(), rhs.W());
+   Cset(dst.W(), cond);
+ }
+@@ -1652,18 +1622,16 @@ void LiftoffAssembler::emit_i64_eqz(Register dst, LiftoffRegister src) {
+   Cset(dst.W(), eq);
+ }
+ 
+-void LiftoffAssembler::emit_i64_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, LiftoffRegister lhs,
++void LiftoffAssembler::emit_i64_set_cond(Condition cond, Register dst,
++                                         LiftoffRegister lhs,
+                                          LiftoffRegister rhs) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   Cmp(lhs.gp().X(), rhs.gp().X());
+   Cset(dst.W(), cond);
+ }
+ 
+-void LiftoffAssembler::emit_f32_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, DoubleRegister lhs,
++void LiftoffAssembler::emit_f32_set_cond(Condition cond, Register dst,
++                                         DoubleRegister lhs,
+                                          DoubleRegister rhs) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   Fcmp(lhs.S(), rhs.S());
+   Cset(dst.W(), cond);
+   if (cond != ne) {
+@@ -1672,10 +1640,9 @@ void LiftoffAssembler::emit_f32_set_cond(LiftoffCondition liftoff_cond,
+   }
+ }
+ 
+-void LiftoffAssembler::emit_f64_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, DoubleRegister lhs,
++void LiftoffAssembler::emit_f64_set_cond(Condition cond, Register dst,
++                                         DoubleRegister lhs,
+                                          DoubleRegister rhs) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   Fcmp(lhs.D(), rhs.D());
+   Cset(dst.W(), cond);
+   if (cond != ne) {
+diff --git a/src/wasm/baseline/ia32/liftoff-assembler-ia32.h b/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
+index 5985061e87..0f28d7157a 100644
+--- a/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
++++ b/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
+@@ -24,31 +24,6 @@ namespace wasm {
+ 
+ namespace liftoff {
+ 
+-inline constexpr Condition ToCondition(LiftoffCondition liftoff_cond) {
+-  switch (liftoff_cond) {
+-    case kEqual:
+-      return equal;
+-    case kUnequal:
+-      return not_equal;
+-    case kSignedLessThan:
+-      return less;
+-    case kSignedLessEqual:
+-      return less_equal;
+-    case kSignedGreaterThan:
+-      return greater;
+-    case kSignedGreaterEqual:
+-      return greater_equal;
+-    case kUnsignedLessThan:
+-      return below;
+-    case kUnsignedLessEqual:
+-      return below_equal;
+-    case kUnsignedGreaterThan:
+-      return above;
+-    case kUnsignedGreaterEqual:
+-      return above_equal;
+-  }
+-}
+-
+ // ebp-4 holds the stack marker, ebp-8 is the instance parameter.
+ constexpr int kInstanceOffset = 8;
+ constexpr int kFeedbackVectorOffset = 12;  // ebp-12 is the feedback vector.
+@@ -2491,17 +2466,16 @@ void LiftoffAssembler::emit_jump(Label* label) { jmp(label); }
+ 
+ void LiftoffAssembler::emit_jump(Register target) { jmp(target); }
+ 
+-void LiftoffAssembler::emit_cond_jump(LiftoffCondition liftoff_cond,
+-                                      Label* label, ValueKind kind,
+-                                      Register lhs, Register rhs,
++void LiftoffAssembler::emit_cond_jump(Condition cond, Label* label,
++                                      ValueKind kind, Register lhs,
++                                      Register rhs,
+                                       const FreezeCacheState& frozen) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   if (rhs != no_reg) {
+     switch (kind) {
+       case kRef:
+       case kRefNull:
+       case kRtt:
+-        DCHECK(liftoff_cond == kEqual || liftoff_cond == kUnequal);
++        DCHECK(cond == kEqual || cond == kNotEqual);
+         V8_FALLTHROUGH;
+       case kI32:
+         cmp(lhs, rhs);
+@@ -2517,10 +2491,9 @@ void LiftoffAssembler::emit_cond_jump(LiftoffCondition liftoff_cond,
+   j(cond, label);
+ }
+ 
+-void LiftoffAssembler::emit_i32_cond_jumpi(LiftoffCondition liftoff_cond,
+-                                           Label* label, Register lhs, int imm,
++void LiftoffAssembler::emit_i32_cond_jumpi(Condition cond, Label* label,
++                                           Register lhs, int imm,
+                                            const FreezeCacheState& frozen) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   cmp(lhs, Immediate(imm));
+   j(cond, label);
+ }
+@@ -2555,10 +2528,8 @@ void LiftoffAssembler::emit_i32_eqz(Register dst, Register src) {
+   liftoff::setcc_32(this, equal, dst);
+ }
+ 
+-void LiftoffAssembler::emit_i32_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, Register lhs,
+-                                         Register rhs) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
++void LiftoffAssembler::emit_i32_set_cond(Condition cond, Register dst,
++                                         Register lhs, Register rhs) {
+   cmp(lhs, rhs);
+   liftoff::setcc_32(this, cond, dst);
+ }
+@@ -2576,28 +2547,26 @@ void LiftoffAssembler::emit_i64_eqz(Register dst, LiftoffRegister src) {
+ }
+ 
+ namespace liftoff {
+-inline LiftoffCondition cond_make_unsigned(LiftoffCondition cond) {
++inline Condition cond_make_unsigned(Condition cond) {
+   switch (cond) {
+-    case kSignedLessThan:
++    case kLessThan:
+       return kUnsignedLessThan;
+-    case kSignedLessEqual:
+-      return kUnsignedLessEqual;
+-    case kSignedGreaterThan:
++    case kLessThanEqual:
++      return kUnsignedLessThanEqual;
++    case kGreaterThan:
+       return kUnsignedGreaterThan;
+-    case kSignedGreaterEqual:
+-      return kUnsignedGreaterEqual;
++    case kGreaterThanEqual:
++      return kUnsignedGreaterThanEqual;
+     default:
+       return cond;
+   }
+ }
+ }  // namespace liftoff
+ 
+-void LiftoffAssembler::emit_i64_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, LiftoffRegister lhs,
++void LiftoffAssembler::emit_i64_set_cond(Condition cond, Register dst,
++                                         LiftoffRegister lhs,
+                                          LiftoffRegister rhs) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+-  Condition unsigned_cond =
+-      liftoff::ToCondition(liftoff::cond_make_unsigned(liftoff_cond));
++  Condition unsigned_cond = liftoff::cond_make_unsigned(cond);
+ 
+   // Get the tmp byte register out here, such that we don't conditionally spill
+   // (this cannot be reflected in the cache state).
+@@ -2652,17 +2621,15 @@ void EmitFloatSetCond(LiftoffAssembler* assm, Condition cond, Register dst,
+ }
+ }  // namespace liftoff
+ 
+-void LiftoffAssembler::emit_f32_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, DoubleRegister lhs,
++void LiftoffAssembler::emit_f32_set_cond(Condition cond, Register dst,
++                                         DoubleRegister lhs,
+                                          DoubleRegister rhs) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   liftoff::EmitFloatSetCond<&Assembler::ucomiss>(this, cond, dst, lhs, rhs);
+ }
+ 
+-void LiftoffAssembler::emit_f64_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, DoubleRegister lhs,
++void LiftoffAssembler::emit_f64_set_cond(Condition cond, Register dst,
++                                         DoubleRegister lhs,
+                                          DoubleRegister rhs) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   liftoff::EmitFloatSetCond<&Assembler::ucomisd>(this, cond, dst, lhs, rhs);
+ }
+ 
+diff --git a/src/wasm/baseline/liftoff-assembler.h b/src/wasm/baseline/liftoff-assembler.h
+index 005feb732c..e0e9501bcd 100644
+--- a/src/wasm/baseline/liftoff-assembler.h
++++ b/src/wasm/baseline/liftoff-assembler.h
+@@ -30,68 +30,57 @@ class CallDescriptor;
+ 
+ namespace wasm {
+ 
+-enum LiftoffCondition {
+-  kEqual,
+-  kEqualZero = kEqual,  // When used in a unary operation.
+-  kUnequal,
+-  kNotEqualZero = kUnequal,  // When used in a unary operation.
+-  kSignedLessThan,
+-  kSignedLessEqual,
+-  kSignedGreaterThan,
+-  kSignedGreaterEqual,
+-  kUnsignedLessThan,
+-  kUnsignedLessEqual,
+-  kUnsignedGreaterThan,
+-  kUnsignedGreaterEqual
+-};
+-
+-inline constexpr LiftoffCondition Negate(LiftoffCondition cond) {
++inline constexpr Condition Negate(Condition cond) {
+   switch (cond) {
+     case kEqual:
+-      return kUnequal;
+-    case kUnequal:
++      return kNotEqual;
++    case kNotEqual:
+       return kEqual;
+-    case kSignedLessThan:
+-      return kSignedGreaterEqual;
+-    case kSignedLessEqual:
+-      return kSignedGreaterThan;
+-    case kSignedGreaterEqual:
+-      return kSignedLessThan;
+-    case kSignedGreaterThan:
+-      return kSignedLessEqual;
++    case kLessThan:
++      return kGreaterThanEqual;
++    case kLessThanEqual:
++      return kGreaterThan;
++    case kGreaterThanEqual:
++      return kLessThan;
++    case kGreaterThan:
++      return kLessThanEqual;
+     case kUnsignedLessThan:
+-      return kUnsignedGreaterEqual;
+-    case kUnsignedLessEqual:
++      return kUnsignedGreaterThanEqual;
++    case kUnsignedLessThanEqual:
+       return kUnsignedGreaterThan;
+-    case kUnsignedGreaterEqual:
++    case kUnsignedGreaterThanEqual:
+       return kUnsignedLessThan;
+     case kUnsignedGreaterThan:
+-      return kUnsignedLessEqual;
++      return kUnsignedLessThanEqual;
++    default:
++      UNREACHABLE();
+   }
+ }
+ 
+-inline constexpr LiftoffCondition Flip(LiftoffCondition cond) {
++inline constexpr Condition Flip(Condition cond) {
+   switch (cond) {
+     case kEqual:
+       return kEqual;
+-    case kUnequal:
+-      return kUnequal;
+-    case kSignedLessThan:
+-      return kSignedGreaterThan;
+-    case kSignedLessEqual:
+-      return kSignedGreaterEqual;
+-    case kSignedGreaterEqual:
+-      return kSignedLessEqual;
+-    case kSignedGreaterThan:
+-      return kSignedLessThan;
++    case kNotEqual:
++      return kNotEqual;
++    case kLessThan:
++      return kGreaterThan;
++    case kLessThanEqual:
++      return kGreaterThanEqual;
++    case kGreaterThanEqual:
++      return kLessThanEqual;
++    case kGreaterThan:
++      return kLessThan;
+     case kUnsignedLessThan:
+       return kUnsignedGreaterThan;
+-    case kUnsignedLessEqual:
+-      return kUnsignedGreaterEqual;
+-    case kUnsignedGreaterEqual:
+-      return kUnsignedLessEqual;
++    case kUnsignedLessThanEqual:
++      return kUnsignedGreaterThanEqual;
++    case kUnsignedGreaterThanEqual:
++      return kUnsignedLessThanEqual;
+     case kUnsignedGreaterThan:
+       return kUnsignedLessThan;
++    default:
++      UNREACHABLE();
+   }
+ }
+ 
+@@ -1006,7 +995,7 @@ class LiftoffAssembler : public TurboAssembler {
+     }
+   }
+ 
+-  void emit_ptrsize_set_cond(LiftoffCondition condition, Register dst,
++  void emit_ptrsize_set_cond(Condition condition, Register dst,
+                              LiftoffRegister lhs, LiftoffRegister rhs) {
+     if (kSystemPointerSize == 8) {
+       emit_i64_set_cond(condition, dst, lhs, rhs);
+@@ -1086,24 +1075,23 @@ class LiftoffAssembler : public TurboAssembler {
+   inline void emit_jump(Label*);
+   inline void emit_jump(Register);
+ 
+-  inline void emit_cond_jump(LiftoffCondition, Label*, ValueKind value,
+-                             Register lhs, Register rhs,
+-                             const FreezeCacheState& frozen);
+-  inline void emit_i32_cond_jumpi(LiftoffCondition, Label*, Register lhs,
+-                                  int imm, const FreezeCacheState& frozen);
++  inline void emit_cond_jump(Condition, Label*, ValueKind value, Register lhs,
++                             Register rhs, const FreezeCacheState& frozen);
++  inline void emit_i32_cond_jumpi(Condition, Label*, Register lhs, int imm,
++                                  const FreezeCacheState& frozen);
+   inline void emit_i32_subi_jump_negative(Register value, int subtrahend,
+                                           Label* result_negative,
+                                           const FreezeCacheState& frozen);
+   // Set {dst} to 1 if condition holds, 0 otherwise.
+   inline void emit_i32_eqz(Register dst, Register src);
+-  inline void emit_i32_set_cond(LiftoffCondition, Register dst, Register lhs,
++  inline void emit_i32_set_cond(Condition, Register dst, Register lhs,
+                                 Register rhs);
+   inline void emit_i64_eqz(Register dst, LiftoffRegister src);
+-  inline void emit_i64_set_cond(LiftoffCondition condition, Register dst,
++  inline void emit_i64_set_cond(Condition condition, Register dst,
+                                 LiftoffRegister lhs, LiftoffRegister rhs);
+-  inline void emit_f32_set_cond(LiftoffCondition condition, Register dst,
++  inline void emit_f32_set_cond(Condition condition, Register dst,
+                                 DoubleRegister lhs, DoubleRegister rhs);
+-  inline void emit_f64_set_cond(LiftoffCondition condition, Register dst,
++  inline void emit_f64_set_cond(Condition condition, Register dst,
+                                 DoubleRegister lhs, DoubleRegister rhs);
+ 
+   // Optional select support: Returns false if generic code (via branches)
+diff --git a/src/wasm/baseline/liftoff-compiler.cc b/src/wasm/baseline/liftoff-compiler.cc
+index 1b36c114c2..e916ce1ca5 100644
+--- a/src/wasm/baseline/liftoff-compiler.cc
++++ b/src/wasm/baseline/liftoff-compiler.cc
+@@ -135,28 +135,28 @@ compiler::CallDescriptor* GetLoweredCallDescriptor(
+              : call_desc;
+ }
+ 
+-constexpr LiftoffCondition GetCompareCondition(WasmOpcode opcode) {
++constexpr Condition GetCompareCondition(WasmOpcode opcode) {
+   switch (opcode) {
+     case kExprI32Eq:
+       return kEqual;
+     case kExprI32Ne:
+-      return kUnequal;
++      return kNotEqual;
+     case kExprI32LtS:
+-      return kSignedLessThan;
++      return kLessThan;
+     case kExprI32LtU:
+       return kUnsignedLessThan;
+     case kExprI32GtS:
+-      return kSignedGreaterThan;
++      return kGreaterThan;
+     case kExprI32GtU:
+       return kUnsignedGreaterThan;
+     case kExprI32LeS:
+-      return kSignedLessEqual;
++      return kLessThanEqual;
+     case kExprI32LeU:
+-      return kUnsignedLessEqual;
++      return kUnsignedLessThanEqual;
+     case kExprI32GeS:
+-      return kSignedGreaterEqual;
++      return kGreaterThanEqual;
+     case kExprI32GeU:
+-      return kUnsignedGreaterEqual;
++      return kUnsignedGreaterThanEqual;
+     default:
+       UNREACHABLE();
+   }
+@@ -1128,7 +1128,7 @@ class LiftoffCompiler {
+       __ Store(max_steps_addr.gp(), no_reg, 0, max_steps, StoreType::kI32Store,
+                pinned);
+       Label cont;
+-      __ emit_i32_cond_jumpi(kSignedGreaterEqual, &cont, max_steps.gp(), 0,
++      __ emit_i32_cond_jumpi(kGreaterThanEqual, &cont, max_steps.gp(), 0,
+                              frozen);
+       // Abort.
+       Trap(decoder, kTrapUnreachable);
+@@ -1176,11 +1176,11 @@ class LiftoffCompiler {
+                           {});
+       FREEZE_STATE(frozen);
+       __ Load(LiftoffRegister{flag}, flag, no_reg, 0, LoadType::kI32Load8U, {});
+-      __ emit_cond_jump(kNotEqualZero, &do_break, kI32, flag, no_reg, frozen);
++      __ emit_cond_jump(kNotZero, &do_break, kI32, flag, no_reg, frozen);
+ 
+       // Check if we should stop on "script entry".
+       LOAD_INSTANCE_FIELD(flag, BreakOnEntry, kUInt8Size, {});
+-      __ emit_cond_jump(kEqualZero, &no_break, kI32, flag, no_reg, frozen);
++      __ emit_cond_jump(kZero, &no_break, kI32, flag, no_reg, frozen);
+ 
+       __ bind(&do_break);
+       EmitBreakpoint(decoder);
+@@ -1414,8 +1414,8 @@ class LiftoffCompiler {
+ 
+   void JumpIfFalse(FullDecoder* decoder, Label* false_dst,
+                    std::unique_ptr<FreezeCacheState>& will_freeze) {
+-    LiftoffCondition cond =
+-        test_and_reset_outstanding_op(kExprI32Eqz) ? kNotEqualZero : kEqualZero;
++    Condition cond =
++        test_and_reset_outstanding_op(kExprI32Eqz) ? kNotZero : kZero;
+ 
+     if (!has_outstanding_op()) {
+       // Unary comparison.
+@@ -1723,10 +1723,10 @@ class LiftoffCompiler {
+ #if defined(V8_COMPRESS_POINTERS)
+     // As the value in the {null} register is only the tagged pointer part,
+     // we may only compare 32 bits, not the full pointer size.
+-    __ emit_i32_set_cond(opcode == kExprRefIsNull ? kEqual : kUnequal, dst.gp(),
+-                         ref.gp(), null.gp());
++    __ emit_i32_set_cond(opcode == kExprRefIsNull ? kEqual : kNotEqual,
++                         dst.gp(), ref.gp(), null.gp());
+ #else
+-    __ emit_ptrsize_set_cond(opcode == kExprRefIsNull ? kEqual : kUnequal,
++    __ emit_ptrsize_set_cond(opcode == kExprRefIsNull ? kEqual : kNotEqual,
+                              dst.gp(), ref, null);
+ #endif
+     __ PushRegister(kI32, dst);
+@@ -2058,37 +2058,37 @@ class LiftoffCompiler {
+             BindFirst(&LiftoffAssembler::emit_i64_set_cond, kEqual));
+       case kExprI64Ne:
+         return EmitBinOp<kI64, kI32>(
+-            BindFirst(&LiftoffAssembler::emit_i64_set_cond, kUnequal));
++            BindFirst(&LiftoffAssembler::emit_i64_set_cond, kNotEqual));
+       case kExprI64LtS:
+         return EmitBinOp<kI64, kI32>(
+-            BindFirst(&LiftoffAssembler::emit_i64_set_cond, kSignedLessThan));
++            BindFirst(&LiftoffAssembler::emit_i64_set_cond, kLessThan));
+       case kExprI64LtU:
+         return EmitBinOp<kI64, kI32>(
+             BindFirst(&LiftoffAssembler::emit_i64_set_cond, kUnsignedLessThan));
+       case kExprI64GtS:
+-        return EmitBinOp<kI64, kI32>(BindFirst(
+-            &LiftoffAssembler::emit_i64_set_cond, kSignedGreaterThan));
++        return EmitBinOp<kI64, kI32>(
++            BindFirst(&LiftoffAssembler::emit_i64_set_cond, kGreaterThan));
+       case kExprI64GtU:
+         return EmitBinOp<kI64, kI32>(BindFirst(
+             &LiftoffAssembler::emit_i64_set_cond, kUnsignedGreaterThan));
+       case kExprI64LeS:
+         return EmitBinOp<kI64, kI32>(
+-            BindFirst(&LiftoffAssembler::emit_i64_set_cond, kSignedLessEqual));
++            BindFirst(&LiftoffAssembler::emit_i64_set_cond, kLessThanEqual));
+       case kExprI64LeU:
+         return EmitBinOp<kI64, kI32>(BindFirst(
+-            &LiftoffAssembler::emit_i64_set_cond, kUnsignedLessEqual));
++            &LiftoffAssembler::emit_i64_set_cond, kUnsignedLessThanEqual));
+       case kExprI64GeS:
+-        return EmitBinOp<kI64, kI32>(BindFirst(
+-            &LiftoffAssembler::emit_i64_set_cond, kSignedGreaterEqual));
++        return EmitBinOp<kI64, kI32>(
++            BindFirst(&LiftoffAssembler::emit_i64_set_cond, kGreaterThanEqual));
+       case kExprI64GeU:
+         return EmitBinOp<kI64, kI32>(BindFirst(
+-            &LiftoffAssembler::emit_i64_set_cond, kUnsignedGreaterEqual));
++            &LiftoffAssembler::emit_i64_set_cond, kUnsignedGreaterThanEqual));
+       case kExprF32Eq:
+         return EmitBinOp<kF32, kI32>(
+             BindFirst(&LiftoffAssembler::emit_f32_set_cond, kEqual));
+       case kExprF32Ne:
+         return EmitBinOp<kF32, kI32>(
+-            BindFirst(&LiftoffAssembler::emit_f32_set_cond, kUnequal));
++            BindFirst(&LiftoffAssembler::emit_f32_set_cond, kNotEqual));
+       case kExprF32Lt:
+         return EmitBinOp<kF32, kI32>(
+             BindFirst(&LiftoffAssembler::emit_f32_set_cond, kUnsignedLessThan));
+@@ -2097,16 +2097,16 @@ class LiftoffCompiler {
+             &LiftoffAssembler::emit_f32_set_cond, kUnsignedGreaterThan));
+       case kExprF32Le:
+         return EmitBinOp<kF32, kI32>(BindFirst(
+-            &LiftoffAssembler::emit_f32_set_cond, kUnsignedLessEqual));
++            &LiftoffAssembler::emit_f32_set_cond, kUnsignedLessThanEqual));
+       case kExprF32Ge:
+         return EmitBinOp<kF32, kI32>(BindFirst(
+-            &LiftoffAssembler::emit_f32_set_cond, kUnsignedGreaterEqual));
++            &LiftoffAssembler::emit_f32_set_cond, kUnsignedGreaterThanEqual));
+       case kExprF64Eq:
+         return EmitBinOp<kF64, kI32>(
+             BindFirst(&LiftoffAssembler::emit_f64_set_cond, kEqual));
+       case kExprF64Ne:
+         return EmitBinOp<kF64, kI32>(
+-            BindFirst(&LiftoffAssembler::emit_f64_set_cond, kUnequal));
++            BindFirst(&LiftoffAssembler::emit_f64_set_cond, kNotEqual));
+       case kExprF64Lt:
+         return EmitBinOp<kF64, kI32>(
+             BindFirst(&LiftoffAssembler::emit_f64_set_cond, kUnsignedLessThan));
+@@ -2115,10 +2115,10 @@ class LiftoffCompiler {
+             &LiftoffAssembler::emit_f64_set_cond, kUnsignedGreaterThan));
+       case kExprF64Le:
+         return EmitBinOp<kF64, kI32>(BindFirst(
+-            &LiftoffAssembler::emit_f64_set_cond, kUnsignedLessEqual));
++            &LiftoffAssembler::emit_f64_set_cond, kUnsignedLessThanEqual));
+       case kExprF64Ge:
+         return EmitBinOp<kF64, kI32>(BindFirst(
+-            &LiftoffAssembler::emit_f64_set_cond, kUnsignedGreaterEqual));
++            &LiftoffAssembler::emit_f64_set_cond, kUnsignedGreaterThanEqual));
+       case kExprI32Shl:
+         return EmitBinOpImm<kI32, kI32>(&LiftoffAssembler::emit_i32_shl,
+                                         &LiftoffAssembler::emit_i32_shli);
+@@ -2664,7 +2664,7 @@ class LiftoffCompiler {
+   }
+ 
+   void AssertNullTypecheckImpl(FullDecoder* decoder, const Value& arg,
+-                               Value* result, LiftoffCondition cond) {
++                               Value* result, Condition cond) {
+     LiftoffRegList pinned;
+     LiftoffRegister obj = pinned.set(__ PopToRegister(pinned));
+     Label* trap_label =
+@@ -2681,7 +2681,7 @@ class LiftoffCompiler {
+ 
+   void AssertNullTypecheck(FullDecoder* decoder, const Value& arg,
+                            Value* result) {
+-    AssertNullTypecheckImpl(decoder, arg, result, kUnequal);
++    AssertNullTypecheckImpl(decoder, arg, result, kNotEqual);
+   }
+ 
+   void AssertNotNullTypecheck(FullDecoder* decoder, const Value& arg,
+@@ -2837,7 +2837,7 @@ class LiftoffCompiler {
+     uint32_t split = min + (max - min) / 2;
+     Label upper_half;
+     __ LoadConstant(tmp, WasmValue(split));
+-    __ emit_cond_jump(kUnsignedGreaterEqual, &upper_half, kI32, value.gp(),
++    __ emit_cond_jump(kUnsignedGreaterThanEqual, &upper_half, kI32, value.gp(),
+                       tmp.gp(), frozen);
+     // Emit br table for lower half:
+     GenerateBrTable(decoder, tmp, value, min, split, table_iterator, br_targets,
+@@ -2894,8 +2894,8 @@ class LiftoffCompiler {
+       __ LoadConstant(tmp, WasmValue(uint32_t{imm.table_count}));
+       FREEZE_STATE(frozen);
+       Label case_default;
+-      __ emit_cond_jump(kUnsignedGreaterEqual, &case_default, kI32, value.gp(),
+-                        tmp.gp(), frozen);
++      __ emit_cond_jump(kUnsignedGreaterThanEqual, &case_default, kI32,
++                        value.gp(), tmp.gp(), frozen);
+ 
+       GenerateBrTable(decoder, tmp, value, 0, imm.table_count, &table_iterator,
+                       &br_targets, tmp1, tmp2, frozen);
+@@ -3012,8 +3012,8 @@ class LiftoffCompiler {
+     } else if (kSystemPointerSize == kInt32Size) {
+       DCHECK_GE(kMaxUInt32, env_->module->max_memory_size);
+       FREEZE_STATE(trapping);
+-      __ emit_cond_jump(kNotEqualZero, trap_label, kI32, index.high_gp(),
+-                        no_reg, trapping);
++      __ emit_cond_jump(kNotZero, trap_label, kI32, index.high_gp(), no_reg,
++                        trapping);
+     }
+ 
+     uintptr_t end_offset = offset + access_size - 1u;
+@@ -3031,7 +3031,7 @@ class LiftoffCompiler {
+     // the end offset against the actual memory size, which is not known at
+     // compile time. Otherwise, only one check is required (see below).
+     if (end_offset > env_->module->min_memory_size) {
+-      __ emit_cond_jump(kUnsignedGreaterEqual, trap_label, kIntPtrKind,
++      __ emit_cond_jump(kUnsignedGreaterThanEqual, trap_label, kIntPtrKind,
+                         end_offset_reg.gp(), mem_size.gp(), trapping);
+     }
+ 
+@@ -3041,7 +3041,7 @@ class LiftoffCompiler {
+     __ emit_ptrsize_sub(effective_size_reg.gp(), mem_size.gp(),
+                         end_offset_reg.gp());
+ 
+-    __ emit_cond_jump(kUnsignedGreaterEqual, trap_label, kIntPtrKind,
++    __ emit_cond_jump(kUnsignedGreaterThanEqual, trap_label, kIntPtrKind,
+                       index_ptrsize, effective_size_reg.gp(), trapping);
+     return index_ptrsize;
+   }
+@@ -3064,12 +3064,12 @@ class LiftoffCompiler {
+       // {emit_cond_jump} to use the "test" instruction without the "and" here.
+       // Then we can also avoid using the temp register here.
+       __ emit_i32_andi(address, index, align_mask);
+-      __ emit_cond_jump(kUnequal, trap_label, kI32, address, no_reg, trapping);
++      __ emit_cond_jump(kNotEqual, trap_label, kI32, address, no_reg, trapping);
+     } else {
+       // For alignment checks we only look at the lower 32-bits in {offset}.
+       __ emit_i32_addi(address, index, static_cast<uint32_t>(offset));
+       __ emit_i32_andi(address, address, align_mask);
+-      __ emit_cond_jump(kUnequal, trap_label, kI32, address, no_reg, trapping);
++      __ emit_cond_jump(kNotEqual, trap_label, kI32, address, no_reg, trapping);
+     }
+   }
+ 
+@@ -3406,14 +3406,14 @@ class LiftoffCompiler {
+       __ LoadConstant(result, WasmValue(int32_t{-1}));
+       if (kNeedI64RegPair) {
+         FREEZE_STATE(all_spilled_anyway);
+-        __ emit_cond_jump(kUnequal, &done, kI32, input.high_gp(), no_reg,
++        __ emit_cond_jump(kNotEqual, &done, kI32, input.high_gp(), no_reg,
+                           all_spilled_anyway);
+         input = input.low();
+       } else {
+         LiftoffRegister high_word = __ GetUnusedRegister(kGpReg, pinned);
+         __ emit_i64_shri(high_word, input, 32);
+         FREEZE_STATE(all_spilled_anyway);
+-        __ emit_cond_jump(kUnequal, &done, kI32, high_word.gp(), no_reg,
++        __ emit_cond_jump(kNotEqual, &done, kI32, high_word.gp(), no_reg,
+                           all_spilled_anyway);
+       }
+     }
+@@ -3588,8 +3588,8 @@ class LiftoffCompiler {
+     LoadNullValueForCompare(null, pinned);
+     {
+       FREEZE_STATE(frozen);
+-      __ emit_cond_jump(kUnequal, &cont_false, ref_object.type.kind(), ref.gp(),
+-                        null, frozen);
++      __ emit_cond_jump(kNotEqual, &cont_false, ref_object.type.kind(),
++                        ref.gp(), null, frozen);
+       BrOrRetImpl(decoder, depth, null, tmp);
+     }
+     __ bind(&cont_false);
+@@ -5235,7 +5235,7 @@ class LiftoffCompiler {
+     if (mem_offsets_high_word != no_reg) {
+       // If any high word has bits set, jump to the OOB trap.
+       FREEZE_STATE(trapping);
+-      __ emit_cond_jump(kNotEqualZero, trap_label, kI32, mem_offsets_high_word,
++      __ emit_cond_jump(kNotZero, trap_label, kI32, mem_offsets_high_word,
+                         no_reg, trapping);
+       pinned.clear(mem_offsets_high_word);
+     }
+@@ -5303,7 +5303,7 @@ class LiftoffCompiler {
+     if (mem_offsets_high_word != no_reg) {
+       // If any high word has bits set, jump to the OOB trap.
+       FREEZE_STATE(trapping);
+-      __ emit_cond_jump(kNotEqualZero, trap_label, kI32, mem_offsets_high_word,
++      __ emit_cond_jump(kNotZero, trap_label, kI32, mem_offsets_high_word,
+                         no_reg, trapping);
+     }
+ 
+@@ -5342,7 +5342,7 @@ class LiftoffCompiler {
+     if (mem_offsets_high_word != no_reg) {
+       // If any high word has bits set, jump to the OOB trap.
+       FREEZE_STATE(trapping);
+-      __ emit_cond_jump(kNotEqualZero, trap_label, kI32, mem_offsets_high_word,
++      __ emit_cond_jump(kNotZero, trap_label, kI32, mem_offsets_high_word,
+                         no_reg, trapping);
+     }
+ 
+@@ -5665,7 +5665,7 @@ class LiftoffCompiler {
+       // TODO(jkummerow): See if we can make this more elegant, e.g. by passing
+       // a temp register to {StoreObjectField}.
+       FREEZE_STATE(in_this_case_its_fine);
+-      __ emit_cond_jump(kUnsignedGreaterEqual, &done, kI32, offset.gp(),
++      __ emit_cond_jump(kUnsignedGreaterThanEqual, &done, kI32, offset.gp(),
+                         end_offset.gp(), in_this_case_its_fine);
+     }
+     StoreObjectField(obj.gp(), offset.gp(), 0, value, pinned, elem_kind);
+@@ -5942,7 +5942,7 @@ class LiftoffCompiler {
+ 
+     if (module->types[rtt_type.ref_index()].is_final) {
+       // In this case, simply check for map equality.
+-      __ emit_cond_jump(kUnequal, no_match, rtt_type.kind(), tmp1, rtt_reg,
++      __ emit_cond_jump(kNotEqual, no_match, rtt_type.kind(), tmp1, rtt_reg,
+                         frozen);
+     } else {
+       // Check for rtt equality, and if not, check if the rtt is a struct/array
+@@ -5973,15 +5973,15 @@ class LiftoffCompiler {
+         int offset =
+             ObjectAccess::ToTagged(WasmTypeInfo::kSupertypesLengthOffset);
+         __ LoadSmiAsInt32(list_length, tmp1, offset);
+-        __ emit_i32_cond_jumpi(kUnsignedLessEqual, no_match, list_length.gp(),
+-                               rtt_depth, frozen);
++        __ emit_i32_cond_jumpi(kUnsignedLessThanEqual, no_match,
++                               list_length.gp(), rtt_depth, frozen);
+       }
+       // Step 3: load the candidate list slot into {tmp1}, and compare it.
+       __ LoadTaggedPointer(
+           tmp1, tmp1, no_reg,
+           ObjectAccess::ToTagged(WasmTypeInfo::kSupertypesOffset +
+                                  rtt_depth * kTaggedSize));
+-      __ emit_cond_jump(kUnequal, no_match, rtt_type.kind(), tmp1, rtt_reg,
++      __ emit_cond_jump(kNotEqual, no_match, rtt_type.kind(), tmp1, rtt_reg,
+                         frozen);
+     }
+ 
+@@ -6257,14 +6257,14 @@ class LiftoffCompiler {
+   void StructCheck(TypeCheck& check, const FreezeCacheState& frozen) {
+     LoadInstanceType(check, frozen, check.no_match);
+     LiftoffRegister instance_type(check.instance_type());
+-    __ emit_i32_cond_jumpi(kUnequal, check.no_match, check.instance_type(),
++    __ emit_i32_cond_jumpi(kNotEqual, check.no_match, check.instance_type(),
+                            WASM_STRUCT_TYPE, frozen);
+   }
+ 
+   void ArrayCheck(TypeCheck& check, const FreezeCacheState& frozen) {
+     LoadInstanceType(check, frozen, check.no_match);
+     LiftoffRegister instance_type(check.instance_type());
+-    __ emit_i32_cond_jumpi(kUnequal, check.no_match, check.instance_type(),
++    __ emit_i32_cond_jumpi(kNotEqual, check.no_match, check.instance_type(),
+                            WASM_ARRAY_TYPE, frozen);
+   }
+ 
+@@ -6855,19 +6855,19 @@ class LiftoffCompiler {
+ 
+       // If values pointer-equal, result is 1.
+       __ LoadConstant(result_reg, WasmValue(int32_t{1}));
+-      __ emit_cond_jump(LiftoffCondition::kEqual, &done, kRefNull, a_reg.gp(),
+-                        b_reg.gp(), frozen);
++      __ emit_cond_jump(kEqual, &done, kRefNull, a_reg.gp(), b_reg.gp(),
++                        frozen);
+ 
+       // Otherwise if either operand is null, result is 0.
+       if (check_for_null) {
+         __ LoadConstant(result_reg, WasmValue(int32_t{0}));
+         if (a.type.is_nullable()) {
+-          __ emit_cond_jump(LiftoffCondition::kEqual, &done, kRefNull,
+-                            a_reg.gp(), null.gp(), frozen);
++          __ emit_cond_jump(kEqual, &done, kRefNull, a_reg.gp(), null.gp(),
++                            frozen);
+         }
+         if (b.type.is_nullable()) {
+-          __ emit_cond_jump(LiftoffCondition::kEqual, &done, kRefNull,
+-                            b_reg.gp(), null.gp(), frozen);
++          __ emit_cond_jump(kEqual, &done, kRefNull, b_reg.gp(), null.gp(),
++                            frozen);
+         }
+       }
+ 
+@@ -7429,7 +7429,7 @@ class LiftoffCompiler {
+           AddOutOfLineTrap(decoder, WasmCode::kThrowWasmTrapTableOutOfBounds);
+       {
+         FREEZE_STATE(trapping);
+-        __ emit_cond_jump(kUnsignedGreaterEqual, out_of_bounds_label, kI32,
++        __ emit_cond_jump(kUnsignedGreaterThanEqual, out_of_bounds_label, kI32,
+                           index, table_size, trapping);
+       }
+     }
+@@ -7510,7 +7510,7 @@ class LiftoffCompiler {
+           int offset =
+               ObjectAccess::ToTagged(WasmTypeInfo::kSupertypesLengthOffset);
+           __ LoadSmiAsInt32(list_length, type_info, offset);
+-          __ emit_i32_cond_jumpi(kUnsignedLessEqual, sig_mismatch_label,
++          __ emit_i32_cond_jumpi(kUnsignedLessThanEqual, sig_mismatch_label,
+                                  list_length.gp(), rtt_depth, frozen);
+         }
+         // Step 3: load the candidate list slot, and compare it.
+@@ -7525,13 +7525,13 @@ class LiftoffCompiler {
+             formal_rtt, formal_rtt, no_reg,
+             wasm::ObjectAccess::ElementOffsetInTaggedFixedArray(
+                 imm.sig_imm.index));
+-        __ emit_cond_jump(kUnequal, sig_mismatch_label, kRtt, formal_rtt,
++        __ emit_cond_jump(kNotEqual, sig_mismatch_label, kRtt, formal_rtt,
+                           maybe_match, frozen);
+ 
+         __ bind(&success_label);
+       } else {
+         FREEZE_STATE(trapping);
+-        __ emit_cond_jump(kUnequal, sig_mismatch_label, kI32, real_sig_id,
++        __ emit_cond_jump(kNotEqual, sig_mismatch_label, kI32, real_sig_id,
+                           formal_sig_id, trapping);
+       }
+     } else if (needs_null_check) {
+@@ -7699,7 +7699,7 @@ class LiftoffCompiler {
+ 
+       LiftoffRegister null_address = temp;
+       __ LoadConstant(null_address, WasmValue::ForUintPtr(0));
+-      __ emit_cond_jump(kUnequal, &perform_call, kIntPtrKind, target.gp(),
++      __ emit_cond_jump(kNotEqual, &perform_call, kIntPtrKind, target.gp(),
+                         null_address.gp(), frozen);
+       // The cached target can only be null for WasmJSFunctions.
+       __ LoadTaggedPointer(
+@@ -7769,8 +7769,8 @@ class LiftoffCompiler {
+     LiftoffRegister null = __ GetUnusedRegister(kGpReg, pinned);
+     LoadNullValueForCompare(null.gp(), pinned);
+     FREEZE_STATE(trapping);
+-    __ emit_cond_jump(LiftoffCondition::kEqual, trap_label, kRefNull, object,
+-                      null.gp(), trapping);
++    __ emit_cond_jump(kEqual, trap_label, kRefNull, object, null.gp(),
++                      trapping);
+   }
+ 
+   void BoundsCheckArray(FullDecoder* decoder, LiftoffRegister array,
+@@ -7783,8 +7783,8 @@ class LiftoffCompiler {
+         wasm::ObjectAccess::ToTagged(WasmArray::kLengthOffset);
+     __ Load(length, array.gp(), no_reg, kLengthOffset, LoadType::kI32Load);
+     FREEZE_STATE(trapping);
+-    __ emit_cond_jump(LiftoffCondition::kUnsignedGreaterEqual, trap_label, kI32,
+-                      index.gp(), length.gp(), trapping);
++    __ emit_cond_jump(kUnsignedGreaterThanEqual, trap_label, kI32, index.gp(),
++                      length.gp(), trapping);
+   }
+ 
+   int StructFieldOffset(const StructType* struct_type, int field_index) {
+diff --git a/src/wasm/baseline/loong64/liftoff-assembler-loong64.h b/src/wasm/baseline/loong64/liftoff-assembler-loong64.h
+index 8adcd9b21d..c439cb5b8a 100644
+--- a/src/wasm/baseline/loong64/liftoff-assembler-loong64.h
++++ b/src/wasm/baseline/loong64/liftoff-assembler-loong64.h
+@@ -16,31 +16,6 @@ namespace wasm {
+ 
+ namespace liftoff {
+ 
+-inline constexpr Condition ToCondition(LiftoffCondition liftoff_cond) {
+-  switch (liftoff_cond) {
+-    case kEqual:
+-      return eq;
+-    case kUnequal:
+-      return ne;
+-    case kSignedLessThan:
+-      return lt;
+-    case kSignedLessEqual:
+-      return le;
+-    case kSignedGreaterThan:
+-      return gt;
+-    case kSignedGreaterEqual:
+-      return ge;
+-    case kUnsignedLessThan:
+-      return ult;
+-    case kUnsignedLessEqual:
+-      return ule;
+-    case kUnsignedGreaterThan:
+-      return ugt;
+-    case kUnsignedGreaterEqual:
+-      return uge;
+-  }
+-}
+-
+ // Liftoff Frames.
+ //
+ //  slot      Frame
+@@ -1658,27 +1633,23 @@ void LiftoffAssembler::emit_jump(Register target) {
+   TurboAssembler::Jump(target);
+ }
+ 
+-void LiftoffAssembler::emit_cond_jump(LiftoffCondition liftoff_cond,
+-                                      Label* label, ValueKind kind,
+-                                      Register lhs, Register rhs,
++void LiftoffAssembler::emit_cond_jump(Condition cond, Label* label,
++                                      ValueKind kind, Register lhs,
++                                      Register rhs,
+                                       const FreezeCacheState& frozen) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   if (rhs == no_reg) {
+     DCHECK(kind == kI32 || kind == kI64);
+     TurboAssembler::Branch(label, cond, lhs, Operand(zero_reg));
+   } else {
+     DCHECK((kind == kI32 || kind == kI64) ||
+-           (is_reference(kind) &&
+-            (liftoff_cond == kEqual || liftoff_cond == kUnequal)));
++           (is_reference(kind) && (cond == kEqual || cond == kNotEqual)));
+     TurboAssembler::Branch(label, cond, lhs, Operand(rhs));
+   }
+ }
+ 
+-void LiftoffAssembler::emit_i32_cond_jumpi(LiftoffCondition liftoff_cond,
+-                                           Label* label, Register lhs,
+-                                           int32_t imm,
++void LiftoffAssembler::emit_i32_cond_jumpi(Condition cond, Label* label,
++                                           Register lhs, int32_t imm,
+                                            const FreezeCacheState& frozen) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   TurboAssembler::Branch(label, cond, lhs, Operand(imm));
+ }
+ 
+@@ -1693,10 +1664,8 @@ void LiftoffAssembler::emit_i32_eqz(Register dst, Register src) {
+   sltui(dst, src, 1);
+ }
+ 
+-void LiftoffAssembler::emit_i32_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, Register lhs,
+-                                         Register rhs) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
++void LiftoffAssembler::emit_i32_set_cond(Condition cond, Register dst,
++                                         Register lhs, Register rhs) {
+   Register tmp = dst;
+   if (dst == lhs || dst == rhs) {
+     tmp = GetUnusedRegister(kGpReg, LiftoffRegList{lhs, rhs}).gp();
+@@ -1716,10 +1685,9 @@ void LiftoffAssembler::emit_i64_eqz(Register dst, LiftoffRegister src) {
+   sltui(dst, src.gp(), 1);
+ }
+ 
+-void LiftoffAssembler::emit_i64_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, LiftoffRegister lhs,
++void LiftoffAssembler::emit_i64_set_cond(Condition cond, Register dst,
++                                         LiftoffRegister lhs,
+                                          LiftoffRegister rhs) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   Register tmp = dst;
+   if (dst == lhs.gp() || dst == rhs.gp()) {
+     tmp = GetUnusedRegister(kGpReg, LiftoffRegList{lhs, rhs}).gp();
+@@ -1738,22 +1706,22 @@ void LiftoffAssembler::emit_i64_set_cond(LiftoffCondition liftoff_cond,
+ 
+ namespace liftoff {
+ 
+-inline FPUCondition ConditionToConditionCmpFPU(LiftoffCondition condition,
++inline FPUCondition ConditionToConditionCmpFPU(Condition condition,
+                                                bool* predicate) {
+   switch (condition) {
+     case kEqual:
+       *predicate = true;
+       return CEQ;
+-    case kUnequal:
++    case kNotEqual:
+       *predicate = false;
+       return CEQ;
+     case kUnsignedLessThan:
+       *predicate = true;
+       return CLT;
+-    case kUnsignedGreaterEqual:
++    case kUnsignedGreaterThanEqual:
+       *predicate = false;
+       return CLT;
+-    case kUnsignedLessEqual:
++    case kUnsignedLessThanEqual:
+       *predicate = true;
+       return CLE;
+     case kUnsignedGreaterThan:
+@@ -1768,10 +1736,9 @@ inline FPUCondition ConditionToConditionCmpFPU(LiftoffCondition condition,
+ 
+ }  // namespace liftoff
+ 
+-void LiftoffAssembler::emit_f32_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, DoubleRegister lhs,
++void LiftoffAssembler::emit_f32_set_cond(Condition cond, Register dst,
++                                         DoubleRegister lhs,
+                                          DoubleRegister rhs) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   Label not_nan, cont;
+   TurboAssembler::CompareIsNanF32(lhs, rhs);
+   TurboAssembler::BranchFalseF(&not_nan);
+@@ -1787,8 +1754,7 @@ void LiftoffAssembler::emit_f32_set_cond(LiftoffCondition liftoff_cond,
+ 
+   TurboAssembler::li(dst, 1);
+   bool predicate;
+-  FPUCondition fcond =
+-      liftoff::ConditionToConditionCmpFPU(liftoff_cond, &predicate);
++  FPUCondition fcond = liftoff::ConditionToConditionCmpFPU(cond, &predicate);
+   TurboAssembler::CompareF32(lhs, rhs, fcond);
+   if (predicate) {
+     TurboAssembler::LoadZeroIfNotFPUCondition(dst);
+@@ -1799,10 +1765,9 @@ void LiftoffAssembler::emit_f32_set_cond(LiftoffCondition liftoff_cond,
+   bind(&cont);
+ }
+ 
+-void LiftoffAssembler::emit_f64_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, DoubleRegister lhs,
++void LiftoffAssembler::emit_f64_set_cond(Condition cond, Register dst,
++                                         DoubleRegister lhs,
+                                          DoubleRegister rhs) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   Label not_nan, cont;
+   TurboAssembler::CompareIsNanF64(lhs, rhs);
+   TurboAssembler::BranchFalseF(&not_nan);
+@@ -1818,8 +1783,7 @@ void LiftoffAssembler::emit_f64_set_cond(LiftoffCondition liftoff_cond,
+ 
+   TurboAssembler::li(dst, 1);
+   bool predicate;
+-  FPUCondition fcond =
+-      liftoff::ConditionToConditionCmpFPU(liftoff_cond, &predicate);
++  FPUCondition fcond = liftoff::ConditionToConditionCmpFPU(cond, &predicate);
+   TurboAssembler::CompareF64(lhs, rhs, fcond);
+   if (predicate) {
+     TurboAssembler::LoadZeroIfNotFPUCondition(dst);
+diff --git a/src/wasm/baseline/mips64/liftoff-assembler-mips64.h b/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
+index 6f5bf76c69..df772ab554 100644
+--- a/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
++++ b/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
+@@ -16,31 +16,6 @@ namespace wasm {
+ 
+ namespace liftoff {
+ 
+-inline constexpr Condition ToCondition(LiftoffCondition liftoff_cond) {
+-  switch (liftoff_cond) {
+-    case kEqual:
+-      return eq;
+-    case kUnequal:
+-      return ne;
+-    case kSignedLessThan:
+-      return lt;
+-    case kSignedLessEqual:
+-      return le;
+-    case kSignedGreaterThan:
+-      return gt;
+-    case kSignedGreaterEqual:
+-      return ge;
+-    case kUnsignedLessThan:
+-      return ult;
+-    case kUnsignedLessEqual:
+-      return ule;
+-    case kUnsignedGreaterThan:
+-      return ugt;
+-    case kUnsignedGreaterEqual:
+-      return uge;
+-  }
+-}
+-
+ // Liftoff Frames.
+ //
+ //  slot      Frame
+@@ -1863,27 +1838,23 @@ void LiftoffAssembler::emit_jump(Register target) {
+   TurboAssembler::Jump(target);
+ }
+ 
+-void LiftoffAssembler::emit_cond_jump(LiftoffCondition liftoff_cond,
+-                                      Label* label, ValueKind kind,
+-                                      Register lhs, Register rhs,
++void LiftoffAssembler::emit_cond_jump(Condition cond, Label* label,
++                                      ValueKind kind, Register lhs,
++                                      Register rhs,
+                                       const FreezeCacheState& frozen) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   if (rhs == no_reg) {
+     DCHECK(kind == kI32 || kind == kI64);
+     TurboAssembler::Branch(label, cond, lhs, Operand(zero_reg));
+   } else {
+     DCHECK((kind == kI32 || kind == kI64) ||
+-           (is_reference(kind) &&
+-            (liftoff_cond == kEqual || liftoff_cond == kUnequal)));
++           (is_reference(kind) && (cond == kEqual || cond == kNotEqual)));
+     TurboAssembler::Branch(label, cond, lhs, Operand(rhs));
+   }
+ }
+ 
+-void LiftoffAssembler::emit_i32_cond_jumpi(LiftoffCondition liftoff_cond,
+-                                           Label* label, Register lhs,
+-                                           int32_t imm,
++void LiftoffAssembler::emit_i32_cond_jumpi(Condition cond, Label* label,
++                                           Register lhs, int32_t imm,
+                                            const FreezeCacheState& frozen) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   TurboAssembler::Branch(label, cond, lhs, Operand(imm));
+ }
+ 
+@@ -1898,10 +1869,8 @@ void LiftoffAssembler::emit_i32_eqz(Register dst, Register src) {
+   sltiu(dst, src, 1);
+ }
+ 
+-void LiftoffAssembler::emit_i32_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, Register lhs,
+-                                         Register rhs) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
++void LiftoffAssembler::emit_i32_set_cond(Condition cond, Register dst,
++                                         Register lhs, Register rhs) {
+   Register tmp = dst;
+   if (dst == lhs || dst == rhs) {
+     tmp = GetUnusedRegister(kGpReg, LiftoffRegList{lhs, rhs}).gp();
+@@ -1921,10 +1890,9 @@ void LiftoffAssembler::emit_i64_eqz(Register dst, LiftoffRegister src) {
+   sltiu(dst, src.gp(), 1);
+ }
+ 
+-void LiftoffAssembler::emit_i64_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, LiftoffRegister lhs,
++void LiftoffAssembler::emit_i64_set_cond(Condition cond, Register dst,
++                                         LiftoffRegister lhs,
+                                          LiftoffRegister rhs) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   Register tmp = dst;
+   if (dst == lhs.gp() || dst == rhs.gp()) {
+     tmp = GetUnusedRegister(kGpReg, LiftoffRegList{lhs, rhs}).gp();
+@@ -1943,22 +1911,22 @@ void LiftoffAssembler::emit_i64_set_cond(LiftoffCondition liftoff_cond,
+ 
+ namespace liftoff {
+ 
+-inline FPUCondition ConditionToConditionCmpFPU(LiftoffCondition condition,
++inline FPUCondition ConditionToConditionCmpFPU(Condition condition,
+                                                bool* predicate) {
+   switch (condition) {
+     case kEqual:
+       *predicate = true;
+       return EQ;
+-    case kUnequal:
++    case kNotEqual:
+       *predicate = false;
+       return EQ;
+     case kUnsignedLessThan:
+       *predicate = true;
+       return OLT;
+-    case kUnsignedGreaterEqual:
++    case kUnsignedGreaterThanEqual:
+       *predicate = false;
+       return OLT;
+-    case kUnsignedLessEqual:
++    case kUnsignedLessThanEqual:
+       *predicate = true;
+       return OLE;
+     case kUnsignedGreaterThan:
+@@ -1993,10 +1961,9 @@ inline void EmitAllTrue(LiftoffAssembler* assm, LiftoffRegister dst,
+ 
+ }  // namespace liftoff
+ 
+-void LiftoffAssembler::emit_f32_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, DoubleRegister lhs,
++void LiftoffAssembler::emit_f32_set_cond(Condition cond, Register dst,
++                                         DoubleRegister lhs,
+                                          DoubleRegister rhs) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   Label not_nan, cont;
+   TurboAssembler::CompareIsNanF32(lhs, rhs);
+   TurboAssembler::BranchFalseF(&not_nan);
+@@ -2012,8 +1979,7 @@ void LiftoffAssembler::emit_f32_set_cond(LiftoffCondition liftoff_cond,
+ 
+   TurboAssembler::li(dst, 1);
+   bool predicate;
+-  FPUCondition fcond =
+-      liftoff::ConditionToConditionCmpFPU(liftoff_cond, &predicate);
++  FPUCondition fcond = liftoff::ConditionToConditionCmpFPU(cond, &predicate);
+   TurboAssembler::CompareF32(fcond, lhs, rhs);
+   if (predicate) {
+     TurboAssembler::LoadZeroIfNotFPUCondition(dst);
+@@ -2024,10 +1990,9 @@ void LiftoffAssembler::emit_f32_set_cond(LiftoffCondition liftoff_cond,
+   bind(&cont);
+ }
+ 
+-void LiftoffAssembler::emit_f64_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, DoubleRegister lhs,
++void LiftoffAssembler::emit_f64_set_cond(Condition cond, Register dst,
++                                         DoubleRegister lhs,
+                                          DoubleRegister rhs) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   Label not_nan, cont;
+   TurboAssembler::CompareIsNanF64(lhs, rhs);
+   TurboAssembler::BranchFalseF(&not_nan);
+@@ -2043,8 +2008,7 @@ void LiftoffAssembler::emit_f64_set_cond(LiftoffCondition liftoff_cond,
+ 
+   TurboAssembler::li(dst, 1);
+   bool predicate;
+-  FPUCondition fcond =
+-      liftoff::ConditionToConditionCmpFPU(liftoff_cond, &predicate);
++  FPUCondition fcond = liftoff::ConditionToConditionCmpFPU(cond, &predicate);
+   TurboAssembler::CompareF64(fcond, lhs, rhs);
+   if (predicate) {
+     TurboAssembler::LoadZeroIfNotFPUCondition(dst);
+diff --git a/src/wasm/baseline/ppc/liftoff-assembler-ppc.h b/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
+index 3ad95da4ca..e376c75b23 100644
+--- a/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
++++ b/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
+@@ -62,40 +62,19 @@ inline MemOperand GetStackSlot(uint32_t offset) {
+ 
+ inline MemOperand GetInstanceOperand() { return GetStackSlot(kInstanceOffset); }
+ 
+-inline constexpr Condition ToCondition(LiftoffCondition liftoff_cond) {
+-  switch (liftoff_cond) {
++inline constexpr bool UseSignedOp(Condition cond) {
++  switch (cond) {
+     case kEqual:
+-      return eq;
+-    case kUnequal:
+-      return ne;
+-    case kSignedLessThan:
+-    case kUnsignedLessThan:
+-      return lt;
+-    case kSignedLessEqual:
+-    case kUnsignedLessEqual:
+-      return le;
+-    case kSignedGreaterEqual:
+-    case kUnsignedGreaterEqual:
+-      return ge;
+-    case kSignedGreaterThan:
+-    case kUnsignedGreaterThan:
+-      return gt;
+-  }
+-}
+-
+-inline constexpr bool UseSignedOp(LiftoffCondition liftoff_cond) {
+-  switch (liftoff_cond) {
+-    case kEqual:
+-    case kUnequal:
+-    case kSignedLessThan:
+-    case kSignedLessEqual:
+-    case kSignedGreaterThan:
+-    case kSignedGreaterEqual:
++    case kNotEqual:
++    case kLessThan:
++    case kLessThanEqual:
++    case kGreaterThan:
++    case kGreaterThanEqual:
+       return true;
+     case kUnsignedLessThan:
+-    case kUnsignedLessEqual:
++    case kUnsignedLessThanEqual:
+     case kUnsignedGreaterThan:
+-    case kUnsignedGreaterEqual:
++    case kUnsignedGreaterThanEqual:
+       return false;
+     default:
+       UNREACHABLE();
+@@ -1658,12 +1637,11 @@ void LiftoffAssembler::emit_jump(Label* label) { b(al, label); }
+ 
+ void LiftoffAssembler::emit_jump(Register target) { Jump(target); }
+ 
+-void LiftoffAssembler::emit_cond_jump(LiftoffCondition liftoff_cond,
+-                                      Label* label, ValueKind kind,
+-                                      Register lhs, Register rhs,
++void LiftoffAssembler::emit_cond_jump(Condition cond, Label* label,
++                                      ValueKind kind, Register lhs,
++                                      Register rhs,
+                                       const FreezeCacheState& frozen) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+-  bool use_signed = liftoff::UseSignedOp(liftoff_cond);
++  bool use_signed = liftoff::UseSignedOp(cond);
+ 
+   if (rhs != no_reg) {
+     switch (kind) {
+@@ -1677,7 +1655,7 @@ void LiftoffAssembler::emit_cond_jump(LiftoffCondition liftoff_cond,
+       case kRef:
+       case kRefNull:
+       case kRtt:
+-        DCHECK(liftoff_cond == kEqual || liftoff_cond == kUnequal);
++        DCHECK(cond == kEqual || cond == kNotEqual);
+ #if defined(V8_COMPRESS_POINTERS)
+         if (use_signed) {
+           CmpS32(lhs, rhs);
+@@ -1711,12 +1689,10 @@ void LiftoffAssembler::emit_cond_jump(LiftoffCondition liftoff_cond,
+   b(cond, label);
+ }
+ 
+-void LiftoffAssembler::emit_i32_cond_jumpi(LiftoffCondition liftoff_cond,
+-                                           Label* label, Register lhs,
+-                                           int32_t imm,
++void LiftoffAssembler::emit_i32_cond_jumpi(Condition cond, Label* label,
++                                           Register lhs, int32_t imm,
+                                            const FreezeCacheState& frozen) {
+-  bool use_signed = liftoff::UseSignedOp(liftoff_cond);
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
++  bool use_signed = liftoff::UseSignedOp(cond);
+   if (use_signed) {
+     CmpS32(lhs, Operand(imm), r0);
+   } else {
+@@ -1741,10 +1717,9 @@ void LiftoffAssembler::emit_i32_eqz(Register dst, Register src) {
+   bind(&done);
+ }
+ 
+-void LiftoffAssembler::emit_i32_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, Register lhs,
+-                                         Register rhs) {
+-  bool use_signed = liftoff::UseSignedOp(liftoff_cond);
++void LiftoffAssembler::emit_i32_set_cond(Condition cond, Register dst,
++                                         Register lhs, Register rhs) {
++  bool use_signed = liftoff::UseSignedOp(cond);
+   if (use_signed) {
+     CmpS32(lhs, rhs);
+   } else {
+@@ -1752,7 +1727,7 @@ void LiftoffAssembler::emit_i32_set_cond(LiftoffCondition liftoff_cond,
+   }
+   Label done;
+   mov(dst, Operand(1));
+-  b(liftoff::ToCondition(liftoff_cond), &done);
++  b(liftoff::ToCondition(cond), &done);
+   mov(dst, Operand::Zero());
+   bind(&done);
+ }
+@@ -1766,10 +1741,10 @@ void LiftoffAssembler::emit_i64_eqz(Register dst, LiftoffRegister src) {
+   bind(&done);
+ }
+ 
+-void LiftoffAssembler::emit_i64_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, LiftoffRegister lhs,
++void LiftoffAssembler::emit_i64_set_cond(Condition cond, Register dst,
++                                         LiftoffRegister lhs,
+                                          LiftoffRegister rhs) {
+-  bool use_signed = liftoff::UseSignedOp(liftoff_cond);
++  bool use_signed = liftoff::UseSignedOp(cond);
+   if (use_signed) {
+     CmpS64(lhs.gp(), rhs.gp());
+   } else {
+@@ -1777,23 +1752,23 @@ void LiftoffAssembler::emit_i64_set_cond(LiftoffCondition liftoff_cond,
+   }
+   Label done;
+   mov(dst, Operand(1));
+-  b(liftoff::ToCondition(liftoff_cond), &done);
++  b(liftoff::ToCondition(cond), &done);
+   mov(dst, Operand::Zero());
+   bind(&done);
+ }
+ 
+-void LiftoffAssembler::emit_f32_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, DoubleRegister lhs,
++void LiftoffAssembler::emit_f32_set_cond(Condition cond, Register dst,
++                                         DoubleRegister lhs,
+                                          DoubleRegister rhs) {
+   fcmpu(lhs, rhs, cr0);
+   Label nan, done;
+   bunordered(&nan, cr0);
+   mov(dst, Operand::Zero());
+-  b(NegateCondition(liftoff::ToCondition(liftoff_cond)), &done, cr0);
++  b(NegateCondition(liftoff::ToCondition(cond)), &done, cr0);
+   mov(dst, Operand(1));
+   b(&done);
+   bind(&nan);
+-  if (liftoff_cond == kUnequal) {
++  if (cond == kNotEqual) {
+     mov(dst, Operand(1));
+   } else {
+     mov(dst, Operand::Zero());
+@@ -1801,10 +1776,10 @@ void LiftoffAssembler::emit_f32_set_cond(LiftoffCondition liftoff_cond,
+   bind(&done);
+ }
+ 
+-void LiftoffAssembler::emit_f64_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, DoubleRegister lhs,
++void LiftoffAssembler::emit_f64_set_cond(Condition cond, Register dst,
++                                         DoubleRegister lhs,
+                                          DoubleRegister rhs) {
+-  emit_f32_set_cond(liftoff_cond, dst, lhs, rhs);
++  emit_f32_set_cond(cond, dst, lhs, rhs);
+ }
+ 
+ bool LiftoffAssembler::emit_select(LiftoffRegister dst, Register condition,
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv.h
+index 53be27e7c2..4611e01382 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv.h
+@@ -23,31 +23,6 @@ inline MemOperand GetStackSlot(int offset) { return MemOperand(fp, -offset); }
+ 
+ inline MemOperand GetInstanceOperand() { return GetStackSlot(kInstanceOffset); }
+ 
+-inline constexpr Condition ToCondition(LiftoffCondition liftoff_cond) {
+-  switch (liftoff_cond) {
+-    case kEqual:
+-      return eq;
+-    case kUnequal:
+-      return ne;
+-    case kSignedLessThan:
+-      return lt;
+-    case kSignedLessEqual:
+-      return le;
+-    case kSignedGreaterThan:
+-      return gt;
+-    case kSignedGreaterEqual:
+-      return ge;
+-    case kUnsignedLessThan:
+-      return ult;
+-    case kUnsignedLessEqual:
+-      return ule;
+-    case kUnsignedGreaterThan:
+-      return ugt;
+-    case kUnsignedGreaterEqual:
+-      return uge;
+-  }
+-}
+-
+ }  // namespace liftoff
+ int LiftoffAssembler::PrepareStackFrame() {
+   int offset = pc_offset();
+@@ -303,17 +278,17 @@ FP_UNOP(f64_sqrt, fsqrt_d)
+ #undef FP_UNOP
+ #undef FP_UNOP_RETURN_TRUE
+ 
+-static FPUCondition ConditionToConditionCmpFPU(LiftoffCondition condition) {
++static FPUCondition ConditionToConditionCmpFPU(Condition condition) {
+   switch (condition) {
+     case kEqual:
+       return EQ;
+-    case kUnequal:
++    case kNotEqual:
+       return NE;
+     case kUnsignedLessThan:
+       return LT;
+-    case kUnsignedGreaterEqual:
++    case kUnsignedGreaterThanEqual:
+       return GE;
+-    case kUnsignedLessEqual:
++    case kUnsignedLessThanEqual:
+       return LE;
+     case kUnsignedGreaterThan:
+       return GT;
+@@ -323,17 +298,17 @@ static FPUCondition ConditionToConditionCmpFPU(LiftoffCondition condition) {
+   UNREACHABLE();
+ }
+ 
+-void LiftoffAssembler::emit_f32_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, DoubleRegister lhs,
++void LiftoffAssembler::emit_f32_set_cond(Condition cond, Register dst,
++                                         DoubleRegister lhs,
+                                          DoubleRegister rhs) {
+-  FPUCondition fcond = ConditionToConditionCmpFPU(liftoff_cond);
++  FPUCondition fcond = ConditionToConditionCmpFPU(cond);
+   TurboAssembler::CompareF32(dst, fcond, lhs, rhs);
+ }
+ 
+-void LiftoffAssembler::emit_f64_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, DoubleRegister lhs,
++void LiftoffAssembler::emit_f64_set_cond(Condition cond, Register dst,
++                                         DoubleRegister lhs,
+                                          DoubleRegister rhs) {
+-  FPUCondition fcond = ConditionToConditionCmpFPU(liftoff_cond);
++  FPUCondition fcond = ConditionToConditionCmpFPU(cond);
+   TurboAssembler::CompareF64(dst, fcond, lhs, rhs);
+ }
+ 
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h
+index cc4e59f89a..8b44f8e962 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h
+@@ -1598,27 +1598,23 @@ void LiftoffAssembler::emit_jump(Register target) {
+   TurboAssembler::Jump(target);
+ }
+ 
+-void LiftoffAssembler::emit_cond_jump(LiftoffCondition liftoff_cond,
+-                                      Label* label, ValueKind kind,
+-                                      Register lhs, Register rhs,
++void LiftoffAssembler::emit_cond_jump(Condition cond, Label* label,
++                                      ValueKind kind, Register lhs,
++                                      Register rhs,
+                                       const FreezeCacheState& frozen) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   if (rhs == no_reg) {
+     DCHECK(kind == kI32);
+     TurboAssembler::Branch(label, cond, lhs, Operand(zero_reg));
+   } else {
+     DCHECK((kind == kI32) ||
+-           (is_reference(kind) &&
+-            (liftoff_cond == kEqual || liftoff_cond == kUnequal)));
++           (is_reference(kind) && (cond == kEqual || cond == kNotEqual)));
+     TurboAssembler::Branch(label, cond, lhs, Operand(rhs));
+   }
+ }
+ 
+-void LiftoffAssembler::emit_i32_cond_jumpi(LiftoffCondition liftoff_cond,
+-                                           Label* label, Register lhs,
+-                                           int32_t imm,
++void LiftoffAssembler::emit_i32_cond_jumpi(Condition cond, Label* label,
++                                           Register lhs, int32_t imm,
+                                            const FreezeCacheState& frozen) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   TurboAssembler::Branch(label, cond, lhs, Operand(imm));
+ }
+ 
+@@ -1633,10 +1629,8 @@ void LiftoffAssembler::emit_i32_eqz(Register dst, Register src) {
+   TurboAssembler::Sltu(dst, src, 1);
+ }
+ 
+-void LiftoffAssembler::emit_i32_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, Register lhs,
+-                                         Register rhs) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
++void LiftoffAssembler::emit_i32_set_cond(Condition cond, Register dst,
++                                         Register lhs, Register rhs) {
+   TurboAssembler::CompareI(dst, lhs, Operand(rhs), cond);
+ }
+ 
+@@ -1648,34 +1642,32 @@ void LiftoffAssembler::emit_i64_eqz(Register dst, LiftoffRegister src) {
+ }
+ 
+ namespace liftoff {
+-inline LiftoffCondition cond_make_unsigned(LiftoffCondition cond) {
++inline Condition cond_make_unsigned(Condition cond) {
+   switch (cond) {
+-    case kSignedLessThan:
++    case kLessThan:
+       return kUnsignedLessThan;
+-    case kSignedLessEqual:
+-      return kUnsignedLessEqual;
+-    case kSignedGreaterThan:
++    case kLessThanEqual:
++      return kUnsignedLessThanEqual;
++    case kGreaterThan:
+       return kUnsignedGreaterThan;
+-    case kSignedGreaterEqual:
+-      return kUnsignedGreaterEqual;
++    case kGreaterThanEqual:
++      return kUnsignedGreaterThanEqual;
+     default:
+       return cond;
+   }
+ }
+ }  // namespace liftoff
+ 
+-void LiftoffAssembler::emit_i64_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, LiftoffRegister lhs,
++void LiftoffAssembler::emit_i64_set_cond(Condition cond, Register dst,
++                                         LiftoffRegister lhs,
+                                          LiftoffRegister rhs) {
+   ASM_CODE_COMMENT(this);
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   Label low, cont;
+ 
+   // For signed i64 comparisons, we still need to use unsigned comparison for
+   // the low word (the only bit carrying signedness information is the MSB in
+   // the high word).
+-  Condition unsigned_cond =
+-      liftoff::ToCondition(liftoff::cond_make_unsigned(liftoff_cond));
++  Condition unsigned_cond = liftoff::cond_make_unsigned(cond);
+ 
+   Register tmp = dst;
+   if (liftoff::IsRegInRegPair(lhs, dst) || liftoff::IsRegInRegPair(rhs, dst)) {
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
+index 43a84cd818..c5cdebcbee 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
+@@ -1293,27 +1293,23 @@ void LiftoffAssembler::emit_jump(Register target) {
+   TurboAssembler::Jump(target);
+ }
+ 
+-void LiftoffAssembler::emit_cond_jump(LiftoffCondition liftoff_cond,
+-                                      Label* label, ValueKind kind,
+-                                      Register lhs, Register rhs,
++void LiftoffAssembler::emit_cond_jump(Condition cond, Label* label,
++                                      ValueKind kind, Register lhs,
++                                      Register rhs,
+                                       const FreezeCacheState& frozen) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   if (rhs == no_reg) {
+     DCHECK(kind == kI32 || kind == kI64);
+     TurboAssembler::Branch(label, cond, lhs, Operand(zero_reg));
+   } else {
+     DCHECK((kind == kI32 || kind == kI64) ||
+-           (is_reference(kind) &&
+-            (liftoff_cond == kEqual || liftoff_cond == kUnequal)));
++           (is_reference(kind) && (cond == kEqual || cond == kNotEqual)));
+     TurboAssembler::Branch(label, cond, lhs, Operand(rhs));
+   }
+ }
+ 
+-void LiftoffAssembler::emit_i32_cond_jumpi(LiftoffCondition liftoff_cond,
+-                                           Label* label, Register lhs,
+-                                           int32_t imm,
++void LiftoffAssembler::emit_i32_cond_jumpi(Condition cond, Label* label,
++                                           Register lhs, int32_t imm,
+                                            const FreezeCacheState& frozen) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   TurboAssembler::Branch(label, cond, lhs, Operand(imm));
+ }
+ 
+@@ -1328,10 +1324,8 @@ void LiftoffAssembler::emit_i32_eqz(Register dst, Register src) {
+   TurboAssembler::Sltu(dst, src, 1);
+ }
+ 
+-void LiftoffAssembler::emit_i32_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, Register lhs,
+-                                         Register rhs) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
++void LiftoffAssembler::emit_i32_set_cond(Condition cond, Register dst,
++                                         Register lhs, Register rhs) {
+   TurboAssembler::CompareI(dst, lhs, Operand(rhs), cond);
+ }
+ 
+@@ -1339,10 +1333,9 @@ void LiftoffAssembler::emit_i64_eqz(Register dst, LiftoffRegister src) {
+   TurboAssembler::Sltu(dst, src.gp(), 1);
+ }
+ 
+-void LiftoffAssembler::emit_i64_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, LiftoffRegister lhs,
++void LiftoffAssembler::emit_i64_set_cond(Condition cond, Register dst,
++                                         LiftoffRegister lhs,
+                                          LiftoffRegister rhs) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   TurboAssembler::CompareI(dst, lhs.gp(), Operand(rhs.gp()), cond);
+ }
+ 
+diff --git a/src/wasm/baseline/s390/liftoff-assembler-s390.h b/src/wasm/baseline/s390/liftoff-assembler-s390.h
+index aa2a314848..d4f92e2031 100644
+--- a/src/wasm/baseline/s390/liftoff-assembler-s390.h
++++ b/src/wasm/baseline/s390/liftoff-assembler-s390.h
+@@ -18,40 +18,19 @@ namespace wasm {
+ 
+ namespace liftoff {
+ 
+-inline constexpr Condition ToCondition(LiftoffCondition liftoff_cond) {
+-  switch (liftoff_cond) {
++inline constexpr bool UseSignedOp(Condition cond) {
++  switch (cond) {
+     case kEqual:
+-      return eq;
+-    case kUnequal:
+-      return ne;
+-    case kSignedLessThan:
+-    case kUnsignedLessThan:
+-      return lt;
+-    case kSignedLessEqual:
+-    case kUnsignedLessEqual:
+-      return le;
+-    case kSignedGreaterEqual:
+-    case kUnsignedGreaterEqual:
+-      return ge;
+-    case kSignedGreaterThan:
+-    case kUnsignedGreaterThan:
+-      return gt;
+-  }
+-}
+-
+-inline constexpr bool UseSignedOp(LiftoffCondition liftoff_cond) {
+-  switch (liftoff_cond) {
+-    case kEqual:
+-    case kUnequal:
+-    case kSignedLessThan:
+-    case kSignedLessEqual:
+-    case kSignedGreaterThan:
+-    case kSignedGreaterEqual:
++    case kNotEqual:
++    case kLessThan:
++    case kLessThanEqual:
++    case kGreaterThan:
++    case kGreaterThanEqual:
+       return true;
+     case kUnsignedLessThan:
+-    case kUnsignedLessEqual:
++    case kUnsignedLessThanEqual:
+     case kUnsignedGreaterThan:
+-    case kUnsignedGreaterEqual:
++    case kUnsignedGreaterThanEqual:
+       return false;
+     default:
+       UNREACHABLE();
+@@ -2123,12 +2102,11 @@ void LiftoffAssembler::emit_jump(Label* label) { b(al, label); }
+ 
+ void LiftoffAssembler::emit_jump(Register target) { Jump(target); }
+ 
+-void LiftoffAssembler::emit_cond_jump(LiftoffCondition liftoff_cond,
+-                                      Label* label, ValueKind kind,
+-                                      Register lhs, Register rhs,
++void LiftoffAssembler::emit_cond_jump(Condition cond, Label* label,
++                                      ValueKind kind, Register lhs,
++                                      Register rhs,
+                                       const FreezeCacheState& frozen) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+-  bool use_signed = liftoff::UseSignedOp(liftoff_cond);
++  bool use_signed = liftoff::UseSignedOp(cond);
+ 
+   if (rhs != no_reg) {
+     switch (kind) {
+@@ -2142,7 +2120,7 @@ void LiftoffAssembler::emit_cond_jump(LiftoffCondition liftoff_cond,
+       case kRef:
+       case kRefNull:
+       case kRtt:
+-        DCHECK(liftoff_cond == kEqual || liftoff_cond == kUnequal);
++        DCHECK(cond == kEqual || cond == kNotEqual);
+ #if defined(V8_COMPRESS_POINTERS)
+         if (use_signed) {
+           CmpS32(lhs, rhs);
+@@ -2176,12 +2154,10 @@ void LiftoffAssembler::emit_cond_jump(LiftoffCondition liftoff_cond,
+   b(cond, label);
+ }
+ 
+-void LiftoffAssembler::emit_i32_cond_jumpi(LiftoffCondition liftoff_cond,
+-                                           Label* label, Register lhs,
+-                                           int32_t imm,
++void LiftoffAssembler::emit_i32_cond_jumpi(Condition cond, Label* label,
++                                           Register lhs, int32_t imm,
+                                            const FreezeCacheState& frozen) {
+-  bool use_signed = liftoff::UseSignedOp(liftoff_cond);
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
++  bool use_signed = liftoff::UseSignedOp(cond);
+   if (use_signed) {
+     CmpS32(lhs, Operand(imm));
+   } else {
+@@ -2220,48 +2196,47 @@ void LiftoffAssembler::emit_i32_eqz(Register dst, Register src) {
+     bind(&done);                      \
+   }
+ 
+-void LiftoffAssembler::emit_i32_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, Register lhs,
+-                                         Register rhs) {
+-  bool use_signed = liftoff::UseSignedOp(liftoff_cond);
++void LiftoffAssembler::emit_i32_set_cond(Condition cond, Register dst,
++                                         Register lhs, Register rhs) {
++  bool use_signed = liftoff::UseSignedOp(cond);
+   if (use_signed) {
+     CmpS32(lhs, rhs);
+   } else {
+     CmpU32(lhs, rhs);
+   }
+ 
+-  EMIT_SET_CONDITION(dst, liftoff::ToCondition(liftoff_cond));
++  EMIT_SET_CONDITION(dst, cond);
+ }
+ 
+ void LiftoffAssembler::emit_i64_eqz(Register dst, LiftoffRegister src) {
+   EMIT_EQZ(ltgr, src.gp());
+ }
+ 
+-void LiftoffAssembler::emit_i64_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, LiftoffRegister lhs,
++void LiftoffAssembler::emit_i64_set_cond(Condition cond, Register dst,
++                                         LiftoffRegister lhs,
+                                          LiftoffRegister rhs) {
+-  bool use_signed = liftoff::UseSignedOp(liftoff_cond);
++  bool use_signed = liftoff::UseSignedOp(cond);
+   if (use_signed) {
+     CmpS64(lhs.gp(), rhs.gp());
+   } else {
+     CmpU64(lhs.gp(), rhs.gp());
+   }
+ 
+-  EMIT_SET_CONDITION(dst, liftoff::ToCondition(liftoff_cond));
++  EMIT_SET_CONDITION(dst, cond);
+ }
+ 
+-void LiftoffAssembler::emit_f32_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, DoubleRegister lhs,
++void LiftoffAssembler::emit_f32_set_cond(Condition cond, Register dst,
++                                         DoubleRegister lhs,
+                                          DoubleRegister rhs) {
+   cebr(lhs, rhs);
+-  EMIT_SET_CONDITION(dst, liftoff::ToCondition(liftoff_cond));
++  EMIT_SET_CONDITION(dst, cond);
+ }
+ 
+-void LiftoffAssembler::emit_f64_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, DoubleRegister lhs,
++void LiftoffAssembler::emit_f64_set_cond(Condition cond, Register dst,
++                                         DoubleRegister lhs,
+                                          DoubleRegister rhs) {
+   cdbr(lhs, rhs);
+-  EMIT_SET_CONDITION(dst, liftoff::ToCondition(liftoff_cond));
++  EMIT_SET_CONDITION(dst, cond);
+ }
+ 
+ bool LiftoffAssembler::emit_select(LiftoffRegister dst, Register condition,
+diff --git a/src/wasm/baseline/x64/liftoff-assembler-x64.h b/src/wasm/baseline/x64/liftoff-assembler-x64.h
+index 4babf37b7f..e1a98a890a 100644
+--- a/src/wasm/baseline/x64/liftoff-assembler-x64.h
++++ b/src/wasm/baseline/x64/liftoff-assembler-x64.h
+@@ -9,6 +9,7 @@
+ #include "src/codegen/assembler.h"
+ #include "src/codegen/cpu-features.h"
+ #include "src/codegen/machine-type.h"
++#include "src/codegen/x64/assembler-x64.h"
+ #include "src/codegen/x64/register-x64.h"
+ #include "src/flags/flags.h"
+ #include "src/heap/memory-chunk.h"
+@@ -26,31 +27,6 @@ namespace wasm {
+ 
+ namespace liftoff {
+ 
+-inline constexpr Condition ToCondition(LiftoffCondition liftoff_cond) {
+-  switch (liftoff_cond) {
+-    case kEqual:
+-      return equal;
+-    case kUnequal:
+-      return not_equal;
+-    case kSignedLessThan:
+-      return less;
+-    case kSignedLessEqual:
+-      return less_equal;
+-    case kSignedGreaterThan:
+-      return greater;
+-    case kSignedGreaterEqual:
+-      return greater_equal;
+-    case kUnsignedLessThan:
+-      return below;
+-    case kUnsignedLessEqual:
+-      return below_equal;
+-    case kUnsignedGreaterThan:
+-      return above;
+-    case kUnsignedGreaterEqual:
+-      return above_equal;
+-  }
+-}
+-
+ constexpr Register kScratchRegister2 = r11;
+ static_assert(kScratchRegister != kScratchRegister2, "collision");
+ static_assert((kLiftoffAssemblerGpCacheRegs &
+@@ -2180,11 +2156,10 @@ void LiftoffAssembler::emit_jump(Label* label) { jmp(label); }
+ 
+ void LiftoffAssembler::emit_jump(Register target) { jmp(target); }
+ 
+-void LiftoffAssembler::emit_cond_jump(LiftoffCondition liftoff_cond,
+-                                      Label* label, ValueKind kind,
+-                                      Register lhs, Register rhs,
++void LiftoffAssembler::emit_cond_jump(Condition cond, Label* label,
++                                      ValueKind kind, Register lhs,
++                                      Register rhs,
+                                       const FreezeCacheState& frozen) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   if (rhs != no_reg) {
+     switch (kind) {
+       case kI32:
+@@ -2193,7 +2168,7 @@ void LiftoffAssembler::emit_cond_jump(LiftoffCondition liftoff_cond,
+       case kRef:
+       case kRefNull:
+       case kRtt:
+-        DCHECK(liftoff_cond == kEqual || liftoff_cond == kUnequal);
++        DCHECK(cond == kEqual || cond == kNotEqual);
+ #if defined(V8_COMPRESS_POINTERS)
+         // It's enough to do a 32-bit comparison. This is also necessary for
+         // null checks which only compare against a 32 bit value, not a full
+@@ -2217,10 +2192,9 @@ void LiftoffAssembler::emit_cond_jump(LiftoffCondition liftoff_cond,
+   j(cond, label);
+ }
+ 
+-void LiftoffAssembler::emit_i32_cond_jumpi(LiftoffCondition liftoff_cond,
+-                                           Label* label, Register lhs, int imm,
++void LiftoffAssembler::emit_i32_cond_jumpi(Condition cond, Label* label,
++                                           Register lhs, int imm,
+                                            const FreezeCacheState& frozen) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   cmpl(lhs, Immediate(imm));
+   j(cond, label);
+ }
+@@ -2238,10 +2212,8 @@ void LiftoffAssembler::emit_i32_eqz(Register dst, Register src) {
+   movzxbl(dst, dst);
+ }
+ 
+-void LiftoffAssembler::emit_i32_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, Register lhs,
+-                                         Register rhs) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
++void LiftoffAssembler::emit_i32_set_cond(Condition cond, Register dst,
++                                         Register lhs, Register rhs) {
+   cmpl(lhs, rhs);
+   setcc(cond, dst);
+   movzxbl(dst, dst);
+@@ -2253,10 +2225,9 @@ void LiftoffAssembler::emit_i64_eqz(Register dst, LiftoffRegister src) {
+   movzxbl(dst, dst);
+ }
+ 
+-void LiftoffAssembler::emit_i64_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, LiftoffRegister lhs,
++void LiftoffAssembler::emit_i64_set_cond(Condition cond, Register dst,
++                                         LiftoffRegister lhs,
+                                          LiftoffRegister rhs) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   cmpq(lhs.gp(), rhs.gp());
+   setcc(cond, dst);
+   movzxbl(dst, dst);
+@@ -2287,18 +2258,16 @@ void EmitFloatSetCond(LiftoffAssembler* assm, Condition cond, Register dst,
+ }
+ }  // namespace liftoff
+ 
+-void LiftoffAssembler::emit_f32_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, DoubleRegister lhs,
++void LiftoffAssembler::emit_f32_set_cond(Condition cond, Register dst,
++                                         DoubleRegister lhs,
+                                          DoubleRegister rhs) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   liftoff::EmitFloatSetCond<&TurboAssembler::Ucomiss>(this, cond, dst, lhs,
+                                                       rhs);
+ }
+ 
+-void LiftoffAssembler::emit_f64_set_cond(LiftoffCondition liftoff_cond,
+-                                         Register dst, DoubleRegister lhs,
++void LiftoffAssembler::emit_f64_set_cond(Condition cond, Register dst,
++                                         DoubleRegister lhs,
+                                          DoubleRegister rhs) {
+-  Condition cond = liftoff::ToCondition(liftoff_cond);
+   liftoff::EmitFloatSetCond<&TurboAssembler::Ucomisd>(this, cond, dst, lhs,
+                                                       rhs);
+ }
+-- 
+2.35.1
+

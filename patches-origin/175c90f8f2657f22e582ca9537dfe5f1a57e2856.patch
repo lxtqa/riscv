@@ -1,0 +1,380 @@
+From 175c90f8f2657f22e582ca9537dfe5f1a57e2856 Mon Sep 17 00:00:00 2001
+From: verwaest <verwaest@chromium.org>
+Date: Tue, 8 Dec 2015 23:53:19 -0800
+Subject: [PATCH] Support intriscDefaultProto for Error functions
+
+BUG=v8:3900, v8:3931, v8:1543, v8:3330, v8:4002
+LOG=n
+
+Review URL: https://codereview.chromium.org/1496333002
+
+Cr-Commit-Position: refs/heads/master@{#32692}
+---
+ src/bootstrapper.cc                           | 63 ++++++++++++-
+ src/isolate.cc                                | 23 ++---
+ src/js/messages.js                            | 91 +++++++------------
+ test/mjsunit/error-constructors.js            |  2 +-
+ test/mjsunit/es6/classes-proxy.js             |  2 +-
+ test/mjsunit/harmony/reflect-construct.js     | 14 +--
+ test/test262/test262.status                   |  3 -
+ .../js/native-error-prototype-expected.txt    |  4 +-
+ test/webkit/fast/js/native-error-prototype.js |  4 +-
+ 9 files changed, 115 insertions(+), 91 deletions(-)
+
+diff --git a/src/bootstrapper.cc b/src/bootstrapper.cc
+index 190b70c520..4eead68a6a 100644
+--- a/src/bootstrapper.cc
++++ b/src/bootstrapper.cc
+@@ -1137,8 +1137,8 @@ void Genesis::InitializeGlobal(Handle<JSGlobalObject> global_object,
+     CacheInitialJSArrayMaps(native_context(), initial_strong_map);
+ 
+     SimpleInstallFunction(array_function,
+-        factory->NewStringFromAsciiChecked("isArray"),
+-        Builtins::kArrayIsArray, 1, true);
++                          isolate->factory()->InternalizeUtf8String("isArray"),
++                          Builtins::kArrayIsArray, 1, true);
+   }
+ 
+   {  // --- N u m b e r ---
+@@ -1244,6 +1244,62 @@ void Genesis::InitializeGlobal(Handle<JSGlobalObject> global_object,
+                                    num_fields * kPointerSize);
+   }
+ 
++  {  // -- E r r o r
++    Handle<JSFunction> error_fun = InstallFunction(
++        global, "Error", JS_OBJECT_TYPE, JSObject::kHeaderSize,
++        isolate->initial_object_prototype(), Builtins::kIllegal);
++    InstallWithIntrinsicDefaultProto(isolate, error_fun,
++                                     Context::ERROR_FUNCTION_INDEX);
++  }
++
++  {  // -- E v a l E r r o r
++    Handle<JSFunction> eval_error_fun = InstallFunction(
++        global, "EvalError", JS_OBJECT_TYPE, JSObject::kHeaderSize,
++        isolate->initial_object_prototype(), Builtins::kIllegal);
++    InstallWithIntrinsicDefaultProto(isolate, eval_error_fun,
++                                     Context::EVAL_ERROR_FUNCTION_INDEX);
++  }
++
++  {  // -- R a n g e E r r o r
++    Handle<JSFunction> range_error_fun = InstallFunction(
++        global, "RangeError", JS_OBJECT_TYPE, JSObject::kHeaderSize,
++        isolate->initial_object_prototype(), Builtins::kIllegal);
++    InstallWithIntrinsicDefaultProto(isolate, range_error_fun,
++                                     Context::RANGE_ERROR_FUNCTION_INDEX);
++  }
++
++  {  // -- R e f e r e n c e E r r o r
++    Handle<JSFunction> reference_error_fun = InstallFunction(
++        global, "ReferenceError", JS_OBJECT_TYPE, JSObject::kHeaderSize,
++        isolate->initial_object_prototype(), Builtins::kIllegal);
++    InstallWithIntrinsicDefaultProto(isolate, reference_error_fun,
++                                     Context::REFERENCE_ERROR_FUNCTION_INDEX);
++  }
++
++  {  // -- S y n t a x E r r o r
++    Handle<JSFunction> syntax_error_fun = InstallFunction(
++        global, "SyntaxError", JS_OBJECT_TYPE, JSObject::kHeaderSize,
++        isolate->initial_object_prototype(), Builtins::kIllegal);
++    InstallWithIntrinsicDefaultProto(isolate, syntax_error_fun,
++                                     Context::SYNTAX_ERROR_FUNCTION_INDEX);
++  }
++
++  {  // -- T y p e E r r o r
++    Handle<JSFunction> type_error_fun = InstallFunction(
++        global, "TypeError", JS_OBJECT_TYPE, JSObject::kHeaderSize,
++        isolate->initial_object_prototype(), Builtins::kIllegal);
++    InstallWithIntrinsicDefaultProto(isolate, type_error_fun,
++                                     Context::TYPE_ERROR_FUNCTION_INDEX);
++  }
++
++  {  // -- U R I E r r o r
++    Handle<JSFunction> uri_error_fun = InstallFunction(
++        global, "URIError", JS_OBJECT_TYPE, JSObject::kHeaderSize,
++        isolate->initial_object_prototype(), Builtins::kIllegal);
++    InstallWithIntrinsicDefaultProto(isolate, uri_error_fun,
++                                     Context::URI_ERROR_FUNCTION_INDEX);
++  }
++
+   // Initialize the embedder data slot.
+   Handle<FixedArray> embedder_data = factory->NewFixedArray(3);
+   native_context()->set_embedder_data(*embedder_data);
+@@ -2711,8 +2767,7 @@ bool Genesis::InstallSpecialObjects(Handle<Context> native_context) {
+   Handle<JSGlobalObject> global(JSGlobalObject::cast(
+       native_context->global_object()));
+ 
+-  Handle<JSObject> Error = Handle<JSObject>::cast(
+-      Object::GetProperty(isolate, global, "Error").ToHandleChecked());
++  Handle<JSObject> Error = isolate->error_function();
+   Handle<String> name =
+       factory->InternalizeOneByteString(STATIC_CHAR_VECTOR("stackTraceLimit"));
+   Handle<Smi> stack_trace_limit(Smi::FromInt(FLAG_stack_trace_limit), isolate);
+diff --git a/src/isolate.cc b/src/isolate.cc
+index d5cda54a18..a3456c4600 100644
+--- a/src/isolate.cc
++++ b/src/isolate.cc
+@@ -1348,21 +1348,14 @@ bool Isolate::ComputeLocationFromStackTrace(MessageLocation* target,
+ }
+ 
+ 
+-// Traverse prototype chain to find out whether the object is derived from
+-// the Error object.
+-bool Isolate::IsErrorObject(Handle<Object> obj) {
+-  if (!obj->IsJSObject()) return false;
+-  Handle<Object> error_constructor = error_function();
+-  DisallowHeapAllocation no_gc;
+-  for (PrototypeIterator iter(this, *obj, PrototypeIterator::START_AT_RECEIVER);
+-       !iter.IsAtEnd(); iter.Advance()) {
+-    if (iter.GetCurrent()->IsJSProxy()) return false;
+-    if (iter.GetCurrent<JSObject>()->map()->GetConstructor() ==
+-        *error_constructor) {
+-      return true;
+-    }
+-  }
+-  return false;
++// Use stack_trace_symbol as proxy for [[ErrorData]].
++bool Isolate::IsErrorObject(Handle<Object> object) {
++  Handle<Name> symbol = factory()->stack_trace_symbol();
++  if (!object->IsJSObject()) return false;
++  Maybe<bool> has_stack_trace =
++      JSReceiver::HasOwnProperty(Handle<JSReceiver>::cast(object), symbol);
++  DCHECK(!has_stack_trace.IsNothing());
++  return has_stack_trace.FromJust();
+ }
+ 
+ 
+diff --git a/src/js/messages.js b/src/js/messages.js
+index 8db1166ff4..dc845ea97a 100644
+--- a/src/js/messages.js
++++ b/src/js/messages.js
+@@ -908,59 +908,45 @@ var StackTraceSetter = function(v) {
+ var captureStackTrace = function() {};
+ 
+ 
+-// Define special error type constructors.
+-function DefineError(global, f) {
+-  // Store the error function in both the global object
+-  // and the runtime object. The function is fetched
+-  // from the runtime object when throwing errors from
+-  // within the runtime system to avoid strange side
+-  // effects when overwriting the error functions from
+-  // user code.
+-  var name = f.name;
+-  %AddNamedProperty(global, name, f, DONT_ENUM);
+-  // Configure the error function.
+-  if (name == 'Error') {
+-    // The prototype of the Error object must itself be an error.
+-    // However, it can't be an instance of the Error object because
+-    // it hasn't been properly configured yet.  Instead we create a
+-    // special not-a-true-error-but-close-enough object.
+-    var ErrorPrototype = function() {};
+-    %FunctionSetPrototype(ErrorPrototype, GlobalObject.prototype);
+-    %FunctionSetInstanceClassName(ErrorPrototype, 'Error');
+-    %FunctionSetPrototype(f, new ErrorPrototype());
+-  } else {
+-    %FunctionSetPrototype(f, new GlobalError());
+-    %InternalSetPrototype(f, GlobalError);
+-  }
+-  %FunctionSetInstanceClassName(f, 'Error');
+-  %AddNamedProperty(f.prototype, 'constructor', f, DONT_ENUM);
+-  %AddNamedProperty(f.prototype, 'name', name, DONT_ENUM);
+-  %SetCode(f, function(m) {
+-    if (!IS_UNDEFINED(new.target)) {
+-      try { captureStackTrace(this, f); } catch (e) { }
+-      // Define all the expected properties directly on the error
+-      // object. This avoids going through getters and setters defined
+-      // on prototype objects.
+-      if (!IS_UNDEFINED(m)) {
+-        %AddNamedProperty(this, 'message', TO_STRING(m), DONT_ENUM);
+-      }
+-    } else {
+-      return new f(m);
++// Set up special error type constructors.
++function SetUpError(error_function) {
++  %FunctionSetInstanceClassName(error_function, 'Error');
++  var name = error_function.name;
++  var prototype = new GlobalObject();
++  if (name !== 'Error') {
++    %InternalSetPrototype(error_function, GlobalError);
++    %InternalSetPrototype(prototype, GlobalError.prototype);
++  }
++  %FunctionSetPrototype(error_function, prototype);
++
++  %AddNamedProperty(error_function.prototype, 'name', name, DONT_ENUM);
++  %AddNamedProperty(error_function.prototype, 'message', '', DONT_ENUM);
++  %AddNamedProperty(
++      error_function.prototype, 'constructor', error_function, DONT_ENUM);
++
++  %SetCode(error_function, function(m) {
++    if (IS_UNDEFINED(new.target)) return new error_function(m);
++
++    try { captureStackTrace(this, error_function); } catch (e) { }
++    // Define all the expected properties directly on the error
++    // object. This avoids going through getters and setters defined
++    // on prototype objects.
++    if (!IS_UNDEFINED(m)) {
++      %AddNamedProperty(this, 'message', TO_STRING(m), DONT_ENUM);
+     }
+   });
+-  %SetNativeFlag(f);
+-  return f;
+-};
+ 
+-GlobalError = DefineError(global, function Error() { });
+-GlobalEvalError = DefineError(global, function EvalError() { });
+-GlobalRangeError = DefineError(global, function RangeError() { });
+-GlobalReferenceError = DefineError(global, function ReferenceError() { });
+-GlobalSyntaxError = DefineError(global, function SyntaxError() { });
+-GlobalTypeError = DefineError(global, function TypeError() { });
+-GlobalURIError = DefineError(global, function URIError() { });
++  %SetNativeFlag(error_function);
++  return error_function;
++};
+ 
+-%AddNamedProperty(GlobalError.prototype, 'message', '', DONT_ENUM);
++GlobalError = SetUpError(global.Error);
++GlobalEvalError = SetUpError(global.EvalError);
++GlobalRangeError = SetUpError(global.RangeError);
++GlobalReferenceError = SetUpError(global.ReferenceError);
++GlobalSyntaxError = SetUpError(global.SyntaxError);
++GlobalTypeError = SetUpError(global.TypeError);
++GlobalURIError = SetUpError(global.URIError);
+ 
+ utils.InstallFunctions(GlobalError.prototype, DONT_ENUM,
+                        ['toString', ErrorToString]);
+@@ -1011,8 +997,6 @@ captureStackTrace = function captureStackTrace(obj, cons_opt) {
+ GlobalError.captureStackTrace = captureStackTrace;
+ 
+ %InstallToContext([
+-  "error_function", GlobalError,
+-  "eval_error_function", GlobalEvalError,
+   "get_stack_trace_line_fun", GetStackTraceLine,
+   "make_error_function", MakeGenericError,
+   "make_range_error", MakeRangeError,
+@@ -1021,13 +1005,8 @@ GlobalError.captureStackTrace = captureStackTrace;
+   "message_get_line_number", GetLineNumber,
+   "message_get_source_line", GetSourceLine,
+   "no_side_effect_to_string_fun", NoSideEffectToString,
+-  "range_error_function", GlobalRangeError,
+-  "reference_error_function", GlobalReferenceError,
+   "stack_overflow_boilerplate", StackOverflowBoilerplate,
+-  "syntax_error_function", GlobalSyntaxError,
+   "to_detail_string_fun", ToDetailString,
+-  "type_error_function", GlobalTypeError,
+-  "uri_error_function", GlobalURIError,
+ ]);
+ 
+ utils.Export(function(to) {
+diff --git a/test/mjsunit/error-constructors.js b/test/mjsunit/error-constructors.js
+index 1ada39de55..0f3d74c960 100644
+--- a/test/mjsunit/error-constructors.js
++++ b/test/mjsunit/error-constructors.js
+@@ -128,7 +128,7 @@ for (var i in errors) {
+ 
+ 
+ Error.prototype.toString = Object.prototype.toString;
+-assertEquals("[object Error]", Error.prototype.toString());
++assertEquals("[object Object]", Error.prototype.toString());
+ assertEquals(Object.prototype, Error.prototype.__proto__);
+ var e = new Error("foo");
+ assertEquals("[object Error]", e.toString());
+diff --git a/test/mjsunit/es6/classes-proxy.js b/test/mjsunit/es6/classes-proxy.js
+index d438b01ad8..40a77035cc 100644
+--- a/test/mjsunit/es6/classes-proxy.js
++++ b/test/mjsunit/es6/classes-proxy.js
+@@ -36,7 +36,7 @@ function CreateConstructableProxy(handler) {
+ 
+   var o = Reflect.construct(Number, [100], proxy);
+   assertEquals(["get trap"], log);
+-  assertTrue(Object.getPrototypeOf(o) === Object.prototype);
++  assertTrue(Object.getPrototypeOf(o) === Number.prototype);
+   assertEquals(100, Number.prototype.valueOf.call(o));
+ })();
+ 
+diff --git a/test/mjsunit/harmony/reflect-construct.js b/test/mjsunit/harmony/reflect-construct.js
+index 14f04b1a3e..efe9610f0b 100644
+--- a/test/mjsunit/harmony/reflect-construct.js
++++ b/test/mjsunit/harmony/reflect-construct.js
+@@ -295,8 +295,8 @@
+       "Boolean",
+       ["DataView", [new ArrayBuffer()]],
+       "Date",
+-      // "Error",
+-      // "EvalError",
++      "Error",
++      "EvalError",
+       "Float32Array",
+       "Float64Array",
+       "Function",
+@@ -308,19 +308,19 @@
+       "Number",
+       "Object",
+       // "Promise",
+-      // "RangeError",
+-      // "ReferenceError",
++      "RangeError",
++      "ReferenceError",
+       "RegExp",
+       "Set",
+       "String",
+-      // "SyntaxError",
++      "SyntaxError",
+       // %TypedArray%?
+-      // "TypeError",
++      "TypeError",
+       "Uint8Array",
+       "Uint8ClampedArray",
+       "Uint16Array",
+       "Uint32Array",
+-      // "URIError",
++      "URIError",
+       "WeakMap",
+       "WeakSet"
+   ];
+diff --git a/test/test262/test262.status b/test/test262/test262.status
+index 059dec5515..087dc6e3b5 100644
+--- a/test/test262/test262.status
++++ b/test/test262/test262.status
+@@ -103,9 +103,6 @@
+   'built-ins/Symbol/species/builtin-getter-name': [FAIL],
+   'built-ins/Symbol/species/subclassing': [FAIL],
+ 
+-  # https://code.google.com/p/v8/issues/detail?id=4002
+-  'built-ins/Error/prototype/S15.11.4_A2': [FAIL],
+-
+   # https://code.google.com/p/v8/issues/detail?id=4163
+   'built-ins/GeneratorPrototype/next/context-constructor-invocation': [FAIL],
+ 
+diff --git a/test/webkit/fast/js/native-error-prototype-expected.txt b/test/webkit/fast/js/native-error-prototype-expected.txt
+index 137620bc6e..c0227b25a6 100644
+--- a/test/webkit/fast/js/native-error-prototype-expected.txt
++++ b/test/webkit/fast/js/native-error-prototype-expected.txt
+@@ -26,8 +26,8 @@ This is a test case for bugs 55346, 70889, and 75452.
+ On success, you will see a series of "PASS" messages, followed by "TEST COMPLETE".
+ 
+ 
+-PASS ({}).toString.call(Error.prototype) is "[object Error]"
+-PASS ({}).toString.call(RangeError.prototype) is "[object Error]"
++PASS ({}).toString.call(Error.prototype) is "[object Object]"
++PASS ({}).toString.call(RangeError.prototype) is "[object Object]"
+ PASS err.toString() is "message"
+ PASS err.hasOwnProperty('message') is false
+ PASS err.hasOwnProperty('message') is false
+diff --git a/test/webkit/fast/js/native-error-prototype.js b/test/webkit/fast/js/native-error-prototype.js
+index 588deafe8d..2ce548788d 100644
+--- a/test/webkit/fast/js/native-error-prototype.js
++++ b/test/webkit/fast/js/native-error-prototype.js
+@@ -25,8 +25,8 @@ description(
+ 'This is a test case for bugs <a href="https://bugs.webkit.org/show_bug.cgi?id=55346">55346</a>, <a href="https://bugs.webkit.org/show_bug.cgi?id=70889">70889</a>, and <a href="https://bugs.webkit.org/show_bug.cgi?id=75452">75452</a>.'
+ );
+ 
+-shouldBe("({}).toString.call(Error.prototype)", '"[object Error]"');
+-shouldBe("({}).toString.call(RangeError.prototype)", '"[object Error]"');
++shouldBe("({}).toString.call(Error.prototype)", '"[object Object]"');
++shouldBe("({}).toString.call(RangeError.prototype)", '"[object Object]"');
+ 
+ var err = new Error("message");
+ err.name = "";
+-- 
+2.35.1
+

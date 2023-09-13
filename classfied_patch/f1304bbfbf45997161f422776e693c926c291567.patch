@@ -1,0 +1,678 @@
+From f1304bbfbf45997161f422776e693c926c291567 Mon Sep 17 00:00:00 2001
+From: Toon Verwaest <verwaest@chromium.org>
+Date: Wed, 2 Jun 2021 11:33:34 +0200
+Subject: [PATCH] [masm] Remove unnecessary virtual methods from the
+ turboassembler
+
+Change-Id: I33a6f165b36eb0a948712d0de2b3a926efcd3cb9
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/2931808
+Auto-Submit: Toon Verwaest <verwaest@chromium.org>
+Reviewed-by: Jakob Gruber <jgruber@chromium.org>
+Commit-Queue: Toon Verwaest <verwaest@chromium.org>
+Cr-Commit-Position: refs/heads/master@{#74928}
+---
+ src/codegen/arm/macro-assembler-arm.h         | 23 ++++++++---------
+ src/codegen/arm64/macro-assembler-arm64.h     | 23 ++++++++---------
+ src/codegen/ia32/macro-assembler-ia32.h       | 23 ++++++++---------
+ src/codegen/macro-assembler.h                 |  6 +++++
+ src/codegen/mips/macro-assembler-mips.h       | 24 ++++++++----------
+ src/codegen/mips64/macro-assembler-mips64.h   | 24 ++++++++----------
+ src/codegen/ppc/macro-assembler-ppc.h         | 23 ++++++++---------
+ src/codegen/riscv64/macro-assembler-riscv64.h | 23 ++++++++---------
+ src/codegen/s390/macro-assembler-s390.h       | 21 ++++++++--------
+ src/codegen/turbo-assembler.h                 | 25 -------------------
+ src/codegen/x64/macro-assembler-x64.h         | 23 ++++++++---------
+ 11 files changed, 104 insertions(+), 134 deletions(-)
+
+diff --git a/src/codegen/arm/macro-assembler-arm.h b/src/codegen/arm/macro-assembler-arm.h
+index 82affc5936..7363c47f23 100644
+--- a/src/codegen/arm/macro-assembler-arm.h
++++ b/src/codegen/arm/macro-assembler-arm.h
+@@ -265,8 +265,8 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   void MovFromFloatParameter(DwVfpRegister dst);
+   void MovFromFloatResult(DwVfpRegister dst);
+ 
+-  void Trap() override;
+-  void DebugBreak() override;
++  void Trap();
++  void DebugBreak();
+ 
+   // Calls Abort(msg) if the condition cond is not satisfied.
+   // Use --debug-code to enable.
+@@ -295,10 +295,9 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   void AsrPair(Register dst_low, Register dst_high, Register src_low,
+                Register src_high, uint32_t shift);
+ 
+-  void LoadFromConstantsTable(Register destination,
+-                              int constant_index) override;
+-  void LoadRootRegisterOffset(Register destination, intptr_t offset) override;
+-  void LoadRootRelative(Register destination, int32_t offset) override;
++  void LoadFromConstantsTable(Register destination, int constant_index) final;
++  void LoadRootRegisterOffset(Register destination, intptr_t offset) final;
++  void LoadRootRelative(Register destination, int32_t offset) final;
+ 
+   // Jump, Call, and Ret pseudo instructions implementing inter-working.
+   void Call(Register target, Condition cond = al);
+@@ -317,13 +316,13 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   // Load the builtin given by the Smi in |builtin_index| into the same
+   // register.
+   void LoadEntryFromBuiltinIndex(Register builtin_index);
+-  void CallBuiltinByIndex(Register builtin_index) override;
++  void CallBuiltinByIndex(Register builtin_index);
+   void CallBuiltin(int builtin_index, Condition cond = al);
+ 
+-  void LoadCodeObjectEntry(Register destination, Register code_object) override;
+-  void CallCodeObject(Register code_object) override;
++  void LoadCodeObjectEntry(Register destination, Register code_object);
++  void CallCodeObject(Register code_object);
+   void JumpCodeObject(Register code_object,
+-                      JumpMode jump_mode = JumpMode::kJump) override;
++                      JumpMode jump_mode = JumpMode::kJump);
+ 
+   // Generates an instruction sequence s.t. the return address points to the
+   // instruction following the call.
+@@ -433,7 +432,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   void Jump(Register target, Condition cond = al);
+   void Jump(Address target, RelocInfo::Mode rmode, Condition cond = al);
+   void Jump(Handle<Code> code, RelocInfo::Mode rmode, Condition cond = al);
+-  void Jump(const ExternalReference& reference) override;
++  void Jump(const ExternalReference& reference);
+ 
+   // Perform a floating-point min or max operation with the
+   // (IEEE-754-compatible) semantics of ARM64's fmin/fmax. Some cases, typically
+@@ -522,7 +521,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   }
+ 
+   // Load an object from the root table.
+-  void LoadRoot(Register destination, RootIndex index) override {
++  void LoadRoot(Register destination, RootIndex index) final {
+     LoadRoot(destination, index, al);
+   }
+   void LoadRoot(Register destination, RootIndex index, Condition cond);
+diff --git a/src/codegen/arm64/macro-assembler-arm64.h b/src/codegen/arm64/macro-assembler-arm64.h
+index 479286c7ef..df5814ba15 100644
+--- a/src/codegen/arm64/macro-assembler-arm64.h
++++ b/src/codegen/arm64/macro-assembler-arm64.h
+@@ -584,8 +584,8 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+ 
+   inline void Debug(const char* message, uint32_t code, Instr params = BREAK);
+ 
+-  void Trap() override;
+-  void DebugBreak() override;
++  void Trap();
++  void DebugBreak();
+ 
+   // Print a message to stderr and abort execution.
+   void Abort(AbortReason reason);
+@@ -953,15 +953,14 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+             int shift_amount = 0);
+   void Movi(const VRegister& vd, uint64_t hi, uint64_t lo);
+ 
+-  void LoadFromConstantsTable(Register destination,
+-                              int constant_index) override;
+-  void LoadRootRegisterOffset(Register destination, intptr_t offset) override;
+-  void LoadRootRelative(Register destination, int32_t offset) override;
++  void LoadFromConstantsTable(Register destination, int constant_index) final;
++  void LoadRootRegisterOffset(Register destination, intptr_t offset) final;
++  void LoadRootRelative(Register destination, int32_t offset) final;
+ 
+   void Jump(Register target, Condition cond = al);
+   void Jump(Address target, RelocInfo::Mode rmode, Condition cond = al);
+   void Jump(Handle<Code> code, RelocInfo::Mode rmode, Condition cond = al);
+-  void Jump(const ExternalReference& reference) override;
++  void Jump(const ExternalReference& reference);
+ 
+   void Call(Register target);
+   void Call(Address target, RelocInfo::Mode rmode);
+@@ -977,7 +976,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   void LoadEntryFromBuiltinIndex(Builtins::Name builtin_index,
+                                  Register destination);
+   MemOperand EntryFromBuiltinIndexAsOperand(Builtins::Name builtin_index);
+-  void CallBuiltinByIndex(Register builtin_index) override;
++  void CallBuiltinByIndex(Register builtin_index);
+   void CallBuiltin(Builtins::Name builtin) {
+     // TODO(11527): drop the int overload in favour of the Builtins::Name one.
+     return CallBuiltin(static_cast<int>(builtin));
+@@ -989,10 +988,10 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   }
+   void TailCallBuiltin(int builtin_index);
+ 
+-  void LoadCodeObjectEntry(Register destination, Register code_object) override;
+-  void CallCodeObject(Register code_object) override;
++  void LoadCodeObjectEntry(Register destination, Register code_object);
++  void CallCodeObject(Register code_object);
+   void JumpCodeObject(Register code_object,
+-                      JumpMode jump_mode = JumpMode::kJump) override;
++                      JumpMode jump_mode = JumpMode::kJump);
+ 
+   // Generates an instruction sequence s.t. the return address points to the
+   // instruction following the call.
+@@ -1279,7 +1278,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+ #undef DECLARE_FUNCTION
+ 
+   // Load an object from the root table.
+-  void LoadRoot(Register destination, RootIndex index) override;
++  void LoadRoot(Register destination, RootIndex index) final;
+   void PushRoot(RootIndex index);
+ 
+   inline void Ret(const Register& xn = lr);
+diff --git a/src/codegen/ia32/macro-assembler-ia32.h b/src/codegen/ia32/macro-assembler-ia32.h
+index 10ca2b3019..e4929e7873 100644
+--- a/src/codegen/ia32/macro-assembler-ia32.h
++++ b/src/codegen/ia32/macro-assembler-ia32.h
+@@ -149,14 +149,14 @@ class V8_EXPORT_PRIVATE TurboAssembler : public SharedTurboAssembler {
+   // Load the builtin given by the Smi in |builtin_index| into the same
+   // register.
+   void LoadEntryFromBuiltinIndex(Register builtin_index);
+-  void CallBuiltinByIndex(Register builtin_index) override;
++  void CallBuiltinByIndex(Register builtin_index);
+   void CallBuiltin(int builtin_index);
+ 
+-  void LoadCodeObjectEntry(Register destination, Register code_object) override;
+-  void CallCodeObject(Register code_object) override;
++  void LoadCodeObjectEntry(Register destination, Register code_object);
++  void CallCodeObject(Register code_object);
+   void JumpCodeObject(Register code_object,
+-                      JumpMode jump_mode = JumpMode::kJump) override;
+-  void Jump(const ExternalReference& reference) override;
++                      JumpMode jump_mode = JumpMode::kJump);
++  void Jump(const ExternalReference& reference);
+ 
+   void RetpolineCall(Register reg);
+   void RetpolineCall(Address destination, RelocInfo::Mode rmode);
+@@ -167,8 +167,8 @@ class V8_EXPORT_PRIVATE TurboAssembler : public SharedTurboAssembler {
+ 
+   void RetpolineJump(Register reg);
+ 
+-  void Trap() override;
+-  void DebugBreak() override;
++  void Trap();
++  void DebugBreak();
+ 
+   void CallForDeoptimization(Builtins::Name target, int deopt_id, Label* exit,
+                              DeoptimizeKind kind, Label* ret,
+@@ -269,13 +269,12 @@ class V8_EXPORT_PRIVATE TurboAssembler : public SharedTurboAssembler {
+ 
+   void InitializeRootRegister();
+ 
+-  void LoadRoot(Register destination, RootIndex index) override;
++  void LoadRoot(Register destination, RootIndex index) final;
+ 
+   // Indirect root-relative loads.
+-  void LoadFromConstantsTable(Register destination,
+-                              int constant_index) override;
+-  void LoadRootRegisterOffset(Register destination, intptr_t offset) override;
+-  void LoadRootRelative(Register destination, int32_t offset) override;
++  void LoadFromConstantsTable(Register destination, int constant_index) final;
++  void LoadRootRegisterOffset(Register destination, intptr_t offset) final;
++  void LoadRootRelative(Register destination, int32_t offset) final;
+ 
+   void PushPC();
+ 
+diff --git a/src/codegen/macro-assembler.h b/src/codegen/macro-assembler.h
+index d3f90e71b9..e7aa2eb148 100644
+--- a/src/codegen/macro-assembler.h
++++ b/src/codegen/macro-assembler.h
+@@ -28,6 +28,12 @@ enum AllocationFlags {
+   PRETENURE = 1 << 3,
+ };
+ 
++enum class JumpMode {
++  kJump,          // Does a direct jump to the given address
++  kPushAndReturn  // Pushes the given address as the current return address and
++                  // does a return
++};
++
+ enum class SmiCheck { kOmit, kInline };
+ 
+ // This is the only place allowed to include the platform-specific headers.
+diff --git a/src/codegen/mips/macro-assembler-mips.h b/src/codegen/mips/macro-assembler-mips.h
+index 9b24c09e16..a25b34d5be 100644
+--- a/src/codegen/mips/macro-assembler-mips.h
++++ b/src/codegen/mips/macro-assembler-mips.h
+@@ -107,8 +107,8 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   // -------------------------------------------------------------------------
+   // Debugging.
+ 
+-  void Trap() override;
+-  void DebugBreak() override;
++  void Trap();
++  void DebugBreak();
+ 
+   // Calls Abort(msg) if the condition cc is not satisfied.
+   // Use --debug_code to enable.
+@@ -188,10 +188,9 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   void li(Register dst, const StringConstantBase* string,
+           LiFlags mode = OPTIMIZE_SIZE);
+ 
+-  void LoadFromConstantsTable(Register destination,
+-                              int constant_index) override;
+-  void LoadRootRegisterOffset(Register destination, intptr_t offset) override;
+-  void LoadRootRelative(Register destination, int32_t offset) override;
++  void LoadFromConstantsTable(Register destination, int constant_index) final;
++  void LoadRootRegisterOffset(Register destination, intptr_t offset) final;
++  void LoadRootRelative(Register destination, int32_t offset) final;
+ 
+ // Jump, Call, and Ret pseudo instructions implementing inter-working.
+ #define COND_ARGS                                  \
+@@ -209,7 +208,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   // patching.
+   void PatchAndJump(Address target);
+   void Jump(Handle<Code> code, RelocInfo::Mode rmode, COND_ARGS);
+-  void Jump(const ExternalReference& reference) override;
++  void Jump(const ExternalReference& reference);
+   void Call(Register target, int16_t offset = 0, COND_ARGS);
+   void Call(Register target, Register base, int16_t offset = 0, COND_ARGS);
+   void Call(Address target, RelocInfo::Mode rmode, COND_ARGS);
+@@ -221,19 +220,18 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   // Load the builtin given by the Smi in |builtin_index| into the same
+   // register.
+   void LoadEntryFromBuiltinIndex(Register builtin_index);
+-  void CallBuiltinByIndex(Register builtin_index) override;
++  void CallBuiltinByIndex(Register builtin_index);
+ 
+-  void LoadCodeObjectEntry(Register destination,
+-                           Register code_object) override {
++  void LoadCodeObjectEntry(Register destination, Register code_object) {
+     // TODO(mips): Implement.
+     UNIMPLEMENTED();
+   }
+-  void CallCodeObject(Register code_object) override {
++  void CallCodeObject(Register code_object) {
+     // TODO(mips): Implement.
+     UNIMPLEMENTED();
+   }
+   void JumpCodeObject(Register code_object,
+-                      JumpMode jump_mode = JumpMode::kJump) override {
++                      JumpMode jump_mode = JumpMode::kJump) {
+     // TODO(mips): Implement.
+     UNIMPLEMENTED();
+   }
+@@ -785,7 +783,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+                            Func GetLabelFunction);
+ 
+   // Load an object from the root table.
+-  void LoadRoot(Register destination, RootIndex index) override;
++  void LoadRoot(Register destination, RootIndex index) final;
+   void LoadRoot(Register destination, RootIndex index, Condition cond,
+                 Register src1, const Operand& src2);
+ 
+diff --git a/src/codegen/mips64/macro-assembler-mips64.h b/src/codegen/mips64/macro-assembler-mips64.h
+index 4f1b01edf7..64821ffd26 100644
+--- a/src/codegen/mips64/macro-assembler-mips64.h
++++ b/src/codegen/mips64/macro-assembler-mips64.h
+@@ -128,8 +128,8 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   // -------------------------------------------------------------------------
+   // Debugging.
+ 
+-  void Trap() override;
+-  void DebugBreak() override;
++  void Trap();
++  void DebugBreak();
+ 
+   // Calls Abort(msg) if the condition cc is not satisfied.
+   // Use --debug_code to enable.
+@@ -215,10 +215,9 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   void li(Register dst, const StringConstantBase* string,
+           LiFlags mode = OPTIMIZE_SIZE);
+ 
+-  void LoadFromConstantsTable(Register destination,
+-                              int constant_index) override;
+-  void LoadRootRegisterOffset(Register destination, intptr_t offset) override;
+-  void LoadRootRelative(Register destination, int32_t offset) override;
++  void LoadFromConstantsTable(Register destination, int constant_index) final;
++  void LoadRootRegisterOffset(Register destination, intptr_t offset) final;
++  void LoadRootRelative(Register destination, int32_t offset) final;
+ 
+ // Jump, Call, and Ret pseudo instructions implementing inter-working.
+ #define COND_ARGS                                  \
+@@ -234,7 +233,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   // patching.
+   void PatchAndJump(Address target);
+   void Jump(Handle<Code> code, RelocInfo::Mode rmode, COND_ARGS);
+-  void Jump(const ExternalReference& reference) override;
++  void Jump(const ExternalReference& reference);
+   void Call(Register target, COND_ARGS);
+   void Call(Address target, RelocInfo::Mode rmode, COND_ARGS);
+   void Call(Handle<Code> code, RelocInfo::Mode rmode = RelocInfo::CODE_TARGET,
+@@ -245,19 +244,18 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   // Load the builtin given by the Smi in |builtin_index| into the same
+   // register.
+   void LoadEntryFromBuiltinIndex(Register builtin_index);
+-  void CallBuiltinByIndex(Register builtin_index) override;
++  void CallBuiltinByIndex(Register builtin_index);
+ 
+-  void LoadCodeObjectEntry(Register destination,
+-                           Register code_object) override {
++  void LoadCodeObjectEntry(Register destination, Register code_object) {
+     // TODO(mips): Implement.
+     UNIMPLEMENTED();
+   }
+-  void CallCodeObject(Register code_object) override {
++  void CallCodeObject(Register code_object) {
+     // TODO(mips): Implement.
+     UNIMPLEMENTED();
+   }
+   void JumpCodeObject(Register code_object,
+-                      JumpMode jump_mode = JumpMode::kJump) override {
++                      JumpMode jump_mode = JumpMode::kJump) {
+     // TODO(mips): Implement.
+     UNIMPLEMENTED();
+   }
+@@ -749,7 +747,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+                            Func GetLabelFunction);
+ 
+   // Load an object from the root table.
+-  void LoadRoot(Register destination, RootIndex index) override;
++  void LoadRoot(Register destination, RootIndex index) final;
+   void LoadRoot(Register destination, RootIndex index, Condition cond,
+                 Register src1, const Operand& src2);
+ 
+diff --git a/src/codegen/ppc/macro-assembler-ppc.h b/src/codegen/ppc/macro-assembler-ppc.h
+index 7bea113561..97de5e05e6 100644
+--- a/src/codegen/ppc/macro-assembler-ppc.h
++++ b/src/codegen/ppc/macro-assembler-ppc.h
+@@ -309,7 +309,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+                      Register exclusion3 = no_reg);
+ 
+   // Load an object from the root table.
+-  void LoadRoot(Register destination, RootIndex index) override {
++  void LoadRoot(Register destination, RootIndex index) final {
+     LoadRoot(destination, index, al);
+   }
+   void LoadRoot(Register destination, RootIndex index, Condition cond);
+@@ -379,8 +379,8 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   void MovFromFloatParameter(DoubleRegister dst);
+   void MovFromFloatResult(DoubleRegister dst);
+ 
+-  void Trap() override;
+-  void DebugBreak() override;
++  void Trap();
++  void DebugBreak();
+ 
+   // Calls Abort(msg) if the condition cond is not satisfied.
+   // Use --debug_code to enable.
+@@ -407,10 +407,9 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+                          Register src_high, uint32_t shift);
+ #endif
+ 
+-  void LoadFromConstantsTable(Register destination,
+-                              int constant_index) override;
+-  void LoadRootRegisterOffset(Register destination, intptr_t offset) override;
+-  void LoadRootRelative(Register destination, int32_t offset) override;
++  void LoadFromConstantsTable(Register destination, int constant_index) final;
++  void LoadRootRegisterOffset(Register destination, intptr_t offset) final;
++  void LoadRootRelative(Register destination, int32_t offset) final;
+ 
+   // Jump, Call, and Ret pseudo instructions implementing inter-working.
+   void Jump(Register target);
+@@ -418,7 +417,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+             CRegister cr = cr7);
+   void Jump(Handle<Code> code, RelocInfo::Mode rmode, Condition cond = al,
+             CRegister cr = cr7);
+-  void Jump(const ExternalReference& reference) override;
++  void Jump(const ExternalReference& reference);
+   void Jump(intptr_t target, RelocInfo::Mode rmode, Condition cond = al,
+             CRegister cr = cr7);
+   void Call(Register target);
+@@ -430,12 +429,12 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   // Load the builtin given by the Smi in |builtin_index| into the same
+   // register.
+   void LoadEntryFromBuiltinIndex(Register builtin_index);
+-  void LoadCodeObjectEntry(Register destination, Register code_object) override;
+-  void CallCodeObject(Register code_object) override;
++  void LoadCodeObjectEntry(Register destination, Register code_object);
++  void CallCodeObject(Register code_object);
+   void JumpCodeObject(Register code_object,
+-                      JumpMode jump_mode = JumpMode::kJump) override;
++                      JumpMode jump_mode = JumpMode::kJump);
+ 
+-  void CallBuiltinByIndex(Register builtin_index) override;
++  void CallBuiltinByIndex(Register builtin_index);
+   void CallForDeoptimization(Builtins::Name target, int deopt_id, Label* exit,
+                              DeoptimizeKind kind, Label* ret,
+                              Label* jump_deoptimization_entry_label);
+diff --git a/src/codegen/riscv64/macro-assembler-riscv64.h b/src/codegen/riscv64/macro-assembler-riscv64.h
+index 22b7da3ce0..07534fc388 100644
+--- a/src/codegen/riscv64/macro-assembler-riscv64.h
++++ b/src/codegen/riscv64/macro-assembler-riscv64.h
+@@ -120,8 +120,8 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   // -------------------------------------------------------------------------
+   // Debugging.
+ 
+-  void Trap() override;
+-  void DebugBreak() override;
++  void Trap();
++  void DebugBreak();
+ 
+   // Calls Abort(msg) if the condition cc is not satisfied.
+   // Use --debug_code to enable.
+@@ -200,10 +200,9 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   void li(Register dst, const StringConstantBase* string,
+           LiFlags mode = OPTIMIZE_SIZE);
+ 
+-  void LoadFromConstantsTable(Register destination,
+-                              int constant_index) override;
+-  void LoadRootRegisterOffset(Register destination, intptr_t offset) override;
+-  void LoadRootRelative(Register destination, int32_t offset) override;
++  void LoadFromConstantsTable(Register destination, int constant_index) final;
++  void LoadRootRegisterOffset(Register destination, intptr_t offset) final;
++  void LoadRootRelative(Register destination, int32_t offset) final;
+ 
+   inline void GenPCRelativeJump(Register rd, int64_t imm32);
+   inline void GenPCRelativeJumpAndLink(Register rd, int64_t imm32);
+@@ -220,7 +219,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   // patching.
+   void PatchAndJump(Address target);
+   void Jump(Handle<Code> code, RelocInfo::Mode rmode, COND_ARGS);
+-  void Jump(const ExternalReference& reference) override;
++  void Jump(const ExternalReference& reference);
+   void Call(Register target, COND_ARGS);
+   void Call(Address target, RelocInfo::Mode rmode, COND_ARGS);
+   void Call(Handle<Code> code, RelocInfo::Mode rmode = RelocInfo::CODE_TARGET,
+@@ -236,7 +235,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   void LoadEntryFromBuiltinIndex(Builtins::Name builtin_index,
+                                  Register destination);
+   MemOperand EntryFromBuiltinIndexAsOperand(Builtins::Name builtin_index);
+-  void CallBuiltinByIndex(Register builtin_index) override;
++  void CallBuiltinByIndex(Register builtin_index);
+   void CallBuiltin(Builtins::Name builtin) {
+     // TODO(11527): drop the int overload in favour of the Builtins::Name one.
+     return CallBuiltin(static_cast<int>(builtin));
+@@ -248,10 +247,10 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   }
+   void TailCallBuiltin(int builtin_index);
+ 
+-  void LoadCodeObjectEntry(Register destination, Register code_object) override;
+-  void CallCodeObject(Register code_object) override;
++  void LoadCodeObjectEntry(Register destination, Register code_object);
++  void CallCodeObject(Register code_object);
+   void JumpCodeObject(Register code_object,
+-                      JumpMode jump_mode = JumpMode::kJump) override;
++                      JumpMode jump_mode = JumpMode::kJump);
+ 
+   // Generates an instruction sequence s.t. the return address points to the
+   // instruction following the call.
+@@ -745,7 +744,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+                            Func GetLabelFunction);
+ 
+   // Load an object from the root table.
+-  void LoadRoot(Register destination, RootIndex index) override;
++  void LoadRoot(Register destination, RootIndex index) final;
+   void LoadRoot(Register destination, RootIndex index, Condition cond,
+                 Register src1, const Operand& src2);
+ 
+diff --git a/src/codegen/s390/macro-assembler-s390.h b/src/codegen/s390/macro-assembler-s390.h
+index eb800dd836..f0db49d5e2 100644
+--- a/src/codegen/s390/macro-assembler-s390.h
++++ b/src/codegen/s390/macro-assembler-s390.h
+@@ -77,16 +77,15 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   void NearestIntF32(DoubleRegister dst, DoubleRegister src);
+   void NearestIntF64(DoubleRegister dst, DoubleRegister src);
+ 
+-  void LoadFromConstantsTable(Register destination,
+-                              int constant_index) override;
+-  void LoadRootRegisterOffset(Register destination, intptr_t offset) override;
+-  void LoadRootRelative(Register destination, int32_t offset) override;
++  void LoadFromConstantsTable(Register destination, int constant_index) final;
++  void LoadRootRegisterOffset(Register destination, intptr_t offset) final;
++  void LoadRootRelative(Register destination, int32_t offset) final;
+ 
+   // Jump, Call, and Ret pseudo instructions implementing inter-working.
+   void Jump(Register target, Condition cond = al);
+   void Jump(Address target, RelocInfo::Mode rmode, Condition cond = al);
+   void Jump(Handle<Code> code, RelocInfo::Mode rmode, Condition cond = al);
+-  void Jump(const ExternalReference& reference) override;
++  void Jump(const ExternalReference& reference);
+   // Jump the register contains a smi.
+   inline void JumpIfSmi(Register value, Label* smi_label) {
+     TestIfSmi(value);
+@@ -123,12 +122,12 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   // Load the builtin given by the Smi in |builtin_index| into the same
+   // register.
+   void LoadEntryFromBuiltinIndex(Register builtin_index);
+-  void LoadCodeObjectEntry(Register destination, Register code_object) override;
+-  void CallCodeObject(Register code_object) override;
++  void LoadCodeObjectEntry(Register destination, Register code_object);
++  void CallCodeObject(Register code_object);
+   void JumpCodeObject(Register code_object,
+-                      JumpMode jump_mode = JumpMode::kJump) override;
++                      JumpMode jump_mode = JumpMode::kJump);
+ 
+-  void CallBuiltinByIndex(Register builtin_index) override;
++  void CallBuiltinByIndex(Register builtin_index);
+ 
+   // Register move. May do nothing if the registers are identical.
+   void Move(Register dst, Smi smi) { LoadSmiLiteral(dst, smi); }
+@@ -854,8 +853,8 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   void MovFromFloatParameter(DoubleRegister dst);
+   void MovFromFloatResult(DoubleRegister dst);
+ 
+-  void Trap() override;
+-  void DebugBreak() override;
++  void Trap();
++  void DebugBreak();
+ 
+   // Emit code for a truncating division by a constant. The dividend register is
+   // unchanged and ip gets clobbered. Dividend and result must be different.
+diff --git a/src/codegen/turbo-assembler.h b/src/codegen/turbo-assembler.h
+index e788cb3d19..b4715cedc7 100644
+--- a/src/codegen/turbo-assembler.h
++++ b/src/codegen/turbo-assembler.h
+@@ -15,12 +15,6 @@
+ namespace v8 {
+ namespace internal {
+ 
+-enum class JumpMode {
+-  kJump,          // Does a direct jump to the given address
+-  kPushAndReturn  // Pushes the given address as the current return address and
+-                  // does a return
+-};
+-
+ // Common base class for platform-specific TurboAssemblers containing
+ // platform-independent bits.
+ // You will encounter two subclasses, TurboAssembler (derives from
+@@ -64,22 +58,6 @@ class V8_EXPORT_PRIVATE TurboAssemblerBase : public Assembler {
+   void set_has_frame(bool v) { has_frame_ = v; }
+   bool has_frame() const { return has_frame_; }
+ 
+-  virtual void Jump(const ExternalReference& reference) = 0;
+-
+-  // Calls the builtin given by the Smi in |builtin|. If builtins are embedded,
+-  // the trampoline Code object on the heap is not used.
+-  virtual void CallBuiltinByIndex(Register builtin_index) = 0;
+-
+-  // Calls/jumps to the given Code object. If builtins are embedded, the
+-  // trampoline Code object on the heap is not used.
+-  virtual void CallCodeObject(Register code_object) = 0;
+-  virtual void JumpCodeObject(Register code_object,
+-                              JumpMode jump_mode = JumpMode::kJump) = 0;
+-
+-  // Loads the given Code object's entry point into the destination register.
+-  virtual void LoadCodeObjectEntry(Register destination,
+-                                   Register code_object) = 0;
+-
+   // Loads the given constant or external reference without embedding its direct
+   // pointer. The produced code is isolate-independent.
+   void IndirectLoadConstant(Register destination, Handle<HeapObject> object);
+@@ -98,9 +76,6 @@ class V8_EXPORT_PRIVATE TurboAssemblerBase : public Assembler {
+ 
+   virtual void LoadRoot(Register destination, RootIndex index) = 0;
+ 
+-  virtual void Trap() = 0;
+-  virtual void DebugBreak() = 0;
+-
+   static int32_t RootRegisterOffsetForRootIndex(RootIndex root_index);
+   static int32_t RootRegisterOffsetForBuiltinIndex(int builtin_index);
+ 
+diff --git a/src/codegen/x64/macro-assembler-x64.h b/src/codegen/x64/macro-assembler-x64.h
+index 83ee35b82d..304f0a9863 100644
+--- a/src/codegen/x64/macro-assembler-x64.h
++++ b/src/codegen/x64/macro-assembler-x64.h
+@@ -123,7 +123,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public SharedTurboAssembler {
+   void Ret(int bytes_dropped, Register scratch);
+ 
+   // Operations on roots in the root-array.
+-  void LoadRoot(Register destination, RootIndex index) override;
++  void LoadRoot(Register destination, RootIndex index) final;
+   void LoadRoot(Operand destination, RootIndex index) {
+     LoadRoot(kScratchRegister, index);
+     movq(destination, kScratchRegister);
+@@ -320,10 +320,9 @@ class V8_EXPORT_PRIVATE TurboAssembler : public SharedTurboAssembler {
+   // register.
+   void LoadAddress(Register destination, ExternalReference source);
+ 
+-  void LoadFromConstantsTable(Register destination,
+-                              int constant_index) override;
+-  void LoadRootRegisterOffset(Register destination, intptr_t offset) override;
+-  void LoadRootRelative(Register destination, int32_t offset) override;
++  void LoadFromConstantsTable(Register destination, int constant_index) final;
++  void LoadRootRegisterOffset(Register destination, intptr_t offset) final;
++  void LoadRootRelative(Register destination, int32_t offset) final;
+ 
+   // Operand pointing to an external reference.
+   // May emit code to set up the scratch register. The operand is
+@@ -343,7 +342,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public SharedTurboAssembler {
+ 
+   Operand EntryFromBuiltinIndexAsOperand(Builtins::Name builtin_index);
+   Operand EntryFromBuiltinIndexAsOperand(Register builtin_index);
+-  void CallBuiltinByIndex(Register builtin_index) override;
++  void CallBuiltinByIndex(Register builtin_index);
+   void CallBuiltin(Builtins::Name builtin) {
+     // TODO(11527): drop the int overload in favour of the Builtins::Name one.
+     return CallBuiltin(static_cast<int>(builtin));
+@@ -355,16 +354,16 @@ class V8_EXPORT_PRIVATE TurboAssembler : public SharedTurboAssembler {
+   }
+   void TailCallBuiltin(int builtin_index);
+ 
+-  void LoadCodeObjectEntry(Register destination, Register code_object) override;
+-  void CallCodeObject(Register code_object) override;
++  void LoadCodeObjectEntry(Register destination, Register code_object);
++  void CallCodeObject(Register code_object);
+   void JumpCodeObject(Register code_object,
+-                      JumpMode jump_mode = JumpMode::kJump) override;
++                      JumpMode jump_mode = JumpMode::kJump);
+ 
+   void RetpolineCall(Register reg);
+   void RetpolineCall(Address destination, RelocInfo::Mode rmode);
+ 
+   void Jump(Address destination, RelocInfo::Mode rmode);
+-  void Jump(const ExternalReference& reference) override;
++  void Jump(const ExternalReference& reference);
+   void Jump(Operand op);
+   void Jump(Handle<Code> code_object, RelocInfo::Mode rmode,
+             Condition cc = always);
+@@ -375,8 +374,8 @@ class V8_EXPORT_PRIVATE TurboAssembler : public SharedTurboAssembler {
+                              DeoptimizeKind kind, Label* ret,
+                              Label* jump_deoptimization_entry_label);
+ 
+-  void Trap() override;
+-  void DebugBreak() override;
++  void Trap();
++  void DebugBreak();
+ 
+   // Will move src1 to dst if dst != src1.
+   void Pmaddwd(XMMRegister dst, XMMRegister src1, Operand src2);
+-- 
+2.35.1
+

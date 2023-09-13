@@ -1,0 +1,126 @@
+From e5e5932390be595094589892427c000640122967 Mon Sep 17 00:00:00 2001
+From: Yahan Lu <yahan@iscas.ac.cn>
+Date: Fri, 9 Apr 2021 13:53:31 +0800
+Subject: [PATCH] [riscv64]Clean call/jump register
+
+Change-Id: I33d7bdfc14af9ad169c79a3efd6af6ba2f2362c2
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/2814726
+Commit-Queue: Brice Dobry <brice.dobry@futurewei.com>
+Reviewed-by: Brice Dobry <brice.dobry@futurewei.com>
+Cr-Commit-Position: refs/heads/master@{#74124}
+---
+ src/builtins/riscv64/builtins-riscv64.cc               | 10 +++++-----
+ src/codegen/riscv64/macro-assembler-riscv64.cc         |  6 ++----
+ src/codegen/riscv64/register-riscv64.h                 |  2 +-
+ src/compiler/backend/riscv64/code-generator-riscv64.cc |  4 ++--
+ src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h  |  8 ++++----
+ 5 files changed, 14 insertions(+), 16 deletions(-)
+
+diff --git a/src/builtins/riscv64/builtins-riscv64.cc b/src/builtins/riscv64/builtins-riscv64.cc
+index f4f130e6f5..1b6d60f135 100644
+--- a/src/builtins/riscv64/builtins-riscv64.cc
++++ b/src/builtins/riscv64/builtins-riscv64.cc
+@@ -1727,12 +1727,12 @@ void Generate_ContinueToBuiltinHelper(MacroAssembler* masm,
+                 sp, BuiltinContinuationFrameConstants::kFixedFrameSizeFromFp));
+   // Load builtin index (stored as a Smi) and use it to get the builtin start
+   // address from the builtins table.
+-  __ Pop(t0);
++  __ Pop(t6);
+   __ Add64(sp, sp,
+            Operand(BuiltinContinuationFrameConstants::kFixedFrameSizeFromFp));
+   __ Pop(ra);
+-  __ LoadEntryFromBuiltinIndex(t0);
+-  __ Jump(t0);
++  __ LoadEntryFromBuiltinIndex(t6);
++  __ Jump(t6);
+ }
+ }  // namespace
+ 
+@@ -3476,9 +3476,9 @@ void Generate_DeoptimizationEntry(MacroAssembler* masm,
+     }
+   }
+ 
+-  __ pop(t3);  // Get continuation, leave pc on stack.
++  __ pop(t6);  // Get continuation, leave pc on stack.
+   __ pop(ra);
+-  __ Jump(t3);
++  __ Jump(t6);
+   __ stop();
+ }
+ 
+diff --git a/src/codegen/riscv64/macro-assembler-riscv64.cc b/src/codegen/riscv64/macro-assembler-riscv64.cc
+index 6330813e0e..6193de4d1f 100644
+--- a/src/codegen/riscv64/macro-assembler-riscv64.cc
++++ b/src/codegen/riscv64/macro-assembler-riscv64.cc
+@@ -4584,12 +4584,10 @@ void TurboAssembler::ResetSpeculationPoisonRegister() {
+ void TurboAssembler::CallForDeoptimization(Builtins::Name target, int,
+                                            Label* exit, DeoptimizeKind kind,
+                                            Label* ret, Label*) {
+-  UseScratchRegisterScope temps(this);
+   BlockTrampolinePoolScope block_trampoline_pool(this);
+-  Register scratch = temps.Acquire();
+-  Ld(scratch,
++  Ld(t6,
+      MemOperand(kRootRegister, IsolateData::builtin_entry_slot_offset(target)));
+-  Call(scratch);
++  Call(t6);
+   DCHECK_EQ(SizeOfCodeGeneratedSince(exit),
+             (kind == DeoptimizeKind::kLazy)
+                 ? Deoptimizer::kLazyDeoptExitSize
+diff --git a/src/codegen/riscv64/register-riscv64.h b/src/codegen/riscv64/register-riscv64.h
+index b97594becd..4aacad611d 100644
+--- a/src/codegen/riscv64/register-riscv64.h
++++ b/src/codegen/riscv64/register-riscv64.h
+@@ -337,7 +337,7 @@ constexpr Register kJavaScriptCallTargetRegister = kJSFunctionRegister;
+ constexpr Register kJavaScriptCallNewTargetRegister = a3;
+ constexpr Register kJavaScriptCallExtraArg1Register = a2;
+ 
+-constexpr Register kOffHeapTrampolineRegister = t3;
++constexpr Register kOffHeapTrampolineRegister = t6;
+ constexpr Register kRuntimeCallFunctionRegister = a1;
+ constexpr Register kRuntimeCallArgCountRegister = a0;
+ constexpr Register kRuntimeCallArgvRegister = a2;
+diff --git a/src/compiler/backend/riscv64/code-generator-riscv64.cc b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+index 2beed504ee..608a667294 100644
+--- a/src/compiler/backend/riscv64/code-generator-riscv64.cc
++++ b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+@@ -611,8 +611,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+         Address wasm_code = static_cast<Address>(constant.ToInt64());
+         __ Call(wasm_code, constant.rmode());
+       } else {
+-        __ Add64(kScratchReg, i.InputRegister(0), 0);
+-        __ Call(kScratchReg);
++        __ Add64(t6, i.InputRegister(0), 0);
++        __ Call(t6);
+       }
+       RecordCallPosition(instr);
+       frame_access_state()->ClearSPDelta();
+diff --git a/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h b/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
+index b04d8a10a2..f2b698685b 100644
+--- a/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
++++ b/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
+@@ -2557,8 +2557,8 @@ void LiftoffAssembler::CallIndirect(const ValueKindSig* sig,
+                                     compiler::CallDescriptor* call_descriptor,
+                                     Register target) {
+   if (target == no_reg) {
+-    pop(kScratchReg);
+-    Call(kScratchReg);
++    pop(t6);
++    Call(t6);
+   } else {
+     Call(target);
+   }
+@@ -2566,8 +2566,8 @@ void LiftoffAssembler::CallIndirect(const ValueKindSig* sig,
+ 
+ void LiftoffAssembler::TailCallIndirect(Register target) {
+   if (target == no_reg) {
+-    Pop(kScratchReg);
+-    Jump(kScratchReg);
++    Pop(t6);
++    Jump(t6);
+   } else {
+     Jump(target);
+   }
+-- 
+2.35.1
+

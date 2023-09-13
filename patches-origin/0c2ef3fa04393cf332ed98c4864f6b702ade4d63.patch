@@ -1,0 +1,956 @@
+From 0c2ef3fa04393cf332ed98c4864f6b702ade4d63 Mon Sep 17 00:00:00 2001
+From: Igor Sheludko <ishell@chromium.org>
+Date: Tue, 14 Mar 2023 11:49:16 +0100
+Subject: [PATCH] [ptr-compr] Unify multi-cage mode with shared cage mode
+
+... in particular
+ - always allocate Isolate in C++ heap,
+ - always use separate registers for root table and cage base.
+
+Bug: v8:13788
+Change-Id: Ie94ca1a09130209fdba47254b4327a2ad0729eb7
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4321347
+Reviewed-by: Jakob Linke <jgruber@chromium.org>
+Commit-Queue: Igor Sheludko <ishell@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#86400}
+---
+ src/builtins/arm64/builtins-arm64.cc          |  4 +-
+ src/builtins/ppc/builtins-ppc.cc              |  2 +-
+ src/builtins/riscv/builtins-riscv.cc          |  4 +-
+ src/builtins/x64/builtins-x64.cc              |  2 +-
+ src/codegen/arm64/constants-arm64.h           |  8 --
+ src/codegen/arm64/macro-assembler-arm64-inl.h |  2 +-
+ src/codegen/arm64/register-arm64.h            |  6 +-
+ src/codegen/interface-descriptors.cc          |  2 +-
+ src/codegen/loong64/constants-loong64.h       |  3 +-
+ src/codegen/loong64/register-loong64.h        |  6 ++
+ src/codegen/mips64/constants-mips64.h         |  1 -
+ src/codegen/ppc/constants-ppc.h               |  8 --
+ src/codegen/ppc/macro-assembler-ppc.h         |  2 +-
+ src/codegen/ppc/register-ppc.h                |  6 +-
+ src/codegen/riscv/base-constants-riscv.h      |  2 +-
+ src/codegen/riscv/macro-assembler-riscv.h     |  2 +-
+ src/codegen/riscv/register-riscv.h            |  6 +-
+ src/codegen/s390/constants-s390.h             |  8 --
+ src/codegen/x64/constants-x64.h               |  8 --
+ src/codegen/x64/macro-assembler-x64.h         |  2 +-
+ src/codegen/x64/register-x64.h                |  6 +-
+ src/deoptimizer/deoptimizer.cc                |  2 +-
+ src/diagnostics/objects-debug.cc              | 34 +++----
+ src/execution/isolate-utils-inl.h             | 44 +--------
+ src/execution/isolate.cc                      |  4 -
+ src/execution/isolate.h                       |  3 +-
+ src/heap/read-only-heap-inl.h                 |  5 -
+ src/heap/read-only-spaces.cc                  |  3 +-
+ src/init/isolate-allocator.cc                 | 92 ++-----------------
+ src/init/isolate-allocator.h                  | 14 +--
+ src/objects/objects-inl.h                     |  6 +-
+ src/objects/swiss-name-dictionary-inl.h       | 13 +--
+ src/wasm/baseline/liftoff-assembler-defs.h    |  2 +-
+ test/cctest/test-ptr-compr-cage.cc            | 16 ++--
+ .../assembler/macro-assembler-x64-unittest.cc |  4 +-
+ test/unittests/heap/heap-unittest.cc          |  5 -
+ 36 files changed, 79 insertions(+), 258 deletions(-)
+
+diff --git a/src/builtins/arm64/builtins-arm64.cc b/src/builtins/arm64/builtins-arm64.cc
+index 38b48e4cf3..c16655c918 100644
+--- a/src/builtins/arm64/builtins-arm64.cc
++++ b/src/builtins/arm64/builtins-arm64.cc
+@@ -645,7 +645,7 @@ void Generate_JSEntryVariant(MacroAssembler* masm, StackFrame::Type type,
+     // C calling convention. The first argument is passed in x0.
+     __ Mov(kRootRegister, x0);
+ 
+-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
++#ifdef V8_COMPRESS_POINTERS
+     // Initialize the pointer cage base register.
+     __ LoadRootRelative(kPtrComprCageBaseRegister,
+                         IsolateData::cage_base_offset());
+@@ -929,7 +929,7 @@ static void Generate_JSEntryTrampolineHelper(MacroAssembler* masm,
+     __ Mov(x23, x19);
+     __ Mov(x24, x19);
+     __ Mov(x25, x19);
+-#ifndef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
++#ifndef V8_COMPRESS_POINTERS
+     __ Mov(x28, x19);
+ #endif
+     // Don't initialize the reserved registers.
+diff --git a/src/builtins/ppc/builtins-ppc.cc b/src/builtins/ppc/builtins-ppc.cc
+index 906c274a39..b5789f3cda 100644
+--- a/src/builtins/ppc/builtins-ppc.cc
++++ b/src/builtins/ppc/builtins-ppc.cc
+@@ -850,7 +850,7 @@ void Generate_JSEntryVariant(MacroAssembler* masm, StackFrame::Type type,
+     // C calling convention. The first argument is passed in r3.
+     __ mr(kRootRegister, r3);
+ 
+-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
++#ifdef V8_COMPRESS_POINTERS
+     // Initialize the pointer cage base register.
+     __ LoadRootRelative(kPtrComprCageBaseRegister,
+                         IsolateData::cage_base_offset());
+diff --git a/src/builtins/riscv/builtins-riscv.cc b/src/builtins/riscv/builtins-riscv.cc
+index 78a95eefdb..c811690d4e 100644
+--- a/src/builtins/riscv/builtins-riscv.cc
++++ b/src/builtins/riscv/builtins-riscv.cc
+@@ -578,7 +578,7 @@ void Generate_JSEntryVariant(MacroAssembler* masm, StackFrame::Type type,
+     // C calling convention. The first argument is passed in a0.
+     __ Move(kRootRegister, a0);
+ 
+-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
++#ifdef V8_COMPRESS_POINTERS
+     // Initialize the pointer cage base register.
+     __ LoadRootRelative(kPtrComprCageBaseRegister,
+                         IsolateData::cage_base_offset());
+@@ -799,7 +799,7 @@ static void Generate_JSEntryTrampolineHelper(MacroAssembler* masm,
+     __ Move(s3, a4);
+     __ Move(s4, a4);
+     __ Move(s5, a4);
+-#ifndef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
++#ifndef V8_COMPRESS_POINTERS
+     __ Move(s11, a4);
+ #endif
+     // s6 holds the root address. Do not clobber.
+diff --git a/src/builtins/x64/builtins-x64.cc b/src/builtins/x64/builtins-x64.cc
+index 282a317ce2..cc06b15938 100644
+--- a/src/builtins/x64/builtins-x64.cc
++++ b/src/builtins/x64/builtins-x64.cc
+@@ -398,7 +398,7 @@ void Generate_JSEntryVariant(MacroAssembler* masm, StackFrame::Type type,
+     // C calling convention. The first argument is passed in arg_reg_1.
+     __ movq(kRootRegister, arg_reg_1);
+ 
+-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
++#ifdef V8_COMPRESS_POINTERS
+     // Initialize the pointer cage base register.
+     __ LoadRootRelative(kPtrComprCageBaseRegister,
+                         IsolateData::cage_base_offset());
+diff --git a/src/codegen/arm64/constants-arm64.h b/src/codegen/arm64/constants-arm64.h
+index 56509c8067..1866842f1e 100644
+--- a/src/codegen/arm64/constants-arm64.h
++++ b/src/codegen/arm64/constants-arm64.h
+@@ -144,15 +144,7 @@ constexpr unsigned kFloat16ExponentBias = 15;
+ 
+ // The actual value of the kRootRegister is offset from the IsolateData's start
+ // to take advantage of negative displacement values.
+-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+ constexpr int kRootRegisterBias = 256;
+-// Problems with #include order prevent this static_assert:
+-// static_assert(kRootRegister != kPtrComprCageBaseRegister);
+-#else
+-constexpr int kRootRegisterBias = 0;
+-// Problems with #include order prevent this static_assert:
+-// static_assert(kRootRegister == kPtrComprCageBaseRegister);
+-#endif  // V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+ 
+ using float16 = uint16_t;
+ 
+diff --git a/src/codegen/arm64/macro-assembler-arm64-inl.h b/src/codegen/arm64/macro-assembler-arm64-inl.h
+index 25105b6ff1..831154df10 100644
+--- a/src/codegen/arm64/macro-assembler-arm64-inl.h
++++ b/src/codegen/arm64/macro-assembler-arm64-inl.h
+@@ -1099,7 +1099,7 @@ void MacroAssembler::Uxtw(const Register& rd, const Register& rn) {
+ void MacroAssembler::InitializeRootRegister() {
+   ExternalReference isolate_root = ExternalReference::isolate_root(isolate());
+   Mov(kRootRegister, Operand(isolate_root));
+-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
++#ifdef V8_COMPRESS_POINTERS
+   LoadRootRelative(kPtrComprCageBaseRegister, IsolateData::cage_base_offset());
+ #endif
+ }
+diff --git a/src/codegen/arm64/register-arm64.h b/src/codegen/arm64/register-arm64.h
+index 24878e9d25..3b4c629159 100644
+--- a/src/codegen/arm64/register-arm64.h
++++ b/src/codegen/arm64/register-arm64.h
+@@ -35,7 +35,7 @@ namespace internal {
+          R(x19) R(x20) R(x21) R(x22) R(x23) R(x24) R(x25) \
+   R(x27)
+ 
+-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
++#ifdef V8_COMPRESS_POINTERS
+ #define MAYBE_ALLOCATABLE_GENERAL_REGISTERS(R)
+ #else
+ #define MAYBE_ALLOCATABLE_GENERAL_REGISTERS(R) R(x28)
+@@ -496,10 +496,10 @@ ALIAS_REGISTER(Register, wip1, w17);
+ ALIAS_REGISTER(Register, kRootRegister, x26);
+ ALIAS_REGISTER(Register, rr, x26);
+ // Pointer cage base register.
+-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
++#ifdef V8_COMPRESS_POINTERS
+ ALIAS_REGISTER(Register, kPtrComprCageBaseRegister, x28);
+ #else
+-ALIAS_REGISTER(Register, kPtrComprCageBaseRegister, kRootRegister);
++ALIAS_REGISTER(Register, kPtrComprCageBaseRegister, no_reg);
+ #endif
+ // Context pointer register.
+ ALIAS_REGISTER(Register, cp, x27);
+diff --git a/src/codegen/interface-descriptors.cc b/src/codegen/interface-descriptors.cc
+index 2d42960ba1..e5e26b5805 100644
+--- a/src/codegen/interface-descriptors.cc
++++ b/src/codegen/interface-descriptors.cc
+@@ -25,7 +25,7 @@ void CallInterfaceDescriptorData::InitializeRegisters(
+       DCHECK(reg.is_valid());
+       DCHECK(!reglist.has(reg));
+       DCHECK_NE(reg, kRootRegister);
+-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
++#ifdef V8_COMPRESS_POINTERS
+       DCHECK_NE(reg, kPtrComprCageBaseRegister);
+ #endif
+       reglist.set(reg);
+diff --git a/src/codegen/loong64/constants-loong64.h b/src/codegen/loong64/constants-loong64.h
+index 0c626e2e75..42c6b48a30 100644
+--- a/src/codegen/loong64/constants-loong64.h
++++ b/src/codegen/loong64/constants-loong64.h
+@@ -71,8 +71,7 @@ const uint32_t kFCSRExceptionCauseMask = kFCSRCauseMask ^ kFCSRInexactCauseMask;
+ 
+ // Actual value of root register is offset from the root array's start
+ // to take advantage of negative displacement values.
+-// TODO(sigurds): Choose best value.
+-constexpr int kRootRegisterBias = kSystemPointerSize == kTaggedSize ? 256 : 0;
++constexpr int kRootRegisterBias = 256;
+ 
+ // Helper functions for converting between register numbers and names.
+ class Registers {
+diff --git a/src/codegen/loong64/register-loong64.h b/src/codegen/loong64/register-loong64.h
+index 81c3bdcb6e..e37ddbd743 100644
+--- a/src/codegen/loong64/register-loong64.h
++++ b/src/codegen/loong64/register-loong64.h
+@@ -210,7 +210,13 @@ constexpr Register kRuntimeCallArgvRegister = a2;
+ constexpr Register kWasmInstanceRegister = a0;
+ constexpr Register kWasmCompileLazyFuncIndexRegister = t0;
+ 
++#ifdef V8_COMPRESS_POINTERS
++// TODO(v8:13788): fix pointer compression. kPtrComprCageBaseRegister must be
++// different from kRootRegister.
+ constexpr Register kPtrComprCageBaseRegister = kRootRegister;
++#else
++constexpr Register kPtrComprCageBaseRegister = no_reg;
++#endif
+ 
+ constexpr DoubleRegister kFPReturnRegister0 = f0;
+ 
+diff --git a/src/codegen/mips64/constants-mips64.h b/src/codegen/mips64/constants-mips64.h
+index e1bc8356a3..1b8790d844 100644
+--- a/src/codegen/mips64/constants-mips64.h
++++ b/src/codegen/mips64/constants-mips64.h
+@@ -197,7 +197,6 @@ const int32_t kPrefHintPrepareForStore = 30;
+ 
+ // Actual value of root register is offset from the root array's start
+ // to take advantage of negative displacement values.
+-// TODO(sigurds): Choose best value.
+ constexpr int kRootRegisterBias = 256;
+ 
+ // Helper functions for converting between register numbers and names.
+diff --git a/src/codegen/ppc/constants-ppc.h b/src/codegen/ppc/constants-ppc.h
+index 99d53bfc96..6ddb3da411 100644
+--- a/src/codegen/ppc/constants-ppc.h
++++ b/src/codegen/ppc/constants-ppc.h
+@@ -83,15 +83,7 @@ const int kLoadDoubleMaxReachBits = 15;
+ 
+ // The actual value of the kRootRegister is offset from the IsolateData's start
+ // to take advantage of negative displacement values.
+-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+ constexpr int kRootRegisterBias = 128;
+-// Problems with #include order prevent this static_assert:
+-// static_assert(kRootRegister != kPtrComprCageBaseRegister);
+-#else
+-constexpr int kRootRegisterBias = 0;
+-// Problems with #include order prevent this static_assert:
+-// static_assert(kRootRegister == kPtrComprCageBaseRegister);
+-#endif  // V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+ 
+ // sign-extend the least significant 5-bits of value <imm>
+ #define SIGN_EXT_IMM5(imm) ((static_cast<int>(imm) << 27) >> 27)
+diff --git a/src/codegen/ppc/macro-assembler-ppc.h b/src/codegen/ppc/macro-assembler-ppc.h
+index d877b0b5a9..818ef0bc62 100644
+--- a/src/codegen/ppc/macro-assembler-ppc.h
++++ b/src/codegen/ppc/macro-assembler-ppc.h
+@@ -141,7 +141,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
+   void InitializeRootRegister() {
+     ExternalReference isolate_root = ExternalReference::isolate_root(isolate());
+     mov(kRootRegister, Operand(isolate_root));
+-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
++#ifdef V8_COMPRESS_POINTERS
+     LoadRootRelative(kPtrComprCageBaseRegister,
+                      IsolateData::cage_base_offset());
+ #endif
+diff --git a/src/codegen/ppc/register-ppc.h b/src/codegen/ppc/register-ppc.h
+index bdcb12b9d2..083a86855f 100644
+--- a/src/codegen/ppc/register-ppc.h
++++ b/src/codegen/ppc/register-ppc.h
+@@ -29,7 +29,7 @@ namespace internal {
+ #define MAYBE_ALLOCATEABLE_CONSTANT_POOL_REGISTER(V) V(r28)
+ #endif
+ 
+-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
++#ifdef V8_COMPRESS_POINTERS
+ #define MAYBE_ALLOCATABLE_CAGE_REGISTERS(V)
+ #else
+ #define MAYBE_ALLOCATABLE_CAGE_REGISTERS(V)  V(r27)
+@@ -146,10 +146,10 @@ constexpr Register no_reg = Register::no_reg();
+ constexpr Register kConstantPoolRegister = r28;  // Constant pool.
+ constexpr Register kRootRegister = r29;          // Roots array pointer.
+ constexpr Register cp = r30;                     // JavaScript context pointer.
+-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
++#ifdef V8_COMPRESS_POINTERS
+ constexpr Register kPtrComprCageBaseRegister = r27;  // callee save
+ #else
+-constexpr Register kPtrComprCageBaseRegister = kRootRegister;
++constexpr Register kPtrComprCageBaseRegister = no_reg;
+ #endif
+ 
+ // Returns the number of padding slots needed for stack pointer alignment.
+diff --git a/src/codegen/riscv/base-constants-riscv.h b/src/codegen/riscv/base-constants-riscv.h
+index 0f225c39f7..d4d32142e0 100644
+--- a/src/codegen/riscv/base-constants-riscv.h
++++ b/src/codegen/riscv/base-constants-riscv.h
+@@ -55,9 +55,9 @@ const uint32_t kLessSignificantWordInDoublewordOffset = 4;
+ namespace v8 {
+ namespace internal {
+ using Opcode = uint32_t;
++
+ // Actual value of root register is offset from the root array's start
+ // to take advantage of negative displacement values.
+-// TODO(sigurds): Choose best value.
+ constexpr int kRootRegisterBias = 256;
+ 
+ #define RVV_LMUL(V) \
+diff --git a/src/codegen/riscv/macro-assembler-riscv.h b/src/codegen/riscv/macro-assembler-riscv.h
+index 296cb8725a..8f36921b1c 100644
+--- a/src/codegen/riscv/macro-assembler-riscv.h
++++ b/src/codegen/riscv/macro-assembler-riscv.h
+@@ -109,7 +109,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
+   void InitializeRootRegister() {
+     ExternalReference isolate_root = ExternalReference::isolate_root(isolate());
+     li(kRootRegister, Operand(isolate_root));
+-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
++#ifdef V8_COMPRESS_POINTERS
+     LoadRootRelative(kPtrComprCageBaseRegister,
+                      IsolateData::cage_base_offset());
+ #endif
+diff --git a/src/codegen/riscv/register-riscv.h b/src/codegen/riscv/register-riscv.h
+index c530c54b4e..5f1fc91474 100644
+--- a/src/codegen/riscv/register-riscv.h
++++ b/src/codegen/riscv/register-riscv.h
+@@ -31,7 +31,7 @@ namespace internal {
+              V(a4)  V(a5)  V(a6)  V(a7)  V(t0)  \
+              V(t1)  V(t2)  V(t4)  V(s7)  V(s8) V(s9) V(s10)
+ 
+-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
++#ifdef V8_COMPRESS_POINTERS
+ #define MAYBE_ALLOCATABLE_GENERAL_REGISTERS(V)
+ #else
+ #define MAYBE_ALLOCATABLE_GENERAL_REGISTERS(V) V(s11)
+@@ -301,10 +301,10 @@ constexpr VRegister kSimd128ScratchReg2 = v23;
+ constexpr VRegister kSimd128ScratchReg3 = v8;
+ constexpr VRegister kSimd128RegZero = v25;
+ 
+-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
++#ifdef V8_COMPRESS_POINTERS
+ constexpr Register kPtrComprCageBaseRegister = s11;  // callee save
+ #else
+-constexpr Register kPtrComprCageBaseRegister = kRootRegister;
++constexpr Register kPtrComprCageBaseRegister = no_reg;
+ #endif
+ 
+ }  // namespace internal
+diff --git a/src/codegen/s390/constants-s390.h b/src/codegen/s390/constants-s390.h
+index a930155985..3de1a2f372 100644
+--- a/src/codegen/s390/constants-s390.h
++++ b/src/codegen/s390/constants-s390.h
+@@ -43,15 +43,7 @@ const int kNoRegister = -1;
+ 
+ // The actual value of the kRootRegister is offset from the IsolateData's start
+ // to take advantage of negative displacement values.
+-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+ constexpr int kRootRegisterBias = 128;
+-// Problems with #include order prevent this static_assert:
+-// static_assert(kRootRegister != kPtrComprCageBaseRegister);
+-#else
+-constexpr int kRootRegisterBias = 0;
+-// Problems with #include order prevent this static_assert:
+-// static_assert(kRootRegister == kPtrComprCageBaseRegister);
+-#endif  // V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+ 
+ // sign-extend the least significant 16-bits of value <imm>
+ #define SIGN_EXT_IMM16(imm) ((static_cast<int>(imm) << 16) >> 16)
+diff --git a/src/codegen/x64/constants-x64.h b/src/codegen/x64/constants-x64.h
+index 41e0f7a05b..0ff9fcfa66 100644
+--- a/src/codegen/x64/constants-x64.h
++++ b/src/codegen/x64/constants-x64.h
+@@ -12,18 +12,10 @@ namespace internal {
+ 
+ // The actual value of the kRootRegister is offset from the IsolateData's start
+ // to take advantage of negative displacement values.
+-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+ // On x64, the smallest operand encoding allows int8 offsets, thus we select the
+ // bias s.t. the first 32 8-byte slots of IsolateData are can be encoded this
+ // way.
+ constexpr int kRootRegisterBias = 128;
+-// Problems with #include order prevent this static_assert:
+-// static_assert(kRootRegister != kPtrComprCageBaseRegister);
+-#else
+-constexpr int kRootRegisterBias = 0;
+-// Problems with #include order prevent this static_assert:
+-// static_assert(kRootRegister == kPtrComprCageBaseRegister);
+-#endif  // V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+ 
+ // The maximum size of the code range s.t. pc-relative calls are possible
+ // between all Code objects in the range.
+diff --git a/src/codegen/x64/macro-assembler-x64.h b/src/codegen/x64/macro-assembler-x64.h
+index 70afa66a48..fa836261ef 100644
+--- a/src/codegen/x64/macro-assembler-x64.h
++++ b/src/codegen/x64/macro-assembler-x64.h
+@@ -523,7 +523,7 @@ class V8_EXPORT_PRIVATE MacroAssembler
+   void InitializeRootRegister() {
+     ExternalReference isolate_root = ExternalReference::isolate_root(isolate());
+     Move(kRootRegister, isolate_root);
+-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
++#ifdef V8_COMPRESS_POINTERS
+     LoadRootRelative(kPtrComprCageBaseRegister,
+                      IsolateData::cage_base_offset());
+ #endif
+diff --git a/src/codegen/x64/register-x64.h b/src/codegen/x64/register-x64.h
+index 70e01e7a31..a54880a00c 100644
+--- a/src/codegen/x64/register-x64.h
++++ b/src/codegen/x64/register-x64.h
+@@ -41,7 +41,7 @@ namespace internal {
+   V(r12)                                        \
+   V(r15)
+ 
+-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
++#ifdef V8_COMPRESS_POINTERS
+ #define MAYBE_ALLOCATABLE_GENERAL_REGISTERS(V)
+ #else
+ #define MAYBE_ALLOCATABLE_GENERAL_REGISTERS(V) V(r14)
+@@ -289,10 +289,10 @@ constexpr Register kScratchRegister = r10;
+ constexpr XMMRegister kScratchDoubleReg = xmm15;
+ constexpr YMMRegister kScratchSimd256Reg = ymm15;
+ constexpr Register kRootRegister = r13;  // callee save
+-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
++#ifdef V8_COMPRESS_POINTERS
+ constexpr Register kPtrComprCageBaseRegister = r14;  // callee save
+ #else
+-constexpr Register kPtrComprCageBaseRegister = kRootRegister;
++constexpr Register kPtrComprCageBaseRegister = no_reg;
+ #endif
+ 
+ constexpr Register kOffHeapTrampolineRegister = kScratchRegister;
+diff --git a/src/deoptimizer/deoptimizer.cc b/src/deoptimizer/deoptimizer.cc
+index 64bef54dae..3d2b0e2494 100644
+--- a/src/deoptimizer/deoptimizer.cc
++++ b/src/deoptimizer/deoptimizer.cc
+@@ -835,7 +835,7 @@ void Deoptimizer::DoComputeOutputFrames() {
+   FrameDescription* topmost = output_[count - 1];
+   topmost->GetRegisterValues()->SetRegister(kRootRegister.code(),
+                                             isolate()->isolate_root());
+-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
++#ifdef V8_COMPRESS_POINTERS
+   topmost->GetRegisterValues()->SetRegister(kPtrComprCageBaseRegister.code(),
+                                             isolate()->cage_base());
+ #endif
+diff --git a/src/diagnostics/objects-debug.cc b/src/diagnostics/objects-debug.cc
+index 5cf86e18f1..58b77d6972 100644
+--- a/src/diagnostics/objects-debug.cc
++++ b/src/diagnostics/objects-debug.cc
+@@ -1108,29 +1108,25 @@ void Code::CodeVerify(Isolate* isolate) {
+ 
+     // Ensure the cached code entry point corresponds to the InstructionStream
+     // object associated with this Code.
+-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+-    if (V8_SHORT_BUILTIN_CALLS_BOOL) {
+-      if (istream.instruction_start() == code_entry_point()) {
+-        // Most common case, all good.
+-      } else {
+-        // When shared pointer compression cage is enabled and it has the
+-        // embedded code blob copy then the
+-        // InstructionStream::instruction_start() might return the address of
+-        // the remapped builtin regardless of whether the builtins copy existed
+-        // when the code_entry_point value was cached in the Code (see
+-        // InstructionStream::OffHeapInstructionStart()).  So, do a reverse
+-        // Code object lookup via code_entry_point value to ensure it
+-        // corresponds to this current Code object.
+-        Code lookup_result =
+-            isolate->heap()->FindCodeForInnerPointer(code_entry_point());
+-        CHECK_EQ(lookup_result, *this);
+-      }
++#if defined(V8_COMPRESS_POINTERS) && defined(V8_SHORT_BUILTIN_CALLS)
++    if (istream.instruction_start() == code_entry_point()) {
++      // Most common case, all good.
+     } else {
+-      CHECK_EQ(istream.instruction_start(), code_entry_point());
++      // When shared pointer compression cage is enabled and it has the
++      // embedded code blob copy then the
++      // InstructionStream::instruction_start() might return the address of
++      // the remapped builtin regardless of whether the builtins copy existed
++      // when the code_entry_point value was cached in the Code (see
++      // InstructionStream::OffHeapInstructionStart()).  So, do a reverse
++      // Code object lookup via code_entry_point value to ensure it
++      // corresponds to this current Code object.
++      Code lookup_result =
++          isolate->heap()->FindCodeForInnerPointer(code_entry_point());
++      CHECK_EQ(lookup_result, *this);
+     }
+ #else
+     CHECK_EQ(istream.instruction_start(), code_entry_point());
+-#endif  // V8_COMPRESS_POINTERS_IN_SHARED_CAGE
++#endif  // V8_COMPRESS_POINTERS && V8_SHORT_BUILTIN_CALLS
+   }
+ }
+ 
+diff --git a/src/execution/isolate-utils-inl.h b/src/execution/isolate-utils-inl.h
+index b5f20af0be..bbefedff41 100644
+--- a/src/execution/isolate-utils-inl.h
++++ b/src/execution/isolate-utils-inl.h
+@@ -13,69 +13,31 @@
+ namespace v8 {
+ namespace internal {
+ 
+-#ifdef V8_COMPRESS_POINTERS_IN_ISOLATE_CAGE
+-
+-// Aliases for GetPtrComprCageBase when
+-// V8_COMPRESS_POINTERS_IN_ISOLATE_CAGE. Each Isolate has its own cage, whose
+-// base address is also the Isolate root.
+-V8_INLINE Address GetIsolateRootAddress(Address on_heap_addr) {
+-  return V8HeapCompressionScheme::GetPtrComprCageBaseAddress(on_heap_addr);
+-}
+-
+-V8_INLINE Address GetIsolateRootAddress(PtrComprCageBase cage_base) {
+-  return cage_base.address();
+-}
+-
+-#else
+-
+-V8_INLINE Address GetIsolateRootAddress(Address on_heap_addr) { UNREACHABLE(); }
+-
+-V8_INLINE Address GetIsolateRootAddress(PtrComprCageBase cage_base) {
+-  UNREACHABLE();
+-}
+-
+-#endif  // V8_COMPRESS_POINTERS_IN_ISOLATE_CAGE
+-
+ V8_INLINE Heap* GetHeapFromWritableObject(HeapObject object) {
+   // Avoid using the below GetIsolateFromWritableObject because we want to be
+   // able to get the heap, but not the isolate, for off-thread objects.
+ 
+ #if defined V8_ENABLE_THIRD_PARTY_HEAP
+   return Heap::GetIsolateFromWritableObject(object)->heap();
+-#elif defined(V8_COMPRESS_POINTERS_IN_ISOLATE_CAGE) && \
+-    !defined(V8_EXTERNAL_CODE_SPACE)
+-  Isolate* isolate =
+-      Isolate::FromRootAddress(GetIsolateRootAddress(object.ptr()));
+-  DCHECK_NOT_NULL(isolate);
+-  return isolate->heap();
+ #else
+   heap_internals::MemoryChunk* chunk =
+       heap_internals::MemoryChunk::FromHeapObject(object);
+   return chunk->GetHeap();
+-#endif  // V8_COMPRESS_POINTERS_IN_ISOLATE_CAGE, V8_ENABLE_THIRD_PARTY_HEAP
++#endif  // V8_ENABLE_THIRD_PARTY_HEAP
+ }
+ 
+ V8_INLINE Isolate* GetIsolateFromWritableObject(HeapObject object) {
+ #ifdef V8_ENABLE_THIRD_PARTY_HEAP
+   return Heap::GetIsolateFromWritableObject(object);
+-#elif defined(V8_COMPRESS_POINTERS_IN_ISOLATE_CAGE) && \
+-    !defined(V8_EXTERNAL_CODE_SPACE)
+-  Isolate* isolate =
+-      Isolate::FromRootAddress(GetIsolateRootAddress(object.ptr()));
+-  DCHECK_NOT_NULL(isolate);
+-  return isolate;
+ #else
+   return Isolate::FromHeap(GetHeapFromWritableObject(object));
+-#endif  // V8_COMPRESS_POINTERS_IN_ISOLATE_CAGE, V8_ENABLE_THIRD_PARTY_HEAP
++#endif  // V8_ENABLE_THIRD_PARTY_HEAP
+ }
+ 
+ V8_INLINE bool GetIsolateFromHeapObject(HeapObject object, Isolate** isolate) {
+ #ifdef V8_ENABLE_THIRD_PARTY_HEAP
+   *isolate = Heap::GetIsolateFromWritableObject(object);
+   return true;
+-#elif defined V8_COMPRESS_POINTERS_IN_ISOLATE_CAGE
+-  *isolate = GetIsolateFromWritableObject(object);
+-  return true;
+ #else
+   heap_internals::MemoryChunk* chunk =
+       heap_internals::MemoryChunk::FromHeapObject(object);
+@@ -85,7 +47,7 @@ V8_INLINE bool GetIsolateFromHeapObject(HeapObject object, Isolate** isolate) {
+   }
+   *isolate = Isolate::FromHeap(chunk->GetHeap());
+   return true;
+-#endif  // V8_COMPRESS_POINTERS_IN_ISOLATE_CAGE, V8_ENABLE_THIRD_PARTY_HEAP
++#endif  // V8_ENABLE_THIRD_PARTY_HEAP
+ }
+ 
+ // Use this function instead of Internals::GetIsolateForSandbox for internal
+diff --git a/src/execution/isolate.cc b/src/execution/isolate.cc
+index 461b766ae0..a0261b7e7f 100644
+--- a/src/execution/isolate.cc
++++ b/src/execution/isolate.cc
+@@ -3274,10 +3274,6 @@ Isolate* Isolate::Allocate() {
+   // Construct Isolate object in the allocated memory.
+   void* isolate_ptr = isolate_allocator->isolate_memory();
+   Isolate* isolate = new (isolate_ptr) Isolate(std::move(isolate_allocator));
+-#ifdef V8_COMPRESS_POINTERS_IN_ISOLATE_CAGE
+-  DCHECK(IsAligned(isolate->isolate_root(), kPtrComprCageBaseAlignment));
+-  DCHECK_EQ(isolate->isolate_root(), isolate->cage_base());
+-#endif
+ 
+ #ifdef DEBUG
+   non_disposed_isolates_++;
+diff --git a/src/execution/isolate.h b/src/execution/isolate.h
+index 7265fd5243..b6746d78fc 100644
+--- a/src/execution/isolate.h
++++ b/src/execution/isolate.h
+@@ -1158,8 +1158,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+   // compression cage, and the kPtrComprCageBaseRegister is set to this
+   // value. When pointer compression is off, this is always kNullAddress.
+   Address cage_base() const {
+-    DCHECK_IMPLIES(!COMPRESS_POINTERS_IN_ISOLATE_CAGE_BOOL &&
+-                       !COMPRESS_POINTERS_IN_SHARED_CAGE_BOOL,
++    DCHECK_IMPLIES(!COMPRESS_POINTERS_BOOL,
+                    isolate_data()->cage_base() == kNullAddress);
+     return isolate_data()->cage_base();
+   }
+diff --git a/src/heap/read-only-heap-inl.h b/src/heap/read-only-heap-inl.h
+index 5afa1e9982..ad027a7a0d 100644
+--- a/src/heap/read-only-heap-inl.h
++++ b/src/heap/read-only-heap-inl.h
+@@ -27,10 +27,6 @@ ReadOnlyRoots ReadOnlyHeap::EarlyGetReadOnlyRoots(HeapObject object) {
+ 
+ // static
+ ReadOnlyRoots ReadOnlyHeap::GetReadOnlyRoots(HeapObject object) {
+-#ifdef V8_COMPRESS_POINTERS_IN_ISOLATE_CAGE
+-  return ReadOnlyRoots(
+-      Isolate::FromRootAddress(GetIsolateRootAddress(object.ptr())));
+-#else
+ #ifdef V8_SHARED_RO_HEAP
+   auto* shared_ro_heap = SoleReadOnlyHeap::shared_ro_heap_;
+   // If this check fails in code that runs during initialization use
+@@ -40,7 +36,6 @@ ReadOnlyRoots ReadOnlyHeap::GetReadOnlyRoots(HeapObject object) {
+ #else
+   return ReadOnlyRoots(GetHeapFromWritableObject(object));
+ #endif  // V8_SHARED_RO_HEAP
+-#endif  // V8_COMPRESS_POINTERS_IN_ISOLATE_CAGE
+ }
+ 
+ }  // namespace internal
+diff --git a/src/heap/read-only-spaces.cc b/src/heap/read-only-spaces.cc
+index 2bc9e80cd2..7701664983 100644
+--- a/src/heap/read-only-spaces.cc
++++ b/src/heap/read-only-spaces.cc
+@@ -28,7 +28,8 @@ namespace v8 {
+ namespace internal {
+ 
+ void CopyAndRebaseRoots(Address* src, Address* dst, Address new_base) {
+-  Address src_base = GetIsolateRootAddress(src[0]);
++  Address src_base =
++      V8HeapCompressionScheme::GetPtrComprCageBaseAddress(src[0]);
+   for (size_t i = 0; i < ReadOnlyHeap::kEntriesCount; ++i) {
+     dst[i] = src[i] - src_base + new_base;
+   }
+diff --git a/src/init/isolate-allocator.cc b/src/init/isolate-allocator.cc
+index 435c020487..50530da31c 100644
+--- a/src/init/isolate-allocator.cc
++++ b/src/init/isolate-allocator.cc
+@@ -16,32 +16,14 @@ namespace v8 {
+ namespace internal {
+ 
+ #ifdef V8_COMPRESS_POINTERS
+-namespace {
+-
+-// "IsolateRootBiasPage" is an optional region before the 4Gb aligned
+-// reservation. This "IsolateRootBiasPage" page is supposed to be used for
+-// storing part of the Isolate object when Isolate::isolate_root_bias() is
+-// not zero.
+-inline size_t GetIsolateRootBiasPageSize(
+-    v8::PageAllocator* platform_page_allocator) {
+-  return RoundUp(Isolate::isolate_root_bias(),
+-                 platform_page_allocator->AllocatePageSize());
+-}
+-
+-}  // namespace
+-
+ struct PtrComprCageReservationParams
+     : public VirtualMemoryCage::ReservationParams {
+   PtrComprCageReservationParams() {
+     page_allocator = GetPlatformPageAllocator();
+ 
+-    // This is only used when there is a per-Isolate cage, in which case the
+-    // Isolate is allocated within the cage, and the Isolate root is also the
+-    // cage base.
+-    const size_t kIsolateRootBiasPageSize =
+-        COMPRESS_POINTERS_IN_ISOLATE_CAGE_BOOL
+-            ? GetIsolateRootBiasPageSize(page_allocator)
+-            : 0;
++    // Unused.
++    // TODO(v8:13788): Remove base_bias_size.
++    const size_t kIsolateRootBiasPageSize = 0;
+     reservation_size = kPtrComprCageReservationSize + kIsolateRootBiasPageSize;
+     base_alignment = kPtrComprCageBaseAlignment;
+     base_bias_size = kIsolateRootBiasPageSize;
+@@ -113,30 +95,20 @@ IsolateAllocator::IsolateAllocator() {
+         "Failed to reserve memory for Isolate V8 pointer compression cage");
+   }
+   page_allocator_ = isolate_ptr_compr_cage_.page_allocator();
+-  CommitPagesForIsolate();
+ #elif defined(V8_COMPRESS_POINTERS_IN_SHARED_CAGE)
+-  // Allocate Isolate in C++ heap when sharing a cage.
+   CHECK(GetProcessWidePtrComprCage()->IsReserved());
+   page_allocator_ = GetProcessWidePtrComprCage()->page_allocator();
+-  isolate_memory_ = ::operator new(sizeof(Isolate));
+ #else
+-  // Allocate Isolate in C++ heap.
+   page_allocator_ = GetPlatformPageAllocator();
+-  isolate_memory_ = ::operator new(sizeof(Isolate));
+ #endif  // V8_COMPRESS_POINTERS
+ 
++  // Allocate Isolate in C++ heap.
++  isolate_memory_ = ::operator new(sizeof(Isolate));
++
+   CHECK_NOT_NULL(page_allocator_);
+ }
+ 
+ IsolateAllocator::~IsolateAllocator() {
+-#ifdef V8_COMPRESS_POINTERS_IN_ISOLATE_CAGE
+-  if (isolate_ptr_compr_cage_.reservation()->IsReserved()) {
+-    // The actual memory will be freed when the |isolate_ptr_compr_cage_| will
+-    // die.
+-    return;
+-  }
+-#endif
+-
+   // The memory was allocated in C++ heap.
+   ::operator delete(isolate_memory_);
+ }
+@@ -155,57 +127,5 @@ const VirtualMemoryCage* IsolateAllocator::GetPtrComprCage() const {
+   return const_cast<IsolateAllocator*>(this)->GetPtrComprCage();
+ }
+ 
+-#ifdef V8_COMPRESS_POINTERS_IN_ISOLATE_CAGE
+-void IsolateAllocator::CommitPagesForIsolate() {
+-  v8::PageAllocator* platform_page_allocator = GetPlatformPageAllocator();
+-
+-  CHECK(isolate_ptr_compr_cage_.IsReserved());
+-  Address isolate_root = isolate_ptr_compr_cage_.base();
+-  CHECK(IsAligned(isolate_root, kPtrComprCageBaseAlignment));
+-  CHECK_GE(isolate_ptr_compr_cage_.reservation()->size(),
+-           kPtrComprCageReservationSize +
+-               GetIsolateRootBiasPageSize(platform_page_allocator));
+-  CHECK(isolate_ptr_compr_cage_.reservation()->InVM(
+-      isolate_root, kPtrComprCageReservationSize));
+-
+-  size_t page_size = page_allocator_->AllocatePageSize();
+-  Address isolate_address = isolate_root - Isolate::isolate_root_bias();
+-  Address isolate_end = isolate_address + sizeof(Isolate);
+-
+-  // Inform the bounded page allocator about reserved pages.
+-  {
+-    Address reserved_region_address = isolate_root;
+-    size_t reserved_region_size =
+-        RoundUp(isolate_end, page_size) - reserved_region_address;
+-
+-    CHECK(isolate_ptr_compr_cage_.page_allocator()->AllocatePagesAt(
+-        reserved_region_address, reserved_region_size,
+-        PageAllocator::Permission::kNoAccess));
+-  }
+-
+-  // Commit pages where the Isolate will be stored.
+-  {
+-    size_t commit_page_size = platform_page_allocator->CommitPageSize();
+-    Address committed_region_address =
+-        RoundDown(isolate_address, commit_page_size);
+-    size_t committed_region_size =
+-        RoundUp(isolate_end, commit_page_size) - committed_region_address;
+-
+-    // We are using |isolate_ptr_compr_cage_.reservation()| directly here
+-    // because |page_allocator_| has bigger commit page size than we actually
+-    // need.
+-    CHECK(isolate_ptr_compr_cage_.reservation()->SetPermissions(
+-        committed_region_address, committed_region_size,
+-        PageAllocator::kReadWrite));
+-
+-    if (Heap::ShouldZapGarbage()) {
+-      MemsetPointer(reinterpret_cast<Address*>(committed_region_address),
+-                    kZapValue, committed_region_size / kSystemPointerSize);
+-    }
+-  }
+-  isolate_memory_ = reinterpret_cast<void*>(isolate_address);
+-}
+-#endif  // V8_COMPRESS_POINTERS_IN_ISOLATE_CAGE
+-
+ }  // namespace internal
+ }  // namespace v8
+diff --git a/src/init/isolate-allocator.h b/src/init/isolate-allocator.h
+index 2bf739ec49..876229481b 100644
+--- a/src/init/isolate-allocator.h
++++ b/src/init/isolate-allocator.h
+@@ -15,16 +15,10 @@
+ namespace v8 {
+ namespace internal {
+ 
+-// IsolateAllocator object is responsible for allocating memory for one (!)
+-// Isolate object. Depending on the whether pointer compression is enabled,
+-// the memory can be allocated
+-//
+-// 1) in the C++ heap (when pointer compression is disabled or when multiple
+-// Isolates share a pointer compression cage)
++// TODO(v8:13788): remove IsolateAllocator, as it's no longer needed.
+ //
+-// 2) in a proper part of a properly aligned region of a reserved address space
+-//   (when pointer compression is enabled and each Isolate has its own pointer
+-//   compression cage).
++// IsolateAllocator object is responsible for allocating memory for one (!)
++// Isolate object. Currently, the memory is always allocated in the C++ heap.
+ //
+ // Isolate::New() first creates IsolateAllocator object which allocates the
+ // memory and then it constructs Isolate object in this memory. Once it's done
+@@ -54,8 +48,6 @@ class V8_EXPORT_PRIVATE IsolateAllocator final {
+   static void InitializeOncePerProcess();
+ 
+  private:
+-  void CommitPagesForIsolate();
+-
+   friend class SequentialUnmapperTest;
+   // Only used for testing.
+   static void FreeProcessWidePtrComprCageForTesting();
+diff --git a/src/objects/objects-inl.h b/src/objects/objects-inl.h
+index 82359fa022..8e16ba973d 100644
+--- a/src/objects/objects-inl.h
++++ b/src/objects/objects-inl.h
+@@ -817,13 +817,9 @@ ReadOnlyRoots HeapObject::GetReadOnlyRoots() const {
+   return ReadOnlyHeap::GetReadOnlyRoots(*this);
+ }
+ 
++// TODO(v8:13788): Remove this cage-ful accessor.
+ ReadOnlyRoots HeapObject::GetReadOnlyRoots(PtrComprCageBase cage_base) const {
+-#ifdef V8_COMPRESS_POINTERS_IN_ISOLATE_CAGE
+-  DCHECK_NE(cage_base.address(), 0);
+-  return ReadOnlyRoots(Isolate::FromRootAddress(cage_base.address()));
+-#else
+   return GetReadOnlyRoots();
+-#endif
+ }
+ 
+ Map HeapObject::map() const {
+diff --git a/src/objects/swiss-name-dictionary-inl.h b/src/objects/swiss-name-dictionary-inl.h
+index 8ef6b68073..b0f2c2e6b5 100644
+--- a/src/objects/swiss-name-dictionary-inl.h
++++ b/src/objects/swiss-name-dictionary-inl.h
+@@ -581,7 +581,7 @@ void SwissNameDictionary::Initialize(IsolateT* isolate, ByteArray meta_table,
+ SwissNameDictionary::IndexIterator::IndexIterator(
+     Handle<SwissNameDictionary> dict, int start)
+     : enum_index_{start}, dict_{dict} {
+-  if (!COMPRESS_POINTERS_IN_ISOLATE_CAGE_BOOL && dict.is_null()) {
++  if (dict.is_null()) {
+     used_capacity_ = 0;
+   } else {
+     used_capacity_ = dict->UsedCapacity();
+@@ -626,7 +626,7 @@ SwissNameDictionary::IndexIterator SwissNameDictionary::IndexIterable::begin() {
+ }
+ 
+ SwissNameDictionary::IndexIterator SwissNameDictionary::IndexIterable::end() {
+-  if (!COMPRESS_POINTERS_IN_ISOLATE_CAGE_BOOL && dict_.is_null()) {
++  if (dict_.is_null()) {
+     return IndexIterator(dict_, 0);
+   } else {
+     DCHECK(!dict_.is_null());
+@@ -636,14 +636,15 @@ SwissNameDictionary::IndexIterator SwissNameDictionary::IndexIterable::end() {
+ 
+ SwissNameDictionary::IndexIterable
+ SwissNameDictionary::IterateEntriesOrdered() {
+-  // If we are supposed to iterate the empty dictionary (which is non-writable)
+-  // and pointer compression with a per-Isolate cage is disabled, we have no
+-  // simple way to get the isolate, which we would need to create a handle.
++  // If we are supposed to iterate the empty dictionary (which is non-writable),
++  // we have no simple way to get the isolate, which we would need to create a
++  // handle.
+   // TODO(emrich): Consider always using roots.empty_swiss_dictionary_handle()
+   // in the condition once this function gets Isolate as a parameter in order to
+   // avoid empty dict checks.
+-  if (!COMPRESS_POINTERS_IN_ISOLATE_CAGE_BOOL && Capacity() == 0)
++  if (Capacity() == 0) {
+     return IndexIterable(Handle<SwissNameDictionary>::null());
++  }
+ 
+   Isolate* isolate;
+   GetIsolateFromHeapObject(*this, &isolate);
+diff --git a/src/wasm/baseline/liftoff-assembler-defs.h b/src/wasm/baseline/liftoff-assembler-defs.h
+index 8a2881441d..0f167644d3 100644
+--- a/src/wasm/baseline/liftoff-assembler-defs.h
++++ b/src/wasm/baseline/liftoff-assembler-defs.h
+@@ -151,7 +151,7 @@ constexpr DoubleRegList kLiftoffAssemblerFpCacheRegs =
+ 
+ static_assert(kLiftoffFrameSetupFunctionReg != kWasmInstanceRegister);
+ static_assert(kLiftoffFrameSetupFunctionReg != kRootRegister);
+-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
++#ifdef V8_COMPRESS_POINTERS
+ static_assert(kLiftoffFrameSetupFunctionReg != kPtrComprCageBaseRegister);
+ #endif
+ 
+diff --git a/test/cctest/test-ptr-compr-cage.cc b/test/cctest/test-ptr-compr-cage.cc
+index 1bd2a3c870..10cacc45b8 100644
+--- a/test/cctest/test-ptr-compr-cage.cc
++++ b/test/cctest/test-ptr-compr-cage.cc
+@@ -21,18 +21,14 @@ UNINITIALIZED_TEST(PtrComprCageAndIsolateRoot) {
+   v8::Isolate* isolate2 = v8::Isolate::New(create_params);
+   Isolate* i_isolate2 = reinterpret_cast<Isolate*>(isolate2);
+ 
+-#ifdef V8_COMPRESS_POINTERS_IN_ISOLATE_CAGE
+-  CHECK_EQ(i_isolate1->isolate_root(), i_isolate1->cage_base());
+-  CHECK_EQ(i_isolate2->isolate_root(), i_isolate2->cage_base());
+-  CHECK_NE(i_isolate1->cage_base(), i_isolate2->cage_base());
+-#endif
+-
+-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+-  CHECK_NE(i_isolate1->isolate_root(), i_isolate1->cage_base());
+-  CHECK_NE(i_isolate2->isolate_root(), i_isolate2->cage_base());
++#ifdef V8_COMPRESS_POINTERS
+   CHECK_NE(i_isolate1->isolate_root(), i_isolate2->isolate_root());
++#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+   CHECK_EQ(i_isolate1->cage_base(), i_isolate2->cage_base());
+-#endif
++#else
++  CHECK_NE(i_isolate1->cage_base(), i_isolate2->cage_base());
++#endif  // V8_COMPRESS_POINTERS_IN_SHARED_CAGE
++#endif  // V8_COMPRESS_POINTERS
+ 
+   isolate1->Dispose();
+   isolate2->Dispose();
+diff --git a/test/unittests/assembler/macro-assembler-x64-unittest.cc b/test/unittests/assembler/macro-assembler-x64-unittest.cc
+index cf7e277080..8ea56c12c4 100644
+--- a/test/unittests/assembler/macro-assembler-x64-unittest.cc
++++ b/test/unittests/assembler/macro-assembler-x64-unittest.cc
+@@ -109,14 +109,14 @@ using F0 = int();
+ static void EntryCode(MacroAssembler* masm) {
+   // Smi constant register is callee save.
+   __ pushq(kRootRegister);
+-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
++#ifdef V8_COMPRESS_POINTERS
+   __ pushq(kPtrComprCageBaseRegister);
+ #endif
+   __ InitializeRootRegister();
+ }
+ 
+ static void ExitCode(MacroAssembler* masm) {
+-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
++#ifdef V8_COMPRESS_POINTERS
+   __ popq(kPtrComprCageBaseRegister);
+ #endif
+   __ popq(kRootRegister);
+diff --git a/test/unittests/heap/heap-unittest.cc b/test/unittests/heap/heap-unittest.cc
+index 24e5ac441e..30575eb96d 100644
+--- a/test/unittests/heap/heap-unittest.cc
++++ b/test/unittests/heap/heap-unittest.cc
+@@ -157,11 +157,6 @@ TEST_F(HeapTest, HeapLayout) {
+     EXPECT_TRUE(IsAligned(code_cage_base, size_t{4} * GB));
+   }
+ 
+-#ifdef V8_COMPRESS_POINTERS_IN_ISOLATE_CAGE
+-  Address isolate_root = i_isolate()->isolate_root();
+-  EXPECT_EQ(cage_base, isolate_root);
+-#endif
+-
+   // Check that all memory chunks belong this region.
+   base::AddressRegion heap_reservation(cage_base, size_t{4} * GB);
+   base::AddressRegion code_reservation(code_cage_base, size_t{4} * GB);
+-- 
+2.35.1
+

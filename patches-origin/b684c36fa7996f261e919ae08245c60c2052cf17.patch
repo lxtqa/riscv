@@ -1,0 +1,2453 @@
+From b684c36fa7996f261e919ae08245c60c2052cf17 Mon Sep 17 00:00:00 2001
+From: Camillo Bruni <cbruni@chromium.org>
+Date: Mon, 10 May 2021 22:24:59 +0200
+Subject: [PATCH] [codegen] Move common enums to macro-assembler.h
+
+- Share RemeberedSetAction and SmiCheck enums between all platforms.
+- Convert to enum classes with k-prefixed values
+
+Bug: v8:11420
+Change-Id: Ib265a229f12a850ea866fd01d8022cbae5e1a9d8
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/2885040
+Reviewed-by: Zhi An Ng <zhin@chromium.org>
+Commit-Queue: Camillo Bruni <cbruni@chromium.org>
+Cr-Commit-Position: refs/heads/master@{#74489}
+---
+ src/builtins/arm/builtins-arm.cc              | 10 ++---
+ src/builtins/arm64/builtins-arm64.cc          | 10 ++---
+ src/builtins/builtins-internal-gen.cc         |  2 +-
+ src/builtins/ia32/builtins-ia32.cc            |  9 ++--
+ src/builtins/mips/builtins-mips.cc            | 10 ++---
+ src/builtins/mips64/builtins-mips64.cc        | 10 ++---
+ src/builtins/ppc/builtins-ppc.cc              | 10 ++---
+ src/builtins/riscv64/builtins-riscv64.cc      | 10 ++---
+ src/builtins/s390/builtins-s390.cc            | 10 ++---
+ src/builtins/x64/builtins-x64.cc              |  9 ++--
+ src/codegen/arm/macro-assembler-arm.cc        | 40 +++++++++--------
+ src/codegen/arm/macro-assembler-arm.h         | 18 ++++----
+ src/codegen/arm64/macro-assembler-arm64.cc    | 40 +++++++++--------
+ src/codegen/arm64/macro-assembler-arm64.h     | 18 ++++----
+ src/codegen/ia32/macro-assembler-ia32.cc      | 36 ++++++++-------
+ src/codegen/ia32/macro-assembler-ia32.h       | 17 +++----
+ src/codegen/macro-assembler.h                 |  6 ++-
+ src/codegen/mips/macro-assembler-mips.cc      | 45 ++++++++++---------
+ src/codegen/mips/macro-assembler-mips.h       | 18 ++++----
+ src/codegen/mips64/macro-assembler-mips64.cc  | 44 +++++++++---------
+ src/codegen/mips64/macro-assembler-mips64.h   | 18 ++++----
+ src/codegen/ppc/macro-assembler-ppc.cc        | 40 +++++++++--------
+ src/codegen/ppc/macro-assembler-ppc.h         | 18 ++++----
+ .../riscv64/macro-assembler-riscv64.cc        | 40 +++++++++--------
+ src/codegen/riscv64/macro-assembler-riscv64.h | 18 ++++----
+ src/codegen/s390/macro-assembler-s390.cc      | 40 +++++++++--------
+ src/codegen/s390/macro-assembler-s390.h       | 18 ++++----
+ src/codegen/x64/macro-assembler-x64.cc        | 40 +++++++++--------
+ src/codegen/x64/macro-assembler-x64.h         | 19 ++++----
+ .../backend/arm/code-generator-arm.cc         |  4 +-
+ .../backend/arm64/code-generator-arm64.cc     |  4 +-
+ .../backend/ia32/code-generator-ia32.cc       |  4 +-
+ .../backend/mips/code-generator-mips.cc       |  4 +-
+ .../backend/mips64/code-generator-mips64.cc   |  4 +-
+ .../backend/ppc/code-generator-ppc.cc         |  4 +-
+ .../backend/riscv64/code-generator-riscv64.cc |  4 +-
+ .../backend/s390/code-generator-s390.cc       |  4 +-
+ .../backend/x64/code-generator-x64.cc         |  4 +-
+ src/wasm/baseline/arm/liftoff-assembler-arm.h |  2 +-
+ .../baseline/arm64/liftoff-assembler-arm64.h  |  2 +-
+ .../baseline/ia32/liftoff-assembler-ia32.h    |  4 +-
+ .../baseline/mips/liftoff-assembler-mips.h    |  4 +-
+ .../mips64/liftoff-assembler-mips64.h         |  4 +-
+ .../riscv64/liftoff-assembler-riscv64.h       |  4 +-
+ .../baseline/s390/liftoff-assembler-s390.h    |  2 +-
+ src/wasm/baseline/x64/liftoff-assembler-x64.h |  4 +-
+ 46 files changed, 345 insertions(+), 340 deletions(-)
+
+diff --git a/src/builtins/arm/builtins-arm.cc b/src/builtins/arm/builtins-arm.cc
+index 26777b48bb..6c75f08daf 100644
+--- a/src/builtins/arm/builtins-arm.cc
++++ b/src/builtins/arm/builtins-arm.cc
+@@ -119,7 +119,7 @@ void Generate_JSBuiltinsConstructStubHelper(MacroAssembler* masm) {
+     // r0: number of arguments (untagged)
+     // r1: constructor function
+     // r3: new target
+-    __ InvokeFunctionWithNewTarget(r1, r3, r0, CALL_FUNCTION);
++    __ InvokeFunctionWithNewTarget(r1, r3, r0, InvokeType::kCall);
+ 
+     // Restore context from the frame.
+     __ ldr(cp, MemOperand(fp, ConstructFrameConstants::kContextOffset));
+@@ -237,7 +237,7 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
+   __ Push(r6);
+ 
+   // Call the function.
+-  __ InvokeFunctionWithNewTarget(r1, r3, r0, CALL_FUNCTION);
++  __ InvokeFunctionWithNewTarget(r1, r3, r0, InvokeType::kCall);
+ 
+   // ----------- S t a t e -------------
+   //  --                 r0: constructor result
+@@ -797,8 +797,8 @@ static void ReplaceClosureCodeWithOptimizedCode(MacroAssembler* masm,
+   // Store code entry in the closure.
+   __ str(optimized_code, FieldMemOperand(closure, JSFunction::kCodeOffset));
+   __ RecordWriteField(closure, JSFunction::kCodeOffset, optimized_code,
+-                      kLRHasNotBeenSaved, kDontSaveFPRegs, OMIT_REMEMBERED_SET,
+-                      OMIT_SMI_CHECK);
++                      kLRHasNotBeenSaved, kDontSaveFPRegs,
++                      RememberedSetAction::kOmit, SmiCheck::kOmit);
+ }
+ 
+ static void LeaveInterpreterFrame(MacroAssembler* masm, Register scratch1,
+@@ -2279,7 +2279,7 @@ void Builtins::Generate_CallFunction(MacroAssembler* masm,
+ 
+   __ ldrh(r2,
+           FieldMemOperand(r2, SharedFunctionInfo::kFormalParameterCountOffset));
+-  __ InvokeFunctionCode(r1, no_reg, r2, r0, JUMP_FUNCTION);
++  __ InvokeFunctionCode(r1, no_reg, r2, r0, InvokeType::kJump);
+ 
+   // The function is a "classConstructor", need to raise an exception.
+   __ bind(&class_constructor);
+diff --git a/src/builtins/arm64/builtins-arm64.cc b/src/builtins/arm64/builtins-arm64.cc
+index 9ace3f953b..64d18ffc38 100644
+--- a/src/builtins/arm64/builtins-arm64.cc
++++ b/src/builtins/arm64/builtins-arm64.cc
+@@ -177,7 +177,7 @@ void Generate_JSBuiltinsConstructStubHelper(MacroAssembler* masm) {
+     // -----------------------------------
+ 
+     // Call the function.
+-    __ InvokeFunctionWithNewTarget(x1, x3, argc, CALL_FUNCTION);
++    __ InvokeFunctionWithNewTarget(x1, x3, argc, InvokeType::kCall);
+ 
+     // Restore the context from the frame.
+     __ Ldr(cp, MemOperand(fp, ConstructFrameConstants::kContextOffset));
+@@ -337,7 +337,7 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
+ 
+   // Call the function.
+   __ Mov(x0, x12);
+-  __ InvokeFunctionWithNewTarget(x1, x3, x0, CALL_FUNCTION);
++  __ InvokeFunctionWithNewTarget(x1, x3, x0, InvokeType::kCall);
+ 
+   // ----------- S t a t e -------------
+   //  -- sp[0*kSystemPointerSize]: implicit receiver
+@@ -968,8 +968,8 @@ static void ReplaceClosureCodeWithOptimizedCode(MacroAssembler* masm,
+   __ StoreTaggedField(optimized_code,
+                       FieldMemOperand(closure, JSFunction::kCodeOffset));
+   __ RecordWriteField(closure, JSFunction::kCodeOffset, optimized_code,
+-                      kLRHasNotBeenSaved, kDontSaveFPRegs, OMIT_REMEMBERED_SET,
+-                      OMIT_SMI_CHECK);
++                      kLRHasNotBeenSaved, kDontSaveFPRegs,
++                      RememberedSetAction::kOmit, SmiCheck::kOmit);
+ }
+ 
+ static void LeaveInterpreterFrame(MacroAssembler* masm, Register scratch1,
+@@ -2623,7 +2623,7 @@ void Builtins::Generate_CallFunction(MacroAssembler* masm,
+ 
+   __ Ldrh(x2,
+           FieldMemOperand(x2, SharedFunctionInfo::kFormalParameterCountOffset));
+-  __ InvokeFunctionCode(x1, no_reg, x2, x0, JUMP_FUNCTION);
++  __ InvokeFunctionCode(x1, no_reg, x2, x0, InvokeType::kJump);
+ 
+   // The function is a "classConstructor", need to raise an exception.
+   __ Bind(&class_constructor);
+diff --git a/src/builtins/builtins-internal-gen.cc b/src/builtins/builtins-internal-gen.cc
+index b4adea4124..51bd162b01 100644
+--- a/src/builtins/builtins-internal-gen.cc
++++ b/src/builtins/builtins-internal-gen.cc
+@@ -177,7 +177,7 @@ class RecordWriteCodeStubAssembler : public CodeStubAssembler {
+   }
+ 
+   TNode<BoolT> ShouldEmitRememberSet(TNode<Smi> remembered_set) {
+-    return TaggedEqual(remembered_set, SmiConstant(EMIT_REMEMBERED_SET));
++    return TaggedEqual(remembered_set, SmiConstant(RememberedSetAction::kEmit));
+   }
+ 
+   template <typename Ret, typename Arg0, typename Arg1>
+diff --git a/src/builtins/ia32/builtins-ia32.cc b/src/builtins/ia32/builtins-ia32.cc
+index 439d3ab743..f000474077 100644
+--- a/src/builtins/ia32/builtins-ia32.cc
++++ b/src/builtins/ia32/builtins-ia32.cc
+@@ -117,7 +117,7 @@ void Generate_JSBuiltinsConstructStubHelper(MacroAssembler* masm) {
+     // edx: new target
+     // Reload context from the frame.
+     __ mov(esi, Operand(ebp, ConstructFrameConstants::kContextOffset));
+-    __ InvokeFunction(edi, edx, eax, CALL_FUNCTION);
++    __ InvokeFunction(edi, edx, eax, InvokeType::kCall);
+ 
+     // Restore context from the frame.
+     __ mov(esi, Operand(ebp, ConstructFrameConstants::kContextOffset));
+@@ -246,7 +246,7 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
+ 
+   // Restore and and call the constructor function.
+   __ mov(edi, Operand(ebp, ConstructFrameConstants::kConstructorOffset));
+-  __ InvokeFunction(edi, edx, eax, CALL_FUNCTION);
++  __ InvokeFunction(edi, edx, eax, InvokeType::kCall);
+ 
+   // ----------- S t a t e -------------
+   //  --                eax: constructor result
+@@ -738,7 +738,8 @@ static void ReplaceClosureCodeWithOptimizedCode(MacroAssembler* masm,
+   __ mov(FieldOperand(closure, JSFunction::kCodeOffset), optimized_code);
+   __ mov(scratch1, optimized_code);  // Write barrier clobbers scratch1 below.
+   __ RecordWriteField(closure, JSFunction::kCodeOffset, scratch1, scratch2,
+-                      kDontSaveFPRegs, OMIT_REMEMBERED_SET, OMIT_SMI_CHECK);
++                      kDontSaveFPRegs, RememberedSetAction::kOmit,
++                      SmiCheck::kOmit);
+ }
+ 
+ static void LeaveInterpreterFrame(MacroAssembler* masm, Register scratch1,
+@@ -2442,7 +2443,7 @@ void Builtins::Generate_CallFunction(MacroAssembler* masm,
+ 
+   __ movzx_w(
+       ecx, FieldOperand(edx, SharedFunctionInfo::kFormalParameterCountOffset));
+-  __ InvokeFunctionCode(edi, no_reg, ecx, eax, JUMP_FUNCTION);
++  __ InvokeFunctionCode(edi, no_reg, ecx, eax, InvokeType::kJump);
+   // The function is a "classConstructor", need to raise an exception.
+   __ bind(&class_constructor);
+   {
+diff --git a/src/builtins/mips/builtins-mips.cc b/src/builtins/mips/builtins-mips.cc
+index 7a3ab9ebc4..2c5b663e98 100644
+--- a/src/builtins/mips/builtins-mips.cc
++++ b/src/builtins/mips/builtins-mips.cc
+@@ -103,7 +103,7 @@ void Generate_JSBuiltinsConstructStubHelper(MacroAssembler* masm) {
+     // a0: number of arguments (untagged)
+     // a1: constructor function
+     // a3: new target
+-    __ InvokeFunctionWithNewTarget(a1, a3, a0, CALL_FUNCTION);
++    __ InvokeFunctionWithNewTarget(a1, a3, a0, InvokeType::kCall);
+ 
+     // Restore context from the frame.
+     __ lw(cp, MemOperand(fp, ConstructFrameConstants::kContextOffset));
+@@ -227,7 +227,7 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
+   __ Push(s0);
+ 
+   // Call the function.
+-  __ InvokeFunctionWithNewTarget(a1, a3, a0, CALL_FUNCTION);
++  __ InvokeFunctionWithNewTarget(a1, a3, a0, InvokeType::kCall);
+ 
+   // ----------- S t a t e -------------
+   //  --                 v0: constructor result
+@@ -762,8 +762,8 @@ static void ReplaceClosureCodeWithOptimizedCode(MacroAssembler* masm,
+   __ sw(optimized_code, FieldMemOperand(closure, JSFunction::kCodeOffset));
+   __ mov(scratch1, optimized_code);  // Write barrier clobbers scratch1 below.
+   __ RecordWriteField(closure, JSFunction::kCodeOffset, scratch1, scratch2,
+-                      kRAHasNotBeenSaved, kDontSaveFPRegs, OMIT_REMEMBERED_SET,
+-                      OMIT_SMI_CHECK);
++                      kRAHasNotBeenSaved, kDontSaveFPRegs,
++                      RememberedSetAction::kOmit, SmiCheck::kOmit);
+ }
+ 
+ static void LeaveInterpreterFrame(MacroAssembler* masm, Register scratch1,
+@@ -2006,7 +2006,7 @@ void Builtins::Generate_CallFunction(MacroAssembler* masm,
+ 
+   __ lhu(a2,
+          FieldMemOperand(a2, SharedFunctionInfo::kFormalParameterCountOffset));
+-  __ InvokeFunctionCode(a1, no_reg, a2, a0, JUMP_FUNCTION);
++  __ InvokeFunctionCode(a1, no_reg, a2, a0, InvokeType::kJump);
+ 
+   // The function is a "classConstructor", need to raise an exception.
+   __ bind(&class_constructor);
+diff --git a/src/builtins/mips64/builtins-mips64.cc b/src/builtins/mips64/builtins-mips64.cc
+index 182ccd879e..3e950c0aa2 100644
+--- a/src/builtins/mips64/builtins-mips64.cc
++++ b/src/builtins/mips64/builtins-mips64.cc
+@@ -103,7 +103,7 @@ void Generate_JSBuiltinsConstructStubHelper(MacroAssembler* masm) {
+     // a0: number of arguments (untagged)
+     // a1: constructor function
+     // a3: new target
+-    __ InvokeFunctionWithNewTarget(a1, a3, a0, CALL_FUNCTION);
++    __ InvokeFunctionWithNewTarget(a1, a3, a0, InvokeType::kCall);
+ 
+     // Restore context from the frame.
+     __ Ld(cp, MemOperand(fp, ConstructFrameConstants::kContextOffset));
+@@ -228,7 +228,7 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
+   __ Push(a6);
+ 
+   // Call the function.
+-  __ InvokeFunctionWithNewTarget(a1, a3, a0, CALL_FUNCTION);
++  __ InvokeFunctionWithNewTarget(a1, a3, a0, InvokeType::kCall);
+ 
+   // ----------- S t a t e -------------
+   //  --                 v0: constructor result
+@@ -778,8 +778,8 @@ static void ReplaceClosureCodeWithOptimizedCode(MacroAssembler* masm,
+   __ Sd(optimized_code, FieldMemOperand(closure, JSFunction::kCodeOffset));
+   __ mov(scratch1, optimized_code);  // Write barrier clobbers scratch1 below.
+   __ RecordWriteField(closure, JSFunction::kCodeOffset, scratch1, scratch2,
+-                      kRAHasNotBeenSaved, kDontSaveFPRegs, OMIT_REMEMBERED_SET,
+-                      OMIT_SMI_CHECK);
++                      kRAHasNotBeenSaved, kDontSaveFPRegs,
++                      RememberedSetAction::kOmit, SmiCheck::kOmit);
+ }
+ 
+ static void LeaveInterpreterFrame(MacroAssembler* masm, Register scratch1,
+@@ -2074,7 +2074,7 @@ void Builtins::Generate_CallFunction(MacroAssembler* masm,
+ 
+   __ Lhu(a2,
+          FieldMemOperand(a2, SharedFunctionInfo::kFormalParameterCountOffset));
+-  __ InvokeFunctionCode(a1, no_reg, a2, a0, JUMP_FUNCTION);
++  __ InvokeFunctionCode(a1, no_reg, a2, a0, InvokeType::kJump);
+ 
+   // The function is a "classConstructor", need to raise an exception.
+   __ bind(&class_constructor);
+diff --git a/src/builtins/ppc/builtins-ppc.cc b/src/builtins/ppc/builtins-ppc.cc
+index 1964cf4a47..171c683482 100644
+--- a/src/builtins/ppc/builtins-ppc.cc
++++ b/src/builtins/ppc/builtins-ppc.cc
+@@ -114,7 +114,7 @@ void Generate_JSBuiltinsConstructStubHelper(MacroAssembler* masm) {
+     // r6: new target
+     {
+       ConstantPoolUnavailableScope constant_pool_unavailable(masm);
+-      __ InvokeFunctionWithNewTarget(r4, r6, r3, CALL_FUNCTION);
++      __ InvokeFunctionWithNewTarget(r4, r6, r3, InvokeType::kCall);
+     }
+ 
+     // Restore context from the frame.
+@@ -246,7 +246,7 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
+   // Call the function.
+   {
+     ConstantPoolUnavailableScope constant_pool_unavailable(masm);
+-    __ InvokeFunctionWithNewTarget(r4, r6, r3, CALL_FUNCTION);
++    __ InvokeFunctionWithNewTarget(r4, r6, r3, InvokeType::kCall);
+   }
+ 
+   // ----------- S t a t e -------------
+@@ -798,8 +798,8 @@ static void ReplaceClosureCodeWithOptimizedCode(MacroAssembler* masm,
+                       FieldMemOperand(closure, JSFunction::kCodeOffset), r0);
+   __ mr(scratch1, optimized_code);  // Write barrier clobbers scratch1 below.
+   __ RecordWriteField(closure, JSFunction::kCodeOffset, scratch1, scratch2,
+-                      kLRHasNotBeenSaved, kDontSaveFPRegs, OMIT_REMEMBERED_SET,
+-                      OMIT_SMI_CHECK);
++                      kLRHasNotBeenSaved, kDontSaveFPRegs,
++                      RememberedSetAction::kOmit, SmiCheck::kOmit);
+ }
+ 
+ static void LeaveInterpreterFrame(MacroAssembler* masm, Register scratch1,
+@@ -2124,7 +2124,7 @@ void Builtins::Generate_CallFunction(MacroAssembler* masm,
+ 
+   __ LoadHalfWord(
+       r5, FieldMemOperand(r5, SharedFunctionInfo::kFormalParameterCountOffset));
+-  __ InvokeFunctionCode(r4, no_reg, r5, r3, JUMP_FUNCTION);
++  __ InvokeFunctionCode(r4, no_reg, r5, r3, InvokeType::kJump);
+ 
+   // The function is a "classConstructor", need to raise an exception.
+   __ bind(&class_constructor);
+diff --git a/src/builtins/riscv64/builtins-riscv64.cc b/src/builtins/riscv64/builtins-riscv64.cc
+index 9159b2e1ca..36109941b6 100644
+--- a/src/builtins/riscv64/builtins-riscv64.cc
++++ b/src/builtins/riscv64/builtins-riscv64.cc
+@@ -101,7 +101,7 @@ void Generate_JSBuiltinsConstructStubHelper(MacroAssembler* masm) {
+     // a0: number of arguments (untagged)
+     // a1: constructor function
+     // a3: new target
+-    __ InvokeFunctionWithNewTarget(a1, a3, a0, CALL_FUNCTION);
++    __ InvokeFunctionWithNewTarget(a1, a3, a0, InvokeType::kCall);
+ 
+     // Restore context from the frame.
+     __ Ld(cp, MemOperand(fp, ConstructFrameConstants::kContextOffset));
+@@ -226,7 +226,7 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
+   __ Push(a6);
+ 
+   // Call the function.
+-  __ InvokeFunctionWithNewTarget(a1, a3, a0, CALL_FUNCTION);
++  __ InvokeFunctionWithNewTarget(a1, a3, a0, InvokeType::kCall);
+ 
+   // ----------- S t a t e -------------
+   //  --                 a0: constructor result
+@@ -770,8 +770,8 @@ static void ReplaceClosureCodeWithOptimizedCode(MacroAssembler* masm,
+   __ Sd(optimized_code, FieldMemOperand(closure, JSFunction::kCodeOffset));
+   __ Move(scratch1, optimized_code);  // Write barrier clobbers scratch1 below.
+   __ RecordWriteField(closure, JSFunction::kCodeOffset, scratch1, scratch2,
+-                      kRAHasNotBeenSaved, kDontSaveFPRegs, OMIT_REMEMBERED_SET,
+-                      OMIT_SMI_CHECK);
++                      kRAHasNotBeenSaved, kDontSaveFPRegs,
++                      RememberedSetAction::kOmit, SmiCheck::kOmit);
+ }
+ 
+ static void LeaveInterpreterFrame(MacroAssembler* masm, Register scratch1,
+@@ -2316,7 +2316,7 @@ void Builtins::Generate_CallFunction(MacroAssembler* masm,
+ 
+   __ Lhu(a2,
+          FieldMemOperand(a2, SharedFunctionInfo::kFormalParameterCountOffset));
+-  __ InvokeFunctionCode(a1, no_reg, a2, a0, JUMP_FUNCTION);
++  __ InvokeFunctionCode(a1, no_reg, a2, a0, InvokeType::kJump);
+ 
+   // The function is a "classConstructor", need to raise an exception.
+   __ bind(&class_constructor);
+diff --git a/src/builtins/s390/builtins-s390.cc b/src/builtins/s390/builtins-s390.cc
+index f5dff6edfc..67eab176db 100644
+--- a/src/builtins/s390/builtins-s390.cc
++++ b/src/builtins/s390/builtins-s390.cc
+@@ -111,7 +111,7 @@ void Generate_JSBuiltinsConstructStubHelper(MacroAssembler* masm) {
+     // r3: constructor function
+     // r5: new target
+ 
+-    __ InvokeFunctionWithNewTarget(r3, r5, r2, CALL_FUNCTION);
++    __ InvokeFunctionWithNewTarget(r3, r5, r2, InvokeType::kCall);
+ 
+     // Restore context from the frame.
+     __ LoadU64(cp, MemOperand(fp, ConstructFrameConstants::kContextOffset));
+@@ -239,7 +239,7 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
+   __ Push(r8);
+ 
+   // Call the function.
+-  __ InvokeFunctionWithNewTarget(r3, r5, r2, CALL_FUNCTION);
++  __ InvokeFunctionWithNewTarget(r3, r5, r2, InvokeType::kCall);
+ 
+   // ----------- S t a t e -------------
+   //  --                 r0: constructor result
+@@ -855,8 +855,8 @@ static void ReplaceClosureCodeWithOptimizedCode(MacroAssembler* masm,
+   __ mov(scratch1,
+          optimized_code);  // Write barrier clobbers scratch1 below.
+   __ RecordWriteField(closure, JSFunction::kCodeOffset, scratch1, scratch2,
+-                      kLRHasNotBeenSaved, kDontSaveFPRegs, OMIT_REMEMBERED_SET,
+-                      OMIT_SMI_CHECK);
++                      kLRHasNotBeenSaved, kDontSaveFPRegs,
++                      RememberedSetAction::kOmit, SmiCheck::kOmit);
+ }
+ 
+ static void LeaveInterpreterFrame(MacroAssembler* masm, Register scratch1,
+@@ -2176,7 +2176,7 @@ void Builtins::Generate_CallFunction(MacroAssembler* masm,
+ 
+   __ LoadU16(
+       r4, FieldMemOperand(r4, SharedFunctionInfo::kFormalParameterCountOffset));
+-  __ InvokeFunctionCode(r3, no_reg, r4, r2, JUMP_FUNCTION);
++  __ InvokeFunctionCode(r3, no_reg, r4, r2, InvokeType::kJump);
+ 
+   // The function is a "classConstructor", need to raise an exception.
+   __ bind(&class_constructor);
+diff --git a/src/builtins/x64/builtins-x64.cc b/src/builtins/x64/builtins-x64.cc
+index 5dd5e89cf8..0cabacad72 100644
+--- a/src/builtins/x64/builtins-x64.cc
++++ b/src/builtins/x64/builtins-x64.cc
+@@ -119,7 +119,7 @@ void Generate_JSBuiltinsConstructStubHelper(MacroAssembler* masm) {
+     // rax: number of arguments (untagged)
+     // rdi: constructor function
+     // rdx: new target
+-    __ InvokeFunction(rdi, rdx, rax, CALL_FUNCTION);
++    __ InvokeFunction(rdi, rdx, rax, InvokeType::kCall);
+ 
+     // Restore smi-tagged arguments count from the frame.
+     __ movq(rbx, Operand(rbp, ConstructFrameConstants::kLengthOffset));
+@@ -243,7 +243,7 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
+   __ Push(r8);
+ 
+   // Call the function.
+-  __ InvokeFunction(rdi, rdx, rax, CALL_FUNCTION);
++  __ InvokeFunction(rdi, rdx, rax, InvokeType::kCall);
+ 
+   // ----------- S t a t e -------------
+   //  -- rax                 constructor result
+@@ -838,7 +838,8 @@ static void ReplaceClosureCodeWithOptimizedCode(MacroAssembler* masm,
+                       optimized_code);
+   __ movq(scratch1, optimized_code);  // Write barrier clobbers scratch1 below.
+   __ RecordWriteField(closure, JSFunction::kCodeOffset, scratch1, scratch2,
+-                      kDontSaveFPRegs, OMIT_REMEMBERED_SET, OMIT_SMI_CHECK);
++                      kDontSaveFPRegs, RememberedSetAction::kOmit,
++                      SmiCheck::kOmit);
+ }
+ 
+ static void LeaveInterpreterFrame(MacroAssembler* masm, Register scratch1,
+@@ -2367,7 +2368,7 @@ void Builtins::Generate_CallFunction(MacroAssembler* masm,
+   __ movzxwq(
+       rbx, FieldOperand(rdx, SharedFunctionInfo::kFormalParameterCountOffset));
+ 
+-  __ InvokeFunctionCode(rdi, no_reg, rbx, rax, JUMP_FUNCTION);
++  __ InvokeFunctionCode(rdi, no_reg, rbx, rax, InvokeType::kJump);
+ 
+   // The function is a "classConstructor", need to raise an exception.
+   __ bind(&class_constructor);
+diff --git a/src/codegen/arm/macro-assembler-arm.cc b/src/codegen/arm/macro-assembler-arm.cc
+index a7640aab7c..c8b1c61067 100644
+--- a/src/codegen/arm/macro-assembler-arm.cc
++++ b/src/codegen/arm/macro-assembler-arm.cc
+@@ -661,7 +661,7 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
+   Label done;
+ 
+   // Skip barrier if writing a smi.
+-  if (smi_check == INLINE_SMI_CHECK) {
++  if (smi_check == SmiCheck::kInline) {
+     JumpIfSmi(value, &done);
+   }
+ 
+@@ -681,7 +681,7 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
+   }
+ 
+   RecordWrite(object, Operand(offset - kHeapObjectTag), value, lr_status,
+-              save_fp, remembered_set_action, OMIT_SMI_CHECK);
++              save_fp, remembered_set_action, SmiCheck::kOmit);
+ 
+   bind(&done);
+ }
+@@ -838,7 +838,7 @@ void MacroAssembler::RecordWrite(Register object, Operand offset,
+     Check(eq, AbortReason::kWrongAddressOrValuePassedToRecordWrite);
+   }
+ 
+-  if ((remembered_set_action == OMIT_REMEMBERED_SET &&
++  if ((remembered_set_action == RememberedSetAction::kOmit &&
+        !FLAG_incremental_marking) ||
+       FLAG_disable_write_barriers) {
+     return;
+@@ -848,7 +848,7 @@ void MacroAssembler::RecordWrite(Register object, Operand offset,
+   // catch stores of smis and stores into the young generation.
+   Label done;
+ 
+-  if (smi_check == INLINE_SMI_CHECK) {
++  if (smi_check == SmiCheck::kInline) {
+     JumpIfSmi(value, &done);
+   }
+ 
+@@ -1623,7 +1623,7 @@ void MacroAssembler::StackOverflowCheck(Register num_args, Register scratch,
+ 
+ void MacroAssembler::InvokePrologue(Register expected_parameter_count,
+                                     Register actual_parameter_count,
+-                                    Label* done, InvokeFlag flag) {
++                                    Label* done, InvokeType type) {
+   Label regular_invoke;
+   //  r0: actual arguments count
+   //  r1: function (passed through to callee)
+@@ -1723,9 +1723,9 @@ void MacroAssembler::CallDebugOnFunctionCall(Register fun, Register new_target,
+ void MacroAssembler::InvokeFunctionCode(Register function, Register new_target,
+                                         Register expected_parameter_count,
+                                         Register actual_parameter_count,
+-                                        InvokeFlag flag) {
++                                        InvokeType type) {
+   // You can't call a function without a valid frame.
+-  DCHECK_IMPLIES(flag == CALL_FUNCTION, has_frame());
++  DCHECK_IMPLIES(type == InvokeType::kCall, has_frame());
+   DCHECK_EQ(function, r1);
+   DCHECK_IMPLIES(new_target.is_valid(), new_target == r3);
+ 
+@@ -1747,17 +1747,19 @@ void MacroAssembler::InvokeFunctionCode(Register function, Register new_target,
+   }
+ 
+   Label done;
+-  InvokePrologue(expected_parameter_count, actual_parameter_count, &done, flag);
++  InvokePrologue(expected_parameter_count, actual_parameter_count, &done, type);
+   // We call indirectly through the code field in the function to
+   // allow recompilation to take effect without changing any of the
+   // call sites.
+   Register code = kJavaScriptCallCodeStartRegister;
+   ldr(code, FieldMemOperand(function, JSFunction::kCodeOffset));
+-  if (flag == CALL_FUNCTION) {
+-    CallCodeObject(code);
+-  } else {
+-    DCHECK(flag == JUMP_FUNCTION);
+-    JumpCodeObject(code);
++  switch (type) {
++    case InvokeType::kCall:
++      CallCodeObject(code);
++      break;
++    case InvokeType::kJump:
++      JumpCodeObject(code);
++      break;
+   }
+   b(&done);
+ 
+@@ -1774,9 +1776,9 @@ void MacroAssembler::InvokeFunctionCode(Register function, Register new_target,
+ 
+ void MacroAssembler::InvokeFunctionWithNewTarget(
+     Register fun, Register new_target, Register actual_parameter_count,
+-    InvokeFlag flag) {
++    InvokeType type) {
+   // You can't call a function without a valid frame.
+-  DCHECK_IMPLIES(flag == CALL_FUNCTION, has_frame());
++  DCHECK_IMPLIES(type == InvokeType::kCall, has_frame());
+ 
+   // Contract with called JS functions requires that function is passed in r1.
+   DCHECK_EQ(fun, r1);
+@@ -1791,15 +1793,15 @@ void MacroAssembler::InvokeFunctionWithNewTarget(
+                        SharedFunctionInfo::kFormalParameterCountOffset));
+ 
+   InvokeFunctionCode(fun, new_target, expected_reg, actual_parameter_count,
+-                     flag);
++                     type);
+ }
+ 
+ void MacroAssembler::InvokeFunction(Register function,
+                                     Register expected_parameter_count,
+                                     Register actual_parameter_count,
+-                                    InvokeFlag flag) {
++                                    InvokeType type) {
+   // You can't call a function without a valid frame.
+-  DCHECK_IMPLIES(flag == CALL_FUNCTION, has_frame());
++  DCHECK_IMPLIES(type == InvokeType::kCall, has_frame());
+ 
+   // Contract with called JS functions requires that function is passed in r1.
+   DCHECK_EQ(function, r1);
+@@ -1808,7 +1810,7 @@ void MacroAssembler::InvokeFunction(Register function,
+   ldr(cp, FieldMemOperand(r1, JSFunction::kContextOffset));
+ 
+   InvokeFunctionCode(r1, no_reg, expected_parameter_count,
+-                     actual_parameter_count, flag);
++                     actual_parameter_count, type);
+ }
+ 
+ void MacroAssembler::PushStackHandler() {
+diff --git a/src/codegen/arm/macro-assembler-arm.h b/src/codegen/arm/macro-assembler-arm.h
+index 6ce465d152..cbac827bb5 100644
+--- a/src/codegen/arm/macro-assembler-arm.h
++++ b/src/codegen/arm/macro-assembler-arm.h
+@@ -29,8 +29,6 @@ inline MemOperand FieldMemOperand(Register object, int offset) {
+   return MemOperand(object, offset - kHeapObjectTag);
+ }
+ 
+-enum RememberedSetAction { EMIT_REMEMBERED_SET, OMIT_REMEMBERED_SET };
+-enum SmiCheck { INLINE_SMI_CHECK, OMIT_SMI_CHECK };
+ enum LinkRegisterStatus { kLRHasNotBeenSaved, kLRHasBeenSaved };
+ 
+ Register GetRegisterThatIsNotOneOf(Register reg1, Register reg2 = no_reg,
+@@ -656,16 +654,16 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   void RecordWriteField(
+       Register object, int offset, Register value, LinkRegisterStatus lr_status,
+       SaveFPRegsMode save_fp,
+-      RememberedSetAction remembered_set_action = EMIT_REMEMBERED_SET,
+-      SmiCheck smi_check = INLINE_SMI_CHECK);
++      RememberedSetAction remembered_set_action = RememberedSetAction::kEmit,
++      SmiCheck smi_check = SmiCheck::kInline);
+ 
+   // For a given |object| notify the garbage collector that the slot at |offset|
+   // has been written. |value| is the object being stored.
+   void RecordWrite(
+       Register object, Operand offset, Register value,
+       LinkRegisterStatus lr_status, SaveFPRegsMode save_fp,
+-      RememberedSetAction remembered_set_action = EMIT_REMEMBERED_SET,
+-      SmiCheck smi_check = INLINE_SMI_CHECK);
++      RememberedSetAction remembered_set_action = RememberedSetAction::kEmit,
++      SmiCheck smi_check = SmiCheck::kInline);
+ 
+   // Enter exit frame.
+   // stack_space - extra stack space, used for alignment before call to C.
+@@ -689,7 +687,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   // Invoke the JavaScript function code by either calling or jumping.
+   void InvokeFunctionCode(Register function, Register new_target,
+                           Register expected_parameter_count,
+-                          Register actual_parameter_count, InvokeFlag flag);
++                          Register actual_parameter_count, InvokeType type);
+ 
+   // On function call, call into the debugger.
+   void CallDebugOnFunctionCall(Register fun, Register new_target,
+@@ -700,10 +698,10 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   // current context to the context in the function before invoking.
+   void InvokeFunctionWithNewTarget(Register function, Register new_target,
+                                    Register actual_parameter_count,
+-                                   InvokeFlag flag);
++                                   InvokeType type);
+ 
+   void InvokeFunction(Register function, Register expected_parameter_count,
+-                      Register actual_parameter_count, InvokeFlag flag);
++                      Register actual_parameter_count, InvokeType type);
+ 
+   // Exception handling
+ 
+@@ -871,7 +869,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   // Helper functions for generating invokes.
+   void InvokePrologue(Register expected_parameter_count,
+                       Register actual_parameter_count, Label* done,
+-                      InvokeFlag flag);
++                      InvokeType type);
+ 
+   DISALLOW_IMPLICIT_CONSTRUCTORS(MacroAssembler);
+ };
+diff --git a/src/codegen/arm64/macro-assembler-arm64.cc b/src/codegen/arm64/macro-assembler-arm64.cc
+index 55b8fbdff3..0e886966e9 100644
+--- a/src/codegen/arm64/macro-assembler-arm64.cc
++++ b/src/codegen/arm64/macro-assembler-arm64.cc
+@@ -2190,7 +2190,7 @@ void MacroAssembler::StackOverflowCheck(Register num_args,
+ 
+ void MacroAssembler::InvokePrologue(Register formal_parameter_count,
+                                     Register actual_argument_count, Label* done,
+-                                    InvokeFlag flag) {
++                                    InvokeType type) {
+   //  x0: actual arguments count.
+   //  x1: function (passed through to callee).
+   //  x2: expected arguments count.
+@@ -2321,9 +2321,9 @@ void MacroAssembler::CallDebugOnFunctionCall(Register fun, Register new_target,
+ void MacroAssembler::InvokeFunctionCode(Register function, Register new_target,
+                                         Register expected_parameter_count,
+                                         Register actual_parameter_count,
+-                                        InvokeFlag flag) {
++                                        InvokeType type) {
+   // You can't call a function without a valid frame.
+-  DCHECK_IMPLIES(flag == CALL_FUNCTION, has_frame());
++  DCHECK_IMPLIES(type == InvokeType::kCall, has_frame());
+   DCHECK_EQ(function, x1);
+   DCHECK_IMPLIES(new_target.is_valid(), new_target == x3);
+ 
+@@ -2342,7 +2342,7 @@ void MacroAssembler::InvokeFunctionCode(Register function, Register new_target,
+   }
+ 
+   Label done;
+-  InvokePrologue(expected_parameter_count, actual_parameter_count, &done, flag);
++  InvokePrologue(expected_parameter_count, actual_parameter_count, &done, type);
+ 
+   // If actual != expected, InvokePrologue will have handled the call through
+   // the argument adaptor mechanism.
+@@ -2353,11 +2353,13 @@ void MacroAssembler::InvokeFunctionCode(Register function, Register new_target,
+   Register code = kJavaScriptCallCodeStartRegister;
+   LoadTaggedPointerField(code,
+                          FieldMemOperand(function, JSFunction::kCodeOffset));
+-  if (flag == CALL_FUNCTION) {
+-    CallCodeObject(code);
+-  } else {
+-    DCHECK(flag == JUMP_FUNCTION);
+-    JumpCodeObject(code);
++  switch (type) {
++    case InvokeType::kCall:
++      CallCodeObject(code);
++      break;
++    case InvokeType::kJump:
++      JumpCodeObject(code);
++      break;
+   }
+   B(&done);
+ 
+@@ -2378,9 +2380,9 @@ Operand MacroAssembler::ReceiverOperand(Register arg_count) {
+ 
+ void MacroAssembler::InvokeFunctionWithNewTarget(
+     Register function, Register new_target, Register actual_parameter_count,
+-    InvokeFlag flag) {
++    InvokeType type) {
+   // You can't call a function without a valid frame.
+-  DCHECK(flag == JUMP_FUNCTION || has_frame());
++  DCHECK(type == InvokeType::kJump || has_frame());
+ 
+   // Contract with called JS functions requires that function is passed in x1.
+   // (See FullCodeGenerator::Generate().)
+@@ -2401,15 +2403,15 @@ void MacroAssembler::InvokeFunctionWithNewTarget(
+                        SharedFunctionInfo::kFormalParameterCountOffset));
+ 
+   InvokeFunctionCode(function, new_target, expected_parameter_count,
+-                     actual_parameter_count, flag);
++                     actual_parameter_count, type);
+ }
+ 
+ void MacroAssembler::InvokeFunction(Register function,
+                                     Register expected_parameter_count,
+                                     Register actual_parameter_count,
+-                                    InvokeFlag flag) {
++                                    InvokeType type) {
+   // You can't call a function without a valid frame.
+-  DCHECK(flag == JUMP_FUNCTION || has_frame());
++  DCHECK(type == InvokeType::kJump || has_frame());
+ 
+   // Contract with called JS functions requires that function is passed in x1.
+   // (See FullCodeGenerator::Generate().)
+@@ -2420,7 +2422,7 @@ void MacroAssembler::InvokeFunction(Register function,
+                          FieldMemOperand(function, JSFunction::kContextOffset));
+ 
+   InvokeFunctionCode(function, no_reg, expected_parameter_count,
+-                     actual_parameter_count, flag);
++                     actual_parameter_count, type);
+ }
+ 
+ void TurboAssembler::TryConvertDoubleToInt64(Register result,
+@@ -2896,7 +2898,7 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
+   Label done;
+ 
+   // Skip the barrier if writing a smi.
+-  if (smi_check == INLINE_SMI_CHECK) {
++  if (smi_check == SmiCheck::kInline) {
+     JumpIfSmi(value, &done);
+   }
+ 
+@@ -2916,7 +2918,7 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
+   }
+ 
+   RecordWrite(object, Operand(offset - kHeapObjectTag), value, lr_status,
+-              save_fp, remembered_set_action, OMIT_SMI_CHECK);
++              save_fp, remembered_set_action, SmiCheck::kOmit);
+ 
+   Bind(&done);
+ }
+@@ -3071,7 +3073,7 @@ void MacroAssembler::RecordWrite(Register object, Operand offset,
+     Check(eq, AbortReason::kWrongAddressOrValuePassedToRecordWrite);
+   }
+ 
+-  if ((remembered_set_action == OMIT_REMEMBERED_SET &&
++  if ((remembered_set_action == RememberedSetAction::kOmit &&
+        !FLAG_incremental_marking) ||
+       FLAG_disable_write_barriers) {
+     return;
+@@ -3081,7 +3083,7 @@ void MacroAssembler::RecordWrite(Register object, Operand offset,
+   // catch stores of smis and stores into the young generation.
+   Label done;
+ 
+-  if (smi_check == INLINE_SMI_CHECK) {
++  if (smi_check == SmiCheck::kInline) {
+     DCHECK_EQ(0, kSmiTag);
+     JumpIfSmi(value, &done);
+   }
+diff --git a/src/codegen/arm64/macro-assembler-arm64.h b/src/codegen/arm64/macro-assembler-arm64.h
+index e0e44c6187..14dfc083c0 100644
+--- a/src/codegen/arm64/macro-assembler-arm64.h
++++ b/src/codegen/arm64/macro-assembler-arm64.h
+@@ -126,8 +126,6 @@ inline BranchType InvertBranchType(BranchType type) {
+   }
+ }
+ 
+-enum RememberedSetAction { EMIT_REMEMBERED_SET, OMIT_REMEMBERED_SET };
+-enum SmiCheck { INLINE_SMI_CHECK, OMIT_SMI_CHECK };
+ enum LinkRegisterStatus { kLRHasNotBeenSaved, kLRHasBeenSaved };
+ enum DiscardMoveMode { kDontDiscardForSameWReg, kDiscardForSameWReg };
+ 
+@@ -1882,7 +1880,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   // 'call_kind' must be x5.
+   void InvokePrologue(Register expected_parameter_count,
+                       Register actual_parameter_count, Label* done,
+-                      InvokeFlag flag);
++                      InvokeType type);
+ 
+   // On function call, call into the debugger.
+   void CallDebugOnFunctionCall(Register fun, Register new_target,
+@@ -1890,14 +1888,14 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+                                Register actual_parameter_count);
+   void InvokeFunctionCode(Register function, Register new_target,
+                           Register expected_parameter_count,
+-                          Register actual_parameter_count, InvokeFlag flag);
++                          Register actual_parameter_count, InvokeType type);
+   // Invoke the JavaScript function in the given register.
+   // Changes the current context to the context in the function before invoking.
+   void InvokeFunctionWithNewTarget(Register function, Register new_target,
+                                    Register actual_parameter_count,
+-                                   InvokeFlag flag);
++                                   InvokeType type);
+   void InvokeFunction(Register function, Register expected_parameter_count,
+-                      Register actual_parameter_count, InvokeFlag flag);
++                      Register actual_parameter_count, InvokeType type);
+ 
+   // ---- Code generation helpers ----
+ 
+@@ -2029,16 +2027,16 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   void RecordWriteField(
+       Register object, int offset, Register value, LinkRegisterStatus lr_status,
+       SaveFPRegsMode save_fp,
+-      RememberedSetAction remembered_set_action = EMIT_REMEMBERED_SET,
+-      SmiCheck smi_check = INLINE_SMI_CHECK);
++      RememberedSetAction remembered_set_action = RememberedSetAction::kEmit,
++      SmiCheck smi_check = SmiCheck::kInline);
+ 
+   // For a given |object| notify the garbage collector that the slot at |offset|
+   // has been written. |value| is the object being stored.
+   void RecordWrite(
+       Register object, Operand offset, Register value,
+       LinkRegisterStatus lr_status, SaveFPRegsMode save_fp,
+-      RememberedSetAction remembered_set_action = EMIT_REMEMBERED_SET,
+-      SmiCheck smi_check = INLINE_SMI_CHECK);
++      RememberedSetAction remembered_set_action = RememberedSetAction::kEmit,
++      SmiCheck smi_check = SmiCheck::kInline);
+ 
+   // ---------------------------------------------------------------------------
+   // Debugging.
+diff --git a/src/codegen/ia32/macro-assembler-ia32.cc b/src/codegen/ia32/macro-assembler-ia32.cc
+index 1ddc57fbe0..edfe3df452 100644
+--- a/src/codegen/ia32/macro-assembler-ia32.cc
++++ b/src/codegen/ia32/macro-assembler-ia32.cc
+@@ -365,7 +365,7 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
+   Label done;
+ 
+   // Skip barrier if writing a smi.
+-  if (smi_check == INLINE_SMI_CHECK) {
++  if (smi_check == SmiCheck::kInline) {
+     JumpIfSmi(value, &done);
+   }
+ 
+@@ -383,7 +383,7 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
+   }
+ 
+   RecordWrite(object, dst, value, save_fp, remembered_set_action,
+-              OMIT_SMI_CHECK);
++              SmiCheck::kOmit);
+ 
+   bind(&done);
+ 
+@@ -511,7 +511,7 @@ void MacroAssembler::RecordWrite(Register object, Register address,
+   DCHECK(value != address);
+   AssertNotSmi(object);
+ 
+-  if ((remembered_set_action == OMIT_REMEMBERED_SET &&
++  if ((remembered_set_action == RememberedSetAction::kOmit &&
+        !FLAG_incremental_marking) ||
+       FLAG_disable_write_barriers) {
+     return;
+@@ -529,7 +529,7 @@ void MacroAssembler::RecordWrite(Register object, Register address,
+   // catch stores of Smis and stores into young gen.
+   Label done;
+ 
+-  if (smi_check == INLINE_SMI_CHECK) {
++  if (smi_check == SmiCheck::kInline) {
+     // Skip barrier if writing a smi.
+     JumpIfSmi(value, &done, Label::kNear);
+   }
+@@ -1481,7 +1481,7 @@ void MacroAssembler::StackOverflowCheck(Register num_args, Register scratch,
+ 
+ void MacroAssembler::InvokePrologue(Register expected_parameter_count,
+                                     Register actual_parameter_count,
+-                                    Label* done, InvokeFlag flag) {
++                                    Label* done, InvokeType type) {
+   if (expected_parameter_count != actual_parameter_count) {
+     DCHECK_EQ(actual_parameter_count, eax);
+     DCHECK_EQ(expected_parameter_count, ecx);
+@@ -1518,7 +1518,7 @@ void MacroAssembler::InvokePrologue(Register expected_parameter_count,
+           Operand(expected_parameter_count, times_system_pointer_size, 0));
+       AllocateStackSpace(scratch);
+       // Extra words are the receiver and the return address (if a jump).
+-      int extra_words = flag == CALL_FUNCTION ? 1 : 2;
++      int extra_words = type == InvokeType::kCall ? 1 : 2;
+       lea(num, Operand(eax, extra_words));  // Number of words to copy.
+       Set(current, 0);
+       // Fall-through to the loop body because there are non-zero words to copy.
+@@ -1597,9 +1597,9 @@ void MacroAssembler::CallDebugOnFunctionCall(Register fun, Register new_target,
+ void MacroAssembler::InvokeFunctionCode(Register function, Register new_target,
+                                         Register expected_parameter_count,
+                                         Register actual_parameter_count,
+-                                        InvokeFlag flag) {
++                                        InvokeType type) {
+   // You can't call a function without a valid frame.
+-  DCHECK_IMPLIES(flag == CALL_FUNCTION, has_frame());
++  DCHECK_IMPLIES(type == InvokeType::kCall, has_frame());
+   DCHECK_EQ(function, edi);
+   DCHECK_IMPLIES(new_target.is_valid(), new_target == edx);
+   DCHECK(expected_parameter_count == ecx || expected_parameter_count == eax);
+@@ -1623,17 +1623,19 @@ void MacroAssembler::InvokeFunctionCode(Register function, Register new_target,
+   }
+ 
+   Label done;
+-  InvokePrologue(expected_parameter_count, actual_parameter_count, &done, flag);
++  InvokePrologue(expected_parameter_count, actual_parameter_count, &done, type);
+   // We call indirectly through the code field in the function to
+   // allow recompilation to take effect without changing any of the
+   // call sites.
+   static_assert(kJavaScriptCallCodeStartRegister == ecx, "ABI mismatch");
+   mov(ecx, FieldOperand(function, JSFunction::kCodeOffset));
+-  if (flag == CALL_FUNCTION) {
+-    CallCodeObject(ecx);
+-  } else {
+-    DCHECK(flag == JUMP_FUNCTION);
+-    JumpCodeObject(ecx);
++  switch (type) {
++    case InvokeType::kCall:
++      CallCodeObject(ecx);
++      break;
++    case InvokeType::kJump:
++      JumpCodeObject(ecx);
++      break;
+   }
+   jmp(&done, Label::kNear);
+ 
+@@ -1648,9 +1650,9 @@ void MacroAssembler::InvokeFunctionCode(Register function, Register new_target,
+ 
+ void MacroAssembler::InvokeFunction(Register fun, Register new_target,
+                                     Register actual_parameter_count,
+-                                    InvokeFlag flag) {
++                                    InvokeType type) {
+   // You can't call a function without a valid frame.
+-  DCHECK(flag == JUMP_FUNCTION || has_frame());
++  DCHECK(type == InvokeType::kJump || has_frame());
+ 
+   DCHECK(fun == edi);
+   mov(ecx, FieldOperand(edi, JSFunction::kSharedFunctionInfoOffset));
+@@ -1658,7 +1660,7 @@ void MacroAssembler::InvokeFunction(Register fun, Register new_target,
+   movzx_w(ecx,
+           FieldOperand(ecx, SharedFunctionInfo::kFormalParameterCountOffset));
+ 
+-  InvokeFunctionCode(edi, new_target, ecx, actual_parameter_count, flag);
++  InvokeFunctionCode(edi, new_target, ecx, actual_parameter_count, type);
+ }
+ 
+ void MacroAssembler::LoadGlobalProxy(Register dst) {
+diff --git a/src/codegen/ia32/macro-assembler-ia32.h b/src/codegen/ia32/macro-assembler-ia32.h
+index 9f8ef56aff..8067e8bb7c 100644
+--- a/src/codegen/ia32/macro-assembler-ia32.h
++++ b/src/codegen/ia32/macro-assembler-ia32.h
+@@ -44,9 +44,6 @@ class StatsCounter;
+ // distinguish memory operands from other operands on ia32.
+ using MemOperand = Operand;
+ 
+-enum RememberedSetAction { EMIT_REMEMBERED_SET, OMIT_REMEMBERED_SET };
+-enum SmiCheck { INLINE_SMI_CHECK, OMIT_SMI_CHECK };
+-
+ // TODO(victorgomes): Move definition to macro-assembler.h, once all other
+ // platforms are updated.
+ enum class StackLimitKind { kInterruptStackLimit, kRealStackLimit };
+@@ -538,8 +535,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   void RecordWriteField(
+       Register object, int offset, Register value, Register scratch,
+       SaveFPRegsMode save_fp,
+-      RememberedSetAction remembered_set_action = EMIT_REMEMBERED_SET,
+-      SmiCheck smi_check = INLINE_SMI_CHECK);
++      RememberedSetAction remembered_set_action = RememberedSetAction::kEmit,
++      SmiCheck smi_check = SmiCheck::kInline);
+ 
+   // For page containing |object| mark region covering |address|
+   // dirty. |object| is the object being stored into, |value| is the
+@@ -548,8 +545,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   // write barrier if the value is a smi.
+   void RecordWrite(
+       Register object, Register address, Register value, SaveFPRegsMode save_fp,
+-      RememberedSetAction remembered_set_action = EMIT_REMEMBERED_SET,
+-      SmiCheck smi_check = INLINE_SMI_CHECK);
++      RememberedSetAction remembered_set_action = RememberedSetAction::kEmit,
++      SmiCheck smi_check = SmiCheck::kInline);
+ 
+   // Enter specific kind of exit frame. Expects the number of
+   // arguments in register eax and sets up the number of arguments in
+@@ -581,7 +578,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+ 
+   void InvokeFunctionCode(Register function, Register new_target,
+                           Register expected_parameter_count,
+-                          Register actual_parameter_count, InvokeFlag flag);
++                          Register actual_parameter_count, InvokeType type);
+ 
+   // On function call, call into the debugger.
+   // This may clobber ecx.
+@@ -592,7 +589,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   // Invoke the JavaScript function in the given register. Changes the
+   // current context to the context in the function before invoking.
+   void InvokeFunction(Register function, Register new_target,
+-                      Register actual_parameter_count, InvokeFlag flag);
++                      Register actual_parameter_count, InvokeType type);
+ 
+   // Compare object type for heap object.
+   // Incoming register is heap_object and outgoing register is map.
+@@ -734,7 +731,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   // Helper functions for generating invokes.
+   void InvokePrologue(Register expected_parameter_count,
+                       Register actual_parameter_count, Label* done,
+-                      InvokeFlag flag);
++                      InvokeType type);
+ 
+   void EnterExitFramePrologue(StackFrame::Type frame_type, Register scratch);
+   void EnterExitFrameEpilogue(int argc, bool save_doubles);
+diff --git a/src/codegen/macro-assembler.h b/src/codegen/macro-assembler.h
+index ce3ccbf332..484ec9e4b2 100644
+--- a/src/codegen/macro-assembler.h
++++ b/src/codegen/macro-assembler.h
+@@ -10,7 +10,7 @@
+ #include "src/heap/heap.h"
+ 
+ // Helper types to make boolean flag easier to read at call-site.
+-enum InvokeFlag { CALL_FUNCTION, JUMP_FUNCTION };
++enum class InvokeType { kCall, kJump };
+ 
+ // Flags used for the AllocateInNewSpace functions.
+ enum AllocationFlags {
+@@ -28,6 +28,10 @@ enum AllocationFlags {
+   PRETENURE = 1 << 3,
+ };
+ 
++enum class RememberedSetAction { kOmit, kEmit };
++
++enum class SmiCheck { kOmit, kInline };
++
+ // This is the only place allowed to include the platform-specific headers.
+ #define INCLUDED_FROM_MACRO_ASSEMBLER_H
+ #if V8_TARGET_ARCH_IA32
+diff --git a/src/codegen/mips/macro-assembler-mips.cc b/src/codegen/mips/macro-assembler-mips.cc
+index c4c4ddc83a..4032ee099a 100644
+--- a/src/codegen/mips/macro-assembler-mips.cc
++++ b/src/codegen/mips/macro-assembler-mips.cc
+@@ -180,7 +180,7 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
+   Label done;
+ 
+   // Skip barrier if writing a smi.
+-  if (smi_check == INLINE_SMI_CHECK) {
++  if (smi_check == SmiCheck::kInline) {
+     JumpIfSmi(value, &done);
+   }
+ 
+@@ -199,7 +199,7 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
+   }
+ 
+   RecordWrite(object, dst, value, ra_status, save_fp, remembered_set_action,
+-              OMIT_SMI_CHECK);
++              SmiCheck::kOmit);
+ 
+   bind(&done);
+ 
+@@ -345,7 +345,7 @@ void MacroAssembler::RecordWrite(Register object, Register address,
+            Operand(value));
+   }
+ 
+-  if ((remembered_set_action == OMIT_REMEMBERED_SET &&
++  if ((remembered_set_action == RememberedSetAction::kOmit &&
+        !FLAG_incremental_marking) ||
+       FLAG_disable_write_barriers) {
+     return;
+@@ -355,7 +355,7 @@ void MacroAssembler::RecordWrite(Register object, Register address,
+   // catch stores of smis and stores into the young generation.
+   Label done;
+ 
+-  if (smi_check == INLINE_SMI_CHECK) {
++  if (smi_check == SmiCheck::kInline) {
+     DCHECK_EQ(0, kSmiTag);
+     JumpIfSmi(value, &done);
+   }
+@@ -4366,7 +4366,7 @@ void MacroAssembler::StackOverflowCheck(Register num_args, Register scratch1,
+ 
+ void MacroAssembler::InvokePrologue(Register expected_parameter_count,
+                                     Register actual_parameter_count,
+-                                    Label* done, InvokeFlag flag) {
++                                    Label* done, InvokeType type) {
+   Label regular_invoke;
+ 
+   //  a0: actual arguments count
+@@ -4477,9 +4477,9 @@ void MacroAssembler::CheckDebugHook(Register fun, Register new_target,
+ void MacroAssembler::InvokeFunctionCode(Register function, Register new_target,
+                                         Register expected_parameter_count,
+                                         Register actual_parameter_count,
+-                                        InvokeFlag flag) {
++                                        InvokeType type) {
+   // You can't call a function without a valid frame.
+-  DCHECK_IMPLIES(flag == CALL_FUNCTION, has_frame());
++  DCHECK_IMPLIES(type == InvokeType::kCall, has_frame());
+   DCHECK_EQ(function, a1);
+   DCHECK_IMPLIES(new_target.is_valid(), new_target == a3);
+ 
+@@ -4493,19 +4493,22 @@ void MacroAssembler::InvokeFunctionCode(Register function, Register new_target,
+   }
+ 
+   Label done;
+-  InvokePrologue(expected_parameter_count, actual_parameter_count, &done, flag);
++  InvokePrologue(expected_parameter_count, actual_parameter_count, &done,
++                 ftype);
+   // We call indirectly through the code field in the function to
+   // allow recompilation to take effect without changing any of the
+   // call sites.
+   Register code = kJavaScriptCallCodeStartRegister;
+   lw(code, FieldMemOperand(function, JSFunction::kCodeOffset));
+-  if (flag == CALL_FUNCTION) {
+-    Addu(code, code, Code::kHeaderSize - kHeapObjectTag);
+-    Call(code);
+-  } else {
+-    DCHECK(flag == JUMP_FUNCTION);
+-    Addu(code, code, Code::kHeaderSize - kHeapObjectTag);
+-    Jump(code);
++  switch (type) {
++    case InvokeType::kCall:
++      Addu(code, code, Code::kHeaderSize - kHeapObjectTag);
++      Call(code);
++      break;
++    case InvokeType::kJump:
++      Addu(code, code, Code::kHeaderSize - kHeapObjectTag);
++      Jump(code);
++      break;
+   }
+ 
+   // Continue here if InvokePrologue does handle the invocation due to
+@@ -4515,9 +4518,9 @@ void MacroAssembler::InvokeFunctionCode(Register function, Register new_target,
+ 
+ void MacroAssembler::InvokeFunctionWithNewTarget(
+     Register function, Register new_target, Register actual_parameter_count,
+-    InvokeFlag flag) {
++    InvokeType type) {
+   // You can't call a function without a valid frame.
+-  DCHECK_IMPLIES(flag == CALL_FUNCTION, has_frame());
++  DCHECK_IMPLIES(type == InvokeType::kCall, has_frame());
+ 
+   // Contract with called JS functions requires that function is passed in a1.
+   DCHECK_EQ(function, a1);
+@@ -4531,15 +4534,15 @@ void MacroAssembler::InvokeFunctionWithNewTarget(
+                       SharedFunctionInfo::kFormalParameterCountOffset));
+ 
+   InvokeFunctionCode(function, new_target, expected_reg, actual_parameter_count,
+-                     flag);
++                     type);
+ }
+ 
+ void MacroAssembler::InvokeFunction(Register function,
+                                     Register expected_parameter_count,
+                                     Register actual_parameter_count,
+-                                    InvokeFlag flag) {
++                                    InvokeType type) {
+   // You can't call a function without a valid frame.
+-  DCHECK_IMPLIES(flag == CALL_FUNCTION, has_frame());
++  DCHECK_IMPLIES(type == InvokeType::kCall, has_frame());
+ 
+   // Contract with called JS functions requires that function is passed in a1.
+   DCHECK_EQ(function, a1);
+@@ -4548,7 +4551,7 @@ void MacroAssembler::InvokeFunction(Register function,
+   lw(cp, FieldMemOperand(a1, JSFunction::kContextOffset));
+ 
+   InvokeFunctionCode(a1, no_reg, expected_parameter_count,
+-                     actual_parameter_count, flag);
++                     actual_parameter_count, type);
+ }
+ 
+ // ---------------------------------------------------------------------------
+diff --git a/src/codegen/mips/macro-assembler-mips.h b/src/codegen/mips/macro-assembler-mips.h
+index 3e0f7b1fae..a38d6aa042 100644
+--- a/src/codegen/mips/macro-assembler-mips.h
++++ b/src/codegen/mips/macro-assembler-mips.h
+@@ -45,8 +45,6 @@ enum LiFlags {
+   CONSTANT_SIZE = 1
+ };
+ 
+-enum RememberedSetAction { EMIT_REMEMBERED_SET, OMIT_REMEMBERED_SET };
+-enum SmiCheck { INLINE_SMI_CHECK, OMIT_SMI_CHECK };
+ enum RAStatus { kRAHasNotBeenSaved, kRAHasBeenSaved };
+ 
+ Register GetRegisterThatIsNotOneOf(Register reg1, Register reg2 = no_reg,
+@@ -974,8 +972,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   void RecordWriteField(
+       Register object, int offset, Register value, Register scratch,
+       RAStatus ra_status, SaveFPRegsMode save_fp,
+-      RememberedSetAction remembered_set_action = EMIT_REMEMBERED_SET,
+-      SmiCheck smi_check = INLINE_SMI_CHECK);
++      RememberedSetAction remembered_set_action = RememberedSetAction::kEmit,
++      SmiCheck smi_check = SmiCheck::kInline);
+ 
+   // For a given |object| notify the garbage collector that the slot |address|
+   // has been written.  |value| is the object being stored. The value and
+@@ -983,8 +981,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   void RecordWrite(
+       Register object, Register address, Register value, RAStatus ra_status,
+       SaveFPRegsMode save_fp,
+-      RememberedSetAction remembered_set_action = EMIT_REMEMBERED_SET,
+-      SmiCheck smi_check = INLINE_SMI_CHECK);
++      RememberedSetAction remembered_set_action = RememberedSetAction::kEmit,
++      SmiCheck smi_check = SmiCheck::kInline);
+ 
+   void Pref(int32_t hint, const MemOperand& rs);
+ 
+@@ -1016,7 +1014,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   // Invoke the JavaScript function code by either calling or jumping.
+   void InvokeFunctionCode(Register function, Register new_target,
+                           Register expected_parameter_count,
+-                          Register actual_parameter_count, InvokeFlag flag);
++                          Register actual_parameter_count, InvokeType type);
+ 
+   // On function call, call into the debugger if necessary.
+   void CheckDebugHook(Register fun, Register new_target,
+@@ -1027,10 +1025,10 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   // current context to the context in the function before invoking.
+   void InvokeFunctionWithNewTarget(Register function, Register new_target,
+                                    Register actual_parameter_count,
+-                                   InvokeFlag flag);
++                                   InvokeType type);
+ 
+   void InvokeFunction(Register function, Register expected_parameter_count,
+-                      Register actual_parameter_count, InvokeFlag flag);
++                      Register actual_parameter_count, InvokeType type);
+ 
+   // Exception handling.
+ 
+@@ -1152,7 +1150,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   // Helper functions for generating invokes.
+   void InvokePrologue(Register expected_parameter_count,
+                       Register actual_parameter_count, Label* done,
+-                      InvokeFlag flag);
++                      InvokeType type);
+ 
+   // Compute memory operands for safepoint stack slots.
+   static int SafepointRegisterStackIndex(int reg_code);
+diff --git a/src/codegen/mips64/macro-assembler-mips64.cc b/src/codegen/mips64/macro-assembler-mips64.cc
+index 53a515f71b..f694067688 100644
+--- a/src/codegen/mips64/macro-assembler-mips64.cc
++++ b/src/codegen/mips64/macro-assembler-mips64.cc
+@@ -178,7 +178,7 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
+   Label done;
+ 
+   // Skip barrier if writing a smi.
+-  if (smi_check == INLINE_SMI_CHECK) {
++  if (smi_check == SmiCheck::kInline) {
+     JumpIfSmi(value, &done);
+   }
+ 
+@@ -197,7 +197,7 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
+   }
+ 
+   RecordWrite(object, dst, value, ra_status, save_fp, remembered_set_action,
+-              OMIT_SMI_CHECK);
++              SmiCheck::kOmit);
+ 
+   bind(&done);
+ 
+@@ -343,7 +343,7 @@ void MacroAssembler::RecordWrite(Register object, Register address,
+            Operand(value));
+   }
+ 
+-  if ((remembered_set_action == OMIT_REMEMBERED_SET &&
++  if ((remembered_set_action == RememberedSetAction::kOmit &&
+        !FLAG_incremental_marking) ||
+       FLAG_disable_write_barriers) {
+     return;
+@@ -353,7 +353,7 @@ void MacroAssembler::RecordWrite(Register object, Register address,
+   // catch stores of smis and stores into the young generation.
+   Label done;
+ 
+-  if (smi_check == INLINE_SMI_CHECK) {
++  if (smi_check == SmiCheck::kInline) {
+     DCHECK_EQ(0, kSmiTag);
+     JumpIfSmi(value, &done);
+   }
+@@ -4880,7 +4880,7 @@ void MacroAssembler::StackOverflowCheck(Register num_args, Register scratch1,
+ 
+ void MacroAssembler::InvokePrologue(Register expected_parameter_count,
+                                     Register actual_parameter_count,
+-                                    Label* done, InvokeFlag flag) {
++                                    Label* done, InvokeType type) {
+   Label regular_invoke;
+ 
+   //  a0: actual arguments count
+@@ -4992,9 +4992,9 @@ void MacroAssembler::CheckDebugHook(Register fun, Register new_target,
+ void MacroAssembler::InvokeFunctionCode(Register function, Register new_target,
+                                         Register expected_parameter_count,
+                                         Register actual_parameter_count,
+-                                        InvokeFlag flag) {
++                                        InvokeType type) {
+   // You can't call a function without a valid frame.
+-  DCHECK_IMPLIES(flag == CALL_FUNCTION, has_frame());
++  DCHECK_IMPLIES(type == InvokeType::kCall, has_frame());
+   DCHECK_EQ(function, a1);
+   DCHECK_IMPLIES(new_target.is_valid(), new_target == a3);
+ 
+@@ -5008,19 +5008,21 @@ void MacroAssembler::InvokeFunctionCode(Register function, Register new_target,
+   }
+ 
+   Label done;
+-  InvokePrologue(expected_parameter_count, actual_parameter_count, &done, flag);
++  InvokePrologue(expected_parameter_count, actual_parameter_count, &done, type);
+   // We call indirectly through the code field in the function to
+   // allow recompilation to take effect without changing any of the
+   // call sites.
+   Register code = kJavaScriptCallCodeStartRegister;
+   Ld(code, FieldMemOperand(function, JSFunction::kCodeOffset));
+-  if (flag == CALL_FUNCTION) {
+-    Daddu(code, code, Operand(Code::kHeaderSize - kHeapObjectTag));
+-    Call(code);
+-  } else {
+-    DCHECK(flag == JUMP_FUNCTION);
+-    Daddu(code, code, Operand(Code::kHeaderSize - kHeapObjectTag));
+-    Jump(code);
++  switch (type) {
++    case InvokeType::kCall:
++      Daddu(code, code, Operand(Code::kHeaderSize - kHeapObjectTag));
++      Call(code);
++      break;
++    case InvokeType::kJump:
++      Daddu(code, code, Operand(Code::kHeaderSize - kHeapObjectTag));
++      Jump(code);
++      break;
+   }
+ 
+   // Continue here if InvokePrologue does handle the invocation due to
+@@ -5030,9 +5032,9 @@ void MacroAssembler::InvokeFunctionCode(Register function, Register new_target,
+ 
+ void MacroAssembler::InvokeFunctionWithNewTarget(
+     Register function, Register new_target, Register actual_parameter_count,
+-    InvokeFlag flag) {
++    InvokeType type) {
+   // You can't call a function without a valid frame.
+-  DCHECK_IMPLIES(flag == CALL_FUNCTION, has_frame());
++  DCHECK_IMPLIES(type == InvokeType::kCall, has_frame());
+ 
+   // Contract with called JS functions requires that function is passed in a1.
+   DCHECK_EQ(function, a1);
+@@ -5046,15 +5048,15 @@ void MacroAssembler::InvokeFunctionWithNewTarget(
+                       SharedFunctionInfo::kFormalParameterCountOffset));
+ 
+   InvokeFunctionCode(a1, new_target, expected_parameter_count,
+-                     actual_parameter_count, flag);
++                     actual_parameter_count, type);
+ }
+ 
+ void MacroAssembler::InvokeFunction(Register function,
+                                     Register expected_parameter_count,
+                                     Register actual_parameter_count,
+-                                    InvokeFlag flag) {
++                                    InvokeType type) {
+   // You can't call a function without a valid frame.
+-  DCHECK_IMPLIES(flag == CALL_FUNCTION, has_frame());
++  DCHECK_IMPLIES(type == InvokeType::kCall, has_frame());
+ 
+   // Contract with called JS functions requires that function is passed in a1.
+   DCHECK_EQ(function, a1);
+@@ -5063,7 +5065,7 @@ void MacroAssembler::InvokeFunction(Register function,
+   Ld(cp, FieldMemOperand(a1, JSFunction::kContextOffset));
+ 
+   InvokeFunctionCode(a1, no_reg, expected_parameter_count,
+-                     actual_parameter_count, flag);
++                     actual_parameter_count, type);
+ }
+ 
+ // ---------------------------------------------------------------------------
+diff --git a/src/codegen/mips64/macro-assembler-mips64.h b/src/codegen/mips64/macro-assembler-mips64.h
+index 5bff0dc0eb..b83a95eb92 100644
+--- a/src/codegen/mips64/macro-assembler-mips64.h
++++ b/src/codegen/mips64/macro-assembler-mips64.h
+@@ -55,8 +55,6 @@ enum LiFlags {
+   ADDRESS_LOAD = 2
+ };
+ 
+-enum RememberedSetAction { EMIT_REMEMBERED_SET, OMIT_REMEMBERED_SET };
+-enum SmiCheck { INLINE_SMI_CHECK, OMIT_SMI_CHECK };
+ enum RAStatus { kRAHasNotBeenSaved, kRAHasBeenSaved };
+ 
+ Register GetRegisterThatIsNotOneOf(Register reg1, Register reg2 = no_reg,
+@@ -994,8 +992,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   void RecordWriteField(
+       Register object, int offset, Register value, Register scratch,
+       RAStatus ra_status, SaveFPRegsMode save_fp,
+-      RememberedSetAction remembered_set_action = EMIT_REMEMBERED_SET,
+-      SmiCheck smi_check = INLINE_SMI_CHECK);
++      RememberedSetAction remembered_set_action = RememberedSetAction::kEmit,
++      SmiCheck smi_check = SmiCheck::kInline);
+ 
+   // For a given |object| notify the garbage collector that the slot |address|
+   // has been written.  |value| is the object being stored. The value and
+@@ -1003,8 +1001,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   void RecordWrite(
+       Register object, Register address, Register value, RAStatus ra_status,
+       SaveFPRegsMode save_fp,
+-      RememberedSetAction remembered_set_action = EMIT_REMEMBERED_SET,
+-      SmiCheck smi_check = INLINE_SMI_CHECK);
++      RememberedSetAction remembered_set_action = RememberedSetAction::kEmit,
++      SmiCheck smi_check = SmiCheck::kInline);
+ 
+   void Pref(int32_t hint, const MemOperand& rs);
+ 
+@@ -1072,7 +1070,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   // Invoke the JavaScript function code by either calling or jumping.
+   void InvokeFunctionCode(Register function, Register new_target,
+                           Register expected_parameter_count,
+-                          Register actual_parameter_count, InvokeFlag flag);
++                          Register actual_parameter_count, InvokeType type);
+ 
+   // On function call, call into the debugger if necessary.
+   void CheckDebugHook(Register fun, Register new_target,
+@@ -1083,9 +1081,9 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   // current context to the context in the function before invoking.
+   void InvokeFunctionWithNewTarget(Register function, Register new_target,
+                                    Register actual_parameter_count,
+-                                   InvokeFlag flag);
++                                   InvokeType type);
+   void InvokeFunction(Register function, Register expected_parameter_count,
+-                      Register actual_parameter_count, InvokeFlag flag);
++                      Register actual_parameter_count, InvokeType type);
+ 
+   // Exception handling.
+ 
+@@ -1227,7 +1225,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   // Helper functions for generating invokes.
+   void InvokePrologue(Register expected_parameter_count,
+                       Register actual_parameter_count, Label* done,
+-                      InvokeFlag flag);
++                      InvokeType type);
+ 
+   // Compute memory operands for safepoint stack slots.
+   static int SafepointRegisterStackIndex(int reg_code);
+diff --git a/src/codegen/ppc/macro-assembler-ppc.cc b/src/codegen/ppc/macro-assembler-ppc.cc
+index bf6ad1ffde..4612dd5fa0 100644
+--- a/src/codegen/ppc/macro-assembler-ppc.cc
++++ b/src/codegen/ppc/macro-assembler-ppc.cc
+@@ -598,7 +598,7 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
+   Label done;
+ 
+   // Skip barrier if writing a smi.
+-  if (smi_check == INLINE_SMI_CHECK) {
++  if (smi_check == SmiCheck::kInline) {
+     JumpIfSmi(value, &done);
+   }
+ 
+@@ -616,7 +616,7 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
+   }
+ 
+   RecordWrite(object, dst, value, lr_status, save_fp, remembered_set_action,
+-              OMIT_SMI_CHECK);
++              SmiCheck::kOmit);
+ 
+   bind(&done);
+ 
+@@ -759,7 +759,7 @@ void MacroAssembler::RecordWrite(Register object, Register address,
+     Check(eq, AbortReason::kWrongAddressOrValuePassedToRecordWrite);
+   }
+ 
+-  if ((remembered_set_action == OMIT_REMEMBERED_SET &&
++  if ((remembered_set_action == RememberedSetAction::kOmit &&
+        !FLAG_incremental_marking) ||
+       FLAG_disable_write_barriers) {
+     return;
+@@ -769,7 +769,7 @@ void MacroAssembler::RecordWrite(Register object, Register address,
+   // catch stores of smis and stores into the young generation.
+   Label done;
+ 
+-  if (smi_check == INLINE_SMI_CHECK) {
++  if (smi_check == SmiCheck::kInline) {
+     JumpIfSmi(value, &done);
+   }
+ 
+@@ -1414,7 +1414,7 @@ void MacroAssembler::StackOverflowCheck(Register num_args, Register scratch,
+ 
+ void MacroAssembler::InvokePrologue(Register expected_parameter_count,
+                                     Register actual_parameter_count,
+-                                    Label* done, InvokeFlag flag) {
++                                    Label* done, InvokeType type) {
+   Label regular_invoke;
+ 
+   //  r3: actual arguments count
+@@ -1529,9 +1529,9 @@ void MacroAssembler::CheckDebugHook(Register fun, Register new_target,
+ void MacroAssembler::InvokeFunctionCode(Register function, Register new_target,
+                                         Register expected_parameter_count,
+                                         Register actual_parameter_count,
+-                                        InvokeFlag flag) {
++                                        InvokeType type) {
+   // You can't call a function without a valid frame.
+-  DCHECK_IMPLIES(flag == CALL_FUNCTION, has_frame());
++  DCHECK_IMPLIES(type == InvokeType::kCall, has_frame());
+   DCHECK_EQ(function, r4);
+   DCHECK_IMPLIES(new_target.is_valid(), new_target == r6);
+ 
+@@ -1545,18 +1545,20 @@ void MacroAssembler::InvokeFunctionCode(Register function, Register new_target,
+   }
+ 
+   Label done;
+-  InvokePrologue(expected_parameter_count, actual_parameter_count, &done, flag);
++  InvokePrologue(expected_parameter_count, actual_parameter_count, &done, type);
+   // We call indirectly through the code field in the function to
+   // allow recompilation to take effect without changing any of the
+   // call sites.
+   Register code = kJavaScriptCallCodeStartRegister;
+   LoadTaggedPointerField(code,
+                          FieldMemOperand(function, JSFunction::kCodeOffset));
+-  if (flag == CALL_FUNCTION) {
+-    CallCodeObject(code);
+-  } else {
+-    DCHECK(flag == JUMP_FUNCTION);
+-    JumpCodeObject(code);
++  switch (type) {
++    case InvokeType::kCall:
++      CallCodeObject(code);
++      break;
++    case InvokeType::kJump:
++      JumpCodeObject(code);
++      break;
+   }
+ 
+     // Continue here if InvokePrologue does handle the invocation due to
+@@ -1566,9 +1568,9 @@ void MacroAssembler::InvokeFunctionCode(Register function, Register new_target,
+ 
+ void MacroAssembler::InvokeFunctionWithNewTarget(
+     Register fun, Register new_target, Register actual_parameter_count,
+-    InvokeFlag flag) {
++    InvokeType type) {
+   // You can't call a function without a valid frame.
+-  DCHECK_IMPLIES(flag == CALL_FUNCTION, has_frame());
++  DCHECK_IMPLIES(type == InvokeType::kCall, has_frame());
+ 
+   // Contract with called JS functions requires that function is passed in r4.
+   DCHECK_EQ(fun, r4);
+@@ -1584,15 +1586,15 @@ void MacroAssembler::InvokeFunctionWithNewTarget(
+                    temp_reg, SharedFunctionInfo::kFormalParameterCountOffset));
+ 
+   InvokeFunctionCode(fun, new_target, expected_reg, actual_parameter_count,
+-                     flag);
++                     type);
+ }
+ 
+ void MacroAssembler::InvokeFunction(Register function,
+                                     Register expected_parameter_count,
+                                     Register actual_parameter_count,
+-                                    InvokeFlag flag) {
++                                    InvokeType type) {
+   // You can't call a function without a valid frame.
+-  DCHECK_IMPLIES(flag == CALL_FUNCTION, has_frame());
++  DCHECK_IMPLIES(type == InvokeType::kCall, has_frame());
+ 
+   // Contract with called JS functions requires that function is passed in r4.
+   DCHECK_EQ(function, r4);
+@@ -1601,7 +1603,7 @@ void MacroAssembler::InvokeFunction(Register function,
+   LoadTaggedPointerField(cp, FieldMemOperand(r4, JSFunction::kContextOffset));
+ 
+   InvokeFunctionCode(r4, no_reg, expected_parameter_count,
+-                     actual_parameter_count, flag);
++                     actual_parameter_count, type);
+ }
+ 
+ void MacroAssembler::PushStackHandler() {
+diff --git a/src/codegen/ppc/macro-assembler-ppc.h b/src/codegen/ppc/macro-assembler-ppc.h
+index 519ab6afc9..f8bf97f3a9 100644
+--- a/src/codegen/ppc/macro-assembler-ppc.h
++++ b/src/codegen/ppc/macro-assembler-ppc.h
+@@ -28,8 +28,6 @@ inline MemOperand FieldMemOperand(Register object, int offset) {
+   return MemOperand(object, offset - kHeapObjectTag);
+ }
+ 
+-enum RememberedSetAction { EMIT_REMEMBERED_SET, OMIT_REMEMBERED_SET };
+-enum SmiCheck { INLINE_SMI_CHECK, OMIT_SMI_CHECK };
+ enum LinkRegisterStatus { kLRHasNotBeenSaved, kLRHasBeenSaved };
+ 
+ Register GetRegisterThatIsNotOneOf(Register reg1, Register reg2 = no_reg,
+@@ -759,8 +757,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   void RecordWriteField(
+       Register object, int offset, Register value, Register scratch,
+       LinkRegisterStatus lr_status, SaveFPRegsMode save_fp,
+-      RememberedSetAction remembered_set_action = EMIT_REMEMBERED_SET,
+-      SmiCheck smi_check = INLINE_SMI_CHECK);
++      RememberedSetAction remembered_set_action = RememberedSetAction::kEmit,
++      SmiCheck smi_check = SmiCheck::kInline);
+ 
+   // For a given |object| notify the garbage collector that the slot |address|
+   // has been written.  |value| is the object being stored. The value and
+@@ -768,8 +766,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   void RecordWrite(
+       Register object, Register address, Register value,
+       LinkRegisterStatus lr_status, SaveFPRegsMode save_fp,
+-      RememberedSetAction remembered_set_action = EMIT_REMEMBERED_SET,
+-      SmiCheck smi_check = INLINE_SMI_CHECK);
++      RememberedSetAction remembered_set_action = RememberedSetAction::kEmit,
++      SmiCheck smi_check = SmiCheck::kInline);
+ 
+   // Enter exit frame.
+   // stack_space - extra stack space, used for parameters before call to C.
+@@ -835,7 +833,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   // Invoke the JavaScript function code by either calling or jumping.
+   void InvokeFunctionCode(Register function, Register new_target,
+                           Register expected_parameter_count,
+-                          Register actual_parameter_count, InvokeFlag flag);
++                          Register actual_parameter_count, InvokeType type);
+ 
+   // On function call, call into the debugger if necessary.
+   void CheckDebugHook(Register fun, Register new_target,
+@@ -846,9 +844,9 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   // current context to the context in the function before invoking.
+   void InvokeFunctionWithNewTarget(Register function, Register new_target,
+                                    Register actual_parameter_count,
+-                                   InvokeFlag flag);
++                                   InvokeType type);
+   void InvokeFunction(Register function, Register expected_parameter_count,
+-                      Register actual_parameter_count, InvokeFlag flag);
++                      Register actual_parameter_count, InvokeType type);
+ 
+   // Exception handling
+ 
+@@ -1048,7 +1046,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   // Helper functions for generating invokes.
+   void InvokePrologue(Register expected_parameter_count,
+                       Register actual_parameter_count, Label* done,
+-                      InvokeFlag flag);
++                      InvokeType type);
+ 
+   DISALLOW_IMPLICIT_CONSTRUCTORS(MacroAssembler);
+ };
+diff --git a/src/codegen/riscv64/macro-assembler-riscv64.cc b/src/codegen/riscv64/macro-assembler-riscv64.cc
+index 6075c053d9..912101de92 100644
+--- a/src/codegen/riscv64/macro-assembler-riscv64.cc
++++ b/src/codegen/riscv64/macro-assembler-riscv64.cc
+@@ -176,7 +176,7 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
+   Label done;
+ 
+   // Skip barrier if writing a smi.
+-  if (smi_check == INLINE_SMI_CHECK) {
++  if (smi_check == SmiCheck::kInline) {
+     JumpIfSmi(value, &done);
+   }
+ 
+@@ -198,7 +198,7 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
+   }
+ 
+   RecordWrite(object, dst, value, ra_status, save_fp, remembered_set_action,
+-              OMIT_SMI_CHECK);
++              SmiCheck::kOmit);
+ 
+   bind(&done);
+ 
+@@ -344,7 +344,7 @@ void MacroAssembler::RecordWrite(Register object, Register address,
+            kScratchReg, Operand(value));
+   }
+ 
+-  if ((remembered_set_action == OMIT_REMEMBERED_SET &&
++  if ((remembered_set_action == RememberedSetAction::kOmit &&
+        !FLAG_incremental_marking) ||
+       FLAG_disable_write_barriers) {
+     return;
+@@ -354,7 +354,7 @@ void MacroAssembler::RecordWrite(Register object, Register address,
+   // catch stores of smis and stores into the young generation.
+   Label done;
+ 
+-  if (smi_check == INLINE_SMI_CHECK) {
++  if (smi_check == SmiCheck::kInline) {
+     DCHECK_EQ(0, kSmiTag);
+     JumpIfSmi(value, &done);
+   }
+@@ -3527,7 +3527,7 @@ void MacroAssembler::StackOverflowCheck(Register num_args, Register scratch1,
+ 
+ void MacroAssembler::InvokePrologue(Register expected_parameter_count,
+                                     Register actual_parameter_count,
+-                                    Label* done, InvokeFlag flag) {
++                                    Label* done, InvokeType type) {
+   Label regular_invoke;
+ 
+   //  a0: actual arguments count
+@@ -3637,9 +3637,9 @@ void MacroAssembler::CheckDebugHook(Register fun, Register new_target,
+ void MacroAssembler::InvokeFunctionCode(Register function, Register new_target,
+                                         Register expected_parameter_count,
+                                         Register actual_parameter_count,
+-                                        InvokeFlag flag) {
++                                        InvokeType type) {
+   // You can't call a function without a valid frame.
+-  DCHECK_IMPLIES(flag == CALL_FUNCTION, has_frame());
++  DCHECK_IMPLIES(type == InvokeType::kCall, has_frame());
+   DCHECK_EQ(function, a1);
+   DCHECK_IMPLIES(new_target.is_valid(), new_target == a3);
+ 
+@@ -3653,17 +3653,19 @@ void MacroAssembler::InvokeFunctionCode(Register function, Register new_target,
+   }
+ 
+   Label done;
+-  InvokePrologue(expected_parameter_count, actual_parameter_count, &done, flag);
++  InvokePrologue(expected_parameter_count, actual_parameter_count, &done, type);
+   // We call indirectly through the code field in the function to
+   // allow recompilation to take effect without changing any of the
+   // call sites.
+   Register code = kJavaScriptCallCodeStartRegister;
+   Ld(code, FieldMemOperand(function, JSFunction::kCodeOffset));
+-  if (flag == CALL_FUNCTION) {
+-    CallCodeObject(code);
+-  } else {
+-    DCHECK(flag == JUMP_FUNCTION);
+-    JumpCodeObject(code);
++  switch (type) {
++    case InvokeType::kCall:
++      CallCodeObject(code);
++      break;
++    case InvokeType::kJump:
++      JumpCodeObject(code);
++      break;
+   }
+ 
+   // Continue here if InvokePrologue does handle the invocation due to
+@@ -3673,9 +3675,9 @@ void MacroAssembler::InvokeFunctionCode(Register function, Register new_target,
+ 
+ void MacroAssembler::InvokeFunctionWithNewTarget(
+     Register function, Register new_target, Register actual_parameter_count,
+-    InvokeFlag flag) {
++    InvokeType type) {
+   // You can't call a function without a valid frame.
+-  DCHECK_IMPLIES(flag == CALL_FUNCTION, has_frame());
++  DCHECK_IMPLIES(type == InvokeType::kCall, has_frame());
+ 
+   // Contract with called JS functions requires that function is passed in a1.
+   DCHECK_EQ(function, a1);
+@@ -3689,15 +3691,15 @@ void MacroAssembler::InvokeFunctionWithNewTarget(
+                       SharedFunctionInfo::kFormalParameterCountOffset));
+ 
+   InvokeFunctionCode(a1, new_target, expected_parameter_count,
+-                     actual_parameter_count, flag);
++                     actual_parameter_count, type);
+ }
+ 
+ void MacroAssembler::InvokeFunction(Register function,
+                                     Register expected_parameter_count,
+                                     Register actual_parameter_count,
+-                                    InvokeFlag flag) {
++                                    InvokeType type) {
+   // You can't call a function without a valid frame.
+-  DCHECK_IMPLIES(flag == CALL_FUNCTION, has_frame());
++  DCHECK_IMPLIES(type == InvokeType::kCall, has_frame());
+ 
+   // Contract with called JS functions requires that function is passed in a1.
+   DCHECK_EQ(function, a1);
+@@ -3706,7 +3708,7 @@ void MacroAssembler::InvokeFunction(Register function,
+   Ld(cp, FieldMemOperand(a1, JSFunction::kContextOffset));
+ 
+   InvokeFunctionCode(a1, no_reg, expected_parameter_count,
+-                     actual_parameter_count, flag);
++                     actual_parameter_count, type);
+ }
+ 
+ // ---------------------------------------------------------------------------
+diff --git a/src/codegen/riscv64/macro-assembler-riscv64.h b/src/codegen/riscv64/macro-assembler-riscv64.h
+index cb27a771b0..e556e55bc5 100644
+--- a/src/codegen/riscv64/macro-assembler-riscv64.h
++++ b/src/codegen/riscv64/macro-assembler-riscv64.h
+@@ -54,8 +54,6 @@ enum LiFlags {
+   ADDRESS_LOAD = 2
+ };
+ 
+-enum RememberedSetAction { EMIT_REMEMBERED_SET, OMIT_REMEMBERED_SET };
+-enum SmiCheck { INLINE_SMI_CHECK, OMIT_SMI_CHECK };
+ enum RAStatus { kRAHasNotBeenSaved, kRAHasBeenSaved };
+ 
+ Register GetRegisterThatIsNotOneOf(Register reg1, Register reg2 = no_reg,
+@@ -972,8 +970,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   void RecordWriteField(
+       Register object, int offset, Register value, Register scratch,
+       RAStatus ra_status, SaveFPRegsMode save_fp,
+-      RememberedSetAction remembered_set_action = EMIT_REMEMBERED_SET,
+-      SmiCheck smi_check = INLINE_SMI_CHECK);
++      RememberedSetAction remembered_set_action = RememberedSetAction::kEmit,
++      SmiCheck smi_check = SmiCheck::kInline);
+ 
+   // For a given |object| notify the garbage collector that the slot |address|
+   // has been written.  |value| is the object being stored. The value and
+@@ -981,8 +979,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   void RecordWrite(
+       Register object, Register address, Register value, RAStatus ra_status,
+       SaveFPRegsMode save_fp,
+-      RememberedSetAction remembered_set_action = EMIT_REMEMBERED_SET,
+-      SmiCheck smi_check = INLINE_SMI_CHECK);
++      RememberedSetAction remembered_set_action = RememberedSetAction::kEmit,
++      SmiCheck smi_check = SmiCheck::kInline);
+ 
+   // void Pref(int32_t hint, const MemOperand& rs);
+ 
+@@ -1030,7 +1028,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   // Invoke the JavaScript function code by either calling or jumping.
+   void InvokeFunctionCode(Register function, Register new_target,
+                           Register expected_parameter_count,
+-                          Register actual_parameter_count, InvokeFlag flag);
++                          Register actual_parameter_count, InvokeType type);
+ 
+   // On function call, call into the debugger if necessary.
+   void CheckDebugHook(Register fun, Register new_target,
+@@ -1041,9 +1039,9 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   // current context to the context in the function before invoking.
+   void InvokeFunctionWithNewTarget(Register function, Register new_target,
+                                    Register actual_parameter_count,
+-                                   InvokeFlag flag);
++                                   InvokeType type);
+   void InvokeFunction(Register function, Register expected_parameter_count,
+-                      Register actual_parameter_count, InvokeFlag flag);
++                      Register actual_parameter_count, InvokeType type);
+ 
+   // Exception handling.
+ 
+@@ -1185,7 +1183,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   // Helper functions for generating invokes.
+   void InvokePrologue(Register expected_parameter_count,
+                       Register actual_parameter_count, Label* done,
+-                      InvokeFlag flag);
++                      InvokeType type);
+ 
+   // Compute memory operands for safepoint stack slots.
+   static int SafepointRegisterStackIndex(int reg_code);
+diff --git a/src/codegen/s390/macro-assembler-s390.cc b/src/codegen/s390/macro-assembler-s390.cc
+index 7c6f1b5586..747125c28e 100644
+--- a/src/codegen/s390/macro-assembler-s390.cc
++++ b/src/codegen/s390/macro-assembler-s390.cc
+@@ -815,7 +815,7 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
+   Label done;
+ 
+   // Skip barrier if writing a smi.
+-  if (smi_check == INLINE_SMI_CHECK) {
++  if (smi_check == SmiCheck::kInline) {
+     JumpIfSmi(value, &done);
+   }
+ 
+@@ -833,7 +833,7 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
+   }
+ 
+   RecordWrite(object, dst, value, lr_status, save_fp, remembered_set_action,
+-              OMIT_SMI_CHECK);
++              SmiCheck::kOmit);
+ 
+   bind(&done);
+ 
+@@ -973,7 +973,7 @@ void MacroAssembler::RecordWrite(Register object, Register address,
+     Check(eq, AbortReason::kWrongAddressOrValuePassedToRecordWrite);
+   }
+ 
+-  if ((remembered_set_action == OMIT_REMEMBERED_SET &&
++  if ((remembered_set_action == RememberedSetAction::kOmit &&
+        !FLAG_incremental_marking) ||
+       FLAG_disable_write_barriers) {
+     return;
+@@ -982,7 +982,7 @@ void MacroAssembler::RecordWrite(Register object, Register address,
+   // catch stores of smis and stores into the young generation.
+   Label done;
+ 
+-  if (smi_check == INLINE_SMI_CHECK) {
++  if (smi_check == SmiCheck::kInline) {
+     JumpIfSmi(value, &done);
+   }
+ 
+@@ -1593,7 +1593,7 @@ void MacroAssembler::StackOverflowCheck(Register num_args, Register scratch,
+ 
+ void MacroAssembler::InvokePrologue(Register expected_parameter_count,
+                                     Register actual_parameter_count,
+-                                    Label* done, InvokeFlag flag) {
++                                    Label* done, InvokeType type) {
+   Label regular_invoke;
+ 
+   //  r2: actual arguments count
+@@ -1709,9 +1709,9 @@ void MacroAssembler::CheckDebugHook(Register fun, Register new_target,
+ void MacroAssembler::InvokeFunctionCode(Register function, Register new_target,
+                                         Register expected_parameter_count,
+                                         Register actual_parameter_count,
+-                                        InvokeFlag flag) {
++                                        InvokeType type) {
+   // You can't call a function without a valid frame.
+-  DCHECK_IMPLIES(flag == CALL_FUNCTION, has_frame());
++  DCHECK_IMPLIES(type == InvokeType::kCall, has_frame());
+   DCHECK_EQ(function, r3);
+   DCHECK_IMPLIES(new_target.is_valid(), new_target == r5);
+ 
+@@ -1725,18 +1725,20 @@ void MacroAssembler::InvokeFunctionCode(Register function, Register new_target,
+   }
+ 
+   Label done;
+-  InvokePrologue(expected_parameter_count, actual_parameter_count, &done, flag);
++  InvokePrologue(expected_parameter_count, actual_parameter_count, &done, type);
+   // We call indirectly through the code field in the function to
+   // allow recompilation to take effect without changing any of the
+   // call sites.
+   Register code = kJavaScriptCallCodeStartRegister;
+   LoadTaggedPointerField(code,
+                          FieldMemOperand(function, JSFunction::kCodeOffset));
+-  if (flag == CALL_FUNCTION) {
+-    CallCodeObject(code);
+-  } else {
+-    DCHECK(flag == JUMP_FUNCTION);
+-    JumpCodeObject(code);
++  switch (type) {
++    case InvokeType::kCall:
++      CallCodeObject(code);
++      break;
++    case InvokeType::kJump:
++      JumpCodeObject(code);
++      break;
+   }
+   // Continue here if InvokePrologue does handle the invocation due to
+   // mismatched parameter counts.
+@@ -1745,9 +1747,9 @@ void MacroAssembler::InvokeFunctionCode(Register function, Register new_target,
+ 
+ void MacroAssembler::InvokeFunctionWithNewTarget(
+     Register fun, Register new_target, Register actual_parameter_count,
+-    InvokeFlag flag) {
++    InvokeType type) {
+   // You can't call a function without a valid frame.
+-  DCHECK_IMPLIES(flag == CALL_FUNCTION, has_frame());
++  DCHECK_IMPLIES(type == InvokeType::kCall, has_frame());
+ 
+   // Contract with called JS functions requires that function is passed in r3.
+   DCHECK_EQ(fun, r3);
+@@ -1763,15 +1765,15 @@ void MacroAssembler::InvokeFunctionWithNewTarget(
+                       SharedFunctionInfo::kFormalParameterCountOffset));
+ 
+   InvokeFunctionCode(fun, new_target, expected_reg, actual_parameter_count,
+-                     flag);
++                     type);
+ }
+ 
+ void MacroAssembler::InvokeFunction(Register function,
+                                     Register expected_parameter_count,
+                                     Register actual_parameter_count,
+-                                    InvokeFlag flag) {
++                                    InvokeType type) {
+   // You can't call a function without a valid frame.
+-  DCHECK_IMPLIES(flag == CALL_FUNCTION, has_frame());
++  DCHECK_IMPLIES(type == InvokeType::kCall, has_frame());
+ 
+   // Contract with called JS functions requires that function is passed in r3.
+   DCHECK_EQ(function, r3);
+@@ -1781,7 +1783,7 @@ void MacroAssembler::InvokeFunction(Register function,
+                          FieldMemOperand(function, JSFunction::kContextOffset));
+ 
+   InvokeFunctionCode(r3, no_reg, expected_parameter_count,
+-                     actual_parameter_count, flag);
++                     actual_parameter_count, type);
+ }
+ 
+ void MacroAssembler::PushStackHandler() {
+diff --git a/src/codegen/s390/macro-assembler-s390.h b/src/codegen/s390/macro-assembler-s390.h
+index f32ed65676..ffb1945372 100644
+--- a/src/codegen/s390/macro-assembler-s390.h
++++ b/src/codegen/s390/macro-assembler-s390.h
+@@ -32,8 +32,6 @@ inline MemOperand FieldMemOperand(Register object, Register index, int offset) {
+   return MemOperand(object, index, offset - kHeapObjectTag);
+ }
+ 
+-enum RememberedSetAction { EMIT_REMEMBERED_SET, OMIT_REMEMBERED_SET };
+-enum SmiCheck { INLINE_SMI_CHECK, OMIT_SMI_CHECK };
+ enum LinkRegisterStatus { kLRHasNotBeenSaved, kLRHasBeenSaved };
+ 
+ Register GetRegisterThatIsNotOneOf(Register reg1, Register reg2 = no_reg,
+@@ -1229,7 +1227,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   // Invoke the JavaScript function code by either calling or jumping.
+   void InvokeFunctionCode(Register function, Register new_target,
+                           Register expected_parameter_count,
+-                          Register actual_parameter_count, InvokeFlag flag);
++                          Register actual_parameter_count, InvokeType type);
+ 
+   // On function call, call into the debugger if necessary.
+   void CheckDebugHook(Register fun, Register new_target,
+@@ -1240,9 +1238,9 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   // current context to the context in the function before invoking.
+   void InvokeFunctionWithNewTarget(Register function, Register new_target,
+                                    Register actual_parameter_count,
+-                                   InvokeFlag flag);
++                                   InvokeType type);
+   void InvokeFunction(Register function, Register expected_parameter_count,
+-                      Register actual_parameter_count, InvokeFlag flag);
++                      Register actual_parameter_count, InvokeType type);
+ 
+   // Exception handling
+ 
+@@ -1359,8 +1357,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   void RecordWriteField(
+       Register object, int offset, Register value, Register scratch,
+       LinkRegisterStatus lr_status, SaveFPRegsMode save_fp,
+-      RememberedSetAction remembered_set_action = EMIT_REMEMBERED_SET,
+-      SmiCheck smi_check = INLINE_SMI_CHECK);
++      RememberedSetAction remembered_set_action = RememberedSetAction::kEmit,
++      SmiCheck smi_check = SmiCheck::kInline);
+ 
+   // For a given |object| notify the garbage collector that the slot |address|
+   // has been written.  |value| is the object being stored. The value and
+@@ -1368,15 +1366,15 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   void RecordWrite(
+       Register object, Register address, Register value,
+       LinkRegisterStatus lr_status, SaveFPRegsMode save_fp,
+-      RememberedSetAction remembered_set_action = EMIT_REMEMBERED_SET,
+-      SmiCheck smi_check = INLINE_SMI_CHECK);
++      RememberedSetAction remembered_set_action = RememberedSetAction::kEmit,
++      SmiCheck smi_check = SmiCheck::kInline);
+ 
+  private:
+   static const int kSmiShift = kSmiTagSize + kSmiShiftSize;
+   // Helper functions for generating invokes.
+   void InvokePrologue(Register expected_parameter_count,
+                       Register actual_parameter_count, Label* done,
+-                      InvokeFlag flag);
++                      InvokeType type);
+ 
+   DISALLOW_IMPLICIT_CONSTRUCTORS(MacroAssembler);
+ };
+diff --git a/src/codegen/x64/macro-assembler-x64.cc b/src/codegen/x64/macro-assembler-x64.cc
+index ac0f3b8793..26fb373c8d 100644
+--- a/src/codegen/x64/macro-assembler-x64.cc
++++ b/src/codegen/x64/macro-assembler-x64.cc
+@@ -332,7 +332,7 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
+   Label done;
+ 
+   // Skip barrier if writing a smi.
+-  if (smi_check == INLINE_SMI_CHECK) {
++  if (smi_check == SmiCheck::kInline) {
+     JumpIfSmi(value, &done);
+   }
+ 
+@@ -350,7 +350,7 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
+   }
+ 
+   RecordWrite(object, dst, value, save_fp, remembered_set_action,
+-              OMIT_SMI_CHECK);
++              SmiCheck::kOmit);
+ 
+   bind(&done);
+ 
+@@ -502,7 +502,7 @@ void MacroAssembler::RecordWrite(Register object, Register address,
+   DCHECK(value != address);
+   AssertNotSmi(object);
+ 
+-  if ((remembered_set_action == OMIT_REMEMBERED_SET &&
++  if ((remembered_set_action == RememberedSetAction::kOmit &&
+        !FLAG_incremental_marking) ||
+       FLAG_disable_write_barriers) {
+     return;
+@@ -520,7 +520,7 @@ void MacroAssembler::RecordWrite(Register object, Register address,
+   // catch stores of smis and stores into the young generation.
+   Label done;
+ 
+-  if (smi_check == INLINE_SMI_CHECK) {
++  if (smi_check == SmiCheck::kInline) {
+     // Skip barrier if writing a smi.
+     JumpIfSmi(value, &done);
+   }
+@@ -2763,32 +2763,32 @@ void TurboAssembler::PrepareForTailCall(Register callee_args_count,
+ 
+ void MacroAssembler::InvokeFunction(Register function, Register new_target,
+                                     Register actual_parameter_count,
+-                                    InvokeFlag flag) {
++                                    InvokeType type) {
+   LoadTaggedPointerField(
+       rbx, FieldOperand(function, JSFunction::kSharedFunctionInfoOffset));
+   movzxwq(rbx,
+           FieldOperand(rbx, SharedFunctionInfo::kFormalParameterCountOffset));
+ 
+-  InvokeFunction(function, new_target, rbx, actual_parameter_count, flag);
++  InvokeFunction(function, new_target, rbx, actual_parameter_count, type);
+ }
+ 
+ void MacroAssembler::InvokeFunction(Register function, Register new_target,
+                                     Register expected_parameter_count,
+                                     Register actual_parameter_count,
+-                                    InvokeFlag flag) {
+-  DCHECK(function == rdi);
++                                    InvokeType type) {
++  DCHECK_EQ(function, rdi);
+   LoadTaggedPointerField(rsi,
+                          FieldOperand(function, JSFunction::kContextOffset));
+   InvokeFunctionCode(rdi, new_target, expected_parameter_count,
+-                     actual_parameter_count, flag);
++                     actual_parameter_count, type);
+ }
+ 
+ void MacroAssembler::InvokeFunctionCode(Register function, Register new_target,
+                                         Register expected_parameter_count,
+                                         Register actual_parameter_count,
+-                                        InvokeFlag flag) {
++                                        InvokeType type) {
+   // You can't call a function without a valid frame.
+-  DCHECK_IMPLIES(flag == CALL_FUNCTION, has_frame());
++  DCHECK_IMPLIES(type == InvokeType::kCall, has_frame());
+   DCHECK_EQ(function, rdi);
+   DCHECK_IMPLIES(new_target.is_valid(), new_target == rdx);
+ 
+@@ -2810,17 +2810,19 @@ void MacroAssembler::InvokeFunctionCode(Register function, Register new_target,
+   }
+ 
+   Label done;
+-  InvokePrologue(expected_parameter_count, actual_parameter_count, &done, flag);
++  InvokePrologue(expected_parameter_count, actual_parameter_count, &done, type);
+   // We call indirectly through the code field in the function to
+   // allow recompilation to take effect without changing any of the
+   // call sites.
+   static_assert(kJavaScriptCallCodeStartRegister == rcx, "ABI mismatch");
+   LoadTaggedPointerField(rcx, FieldOperand(function, JSFunction::kCodeOffset));
+-  if (flag == CALL_FUNCTION) {
+-    CallCodeObject(rcx);
+-  } else {
+-    DCHECK(flag == JUMP_FUNCTION);
+-    JumpCodeObject(rcx);
++  switch (type) {
++    case InvokeType::kCall:
++      CallCodeObject(rcx);
++      break;
++    case InvokeType::kJump:
++      JumpCodeObject(rcx);
++      break;
+   }
+   jmp(&done, Label::kNear);
+ 
+@@ -2873,7 +2875,7 @@ void MacroAssembler::StackOverflowCheck(
+ 
+ void MacroAssembler::InvokePrologue(Register expected_parameter_count,
+                                     Register actual_parameter_count,
+-                                    Label* done, InvokeFlag flag) {
++                                    Label* done, InvokeType type) {
+   if (expected_parameter_count != actual_parameter_count) {
+     Label regular_invoke;
+     // If the expected parameter count is equal to the adaptor sentinel, no need
+@@ -2899,7 +2901,7 @@ void MacroAssembler::InvokePrologue(Register expected_parameter_count,
+            Operand(expected_parameter_count, times_system_pointer_size, 0));
+       AllocateStackSpace(kScratchRegister);
+       // Extra words are the receiver and the return address (if a jump).
+-      int extra_words = flag == CALL_FUNCTION ? 1 : 2;
++      int extra_words = type == InvokeType::kCall ? 1 : 2;
+       leaq(num, Operand(rax, extra_words));  // Number of words to copy.
+       Set(current, 0);
+       // Fall-through to the loop body because there are non-zero words to copy.
+diff --git a/src/codegen/x64/macro-assembler-x64.h b/src/codegen/x64/macro-assembler-x64.h
+index ffa802d2f3..389c3935d4 100644
+--- a/src/codegen/x64/macro-assembler-x64.h
++++ b/src/codegen/x64/macro-assembler-x64.h
+@@ -26,9 +26,6 @@ using MemOperand = Operand;
+ 
+ class StringConstantBase;
+ 
+-enum RememberedSetAction { EMIT_REMEMBERED_SET, OMIT_REMEMBERED_SET };
+-enum SmiCheck { INLINE_SMI_CHECK, OMIT_SMI_CHECK };
+-
+ struct SmiIndex {
+   SmiIndex(Register index_register, ScaleFactor scale)
+       : reg(index_register), scale(scale) {}
+@@ -671,8 +668,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   void RecordWriteField(
+       Register object, int offset, Register value, Register scratch,
+       SaveFPRegsMode save_fp,
+-      RememberedSetAction remembered_set_action = EMIT_REMEMBERED_SET,
+-      SmiCheck smi_check = INLINE_SMI_CHECK);
++      RememberedSetAction remembered_set_action = RememberedSetAction::kEmit,
++      SmiCheck smi_check = SmiCheck::kInline);
+ 
+   // For page containing |object| mark region covering |address|
+   // dirty. |object| is the object being stored into, |value| is the
+@@ -681,8 +678,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   // the write barrier if the value is a smi.
+   void RecordWrite(
+       Register object, Register address, Register value, SaveFPRegsMode save_fp,
+-      RememberedSetAction remembered_set_action = EMIT_REMEMBERED_SET,
+-      SmiCheck smi_check = INLINE_SMI_CHECK);
++      RememberedSetAction remembered_set_action = RememberedSetAction::kEmit,
++      SmiCheck smi_check = SmiCheck::kInline);
+ 
+   // Enter specific kind of exit frame; either in normal or
+   // debug mode. Expects the number of arguments in register rax and
+@@ -714,7 +711,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   // Invoke the JavaScript function code by either calling or jumping.
+   void InvokeFunctionCode(Register function, Register new_target,
+                           Register expected_parameter_count,
+-                          Register actual_parameter_count, InvokeFlag flag);
++                          Register actual_parameter_count, InvokeType type);
+ 
+   // On function call, call into the debugger.
+   void CallDebugOnFunctionCall(Register fun, Register new_target,
+@@ -724,11 +721,11 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   // Invoke the JavaScript function in the given register. Changes the
+   // current context to the context in the function before invoking.
+   void InvokeFunction(Register function, Register new_target,
+-                      Register actual_parameter_count, InvokeFlag flag);
++                      Register actual_parameter_count, InvokeType type);
+ 
+   void InvokeFunction(Register function, Register new_target,
+                       Register expected_parameter_count,
+-                      Register actual_parameter_count, InvokeFlag flag);
++                      Register actual_parameter_count, InvokeType type);
+ 
+   // ---------------------------------------------------------------------------
+   // Conversions between tagged smi values and non-tagged integer values.
+@@ -934,7 +931,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   // Helper functions for generating invokes.
+   void InvokePrologue(Register expected_parameter_count,
+                       Register actual_parameter_count, Label* done,
+-                      InvokeFlag flag);
++                      InvokeType type);
+ 
+   void EnterExitFramePrologue(Register saved_rax_reg,
+                               StackFrame::Type frame_type);
+diff --git a/src/compiler/backend/arm/code-generator-arm.cc b/src/compiler/backend/arm/code-generator-arm.cc
+index 5da33c2256..6a5236fc87 100644
+--- a/src/compiler/backend/arm/code-generator-arm.cc
++++ b/src/compiler/backend/arm/code-generator-arm.cc
+@@ -197,8 +197,8 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
+     __ CheckPageFlag(value_, MemoryChunk::kPointersToHereAreInterestingMask, eq,
+                      exit());
+     RememberedSetAction const remembered_set_action =
+-        mode_ > RecordWriteMode::kValueIsMap ? EMIT_REMEMBERED_SET
+-                                             : OMIT_REMEMBERED_SET;
++        mode_ > RecordWriteMode::kValueIsMap ? RememberedSetAction::kEmit
++                                             : RememberedSetAction::kOmit;
+     SaveFPRegsMode const save_fp_mode =
+         frame()->DidAllocateDoubleRegisters() ? kSaveFPRegs : kDontSaveFPRegs;
+     if (must_save_lr_) {
+diff --git a/src/compiler/backend/arm64/code-generator-arm64.cc b/src/compiler/backend/arm64/code-generator-arm64.cc
+index a8888170ac..4acf8d8766 100644
+--- a/src/compiler/backend/arm64/code-generator-arm64.cc
++++ b/src/compiler/backend/arm64/code-generator-arm64.cc
+@@ -288,8 +288,8 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
+     __ CheckPageFlag(value_, MemoryChunk::kPointersToHereAreInterestingMask, ne,
+                      exit());
+     RememberedSetAction const remembered_set_action =
+-        mode_ > RecordWriteMode::kValueIsMap ? EMIT_REMEMBERED_SET
+-                                             : OMIT_REMEMBERED_SET;
++        mode_ > RecordWriteMode::kValueIsMap ? RememberedSetAction::kEmit
++                                             : RememberedSetAction::kOmit;
+     SaveFPRegsMode const save_fp_mode =
+         frame()->DidAllocateDoubleRegisters() ? kSaveFPRegs : kDontSaveFPRegs;
+     if (must_save_lr_) {
+diff --git a/src/compiler/backend/ia32/code-generator-ia32.cc b/src/compiler/backend/ia32/code-generator-ia32.cc
+index 9a842ae17a..fbe7c5001c 100644
+--- a/src/compiler/backend/ia32/code-generator-ia32.cc
++++ b/src/compiler/backend/ia32/code-generator-ia32.cc
+@@ -325,8 +325,8 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
+                      exit());
+     __ lea(scratch1_, operand_);
+     RememberedSetAction const remembered_set_action =
+-        mode_ > RecordWriteMode::kValueIsMap ? EMIT_REMEMBERED_SET
+-                                             : OMIT_REMEMBERED_SET;
++        mode_ > RecordWriteMode::kValueIsMap ? RememberedSetAction::kEmit
++                                             : RememberedSetAction::kOmit;
+     SaveFPRegsMode const save_fp_mode =
+         frame()->DidAllocateDoubleRegisters() ? kSaveFPRegs : kDontSaveFPRegs;
+     if (mode_ == RecordWriteMode::kValueIsEphemeronKey) {
+diff --git a/src/compiler/backend/mips/code-generator-mips.cc b/src/compiler/backend/mips/code-generator-mips.cc
+index a37cb6d18c..18cfe33a9e 100644
+--- a/src/compiler/backend/mips/code-generator-mips.cc
++++ b/src/compiler/backend/mips/code-generator-mips.cc
+@@ -169,8 +169,8 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
+                      exit());
+     __ Addu(scratch1_, object_, index_);
+     RememberedSetAction const remembered_set_action =
+-        mode_ > RecordWriteMode::kValueIsMap ? EMIT_REMEMBERED_SET
+-                                             : OMIT_REMEMBERED_SET;
++        mode_ > RecordWriteMode::kValueIsMap ? RememberedSetAction::kEmit
++                                             : RememberedSetAction::kOmit;
+     SaveFPRegsMode const save_fp_mode =
+         frame()->DidAllocateDoubleRegisters() ? kSaveFPRegs : kDontSaveFPRegs;
+     if (must_save_lr_) {
+diff --git a/src/compiler/backend/mips64/code-generator-mips64.cc b/src/compiler/backend/mips64/code-generator-mips64.cc
+index 50e5584707..52e0d4eab7 100644
+--- a/src/compiler/backend/mips64/code-generator-mips64.cc
++++ b/src/compiler/backend/mips64/code-generator-mips64.cc
+@@ -171,8 +171,8 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
+                      exit());
+     __ Daddu(scratch1_, object_, index_);
+     RememberedSetAction const remembered_set_action =
+-        mode_ > RecordWriteMode::kValueIsMap ? EMIT_REMEMBERED_SET
+-                                             : OMIT_REMEMBERED_SET;
++        mode_ > RecordWriteMode::kValueIsMap ? RememberedSetAction::kEmit
++                                             : RememberedSetAction::kOmit;
+     SaveFPRegsMode const save_fp_mode =
+         frame()->DidAllocateDoubleRegisters() ? kSaveFPRegs : kDontSaveFPRegs;
+     if (must_save_lr_) {
+diff --git a/src/compiler/backend/ppc/code-generator-ppc.cc b/src/compiler/backend/ppc/code-generator-ppc.cc
+index ccb1fd9046..6291d4819a 100644
+--- a/src/compiler/backend/ppc/code-generator-ppc.cc
++++ b/src/compiler/backend/ppc/code-generator-ppc.cc
+@@ -184,8 +184,8 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
+       __ add(scratch1_, object_, offset_);
+     }
+     RememberedSetAction const remembered_set_action =
+-        mode_ > RecordWriteMode::kValueIsMap ? EMIT_REMEMBERED_SET
+-                                             : OMIT_REMEMBERED_SET;
++        mode_ > RecordWriteMode::kValueIsMap ? RememberedSetAction::kEmit
++                                             : RememberedSetAction::kOmit;
+     SaveFPRegsMode const save_fp_mode =
+         frame()->DidAllocateDoubleRegisters() ? kSaveFPRegs : kDontSaveFPRegs;
+     if (must_save_lr_) {
+diff --git a/src/compiler/backend/riscv64/code-generator-riscv64.cc b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+index 2ad48c2f6b..2021ceed98 100644
+--- a/src/compiler/backend/riscv64/code-generator-riscv64.cc
++++ b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+@@ -165,8 +165,8 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
+                      exit());
+     __ Add64(scratch1_, object_, index_);
+     RememberedSetAction const remembered_set_action =
+-        mode_ > RecordWriteMode::kValueIsMap ? EMIT_REMEMBERED_SET
+-                                             : OMIT_REMEMBERED_SET;
++        mode_ > RecordWriteMode::kValueIsMap ? RememberedSetAction::kEmit
++                                             : RememberedSetAction::kOmit;
+     SaveFPRegsMode const save_fp_mode =
+         frame()->DidAllocateDoubleRegisters() ? kSaveFPRegs : kDontSaveFPRegs;
+     if (must_save_lr_) {
+diff --git a/src/compiler/backend/s390/code-generator-s390.cc b/src/compiler/backend/s390/code-generator-s390.cc
+index d9d60f0a72..9832efb800 100644
+--- a/src/compiler/backend/s390/code-generator-s390.cc
++++ b/src/compiler/backend/s390/code-generator-s390.cc
+@@ -219,8 +219,8 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
+       __ AddS64(scratch1_, object_, offset_);
+     }
+     RememberedSetAction const remembered_set_action =
+-        mode_ > RecordWriteMode::kValueIsMap ? EMIT_REMEMBERED_SET
+-                                             : OMIT_REMEMBERED_SET;
++        mode_ > RecordWriteMode::kValueIsMap ? RememberedSetAction::kEmit
++                                             : RememberedSetAction::kOmit;
+     SaveFPRegsMode const save_fp_mode =
+         frame()->DidAllocateDoubleRegisters() ? kSaveFPRegs : kDontSaveFPRegs;
+     if (must_save_lr_) {
+diff --git a/src/compiler/backend/x64/code-generator-x64.cc b/src/compiler/backend/x64/code-generator-x64.cc
+index 6a0a954751..ee92827966 100644
+--- a/src/compiler/backend/x64/code-generator-x64.cc
++++ b/src/compiler/backend/x64/code-generator-x64.cc
+@@ -285,8 +285,8 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
+     __ leaq(scratch1_, operand_);
+ 
+     RememberedSetAction const remembered_set_action =
+-        mode_ > RecordWriteMode::kValueIsMap ? EMIT_REMEMBERED_SET
+-                                             : OMIT_REMEMBERED_SET;
++        mode_ > RecordWriteMode::kValueIsMap ? RememberedSetAction::kEmit
++                                             : RememberedSetAction::kOmit;
+     SaveFPRegsMode const save_fp_mode =
+         frame()->DidAllocateDoubleRegisters() ? kSaveFPRegs : kDontSaveFPRegs;
+ 
+diff --git a/src/wasm/baseline/arm/liftoff-assembler-arm.h b/src/wasm/baseline/arm/liftoff-assembler-arm.h
+index 54543ee9d3..6260e403c1 100644
+--- a/src/wasm/baseline/arm/liftoff-assembler-arm.h
++++ b/src/wasm/baseline/arm/liftoff-assembler-arm.h
+@@ -760,7 +760,7 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+   CallRecordWriteStub(dst_addr,
+                       actual_offset_reg == no_reg ? Operand(offset_imm)
+                                                   : Operand(actual_offset_reg),
+-                      EMIT_REMEMBERED_SET, kSaveFPRegs,
++                      RememberedSetAction::kEmit, kSaveFPRegs,
+                       wasm::WasmCode::kRecordWrite);
+   bind(&exit);
+ }
+diff --git a/src/wasm/baseline/arm64/liftoff-assembler-arm64.h b/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
+index b8cbc6abf2..928126addc 100644
+--- a/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
++++ b/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
+@@ -485,7 +485,7 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+       dst_addr,
+       dst_op.IsRegisterOffset() ? Operand(dst_op.regoffset().X())
+                                 : Operand(dst_op.offset()),
+-      EMIT_REMEMBERED_SET, kSaveFPRegs, wasm::WasmCode::kRecordWrite);
++      RememberedSetAction::kEmit, kSaveFPRegs, wasm::WasmCode::kRecordWrite);
+   bind(&exit);
+ }
+ 
+diff --git a/src/wasm/baseline/ia32/liftoff-assembler-ia32.h b/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
+index 2001396ab3..668b9900d2 100644
+--- a/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
++++ b/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
+@@ -382,8 +382,8 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+                 MemoryChunk::kPointersToHereAreInterestingMask, zero, &exit,
+                 Label::kNear);
+   lea(scratch, dst_op);
+-  CallRecordWriteStub(dst_addr, scratch, EMIT_REMEMBERED_SET, kSaveFPRegs,
+-                      wasm::WasmCode::kRecordWrite);
++  CallRecordWriteStub(dst_addr, scratch, RememberedSetAction::kEmit,
++                      kSaveFPRegs, wasm::WasmCode::kRecordWrite);
+   bind(&exit);
+ }
+ 
+diff --git a/src/wasm/baseline/mips/liftoff-assembler-mips.h b/src/wasm/baseline/mips/liftoff-assembler-mips.h
+index 3fdd7ca659..c159a0a815 100644
+--- a/src/wasm/baseline/mips/liftoff-assembler-mips.h
++++ b/src/wasm/baseline/mips/liftoff-assembler-mips.h
+@@ -485,8 +485,8 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+   CheckPageFlag(src.gp(), scratch,
+                 MemoryChunk::kPointersToHereAreInterestingMask, eq, &exit);
+   Addu(scratch, dst_op.rm(), dst_op.offset());
+-  CallRecordWriteStub(dst_addr, scratch, EMIT_REMEMBERED_SET, kSaveFPRegs,
+-                      wasm::WasmCode::kRecordWrite);
++  CallRecordWriteStub(dst_addr, scratch, RememberedSetAction::kEmit,
++                      kSaveFPRegs, wasm::WasmCode::kRecordWrite);
+   bind(&exit);
+ }
+ 
+diff --git a/src/wasm/baseline/mips64/liftoff-assembler-mips64.h b/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
+index e6ae3d6eef..66147ca05b 100644
+--- a/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
++++ b/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
+@@ -464,8 +464,8 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+                 MemoryChunk::kPointersToHereAreInterestingMask, eq,
+                 &exit);
+   Daddu(scratch, dst_op.rm(), dst_op.offset());
+-  CallRecordWriteStub(dst_addr, scratch, EMIT_REMEMBERED_SET, kSaveFPRegs,
+-                      wasm::WasmCode::kRecordWrite);
++  CallRecordWriteStub(dst_addr, scratch, RememberedSetAction::kEmit,
++                      kSaveFPRegs, wasm::WasmCode::kRecordWrite);
+   bind(&exit);
+ }
+ 
+diff --git a/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h b/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
+index bc1ec79258..9c2f9b4eb2 100644
+--- a/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
++++ b/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
+@@ -453,8 +453,8 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+   CheckPageFlag(src.gp(), scratch,
+                 MemoryChunk::kPointersToHereAreInterestingMask, eq, &exit);
+   Add64(scratch, dst_op.rm(), dst_op.offset());
+-  CallRecordWriteStub(dst_addr, scratch, EMIT_REMEMBERED_SET, kSaveFPRegs,
+-                      wasm::WasmCode::kRecordWrite);
++  CallRecordWriteStub(dst_addr, scratch, RememberedSetAction::kEmit,
++                      kSaveFPRegs, wasm::WasmCode::kRecordWrite);
+   bind(&exit);
+ }
+ 
+diff --git a/src/wasm/baseline/s390/liftoff-assembler-s390.h b/src/wasm/baseline/s390/liftoff-assembler-s390.h
+index 203041ba38..99a98944b9 100644
+--- a/src/wasm/baseline/s390/liftoff-assembler-s390.h
++++ b/src/wasm/baseline/s390/liftoff-assembler-s390.h
+@@ -271,7 +271,7 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+   CheckPageFlag(src.gp(), r1, MemoryChunk::kPointersToHereAreInterestingMask,
+                 eq, &exit);
+   lay(r1, dst_op);
+-  CallRecordWriteStub(dst_addr, r1, EMIT_REMEMBERED_SET, kSaveFPRegs,
++  CallRecordWriteStub(dst_addr, r1, RememberedSetAction::kEmit, kSaveFPRegs,
+                       wasm::WasmCode::kRecordWrite);
+   bind(&exit);
+ }
+diff --git a/src/wasm/baseline/x64/liftoff-assembler-x64.h b/src/wasm/baseline/x64/liftoff-assembler-x64.h
+index ca837352ab..3eed5c47e1 100644
+--- a/src/wasm/baseline/x64/liftoff-assembler-x64.h
++++ b/src/wasm/baseline/x64/liftoff-assembler-x64.h
+@@ -381,8 +381,8 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+                 MemoryChunk::kPointersToHereAreInterestingMask, zero, &exit,
+                 Label::kNear);
+   leaq(scratch, dst_op);
+-  CallRecordWriteStub(dst_addr, scratch, EMIT_REMEMBERED_SET, kSaveFPRegs,
+-                      wasm::WasmCode::kRecordWrite);
++  CallRecordWriteStub(dst_addr, scratch, RememberedSetAction::kEmit,
++                      kSaveFPRegs, wasm::WasmCode::kRecordWrite);
+   bind(&exit);
+ }
+ 
+-- 
+2.35.1
+

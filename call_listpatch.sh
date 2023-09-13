@@ -1,0 +1,1 @@
+python3 listpatch.py input.txt ./patches-origin

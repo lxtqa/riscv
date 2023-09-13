@@ -1,0 +1,1768 @@
+From 5c27726778b7ad6da15610965ee59d00bd52c030 Mon Sep 17 00:00:00 2001
+From: Yahan Lu <yahan@iscas.ac.cn>
+Date: Fri, 26 Mar 2021 09:32:35 +0800
+Subject: [PATCH] [riscv64]port sparkplug and Implement catch with immediate
+
+Port: 3e689a7da616395b19459d6fb9ef73133209f3ce
+
+Bug: v8:11421
+
+Change-Id: I733a68d8ce6d4cbc11a63e82ccb6bd951f5e5870
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/2763963
+Reviewed-by: Leszek Swirski <leszeks@chromium.org>
+Reviewed-by: Brice Dobry <brice.dobry@futurewei.com>
+Reviewed-by: Michael Stanton <mvstanton@chromium.org>
+Commit-Queue: Yahan Lu <yahan@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/master@{#73873}
+---
+ BUILD.gn                                      |   3 +
+ src/baseline/baseline-assembler-inl.h         |   4 +-
+ src/baseline/baseline-assembler.h             |   2 +-
+ src/baseline/baseline-compiler.cc             |   4 +-
+ src/baseline/baseline-compiler.h              |   2 +-
+ src/baseline/baseline.cc                      |   2 +-
+ .../riscv64/baseline-assembler-riscv64-inl.h  | 613 ++++++++++++++++++
+ .../riscv64/baseline-compiler-riscv64-inl.h   | 113 ++++
+ src/builtins/builtins-internal-gen.cc         |   2 +-
+ src/builtins/riscv64/builtins-riscv64.cc      | 359 +++++++++-
+ src/codegen/interface-descriptors.cc          |   4 +-
+ src/codegen/riscv64/assembler-riscv64.h       |  10 +
+ .../riscv64/interface-descriptors-riscv64.cc  |  17 +-
+ .../riscv64/macro-assembler-riscv64.cc        |  86 ++-
+ src/codegen/riscv64/macro-assembler-riscv64.h |  28 +-
+ .../backend/riscv64/code-generator-riscv64.cc |   5 +
+ .../riscv64/instruction-selector-riscv64.cc   |   7 +-
+ src/debug/riscv64/debug-riscv64.cc            |   6 +-
+ src/flags/flag-definitions.h                  |   2 +-
+ .../riscv64/liftoff-assembler-riscv64.h       |  23 +-
+ test/inspector/inspector.status               |   4 +
+ 21 files changed, 1228 insertions(+), 68 deletions(-)
+ create mode 100644 src/baseline/riscv64/baseline-assembler-riscv64-inl.h
+ create mode 100644 src/baseline/riscv64/baseline-compiler-riscv64-inl.h
+
+diff --git a/BUILD.gn b/BUILD.gn
+index 8d241bff80..98ddc026c3 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -4239,6 +4239,9 @@ v8_source_set("v8_base_without_compiler") {
+     ]
+   } else if (v8_current_cpu == "riscv64") {
+     sources += [  ### gcmole(arch:riscv64) ###
++      "src/baseline/riscv64/baseline-assembler-riscv64-inl.h",
++      "src/baseline/riscv64/baseline-compiler-riscv64-inl.h",
++      "src/codegen/riscv64/assembler-riscv64-inl.h",
+       "src/codegen/riscv64/assembler-riscv64.cc",
+       "src/codegen/riscv64/constants-riscv64.cc",
+       "src/codegen/riscv64/cpu-riscv64.cc",
+diff --git a/src/baseline/baseline-assembler-inl.h b/src/baseline/baseline-assembler-inl.h
+index 8fd54d63a2..cbce3ba7b8 100644
+--- a/src/baseline/baseline-assembler-inl.h
++++ b/src/baseline/baseline-assembler-inl.h
+@@ -8,7 +8,7 @@
+ // TODO(v8:11421): Remove #if once baseline compiler is ported to other
+ // architectures.
+ #if V8_TARGET_ARCH_IA32 || V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64 || \
+-    V8_TARGET_ARCH_ARM
++    V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_RISCV64
+ 
+ #include <type_traits>
+ #include <unordered_map>
+@@ -27,6 +27,8 @@
+ #include "src/baseline/ia32/baseline-assembler-ia32-inl.h"
+ #elif V8_TARGET_ARCH_ARM
+ #include "src/baseline/arm/baseline-assembler-arm-inl.h"
++#elif V8_TARGET_ARCH_RISCV64
++#include "src/baseline/riscv64/baseline-assembler-riscv64-inl.h"
+ #else
+ #error Unsupported target architecture.
+ #endif
+diff --git a/src/baseline/baseline-assembler.h b/src/baseline/baseline-assembler.h
+index 38874d556f..53a2c657c6 100644
+--- a/src/baseline/baseline-assembler.h
++++ b/src/baseline/baseline-assembler.h
+@@ -8,7 +8,7 @@
+ // TODO(v8:11421): Remove #if once baseline compiler is ported to other
+ // architectures.
+ #if V8_TARGET_ARCH_IA32 || V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64 || \
+-    V8_TARGET_ARCH_ARM
++    V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_RISCV64
+ 
+ #include "src/codegen/macro-assembler.h"
+ #include "src/objects/tagged-index.h"
+diff --git a/src/baseline/baseline-compiler.cc b/src/baseline/baseline-compiler.cc
+index 3d599c11fd..cde1dd8d6d 100644
+--- a/src/baseline/baseline-compiler.cc
++++ b/src/baseline/baseline-compiler.cc
+@@ -5,7 +5,7 @@
+ // TODO(v8:11421): Remove #if once baseline compiler is ported to other
+ // architectures.
+ #if V8_TARGET_ARCH_IA32 || V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64 || \
+-    V8_TARGET_ARCH_ARM
++    V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_RISCV64
+ 
+ #include "src/baseline/baseline-compiler.h"
+ 
+@@ -40,6 +40,8 @@
+ #include "src/baseline/ia32/baseline-compiler-ia32-inl.h"
+ #elif V8_TARGET_ARCH_ARM
+ #include "src/baseline/arm/baseline-compiler-arm-inl.h"
++#elif V8_TARGET_ARCH_RISCV64
++#include "src/baseline/riscv64/baseline-compiler-riscv64-inl.h"
+ #else
+ #error Unsupported target architecture.
+ #endif
+diff --git a/src/baseline/baseline-compiler.h b/src/baseline/baseline-compiler.h
+index dbb2f64f6c..2a625a9aac 100644
+--- a/src/baseline/baseline-compiler.h
++++ b/src/baseline/baseline-compiler.h
+@@ -8,7 +8,7 @@
+ // TODO(v8:11421): Remove #if once baseline compiler is ported to other
+ // architectures.
+ #if V8_TARGET_ARCH_IA32 || V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64 || \
+-    V8_TARGET_ARCH_ARM
++    V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_RISCV64
+ 
+ #include "src/base/logging.h"
+ #include "src/base/threaded-list.h"
+diff --git a/src/baseline/baseline.cc b/src/baseline/baseline.cc
+index b5355660f9..d11f95ac32 100644
+--- a/src/baseline/baseline.cc
++++ b/src/baseline/baseline.cc
+@@ -9,7 +9,7 @@
+ // TODO(v8:11421): Remove #if once baseline compiler is ported to other
+ // architectures.
+ #if V8_TARGET_ARCH_IA32 || V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64 || \
+-    V8_TARGET_ARCH_ARM
++    V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_RISCV64
+ 
+ #include "src/baseline/baseline-assembler-inl.h"
+ #include "src/baseline/baseline-compiler.h"
+diff --git a/src/baseline/riscv64/baseline-assembler-riscv64-inl.h b/src/baseline/riscv64/baseline-assembler-riscv64-inl.h
+new file mode 100644
+index 0000000000..11e21dc572
+--- /dev/null
++++ b/src/baseline/riscv64/baseline-assembler-riscv64-inl.h
+@@ -0,0 +1,613 @@
++// Copyright 2021 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef V8_BASELINE_RISCV64_BASELINE_ASSEMBLER_RISCV64_INL_H_
++#define V8_BASELINE_RISCV64_BASELINE_ASSEMBLER_RISCV64_INL_H_
++
++#include "src/baseline/baseline-assembler.h"
++#include "src/codegen/assembler-inl.h"
++#include "src/codegen/interface-descriptors.h"
++namespace v8 {
++namespace internal {
++namespace baseline {
++
++constexpr Register kTestReg = t0;
++class BaselineAssembler::ScratchRegisterScope {
++ public:
++  explicit ScratchRegisterScope(BaselineAssembler* assembler)
++      : assembler_(assembler),
++        prev_scope_(assembler->scratch_register_scope_),
++        wrapped_scope_(assembler->masm()) {
++    if (!assembler_->scratch_register_scope_) {
++      // If we haven't opened a scratch scope yet, for the first one add a
++      // couple of extra registers.
++      wrapped_scope_.Include(t2, t4);
++    }
++    assembler_->scratch_register_scope_ = this;
++  }
++  ~ScratchRegisterScope() { assembler_->scratch_register_scope_ = prev_scope_; }
++
++  Register AcquireScratch() { return wrapped_scope_.Acquire(); }
++
++ private:
++  BaselineAssembler* assembler_;
++  ScratchRegisterScope* prev_scope_;
++  UseScratchRegisterScope wrapped_scope_;
++};
++
++enum class Condition : uint32_t {
++  kEqual = eq,
++  kNotEqual = ne,
++
++  kLessThan = lt,
++  kGreaterThan = gt,
++  kLessThanEqual = le,
++  kGreaterThanEqual = ge,
++
++  kUnsignedLessThan = Uless,
++  kUnsignedGreaterThan = Ugreater,
++  kUnsignedLessThanEqual = Uless_equal,
++  kUnsignedGreaterThanEqual = Ugreater_equal,
++
++  kOverflow = overflow,
++  kNoOverflow = no_overflow,
++
++  kZero = eq,
++  kNotZero = ne,
++};
++
++inline internal::Condition AsMasmCondition(Condition cond) {
++  return static_cast<internal::Condition>(cond);
++}
++
++namespace detail {
++
++#ifdef DEBUG
++inline bool Clobbers(Register target, MemOperand op) {
++  return op.is_reg() && op.rm() == target;
++}
++#endif
++
++}  // namespace detail
++
++#define __ masm_->
++
++MemOperand BaselineAssembler::RegisterFrameOperand(
++    interpreter::Register interpreter_register) {
++  return MemOperand(fp, interpreter_register.ToOperand() * kSystemPointerSize);
++}
++MemOperand BaselineAssembler::FeedbackVectorOperand() {
++  return MemOperand(fp, BaselineFrameConstants::kFeedbackVectorFromFp);
++}
++
++void BaselineAssembler::Bind(Label* label) { __ bind(label); }
++
++void BaselineAssembler::JumpTarget() {
++  // Nop
++}
++
++void BaselineAssembler::Jump(Label* target, Label::Distance distance) {
++  __ jmp(target);
++}
++void BaselineAssembler::JumpIf(Condition cc, Label* target, Label::Distance) {
++  __ Branch(target, AsMasmCondition(cc), kTestReg, Operand((int64_t)0));
++}
++void BaselineAssembler::JumpIfRoot(Register value, RootIndex index,
++                                   Label* target, Label::Distance) {
++  __ JumpIfRoot(value, index, target);
++}
++void BaselineAssembler::JumpIfNotRoot(Register value, RootIndex index,
++                                      Label* target, Label::Distance) {
++  __ JumpIfNotRoot(value, index, target);
++}
++void BaselineAssembler::JumpIfSmi(Register value, Label* target,
++                                  Label::Distance) {
++  __ JumpIfSmi(value, target);
++}
++void BaselineAssembler::JumpIfNotSmi(Register value, Label* target,
++                                     Label::Distance) {
++  __ JumpIfSmi(value, target);
++}
++
++void BaselineAssembler::CallBuiltin(Builtins::Name builtin) {
++  if (masm()->options().short_builtin_calls) {
++    __ CallBuiltin(builtin);
++  } else {
++    __ RecordCommentForOffHeapTrampoline(builtin);
++    Register temp = t6;
++    __ LoadEntryFromBuiltinIndex(builtin, temp);
++    __ Call(temp);
++    if (FLAG_code_comments) __ RecordComment("]");
++  }
++}
++
++void BaselineAssembler::TailCallBuiltin(Builtins::Name builtin) {
++  if (masm()->options().short_builtin_calls) {
++    // Generate pc-relative jump.
++    __ TailCallBuiltin(builtin);
++  } else {
++    __ RecordCommentForOffHeapTrampoline(builtin);
++    // t6 be used for function call in RISCV64
++    // For example 'jalr t6' or 'jal t6'
++    Register temp = t6;
++    __ LoadEntryFromBuiltinIndex(builtin, temp);
++    __ Jump(temp);
++    if (FLAG_code_comments) __ RecordComment("]");
++  }
++}
++
++void BaselineAssembler::Test(Register value, int mask) {
++  __ And(kTestReg, value, Operand(mask));
++}
++
++void BaselineAssembler::CmpObjectType(Register object,
++                                      InstanceType instance_type,
++                                      Register map) {
++  ScratchRegisterScope temps(this);
++  Register type = temps.AcquireScratch();
++  __ GetObjectType(object, map, type);
++  __ Sub64(kTestReg, type, Operand(instance_type));
++}
++void BaselineAssembler::CmpInstanceType(Register value,
++                                        InstanceType instance_type) {
++  ScratchRegisterScope temps(this);
++  Register type = temps.AcquireScratch();
++  __ Ld(type, FieldMemOperand(value, Map::kInstanceTypeOffset));
++  __ Sub64(kTestReg, type, Operand(instance_type));
++}
++
++void BaselineAssembler::Cmp(Register value, Smi smi) {
++  ScratchRegisterScope temps(this);
++  Register temp = temps.AcquireScratch();
++  __ li(temp, Operand(smi));
++  __ SmiUntag(temp);
++  __ Sub64(kTestReg, value, temp);
++}
++void BaselineAssembler::ComparePointer(Register value, MemOperand operand) {
++  ScratchRegisterScope temps(this);
++  Register temp = temps.AcquireScratch();
++  __ Ld(temp, operand);
++  __ Sub64(kTestReg, value, temp);
++}
++
++void BaselineAssembler::SmiCompare(Register lhs, Register rhs) {
++  __ AssertSmi(lhs);
++  __ AssertSmi(rhs);
++  if (COMPRESS_POINTERS_BOOL) {
++    __ Sub32(kTestReg, lhs, rhs);
++  } else {
++    __ Sub64(kTestReg, lhs, rhs);
++  }
++}
++void BaselineAssembler::CompareTagged(Register value, MemOperand operand) {
++  ScratchRegisterScope temps(this);
++  Register tmp = temps.AcquireScratch();
++  __ Ld(tmp, operand);
++  if (COMPRESS_POINTERS_BOOL) {
++    __ Sub32(kTestReg, value, tmp);
++  } else {
++    __ Sub64(kTestReg, value, tmp);
++  }
++}
++void BaselineAssembler::CompareTagged(MemOperand operand, Register value) {
++  ScratchRegisterScope temps(this);
++  Register tmp = temps.AcquireScratch();
++  __ Ld(tmp, operand);
++  if (COMPRESS_POINTERS_BOOL) {
++    __ Sub32(kTestReg, tmp, value);
++  } else {
++    __ Sub64(kTestReg, tmp, value);
++  }
++}
++
++void BaselineAssembler::CompareByte(Register value, int32_t byte) {
++  __ Sub64(kTestReg, value, Operand(byte));
++}
++
++void BaselineAssembler::Move(interpreter::Register output, Register source) {
++  Move(RegisterFrameOperand(output), source);
++}
++void BaselineAssembler::Move(Register output, TaggedIndex value) {
++  __ li(output, Operand(value.ptr()));
++}
++void BaselineAssembler::Move(MemOperand output, Register source) {
++  __ Sd(source, output);
++}
++void BaselineAssembler::Move(Register output, ExternalReference reference) {
++  __ li(output, Operand(reference));
++}
++void BaselineAssembler::Move(Register output, Handle<HeapObject> value) {
++  __ li(output, Operand(value));
++}
++void BaselineAssembler::Move(Register output, int32_t value) {
++  __ li(output, Operand(value));
++}
++void BaselineAssembler::MoveMaybeSmi(Register output, Register source) {
++  __ Move(output, source);
++}
++void BaselineAssembler::MoveSmi(Register output, Register source) {
++  __ Move(output, source);
++}
++
++namespace detail {
++
++template <typename Arg>
++inline Register ToRegister(BaselineAssembler* basm,
++                           BaselineAssembler::ScratchRegisterScope* scope,
++                           Arg arg) {
++  Register reg = scope->AcquireScratch();
++  basm->Move(reg, arg);
++  return reg;
++}
++inline Register ToRegister(BaselineAssembler* basm,
++                           BaselineAssembler::ScratchRegisterScope* scope,
++                           Register reg) {
++  return reg;
++}
++
++template <typename... Args>
++struct CountPushHelper;
++template <>
++struct CountPushHelper<> {
++  static int Count() { return 0; }
++};
++template <typename Arg, typename... Args>
++struct CountPushHelper<Arg, Args...> {
++  static int Count(Arg arg, Args... args) {
++    return 1 + CountPushHelper<Args...>::Count(args...);
++  }
++};
++template <typename... Args>
++struct CountPushHelper<interpreter::RegisterList, Args...> {
++  static int Count(interpreter::RegisterList list, Args... args) {
++    return list.register_count() + CountPushHelper<Args...>::Count(args...);
++  }
++};
++
++template <typename... Args>
++struct PushAllHelper;
++template <typename... Args>
++void PushAll(BaselineAssembler* basm, Args... args) {
++  PushAllHelper<Args...>::Push(basm, args...);
++}
++template <typename... Args>
++void PushAllReverse(BaselineAssembler* basm, Args... args) {
++  PushAllHelper<Args...>::PushReverse(basm, args...);
++}
++
++template <>
++struct PushAllHelper<> {
++  static void Push(BaselineAssembler* basm) {}
++  static void PushReverse(BaselineAssembler* basm) {}
++};
++
++inline void PushSingle(MacroAssembler* masm, RootIndex source) {
++  masm->PushRoot(source);
++}
++inline void PushSingle(MacroAssembler* masm, Register reg) { masm->Push(reg); }
++
++inline void PushSingle(MacroAssembler* masm, Smi value) { masm->Push(value); }
++inline void PushSingle(MacroAssembler* masm, Handle<HeapObject> object) {
++  masm->Push(object);
++}
++inline void PushSingle(MacroAssembler* masm, int32_t immediate) {
++  masm->li(kScratchReg, (int64_t)(immediate));
++  PushSingle(masm, kScratchReg);
++}
++
++inline void PushSingle(MacroAssembler* masm, TaggedIndex value) {
++  masm->li(kScratchReg, static_cast<int64_t>(value.ptr()));
++  PushSingle(masm, kScratchReg);
++}
++inline void PushSingle(MacroAssembler* masm, MemOperand operand) {
++  masm->Ld(kScratchReg, operand);
++  PushSingle(masm, kScratchReg);
++}
++inline void PushSingle(MacroAssembler* masm, interpreter::Register source) {
++  return PushSingle(masm, BaselineAssembler::RegisterFrameOperand(source));
++}
++
++template <typename Arg>
++struct PushAllHelper<Arg> {
++  static void Push(BaselineAssembler* basm, Arg arg) {
++    PushSingle(basm->masm(), arg);
++  }
++  static void PushReverse(BaselineAssembler* basm, Arg arg) {
++    // Push the padding register to round up the amount of values pushed.
++    return Push(basm, arg);
++  }
++};
++template <typename Arg1, typename Arg2, typename... Args>
++struct PushAllHelper<Arg1, Arg2, Args...> {
++  static void Push(BaselineAssembler* basm, Arg1 arg1, Arg2 arg2,
++                   Args... args) {
++    {
++      BaselineAssembler::ScratchRegisterScope scope(basm);
++      basm->masm()->Push(ToRegister(basm, &scope, arg1),
++                         ToRegister(basm, &scope, arg2));
++    }
++    PushAll(basm, args...);
++  }
++  static void PushReverse(BaselineAssembler* basm, Arg1 arg1, Arg2 arg2,
++                          Args... args) {
++    PushAllReverse(basm, args...);
++    {
++      BaselineAssembler::ScratchRegisterScope scope(basm);
++      basm->masm()->Push(ToRegister(basm, &scope, arg2),
++                         ToRegister(basm, &scope, arg1));
++    }
++  }
++};
++// Currently RegisterLists are always be the last argument, so we don't
++// specialize for the case where they're not. We do still specialise for the
++// aligned and unaligned cases.
++template <typename Arg>
++struct PushAllHelper<Arg, interpreter::RegisterList> {
++  static void Push(BaselineAssembler* basm, Arg arg,
++                   interpreter::RegisterList list) {
++    DCHECK_EQ(list.register_count() % 2, 1);
++    PushAll(basm, arg, list[0], list.PopLeft());
++  }
++  static void PushReverse(BaselineAssembler* basm, Arg arg,
++                          interpreter::RegisterList list) {
++    if (list.register_count() == 0) {
++      PushAllReverse(basm, arg);
++    } else {
++      PushAllReverse(basm, arg, list[0], list.PopLeft());
++    }
++  }
++};
++template <>
++struct PushAllHelper<interpreter::RegisterList> {
++  static void Push(BaselineAssembler* basm, interpreter::RegisterList list) {
++    DCHECK_EQ(list.register_count() % 2, 0);
++    for (int reg_index = 0; reg_index < list.register_count(); reg_index += 2) {
++      PushAll(basm, list[reg_index], list[reg_index + 1]);
++    }
++  }
++  static void PushReverse(BaselineAssembler* basm,
++                          interpreter::RegisterList list) {
++    int reg_index = list.register_count() - 1;
++    if (reg_index % 2 == 0) {
++      // Push the padding register to round up the amount of values pushed.
++      PushAllReverse(basm, list[reg_index]);
++      reg_index--;
++    }
++    for (; reg_index >= 1; reg_index -= 2) {
++      PushAllReverse(basm, list[reg_index - 1], list[reg_index]);
++    }
++  }
++};
++
++template <typename... T>
++struct PopAllHelper;
++template <>
++struct PopAllHelper<> {
++  static void Pop(BaselineAssembler* basm) {}
++};
++template <>
++struct PopAllHelper<Register> {
++  static void Pop(BaselineAssembler* basm, Register reg) {
++    basm->masm()->Pop(reg);
++  }
++};
++template <typename... T>
++struct PopAllHelper<Register, Register, T...> {
++  static void Pop(BaselineAssembler* basm, Register reg1, Register reg2,
++                  T... tail) {
++    basm->masm()->Pop(reg1, reg2);
++    PopAllHelper<T...>::Pop(basm, tail...);
++  }
++};
++
++}  // namespace detail
++
++template <typename... T>
++int BaselineAssembler::Push(T... vals) {
++  // We have to count the pushes first, to decide whether to add padding before
++  // the first push.
++  int push_count = detail::CountPushHelper<T...>::Count(vals...);
++  if (push_count % 2 == 0) {
++    detail::PushAll(this, vals...);
++  } else {
++    detail::PushAll(this, vals...);
++  }
++  return push_count;
++}
++
++template <typename... T>
++void BaselineAssembler::PushReverse(T... vals) {
++  detail::PushAllReverse(this, vals...);
++}
++
++template <typename... T>
++void BaselineAssembler::Pop(T... registers) {
++  detail::PopAllHelper<T...>::Pop(this, registers...);
++}
++
++void BaselineAssembler::LoadTaggedPointerField(Register output, Register source,
++                                               int offset) {
++  // FIXME(riscv64): riscv64 don't implement pointer compressed
++  // __ LoadTaggedPointerField(output, FieldMemOperand(source, offset));
++  __ Ld(output, FieldMemOperand(source, offset));
++}
++void BaselineAssembler::LoadTaggedSignedField(Register output, Register source,
++                                              int offset) {
++  // FIXME(riscv64): riscv64 don't implement pointer compressed
++  __ Ld(output, FieldMemOperand(source, offset));
++}
++void BaselineAssembler::LoadTaggedAnyField(Register output, Register source,
++                                           int offset) {
++  // FIXME(riscv64): riscv64 don't implement pointer compressed
++  __ Ld(output, FieldMemOperand(source, offset));
++}
++void BaselineAssembler::LoadByteField(Register output, Register source,
++                                      int offset) {
++  __ Ld(output, FieldMemOperand(source, offset));
++}
++void BaselineAssembler::StoreTaggedSignedField(Register target, int offset,
++                                               Smi value) {
++  ScratchRegisterScope temps(this);
++  Register tmp = temps.AcquireScratch();
++  __ li(tmp, Operand(value));
++  // FIXME(riscv64): riscv64 don't implement pointer compressed
++  __ Sd(tmp, FieldMemOperand(target, offset));
++}
++void BaselineAssembler::StoreTaggedFieldWithWriteBarrier(Register target,
++                                                         int offset,
++                                                         Register value) {
++  // FIXME(riscv64): riscv64 don't implement pointer compressed
++  __ Sd(value, FieldMemOperand(target, offset));
++  ScratchRegisterScope temps(this);
++  Register tmp = temps.AcquireScratch();
++  __ RecordWriteField(target, offset, value, tmp, kRAHasNotBeenSaved,
++                      kDontSaveFPRegs);
++}
++void BaselineAssembler::StoreTaggedFieldNoWriteBarrier(Register target,
++                                                       int offset,
++                                                       Register value) {
++  // FIXME(riscv64): riscv64 don't implement pointer compressed
++  __ Sd(value, FieldMemOperand(target, offset));
++}
++
++void BaselineAssembler::AddToInterruptBudget(int32_t weight) {
++  ScratchRegisterScope scratch_scope(this);
++  Register feedback_cell = scratch_scope.AcquireScratch();
++  LoadFunction(feedback_cell);
++  LoadTaggedPointerField(feedback_cell, feedback_cell,
++                         JSFunction::kFeedbackCellOffset);
++
++  Register interrupt_budget = scratch_scope.AcquireScratch();
++  __ Ld(interrupt_budget,
++        FieldMemOperand(feedback_cell, FeedbackCell::kInterruptBudgetOffset));
++  // Remember to set flags as part of the add!
++  __ Add64(interrupt_budget, interrupt_budget, weight);
++  __ Sd(interrupt_budget,
++        FieldMemOperand(feedback_cell, FeedbackCell::kInterruptBudgetOffset));
++}
++
++void BaselineAssembler::AddToInterruptBudget(Register weight) {
++  ScratchRegisterScope scratch_scope(this);
++  Register feedback_cell = scratch_scope.AcquireScratch();
++  LoadFunction(feedback_cell);
++  LoadTaggedPointerField(feedback_cell, feedback_cell,
++                         JSFunction::kFeedbackCellOffset);
++
++  Register interrupt_budget = scratch_scope.AcquireScratch();
++  __ Ld(interrupt_budget,
++        FieldMemOperand(feedback_cell, FeedbackCell::kInterruptBudgetOffset));
++  // Remember to set flags as part of the add!
++  __ Add64(interrupt_budget, interrupt_budget, weight);
++  __ Sd(interrupt_budget,
++        FieldMemOperand(feedback_cell, FeedbackCell::kInterruptBudgetOffset));
++}
++
++void BaselineAssembler::AddSmi(Register lhs, Smi rhs) {
++  if (SmiValuesAre31Bits()) {
++    __ Add32(lhs, lhs, Operand(rhs));
++  } else {
++    __ Add64(lhs, lhs, Operand(rhs));
++  }
++}
++
++void BaselineAssembler::Switch(Register reg, int case_value_base,
++                               Label** labels, int num_labels) {
++  Label fallthrough;
++  if (case_value_base > 0) {
++    __ Sub64(reg, reg, Operand(case_value_base));
++  }
++
++  // Mostly copied from code-generator-riscv64.cc
++  ScratchRegisterScope scope(this);
++  Register temp = scope.AcquireScratch();
++  Label table;
++  __ Branch(&fallthrough, AsMasmCondition(Condition::kUnsignedGreaterThanEqual),
++            reg, Operand(int64_t(num_labels)));
++  int64_t imm64;
++  imm64 = __ branch_long_offset(&table);
++  DCHECK(is_int32(imm64));
++  int32_t Hi20 = (((int32_t)imm64 + 0x800) >> 12);
++  int32_t Lo12 = (int32_t)imm64 << 20 >> 20;
++  __ auipc(temp, Hi20);  // Read PC + Hi20 into t6
++  __ lui(temp, Lo12);    // jump PC + Hi20 + Lo12
++
++  int entry_size_log2 = 2;
++  Register temp2 = scope.AcquireScratch();
++  __ CalcScaledAddress(temp2, temp, reg, entry_size_log2);
++  __ Jump(temp);
++  {
++    TurboAssembler::BlockTrampolinePoolScope(masm());
++    __ BlockTrampolinePoolFor(num_labels * kInstrSize);
++    __ bind(&table);
++    for (int i = 0; i < num_labels; ++i) {
++      __ Branch(labels[i]);
++    }
++    DCHECK_EQ(num_labels * kInstrSize, __ InstructionsGeneratedSince(&table));
++    __ bind(&fallthrough);
++  }
++}
++
++#undef __
++
++#define __ basm.
++
++void BaselineAssembler::EmitReturn(MacroAssembler* masm) {
++  BaselineAssembler basm(masm);
++
++  Register weight = BaselineLeaveFrameDescriptor::WeightRegister();
++  Register params_size = BaselineLeaveFrameDescriptor::ParamsSizeRegister();
++
++  __ RecordComment("[ Update Interrupt Budget");
++  __ AddToInterruptBudget(weight);
++
++  // Use compare flags set by add
++  Label skip_interrupt_label;
++  __ JumpIf(Condition::kGreaterThanEqual, &skip_interrupt_label);
++  {
++    __ masm()->SmiTag(params_size);
++    __ masm()->Push(params_size, kInterpreterAccumulatorRegister);
++
++    __ LoadContext(kContextRegister);
++    __ LoadFunction(kJSFunctionRegister);
++    __ masm()->Push(kJSFunctionRegister);
++    __ CallRuntime(Runtime::kBytecodeBudgetInterruptFromBytecode, 1);
++
++    __ masm()->Pop(kInterpreterAccumulatorRegister, params_size);
++    __ masm()->SmiUntag(params_size);
++  }
++  __ RecordComment("]");
++
++  __ Bind(&skip_interrupt_label);
++
++  BaselineAssembler::ScratchRegisterScope temps(&basm);
++  Register actual_params_size = temps.AcquireScratch();
++  // Compute the size of the actual parameters + receiver (in bytes).
++  __ Move(actual_params_size,
++          MemOperand(fp, StandardFrameConstants::kArgCOffset));
++
++  // If actual is bigger than formal, then we should use it to free up the stack
++  // arguments.
++  Label corrected_args_count;
++  __ masm()->Branch(&corrected_args_count, ge, params_size,
++                    Operand(actual_params_size));
++  __ masm()->Move(params_size, actual_params_size);
++  __ Bind(&corrected_args_count);
++
++  // Leave the frame (also dropping the register file).
++  __ masm()->LeaveFrame(StackFrame::MANUAL);
++
++  // Drop receiver + arguments.
++  __ masm()->Add64(params_size, params_size, 1);  // Include the receiver.
++  __ masm()->slli(params_size, params_size, kPointerSizeLog2);
++  __ masm()->Add64(sp, sp, params_size);
++  __ masm()->Ret();
++}
++
++#undef __
++
++}  // namespace baseline
++}  // namespace internal
++}  // namespace v8
++
++#endif  // V8_BASELINE_RISCV64_BASELINE_ASSEMBLER_RISCV64_INL_H_
+diff --git a/src/baseline/riscv64/baseline-compiler-riscv64-inl.h b/src/baseline/riscv64/baseline-compiler-riscv64-inl.h
+new file mode 100644
+index 0000000000..4bafa58ded
+--- /dev/null
++++ b/src/baseline/riscv64/baseline-compiler-riscv64-inl.h
+@@ -0,0 +1,113 @@
++// Copyright 2021 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef V8_BASELINE_RISCV64_BASELINE_COMPILER_RISCV64_INL_H_
++#define V8_BASELINE_RISCV64_BASELINE_COMPILER_RISCV64_INL_H_
++
++#include "src/baseline/baseline-compiler.h"
++
++namespace v8 {
++namespace internal {
++namespace baseline {
++
++#define __ basm_.
++
++void BaselineCompiler::Prologue() {
++  __ masm()->li(kInterpreterBytecodeArrayRegister, Operand(bytecode_));
++  DCHECK_EQ(kJSFunctionRegister, kJavaScriptCallTargetRegister);
++  // Enter the frame here, since CallBuiltin will override lr.
++  __ masm()->EnterFrame(StackFrame::MANUAL);
++  CallBuiltin(Builtins::kBaselineOutOfLinePrologue, kContextRegister,
++              kJSFunctionRegister, kJavaScriptCallArgCountRegister,
++              kInterpreterBytecodeArrayRegister,
++              kJavaScriptCallNewTargetRegister);
++  PrologueFillFrame();
++}
++
++void BaselineCompiler::PrologueFillFrame() {
++  __ RecordComment("[ Fill frame");
++  // Inlined register frame fill
++  interpreter::Register new_target_or_generator_register =
++      bytecode_->incoming_new_target_or_generator_register();
++  __ LoadRoot(kInterpreterAccumulatorRegister, RootIndex::kUndefinedValue);
++  int register_count = bytecode_->register_count();
++  // Magic value
++  const int kLoopUnrollSize = 8;
++  const int new_target_index = new_target_or_generator_register.index();
++  const bool has_new_target = new_target_index != kMaxInt;
++  // BaselineOutOfLinePrologue already pushed one undefined.
++  register_count -= 1;
++  if (has_new_target) {
++    if (new_target_index == 0) {
++      // Oops, need to fix up that undefined that BaselineOutOfLinePrologue
++      // pushed.
++      __ masm()->Sd(kJavaScriptCallNewTargetRegister, MemOperand(sp));
++    } else {
++      DCHECK_LE(new_target_index, register_count);
++      int index = 1;
++      for (; index + 2 <= new_target_index; index += 2) {
++        __ masm()->Push(kInterpreterAccumulatorRegister,
++                        kInterpreterAccumulatorRegister);
++      }
++      if (index == new_target_index) {
++        __ masm()->Push(kJavaScriptCallNewTargetRegister,
++                        kInterpreterAccumulatorRegister);
++      } else {
++        DCHECK_EQ(index, new_target_index - 1);
++        __ masm()->Push(kInterpreterAccumulatorRegister,
++                        kJavaScriptCallNewTargetRegister);
++      }
++      // We pushed "index" registers, minus the one the prologue pushed, plus
++      // the two registers that included new_target.
++      register_count -= (index - 1 + 2);
++    }
++  }
++  if (register_count < 2 * kLoopUnrollSize) {
++    // If the frame is small enough, just unroll the frame fill completely.
++    for (int i = 0; i < register_count; i += 2) {
++      __ masm()->Push(kInterpreterAccumulatorRegister,
++                      kInterpreterAccumulatorRegister);
++    }
++  } else {
++    BaselineAssembler::ScratchRegisterScope temps(&basm_);
++    Register scratch = temps.AcquireScratch();
++
++    // Extract the first few registers to round to the unroll size.
++    int first_registers = register_count % kLoopUnrollSize;
++    for (int i = 0; i < first_registers; i += 2) {
++      __ masm()->Push(kInterpreterAccumulatorRegister,
++                      kInterpreterAccumulatorRegister);
++    }
++    __ Move(scratch, register_count / kLoopUnrollSize);
++    // We enter the loop unconditionally, so make sure we need to loop at least
++    // once.
++    DCHECK_GT(register_count / kLoopUnrollSize, 0);
++    Label loop;
++    __ Bind(&loop);
++    for (int i = 0; i < kLoopUnrollSize; i += 2) {
++      __ masm()->Push(kInterpreterAccumulatorRegister,
++                      kInterpreterAccumulatorRegister);
++    }
++    __ masm()->Sub64(scratch, scratch, 1);
++    __ JumpIf(Condition::kGreaterThan, &loop);
++  }
++  __ RecordComment("]");
++}
++
++void BaselineCompiler::VerifyFrameSize() {
++  __ masm()->Add64(kScratchReg, sp,
++                   RoundUp(InterpreterFrameConstants::kFixedFrameSizeFromFp +
++                               bytecode_->frame_size(),
++                           2 * kSystemPointerSize));
++  __ masm()->Assert(eq, AbortReason::kUnexpectedStackPointer, kScratchReg,
++                    Operand(fp));
++}
++
++#undef __
++
++}  // namespace baseline
++}  // namespace internal
++}  // namespace v8
++
++#endif  // V8_BASELINE_RISCV64_BASELINE_COMPILER_RISCV64_INL_H_
+diff --git a/src/builtins/builtins-internal-gen.cc b/src/builtins/builtins-internal-gen.cc
+index a0ca10b0a3..a2015e0d0b 100644
+--- a/src/builtins/builtins-internal-gen.cc
++++ b/src/builtins/builtins-internal-gen.cc
+@@ -956,7 +956,7 @@ void Builtins::Generate_MemMove(MacroAssembler* masm) {
+ // TODO(v8:11421): Remove #if once baseline compiler is ported to other
+ // architectures.
+ #if V8_TARGET_ARCH_IA32 || V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64 || \
+-    V8_TARGET_ARCH_ARM
++    V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_RISCV64
+ void Builtins::Generate_BaselineLeaveFrame(MacroAssembler* masm) {
+   EmitReturnBaseline(masm);
+ }
+diff --git a/src/builtins/riscv64/builtins-riscv64.cc b/src/builtins/riscv64/builtins-riscv64.cc
+index 04907f5268..8b3c045caf 100644
+--- a/src/builtins/riscv64/builtins-riscv64.cc
++++ b/src/builtins/riscv64/builtins-riscv64.cc
+@@ -300,12 +300,16 @@ void Builtins::Generate_JSBuiltinsConstructStub(MacroAssembler* masm) {
+   Generate_JSBuiltinsConstructStubHelper(masm);
+ }
+ 
+-static void GetSharedFunctionInfoBytecode(MacroAssembler* masm,
+-                                          Register sfi_data,
+-                                          Register scratch1) {
++// TODO(v8:11429): Add a path for "not_compiled" and unify the two uses under
++// the more general dispatch.
++static void GetSharedFunctionInfoBytecodeOrBaseline(MacroAssembler* masm,
++                                                    Register sfi_data,
++                                                    Register scratch1,
++                                                    Label* is_baseline) {
+   Label done;
+ 
+   __ GetObjectType(sfi_data, scratch1, scratch1);
++  __ Branch(is_baseline, eq, scratch1, Operand(BASELINE_DATA_TYPE));
+   __ Branch(&done, ne, scratch1, Operand(INTERPRETER_DATA_TYPE));
+   __ Ld(sfi_data,
+         FieldMemOperand(sfi_data, InterpreterData::kBytecodeArrayOffset));
+@@ -388,12 +392,14 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
+ 
+   // Underlying function needs to have bytecode available.
+   if (FLAG_debug_code) {
++    Label is_baseline;
+     __ Ld(a3, FieldMemOperand(a4, JSFunction::kSharedFunctionInfoOffset));
+     __ Ld(a3, FieldMemOperand(a3, SharedFunctionInfo::kFunctionDataOffset));
+-    GetSharedFunctionInfoBytecode(masm, a3, a0);
++    GetSharedFunctionInfoBytecodeOrBaseline(masm, a3, a0, &is_baseline);
+     __ GetObjectType(a3, a3, a3);
+     __ Assert(eq, AbortReason::kMissingBytecodeArray, a3,
+               Operand(BYTECODE_ARRAY_TYPE));
++    __ bind(&is_baseline);
+   }
+ 
+   // Resume (Ignition/TurboFan) generator object.
+@@ -964,6 +970,184 @@ static void AdvanceBytecodeOffsetOrReturn(MacroAssembler* masm,
+   __ bind(&end);
+ }
+ 
++// Read off the optimization state in the feedback vector and check if there
++// is optimized code or a optimization marker that needs to be processed.
++static void LoadOptimizationStateAndJumpIfNeedsProcessing(
++    MacroAssembler* masm, Register optimization_state, Register feedback_vector,
++    Label* has_optimized_code_or_marker) {
++  __ RecordComment("[ Check optimization state");
++  UseScratchRegisterScope temps(masm);
++  Register scratch = temps.Acquire();
++  __ Ld(optimization_state,
++        FieldMemOperand(feedback_vector, FeedbackVector::kFlagsOffset));
++  __ And(
++      scratch, optimization_state,
++      Operand(FeedbackVector::kHasOptimizedCodeOrCompileOptimizedMarkerMask));
++  __ Branch(has_optimized_code_or_marker, ne, scratch, Operand(zero_reg));
++  __ RecordComment("]");
++}
++
++static void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
++    MacroAssembler* masm, Register optimization_state,
++    Register feedback_vector) {
++  Label maybe_has_optimized_code;
++  // Check if optimized code marker is available
++  __ And(
++      t0, optimization_state,
++      Operand(FeedbackVector::kHasCompileOptimizedOrLogFirstExecutionMarker));
++  __ Branch(&maybe_has_optimized_code, eq, t0, Operand(zero_reg));
++
++  Register optimization_marker = optimization_state;
++  __ DecodeField<FeedbackVector::OptimizationMarkerBits>(optimization_marker);
++  MaybeOptimizeCode(masm, feedback_vector, optimization_marker);
++
++  __ bind(&maybe_has_optimized_code);
++  Register optimized_code_entry = optimization_state;
++  __ Ld(optimization_marker,
++        FieldMemOperand(feedback_vector,
++                        FeedbackVector::kMaybeOptimizedCodeOffset));
++  TailCallOptimizedCodeSlot(masm, optimized_code_entry, t4, a5);
++}
++
++// static
++void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
++  UseScratchRegisterScope temps(masm);
++  temps.Include(kScratchReg.bit() | kScratchReg2.bit());
++  auto descriptor = Builtins::CallInterfaceDescriptorFor(
++      Builtins::kBaselineOutOfLinePrologue);
++  Register closure = descriptor.GetRegisterParameter(
++      BaselineOutOfLinePrologueDescriptor::kClosure);
++  // Load the feedback vector from the closure.
++  Register feedback_vector = temps.Acquire();
++  __ Ld(feedback_vector,
++        FieldMemOperand(closure, JSFunction::kFeedbackCellOffset));
++  __ Ld(feedback_vector, FieldMemOperand(feedback_vector, Cell::kValueOffset));
++  if (__ emit_debug_code()) {
++    __ GetObjectType(feedback_vector, t0, t0);
++    __ Assert(eq, AbortReason::kExpectedFeedbackVector, t0,
++              Operand(FEEDBACK_VECTOR_TYPE));
++  }
++
++  // Check for an optimization marker.
++  Label has_optimized_code_or_marker;
++  Register optimization_state = temps.Acquire();
++  LoadOptimizationStateAndJumpIfNeedsProcessing(
++      masm, optimization_state, feedback_vector, &has_optimized_code_or_marker);
++
++  // Increment invocation count for the function.
++  {
++    Register invocation_count = t0;
++    __ Lw(invocation_count,
++          FieldMemOperand(feedback_vector,
++                          FeedbackVector::kInvocationCountOffset));
++    __ Add32(invocation_count, invocation_count, Operand(1));
++    __ Sw(invocation_count,
++          FieldMemOperand(feedback_vector,
++                          FeedbackVector::kInvocationCountOffset));
++  }
++
++  __ RecordComment("[ Frame Setup");
++  FrameScope frame_scope(masm, StackFrame::MANUAL);
++  // Normally the first thing we'd do here is Push(lr, fp), but we already
++  // entered the frame in BaselineCompiler::Prologue, as we had to use the
++  // value lr before the call to this BaselineOutOfLinePrologue builtin.
++
++  Register callee_context = descriptor.GetRegisterParameter(
++      BaselineOutOfLinePrologueDescriptor::kCalleeContext);
++  Register callee_js_function = descriptor.GetRegisterParameter(
++      BaselineOutOfLinePrologueDescriptor::kClosure);
++  __ Push(callee_context, callee_js_function);
++  DCHECK_EQ(callee_js_function, kJavaScriptCallTargetRegister);
++  DCHECK_EQ(callee_js_function, kJSFunctionRegister);
++
++  Register argc = descriptor.GetRegisterParameter(
++      BaselineOutOfLinePrologueDescriptor::kJavaScriptCallArgCount);
++  // We'll use the bytecode for both code age/OSR resetting, and pushing onto
++  // the frame, so load it into a register.
++  Register bytecodeArray = descriptor.GetRegisterParameter(
++      BaselineOutOfLinePrologueDescriptor::kInterpreterBytecodeArray);
++
++  // Reset code age and the OSR arming. The OSR field and BytecodeAgeOffset
++  // are 8-bit fields next to each other, so we could just optimize by writing
++  // a 16-bit. These static asserts guard our assumption is valid.
++  STATIC_ASSERT(BytecodeArray::kBytecodeAgeOffset ==
++                BytecodeArray::kOsrNestingLevelOffset + kCharSize);
++  STATIC_ASSERT(BytecodeArray::kNoAgeBytecodeAge == 0);
++  __ Sh(zero_reg,
++        FieldMemOperand(bytecodeArray, BytecodeArray::kOsrNestingLevelOffset));
++
++  __ Push(argc, bytecodeArray);
++
++  // Baseline code frames store the feedback vector where interpreter would
++  // store the bytecode offset.
++  if (__ emit_debug_code()) {
++    __ GetObjectType(feedback_vector, t0, t0);
++    __ Assert(eq, AbortReason::kExpectedFeedbackVector, t0,
++              Operand(FEEDBACK_VECTOR_TYPE));
++  }
++  // Our stack is currently aligned. We have have to push something along with
++  // the feedback vector to keep it that way -- we may as well start
++  // initialising the register frame.
++  // TODO(v8:11429,leszeks): Consider guaranteeing that this call leaves
++  // `undefined` in the accumulator register, to skip the load in the baseline
++  // code.
++  __ LoadRoot(kInterpreterAccumulatorRegister, RootIndex::kUndefinedValue);
++  __ Push(feedback_vector, kInterpreterAccumulatorRegister);
++  __ RecordComment("]");
++
++  __ RecordComment("[ Stack/interrupt check");
++  Label call_stack_guard;
++  {
++    // Stack check. This folds the checks for both the interrupt stack limit
++    // check and the real stack limit into one by just checking for the
++    // interrupt limit. The interrupt limit is either equal to the real stack
++    // limit or tighter. By ensuring we have space until that limit after
++    // building the frame we can quickly precheck both at once.
++    Register frame_size = t0;
++    __ Ld(frame_size,
++          FieldMemOperand(bytecodeArray, BytecodeArray::kFrameSizeOffset));
++    Register sp_minus_frame_size = frame_size;
++    __ Sub64(sp_minus_frame_size, sp, frame_size);
++    Register interrupt_limit = t1;
++    __ LoadStackLimit(interrupt_limit,
++                      MacroAssembler::StackLimitKind::kInterruptStackLimit);
++    __ Branch(&call_stack_guard, Uless, sp_minus_frame_size,
++              Operand(interrupt_limit));
++    __ RecordComment("]");
++  }
++
++  // Do "fast" return to the caller pc in lr.
++  // TODO(v8:11429): Document this frame setup better.
++  __ Ret();
++
++  __ bind(&has_optimized_code_or_marker);
++  {
++    __ RecordComment("[ Optimized marker check");
++    // Drop the frame created by the baseline call.
++    __ Pop(fp, ra);
++    MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(masm, optimization_state,
++                                                 feedback_vector);
++    __ Trap();
++    __ RecordComment("]");
++  }
++
++  __ bind(&call_stack_guard);
++  {
++    Register new_target = descriptor.GetRegisterParameter(
++        BaselineOutOfLinePrologueDescriptor::kJavaScriptCallNewTarget);
++
++    FrameScope frame_scope(masm, StackFrame::INTERNAL);
++    __ RecordComment("[ Stack/interrupt call");
++    // Save incoming new target or generator
++    __ Push(zero_reg, new_target);
++    __ CallRuntime(Runtime::kStackGuard);
++    __ Pop(new_target, zero_reg);
++    __ RecordComment("]");
++  }
++  __ Ret();
++  temps.Exclude(kScratchReg.bit() | kScratchReg2.bit());
++}
++
+ // Generate code for entering a JS function with the interpreter.
+ // On entry to the function the receiver and arguments have been pushed on the
+ // stack left to right.
+@@ -989,8 +1173,9 @@ void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
+         FieldMemOperand(closure, JSFunction::kSharedFunctionInfoOffset));
+   __ Ld(kInterpreterBytecodeArrayRegister,
+         FieldMemOperand(kScratchReg, SharedFunctionInfo::kFunctionDataOffset));
+-  GetSharedFunctionInfoBytecode(masm, kInterpreterBytecodeArrayRegister,
+-                                kScratchReg);
++  Label is_baseline;
++  GetSharedFunctionInfoBytecodeOrBaseline(
++      masm, kInterpreterBytecodeArrayRegister, kScratchReg, &is_baseline);
+ 
+   // The bytecode array could have been flushed from the shared function info,
+   // if so, call into CompileLazy.
+@@ -1188,6 +1373,44 @@ void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
+                         FeedbackVector::kMaybeOptimizedCodeOffset));
+ 
+   TailCallOptimizedCodeSlot(masm, optimized_code_entry, t4, a5);
++  __ bind(&is_baseline);
++  {
++    // Load the feedback vector from the closure.
++    __ Ld(feedback_vector,
++          FieldMemOperand(closure, JSFunction::kFeedbackCellOffset));
++    __ Ld(feedback_vector,
++          FieldMemOperand(feedback_vector, Cell::kValueOffset));
++
++    Label install_baseline_code;
++    // Check if feedback vector is valid. If not, call prepare for baseline to
++    // allocate it.
++    __ Ld(t0, FieldMemOperand(feedback_vector, HeapObject::kMapOffset));
++    __ Lh(t0, FieldMemOperand(t0, Map::kInstanceTypeOffset));
++    __ Branch(&install_baseline_code, ne, t0, Operand(FEEDBACK_VECTOR_TYPE));
++
++    // Read off the optimization state in the feedback vector.
++    // TODO(v8:11429): Is this worth doing here? Baseline code will check it
++    // anyway...
++    __ Ld(optimization_state,
++          FieldMemOperand(feedback_vector, FeedbackVector::kFlagsOffset));
++
++    // Check if there is optimized code or a optimization marker that needes to
++    // be processed.
++    __ And(
++        t0, optimization_state,
++        Operand(FeedbackVector::kHasOptimizedCodeOrCompileOptimizedMarkerMask));
++    __ Branch(&has_optimized_code_or_marker, ne, t0, Operand(zero_reg));
++
++    // Load the baseline code into the closure.
++    __ Ld(a2, FieldMemOperand(kInterpreterBytecodeArrayRegister,
++                              BaselineData::kBaselineCodeOffset));
++    static_assert(kJavaScriptCallCodeStartRegister == a2, "ABI mismatch");
++    ReplaceClosureCodeWithOptimizedCode(masm, a2, closure, t0, t1);
++    __ JumpCodeObject(a2);
++
++    __ bind(&install_baseline_code);
++    GenerateTailCallToReturnedCode(masm, Runtime::kInstallBaselineCode);
++  }
+ 
+   __ bind(&compile_lazy);
+   GenerateTailCallToReturnedCode(masm, Runtime::kCompileLazy);
+@@ -1542,7 +1765,12 @@ void Builtins::Generate_NotifyDeoptimized(MacroAssembler* masm) {
+   __ Ret();
+ }
+ 
+-void Builtins::Generate_InterpreterOnStackReplacement(MacroAssembler* masm) {
++void Builtins::Generate_TailCallOptimizedCodeSlot(MacroAssembler* masm) {
++  Register optimized_code_entry = kJavaScriptCallCodeStartRegister;
++  TailCallOptimizedCodeSlot(masm, optimized_code_entry, t4, t0);
++}
++namespace {
++void OnStackReplacement(MacroAssembler* masm, bool is_interpreter) {
+   {
+     FrameScope scope(masm, StackFrame::INTERNAL);
+     __ CallRuntime(Runtime::kCompileForOnStackReplacement);
+@@ -1550,11 +1778,11 @@ void Builtins::Generate_InterpreterOnStackReplacement(MacroAssembler* masm) {
+ 
+   // If the code object is null, just return to the caller.
+   __ Ret(eq, a0, Operand(Smi::zero()));
+-
+-  // Drop the handler frame that is be sitting on top of the actual
+-  // JavaScript frame. This is the case then OSR is triggered from bytecode.
+-  __ LeaveFrame(StackFrame::STUB);
+-
++  if (is_interpreter) {
++    // Drop the handler frame that is be sitting on top of the actual
++    // JavaScript frame. This is the case then OSR is triggered from bytecode.
++    __ LeaveFrame(StackFrame::STUB);
++  }
+   // Load deoptimization data from the code object.
+   // <deopt_data> = <code>[#deoptimization_data_offset]
+   __ Ld(a1, MemOperand(a0, Code::kDeoptimizationDataOffset - kHeapObjectTag));
+@@ -1572,6 +1800,15 @@ void Builtins::Generate_InterpreterOnStackReplacement(MacroAssembler* masm) {
+   // And "return" to the OSR entry point of the function.
+   __ Ret();
+ }
++}  // namespace
++
++void Builtins::Generate_InterpreterOnStackReplacement(MacroAssembler* masm) {
++  return OnStackReplacement(masm, true);
++}
++
++void Builtins::Generate_BaselineOnStackReplacement(MacroAssembler* masm) {
++  return OnStackReplacement(masm, false);
++}
+ 
+ // static
+ void Builtins::Generate_FunctionPrototypeApply(MacroAssembler* masm) {
+@@ -3252,6 +3489,104 @@ void Builtins::Generate_DeoptimizationEntry_Lazy(MacroAssembler* masm) {
+   Generate_DeoptimizationEntry(masm, DeoptimizeKind::kLazy);
+ }
+ 
++// Converts an interpreter frame into a baseline frame and continues execution
++// in baseline code (baseline code has to exist on the shared function info),
++// either at the start or the end of the current bytecode.
++void Generate_BaselineEntry(MacroAssembler* masm, bool next_bytecode) {
++  // Get bytecode array and bytecode offset from the stack frame.
++  __ Ld(kInterpreterBytecodeArrayRegister,
++        MemOperand(fp, InterpreterFrameConstants::kBytecodeArrayFromFp));
++  __ SmiUntag(kInterpreterBytecodeOffsetRegister,
++              MemOperand(fp, InterpreterFrameConstants::kBytecodeOffsetFromFp));
++
++  // Get function from the frame.
++  Register closure = a1;
++  __ Ld(closure, MemOperand(fp, StandardFrameConstants::kFunctionOffset));
++
++  // Replace BytecodeOffset with the feedback vector.
++  Register feedback_vector = a2;
++  __ Ld(feedback_vector,
++        FieldMemOperand(closure, JSFunction::kFeedbackCellOffset));
++  __ Ld(feedback_vector, FieldMemOperand(feedback_vector, Cell::kValueOffset));
++  if (__ emit_debug_code()) {
++    Register scratch = t0;
++    __ GetObjectType(feedback_vector, scratch, scratch);
++    __ Assert(eq, AbortReason::kExpectedFeedbackVector, scratch,
++              Operand(FEEDBACK_VECTOR_TYPE));
++  }
++  __ Sd(feedback_vector,
++        MemOperand(fp, InterpreterFrameConstants::kBytecodeOffsetFromFp));
++  feedback_vector = no_reg;
++
++  // Get the Code object from the shared function info.
++  UseScratchRegisterScope temps(masm);
++  Register code_obj = temps.Acquire();
++  __ Ld(code_obj,
++        FieldMemOperand(closure, JSFunction::kSharedFunctionInfoOffset));
++  __ Ld(code_obj,
++        FieldMemOperand(code_obj, SharedFunctionInfo::kFunctionDataOffset));
++  __ Ld(code_obj, FieldMemOperand(code_obj, BaselineData::kBaselineCodeOffset));
++  closure = no_reg;
++
++  // Compute baseline pc for bytecode offset.
++  __ Push(zero_reg, kInterpreterAccumulatorRegister);
++  ExternalReference get_baseline_pc_extref =
++      next_bytecode
++          ? ExternalReference::baseline_end_pc_for_bytecode_offset()
++          : ExternalReference::baseline_start_pc_for_bytecode_offset();
++
++  Register get_baseline_pc = a3;
++  __ li(get_baseline_pc, get_baseline_pc_extref);
++
++  // If the code deoptimizes during the implicit function entry stack interrupt
++  // check, it will have a bailout ID of kFunctionEntryBytecodeOffset, which is
++  // not a valid bytecode offset.
++  // TODO(pthier): Investigate if it is feasible to handle this special case
++  // in TurboFan instead of here.
++  Label valid_bytecode_offset, function_entry_bytecode;
++  __ Branch(&function_entry_bytecode, eq, kInterpreterBytecodeOffsetRegister,
++            Operand(BytecodeArray::kHeaderSize - kHeapObjectTag +
++                    kFunctionEntryBytecodeOffset));
++
++  __ Sub64(kInterpreterBytecodeOffsetRegister,
++           kInterpreterBytecodeOffsetRegister,
++           (BytecodeArray::kHeaderSize - kHeapObjectTag));
++
++  __ bind(&valid_bytecode_offset);
++  {
++    FrameScope scope(masm, StackFrame::INTERNAL);
++    Register arg_reg_1 = a0;
++    Register arg_reg_2 = a1;
++    Register arg_reg_3 = a2;
++    __ Move(arg_reg_1, code_obj);
++    __ Move(arg_reg_2, kInterpreterBytecodeOffsetRegister);
++    __ Move(arg_reg_3, kInterpreterBytecodeArrayRegister);
++    __ CallCFunction(get_baseline_pc, 3, 0);
++  }
++  __ Add64(code_obj, code_obj, Code::kHeaderSize - kHeapObjectTag);
++  __ Add64(code_obj, code_obj, kReturnRegister0);
++  __ Pop(kInterpreterAccumulatorRegister, zero_reg);
++
++  __ Jump(code_obj);
++  __ Trap();  // Unreachable.
++
++  __ bind(&function_entry_bytecode);
++  // If the bytecode offset is kFunctionEntryOffset, get the start address of
++  // the first bytecode.
++  __ li(kInterpreterBytecodeOffsetRegister, Operand(int64_t(0)));
++  __ li(get_baseline_pc,
++        ExternalReference::baseline_start_pc_for_bytecode_offset());
++  __ Branch(&valid_bytecode_offset);
++}
++
++void Builtins::Generate_BaselineEnterAtBytecode(MacroAssembler* masm) {
++  Generate_BaselineEntry(masm, false);
++}
++
++void Builtins::Generate_BaselineEnterAtNextBytecode(MacroAssembler* masm) {
++  Generate_BaselineEntry(masm, true);
++}
++
+ void Builtins::Generate_DynamicCheckMapsTrampoline(MacroAssembler* masm) {
+   FrameScope scope(masm, StackFrame::MANUAL);
+   __ EnterFrame(StackFrame::INTERNAL);
+diff --git a/src/codegen/interface-descriptors.cc b/src/codegen/interface-descriptors.cc
+index 53b678580e..03c4c6226e 100644
+--- a/src/codegen/interface-descriptors.cc
++++ b/src/codegen/interface-descriptors.cc
+@@ -335,7 +335,7 @@ void BaselineOutOfLinePrologueDescriptor::InitializePlatformSpecific(
+     CallInterfaceDescriptorData* data) {
+   // TODO(v8:11421): Implement on other platforms.
+ #if V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_IA32 || \
+-    V8_TARGET_ARCH_ARM
++    V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_RISCV64
+   Register registers[] = {kContextRegister,
+                           kJSFunctionRegister,
+                           kJavaScriptCallArgCountRegister,
+@@ -353,7 +353,7 @@ void BaselineLeaveFrameDescriptor::InitializePlatformSpecific(
+     CallInterfaceDescriptorData* data) {
+   // TODO(v8:11421): Implement on other platforms.
+ #if V8_TARGET_ARCH_IA32 || V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64 || \
+-    V8_TARGET_ARCH_ARM
++    V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_RISCV64
+   Register registers[] = {ParamsSizeRegister(), WeightRegister()};
+   data->InitializePlatformSpecific(kParameterCount, registers);
+ #else
+diff --git a/src/codegen/riscv64/assembler-riscv64.h b/src/codegen/riscv64/assembler-riscv64.h
+index 1dcf4e0aae..6c7e86eef4 100644
+--- a/src/codegen/riscv64/assembler-riscv64.h
++++ b/src/codegen/riscv64/assembler-riscv64.h
+@@ -1231,6 +1231,16 @@ class V8_EXPORT_PRIVATE UseScratchRegisterScope {
+ 
+   Register Acquire();
+   bool hasAvailable() const;
++  void Include(const RegList& list) { *available_ |= list; }
++  void Exclude(const RegList& list) { *available_ &= ~list; }
++  void Include(const Register& reg1, const Register& reg2 = no_reg) {
++    RegList list(reg1.bit() | reg2.bit());
++    Include(list);
++  }
++  void Exclude(const Register& reg1, const Register& reg2 = no_reg) {
++    RegList list(reg1.bit() | reg2.bit());
++    Exclude(list);
++  }
+ 
+  private:
+   RegList* available_;
+diff --git a/src/codegen/riscv64/interface-descriptors-riscv64.cc b/src/codegen/riscv64/interface-descriptors-riscv64.cc
+index 23953097cd..68827b352e 100644
+--- a/src/codegen/riscv64/interface-descriptors-riscv64.cc
++++ b/src/codegen/riscv64/interface-descriptors-riscv64.cc
+@@ -283,14 +283,20 @@ void ResumeGeneratorDescriptor::InitializePlatformSpecific(
+ 
+ void BinaryOp_BaselineDescriptor::InitializePlatformSpecific(
+     CallInterfaceDescriptorData* data) {
+-  // TODO(v8:11421): Implement on this platform.
+-  InitializePlatformUnimplemented(data, kParameterCount);
++  // a1: left operand
++  // a0: right operand
++  // a2: feedback slot
++  Register registers[] = {a1, a0, a2};
++  data->InitializePlatformSpecific(arraysize(registers), registers);
+ }
+ 
+ void Compare_BaselineDescriptor::InitializePlatformSpecific(
+     CallInterfaceDescriptorData* data) {
+-  // TODO(v8:11421): Implement on this platform.
+-  InitializePlatformUnimplemented(data, kParameterCount);
++  // a1: left operand
++  // a0: right operand
++  // a2: feedback slot
++  Register registers[] = {a1, a0, a2};
++  data->InitializePlatformSpecific(arraysize(registers), registers);
+ }
+ 
+ void FrameDropperTrampolineDescriptor::InitializePlatformSpecific(
+@@ -307,6 +313,9 @@ void RunMicrotasksEntryDescriptor::InitializePlatformSpecific(
+   data->InitializePlatformSpecific(arraysize(registers), registers);
+ }
+ 
++const Register BaselineLeaveFrameDescriptor::ParamsSizeRegister() { return a2; }
++const Register BaselineLeaveFrameDescriptor::WeightRegister() { return a3; }
++
+ }  // namespace internal
+ }  // namespace v8
+ 
+diff --git a/src/codegen/riscv64/macro-assembler-riscv64.cc b/src/codegen/riscv64/macro-assembler-riscv64.cc
+index ff798da0e9..9d42295972 100644
+--- a/src/codegen/riscv64/macro-assembler-riscv64.cc
++++ b/src/codegen/riscv64/macro-assembler-riscv64.cc
+@@ -928,9 +928,10 @@ void TurboAssembler::Dror(Register rd, Register rs, const Operand& rt) {
+ }
+ 
+ void TurboAssembler::CalcScaledAddress(Register rd, Register rt, Register rs,
+-                                       uint8_t sa, Register scratch) {
++                                       uint8_t sa) {
+   DCHECK(sa >= 1 && sa <= 31);
+-  Register tmp = rd == rt ? scratch : rd;
++  UseScratchRegisterScope temps(this);
++  Register tmp = rd == rt ? temps.Acquire() : rd;
+   DCHECK(tmp != rt);
+   slli(tmp, rs, sa);
+   Add64(rd, rt, tmp);
+@@ -1215,8 +1216,9 @@ void TurboAssembler::Uld(Register rd, const MemOperand& rs) {
+ // Load consequent 32-bit word pair in 64-bit reg. and put first word in low
+ // bits,
+ // second word in high bits.
+-void MacroAssembler::LoadWordPair(Register rd, const MemOperand& rs,
+-                                  Register scratch) {
++void MacroAssembler::LoadWordPair(Register rd, const MemOperand& rs) {
++  UseScratchRegisterScope temps(this);
++  Register scratch = temps.Acquire();
+   Lwu(rd, rs);
+   Lw(scratch, MemOperand(rs.rm(), rs.offset() + kPointerSize / 2));
+   slli(scratch, scratch, 32);
+@@ -1228,8 +1230,9 @@ void TurboAssembler::Usd(Register rd, const MemOperand& rs) {
+ }
+ 
+ // Do 64-bit store as two consequent 32-bit stores to unaligned address.
+-void MacroAssembler::StoreWordPair(Register rd, const MemOperand& rs,
+-                                   Register scratch) {
++void MacroAssembler::StoreWordPair(Register rd, const MemOperand& rs) {
++  UseScratchRegisterScope temps(this);
++  Register scratch = temps.Acquire();
+   Sw(rd, rs);
+   srai(scratch, rd, 32);
+   Sw(scratch, MemOperand(rs.rm(), rs.offset() + kPointerSize / 2));
+@@ -3059,6 +3062,46 @@ void TurboAssembler::CallBuiltinByIndex(Register builtin_index) {
+   Call(builtin_index);
+ }
+ 
++void TurboAssembler::CallBuiltin(int builtin_index) {
++  DCHECK(Builtins::IsBuiltinId(builtin_index));
++  RecordCommentForOffHeapTrampoline(builtin_index);
++  CHECK_NE(builtin_index, Builtins::kNoBuiltinId);
++  EmbeddedData d = EmbeddedData::FromBlob(isolate());
++  Address entry = d.InstructionStartOfBuiltin(builtin_index);
++  if (options().short_builtin_calls) {
++    Call(entry, RelocInfo::RUNTIME_ENTRY);
++  } else {
++    Call(entry, RelocInfo::OFF_HEAP_TARGET);
++  }
++  if (FLAG_code_comments) RecordComment("]");
++}
++
++void TurboAssembler::TailCallBuiltin(int builtin_index) {
++  DCHECK(Builtins::IsBuiltinId(builtin_index));
++  RecordCommentForOffHeapTrampoline(builtin_index);
++  CHECK_NE(builtin_index, Builtins::kNoBuiltinId);
++  EmbeddedData d = EmbeddedData::FromBlob(isolate());
++  Address entry = d.InstructionStartOfBuiltin(builtin_index);
++  if (options().short_builtin_calls) {
++    Jump(entry, RelocInfo::RUNTIME_ENTRY);
++  } else {
++    Jump(entry, RelocInfo::OFF_HEAP_TARGET);
++  }
++  if (FLAG_code_comments) RecordComment("]");
++}
++
++void TurboAssembler::LoadEntryFromBuiltinIndex(Builtins::Name builtin_index,
++                                               Register destination) {
++  Ld(destination, EntryFromBuiltinIndexAsOperand(builtin_index));
++}
++
++MemOperand TurboAssembler::EntryFromBuiltinIndexAsOperand(
++    Builtins::Name builtin_index) {
++  DCHECK(root_array_available());
++  return MemOperand(kRootRegister,
++                    IsolateData::builtin_entry_slot_offset(builtin_index));
++}
++
+ void TurboAssembler::PatchAndJump(Address target) {
+   UseScratchRegisterScope temps(this);
+   Register scratch = temps.Acquire();
+@@ -3882,19 +3925,12 @@ void TurboAssembler::EnterFrame(StackFrame::Type type) {
+   UseScratchRegisterScope temps(this);
+   Register scratch = temps.Acquire();
+   BlockTrampolinePoolScope block_trampoline_pool(this);
+-  int stack_offset = -3 * kPointerSize;
+-  const int fp_offset = 1 * kPointerSize;
+-  addi(sp, sp, stack_offset);
+-  stack_offset = -stack_offset - kPointerSize;
+-  Sd(ra, MemOperand(sp, stack_offset));
+-  stack_offset -= kPointerSize;
+-  Sd(fp, MemOperand(sp, stack_offset));
+-  stack_offset -= kPointerSize;
+-  li(scratch, Operand(StackFrame::TypeToMarker(type)));
+-  Sd(scratch, MemOperand(sp, stack_offset));
+-  // Adjust FP to point to saved FP.
+-  DCHECK_EQ(stack_offset, 0);
+-  Add64(fp, sp, Operand(fp_offset));
++  Push(ra, fp);
++  Move(fp, sp);
++  if (type != StackFrame::MANUAL) {
++    li(scratch, Operand(StackFrame::TypeToMarker(type)));
++    Push(scratch);
++  }
+ }
+ 
+ void TurboAssembler::LeaveFrame(StackFrame::Type type) {
+@@ -4026,7 +4062,7 @@ void MacroAssembler::LeaveExitFrame(bool save_doubles, Register argument_count,
+     if (argument_count_is_length) {
+       add(sp, sp, argument_count);
+     } else {
+-      CalcScaledAddress(sp, sp, argument_count, kPointerSizeLog2, scratch);
++      CalcScaledAddress(sp, sp, argument_count, kPointerSizeLog2);
+     }
+   }
+ 
+@@ -4084,15 +4120,17 @@ void TurboAssembler::SmiUntag(Register dst, const MemOperand& src) {
+   }
+ }
+ 
+-void TurboAssembler::JumpIfSmi(Register value, Label* smi_label,
+-                               Register scratch) {
++void TurboAssembler::JumpIfSmi(Register value, Label* smi_label) {
+   DCHECK_EQ(0, kSmiTag);
++  UseScratchRegisterScope temps(this);
++  Register scratch = temps.Acquire();
+   andi(scratch, value, kSmiTagMask);
+   Branch(smi_label, eq, scratch, Operand(zero_reg));
+ }
+ 
+-void MacroAssembler::JumpIfNotSmi(Register value, Label* not_smi_label,
+-                                  Register scratch) {
++void MacroAssembler::JumpIfNotSmi(Register value, Label* not_smi_label) {
++  UseScratchRegisterScope temps(this);
++  Register scratch = temps.Acquire();
+   DCHECK_EQ(0, kSmiTag);
+   andi(scratch, value, kSmiTagMask);
+   Branch(not_smi_label, ne, scratch, Operand(zero_reg));
+diff --git a/src/codegen/riscv64/macro-assembler-riscv64.h b/src/codegen/riscv64/macro-assembler-riscv64.h
+index b260f1c200..3f72c181ae 100644
+--- a/src/codegen/riscv64/macro-assembler-riscv64.h
++++ b/src/codegen/riscv64/macro-assembler-riscv64.h
+@@ -12,6 +12,7 @@
+ #include "src/codegen/assembler.h"
+ #include "src/codegen/riscv64/assembler-riscv64.h"
+ #include "src/common/globals.h"
++#include "src/objects/tagged-index.h"
+ 
+ namespace v8 {
+ namespace internal {
+@@ -187,6 +188,8 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+     li(rd, Operand(j), mode);
+   }
+ 
++  inline void Move(Register output, MemOperand operand) { Ld(output, operand); }
++
+   void li(Register dst, Handle<HeapObject> value, LiFlags mode = OPTIMIZE_SIZE);
+   void li(Register dst, ExternalReference value, LiFlags mode = OPTIMIZE_SIZE);
+   void li(Register dst, const StringConstantBase* string,
+@@ -223,7 +226,20 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   // Load the builtin given by the Smi in |builtin_index| into the same
+   // register.
+   void LoadEntryFromBuiltinIndex(Register builtin_index);
++  void LoadEntryFromBuiltinIndex(Builtins::Name builtin_index,
++                                 Register destination);
++  MemOperand EntryFromBuiltinIndexAsOperand(Builtins::Name builtin_index);
+   void CallBuiltinByIndex(Register builtin_index) override;
++  void CallBuiltin(Builtins::Name builtin) {
++    // TODO(11527): drop the int overload in favour of the Builtins::Name one.
++    return CallBuiltin(static_cast<int>(builtin));
++  }
++  void CallBuiltin(int builtin_index);
++  void TailCallBuiltin(Builtins::Name builtin) {
++    // TODO(11527): drop the int overload in favour of the Builtins::Name one.
++    return TailCallBuiltin(static_cast<int>(builtin));
++  }
++  void TailCallBuiltin(int builtin_index);
+ 
+   void LoadCodeObjectEntry(Register destination, Register code_object) override;
+   void CallCodeObject(Register code_object) override;
+@@ -799,7 +815,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   void Ceil_s_s(FPURegister fd, FPURegister fs, FPURegister fpu_scratch);
+ 
+   // Jump the register contains a smi.
+-  void JumpIfSmi(Register value, Label* smi_label, Register scratch = t3);
++  void JumpIfSmi(Register value, Label* smi_label);
+ 
+   void JumpIfEqual(Register a, int32_t b, Label* dest) {
+     Branch(dest, eq, a, Operand(b));
+@@ -816,8 +832,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   static int ActivationFrameAlignment();
+ 
+   // Calculated scaled address (rd) as rt + rs << sa
+-  void CalcScaledAddress(Register rd, Register rs, Register rt, uint8_t sa,
+-                         Register scratch = t3);
++  void CalcScaledAddress(Register rd, Register rs, Register rt, uint8_t sa);
+ 
+   // Compute the start of the generated instruction stream from the current PC.
+   // This is an alternative to embedding the {CodeObject} handle as a reference.
+@@ -970,8 +985,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   // ---------------------------------------------------------------------------
+   // Pseudo-instructions.
+ 
+-  void LoadWordPair(Register rd, const MemOperand& rs, Register scratch = t3);
+-  void StoreWordPair(Register rd, const MemOperand& rs, Register scratch = t3);
++  void LoadWordPair(Register rd, const MemOperand& rs);
++  void StoreWordPair(Register rd, const MemOperand& rs);
+ 
+   void Madd_s(FPURegister fd, FPURegister fr, FPURegister fs, FPURegister ft);
+   void Madd_d(FPURegister fd, FPURegister fr, FPURegister fs, FPURegister ft);
+@@ -1131,8 +1146,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   }
+ 
+   // Jump if the register contains a non-smi.
+-  void JumpIfNotSmi(Register value, Label* not_smi_label,
+-                    Register scratch = t3);
++  void JumpIfNotSmi(Register value, Label* not_smi_label);
+ 
+   // Abort execution if argument is a smi, enabled via --debug-code.
+   void AssertNotSmi(Register object);
+diff --git a/src/compiler/backend/riscv64/code-generator-riscv64.cc b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+index f01941883e..32ccaa36f6 100644
+--- a/src/compiler/backend/riscv64/code-generator-riscv64.cc
++++ b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+@@ -488,6 +488,11 @@ void CodeGenerator::AssemblePrepareTailCall() {
+   frame_access_state()->SetFrameAccessToSP();
+ }
+ 
++void CodeGenerator::AssembleArchSelect(Instruction* instr,
++                                       FlagsCondition condition) {
++  UNIMPLEMENTED();
++}
++
+ namespace {
+ 
+ void AdjustStackPointerForTailCall(TurboAssembler* tasm,
+diff --git a/src/compiler/backend/riscv64/instruction-selector-riscv64.cc b/src/compiler/backend/riscv64/instruction-selector-riscv64.cc
+index 1d6b506685..2fd03b56bf 100644
+--- a/src/compiler/backend/riscv64/instruction-selector-riscv64.cc
++++ b/src/compiler/backend/riscv64/instruction-selector-riscv64.cc
+@@ -2654,7 +2654,7 @@ void InstructionSelector::VisitInt64AbsWithOverflow(Node* node) {
+   V(I32x4AllTrue, kRiscvI32x4AllTrue)                       \
+   V(I16x8AllTrue, kRiscvI16x8AllTrue)                       \
+   V(I8x16AllTrue, kRiscvI8x16AllTrue)                       \
+-  V(I64x2AllTrue, kRiscvI64x2AllTrue)                       \
++  V(I64x2AllTrue, kRiscvI64x2AllTrue)
+ 
+ #define SIMD_SHIFT_OP_LIST(V) \
+   V(I64x2Shl)                 \
+@@ -2911,8 +2911,9 @@ bool TryMatchArchShuffle(const uint8_t* shuffle, const ShuffleEntry* table,
+ 
+ void InstructionSelector::VisitI8x16Shuffle(Node* node) {
+   uint8_t shuffle[kSimd128Size];
+-  bool is_swizzle;
+-  CanonicalizeShuffle(node, shuffle, &is_swizzle);
++  auto param = ShuffleParameterOf(node->op());
++  bool is_swizzle = param.is_swizzle();
++  base::Memcpy(shuffle, param.imm().data(), kSimd128Size);
+   uint8_t shuffle32x4[4];
+   ArchOpcode opcode;
+   if (TryMatchArchShuffle(shuffle, arch_shuffles, arraysize(arch_shuffles),
+diff --git a/src/debug/riscv64/debug-riscv64.cc b/src/debug/riscv64/debug-riscv64.cc
+index b292300150..f2e4821b26 100644
+--- a/src/debug/riscv64/debug-riscv64.cc
++++ b/src/debug/riscv64/debug-riscv64.cc
+@@ -33,14 +33,12 @@ void DebugCodegen::GenerateFrameDropperTrampoline(MacroAssembler* masm) {
+   // - Restart the frame by calling the function.
+   __ mv(fp, a1);
+   __ Ld(a1, MemOperand(fp, StandardFrameConstants::kFunctionOffset));
++  __ Ld(a0, MemOperand(fp, StandardFrameConstants::kArgCOffset));
+ 
+   // Pop return address and frame.
+   __ LeaveFrame(StackFrame::INTERNAL);
+ 
+-  __ Ld(a0, FieldMemOperand(a1, JSFunction::kSharedFunctionInfoOffset));
+-  __ Lhu(a0,
+-         FieldMemOperand(a0, SharedFunctionInfo::kFormalParameterCountOffset));
+-  __ mv(a2, a0);
++  __ li(a2, Operand(kDontAdaptArgumentsSentinel));
+ 
+   __ InvokeFunction(a1, a2, a0, JUMP_FUNCTION);
+ }
+diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
+index b5bc3282a4..9ebff126f0 100644
+--- a/src/flags/flag-definitions.h
++++ b/src/flags/flag-definitions.h
+@@ -176,7 +176,7 @@ struct MaybeBoolFlag {
+ #endif
+ 
+ #if V8_TARGET_ARCH_IA32 || V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64 || \
+-    V8_TARGET_ARCH_ARM
++    V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_RISCV64
+ #define ENABLE_SPARKPLUG true
+ #else
+ // TODO(v8:11421): Enable Sparkplug for other architectures
+diff --git a/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h b/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
+index 47f8ce2125..ecb97aa32a 100644
+--- a/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
++++ b/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
+@@ -382,12 +382,19 @@ void LiftoffAssembler::LoadInstanceFromFrame(Register dst) {
+ void LiftoffAssembler::LoadFromInstance(Register dst, Register instance,
+                                         int offset, int size) {
+   DCHECK_LE(0, offset);
+-  DCHECK(size == 4 || size == 8);
+   MemOperand src{instance, offset};
+-  if (size == 4) {
+-    Lw(dst, src);
+-  } else {
+-    Ld(dst, src);
++  switch (size) {
++    case 1:
++      Lb(dst, MemOperand(src));
++      break;
++    case 4:
++      Lw(dst, MemOperand(src));
++      break;
++    case 8:
++      Ld(dst, MemOperand(src));
++      break;
++    default:
++      UNIMPLEMENTED();
+   }
+ }
+ 
+@@ -414,6 +421,12 @@ void LiftoffAssembler::LoadTaggedPointer(Register dst, Register src_addr,
+   Ld(dst, src_op);
+ }
+ 
++void LiftoffAssembler::LoadFullPointer(Register dst, Register src_addr,
++                                       int32_t offset_imm) {
++  MemOperand src_op = liftoff::GetMemOp(this, src_addr, no_reg, offset_imm);
++  Ld(dst, src_op);
++}
++
+ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+                                           Register offset_reg,
+                                           int32_t offset_imm,
+diff --git a/test/inspector/inspector.status b/test/inspector/inspector.status
+index 5e13f52dfd..4aa9338089 100644
+--- a/test/inspector/inspector.status
++++ b/test/inspector/inspector.status
+@@ -127,6 +127,10 @@
+   'debugger/wasm-step-after-trap': [SKIP],
+ }],  # 'arch == riscv64'
+ 
++['arch == riscv64 and variant == stress_incremental_marking', {
++  'debugger/wasm-gc-breakpoints': [SKIP]
++}],  # 'arch == riscv64'
++
+ ################################################################################
+ ['variant == stress_snapshot', {
+   '*': [SKIP],  # only relevant for mjsunit tests.
+-- 
+2.35.1
+

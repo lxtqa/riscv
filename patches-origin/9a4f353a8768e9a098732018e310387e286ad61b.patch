@@ -1,0 +1,127 @@
+From 9a4f353a8768e9a098732018e310387e286ad61b Mon Sep 17 00:00:00 2001
+From: Thibaud Michaud <thibaudm@chromium.org>
+Date: Mon, 13 Sep 2021 23:30:50 +0200
+Subject: [PATCH] Reland "[wasm] Add tests for NaN detection in Liftoff"
+
+This is a reland of deb66c84c0fc69309de69be4e9e7e040ab648871
+
+Added missing cctest.status entries to disable the tests on
+non-simd hardware.
+
+Original change's description:
+> [wasm] Add tests for NaN detection in Liftoff
+>
+> Check that the flag is also set if only one of the lanes is NaN for SIMD
+> operations.
+>
+> R=clemensb@chromium.org
+>
+> Bug: v8:11856
+> Change-Id: I3860ed1beac4faee1ade7180b67ca06762ca9b95
+> Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3158322
+> Reviewed-by: Clemens Backes <clemensb@chromium.org>
+> Commit-Queue: Thibaud Michaud <thibaudm@chromium.org>
+> Cr-Commit-Position: refs/heads/main@{#76801}
+
+Bug: v8:11856
+Change-Id: If45451703d80fe217eac8c610dac022dc778436f
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3158329
+Reviewed-by: Clemens Backes <clemensb@chromium.org>
+Commit-Queue: Thibaud Michaud <thibaudm@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#76812}
+---
+ test/cctest/cctest.status                    | 13 +++++---
+ test/cctest/wasm/test-liftoff-for-fuzzing.cc | 32 ++++++++++++++++++--
+ 2 files changed, 38 insertions(+), 7 deletions(-)
+
+diff --git a/test/cctest/cctest.status b/test/cctest/cctest.status
+index 9c28520ed5..d75184e745 100644
+--- a/test/cctest/cctest.status
++++ b/test/cctest/cctest.status
+@@ -440,9 +440,10 @@
+   'test-run-wasm-64/*': [SKIP],
+   'test-run-wasm/RunWasmTurbofan_Select_s128_parameters': [SKIP],
+   'test-run-wasm/RunWasmLiftoff_Select_s128_parameters': [SKIP],
+-  'test-liftoff-for-fuzzing/NondeterminismUnopF64x2': [SKIP],
+-  'test-liftoff-for-fuzzing/NondeterminismUnopF32x2': [SKIP],
+-  'test-liftoff-for-fuzzing/NondeterminismUnopF32x4': [SKIP],
++  'test-liftoff-for-fuzzing/NondeterminismUnopF64x2AllNaN': [SKIP],
++  'test-liftoff-for-fuzzing/NondeterminismUnopF64x2OneNaN': [SKIP],
++  'test-liftoff-for-fuzzing/NondeterminismUnopF32x4AllNaN': [SKIP],
++  'test-liftoff-for-fuzzing/NondeterminismUnopF32x4OneNaN': [SKIP],
+ }],  # 'arch == riscv64'
+ 
+ ##############################################################################
+@@ -762,8 +763,10 @@
+   'test-gc/RunWasmTurbofan_RefTrivialCasts': [SKIP],
+   'test-run-wasm/RunWasmLiftoff_Select_s128_parameters': [SKIP],
+   'test-run-wasm/RunWasmTurbofan_Select_s128_parameters': [SKIP],
+-  'test-liftoff-for-fuzzing/NondeterminismUnopF32x4': [SKIP],
+-  'test-liftoff-for-fuzzing/NondeterminismUnopF64x2': [SKIP],
++  'test-liftoff-for-fuzzing/NondeterminismUnopF32x4AllNaN': [SKIP],
++  'test-liftoff-for-fuzzing/NondeterminismUnopF32x4OneNaN': [SKIP],
++  'test-liftoff-for-fuzzing/NondeterminismUnopF64x2AllNaN': [SKIP],
++  'test-liftoff-for-fuzzing/NondeterminismUnopF64x2OneNaN': [SKIP],
+ }],  # no_simd_hardware == True
+ 
+ ################################################################################
+diff --git a/test/cctest/wasm/test-liftoff-for-fuzzing.cc b/test/cctest/wasm/test-liftoff-for-fuzzing.cc
+index ae168efda8..3843089dd8 100644
+--- a/test/cctest/wasm/test-liftoff-for-fuzzing.cc
++++ b/test/cctest/wasm/test-liftoff-for-fuzzing.cc
+@@ -40,7 +40,7 @@ TEST(NondeterminismUnopF64) {
+   CHECK(r.HasNondeterminism());
+ }
+ 
+-TEST(NondeterminismUnopF32x4) {
++TEST(NondeterminismUnopF32x4AllNaN) {
+   WasmRunner<int32_t, float> r(TestExecutionTier::kLiftoffForFuzzing);
+ 
+   byte value = 0;
+@@ -55,7 +55,21 @@ TEST(NondeterminismUnopF32x4) {
+   CHECK(r.HasNondeterminism());
+ }
+ 
+-TEST(NondeterminismUnopF64x2) {
++TEST(NondeterminismUnopF32x4OneNaN) {
++  for (byte lane = 0; lane < 4; ++lane) {
++    WasmRunner<int32_t, float> r(TestExecutionTier::kLiftoffForFuzzing);
++    BUILD(r, WASM_SIMD_F32x4_SPLAT(WASM_F32(0)), WASM_LOCAL_GET(0),
++          WASM_SIMD_OP(kExprF32x4ReplaceLane), lane,
++          WASM_SIMD_OP(kExprF32x4Ceil), kExprDrop, WASM_ONE);
++    CHECK(!r.HasNondeterminism());
++    r.CheckCallViaJS(1, 0.0);
++    CHECK(!r.HasNondeterminism());
++    r.CheckCallViaJS(1, std::nanf(""));
++    CHECK(r.HasNondeterminism());
++  }
++}
++
++TEST(NondeterminismUnopF64x2AllNaN) {
+   WasmRunner<int32_t, double> r(TestExecutionTier::kLiftoffForFuzzing);
+ 
+   byte value = 0;
+@@ -70,6 +84,20 @@ TEST(NondeterminismUnopF64x2) {
+   CHECK(r.HasNondeterminism());
+ }
+ 
++TEST(NondeterminismUnopF64x2OneNaN) {
++  for (byte lane = 0; lane < 2; ++lane) {
++    WasmRunner<int32_t, double> r(TestExecutionTier::kLiftoffForFuzzing);
++    BUILD(r, WASM_SIMD_F64x2_SPLAT(WASM_F64(0)), WASM_LOCAL_GET(0),
++          WASM_SIMD_OP(kExprF64x2ReplaceLane), lane,
++          WASM_SIMD_OP(kExprF64x2Ceil), kExprDrop, WASM_ONE);
++    CHECK(!r.HasNondeterminism());
++    r.CheckCallViaJS(1, 0.0);
++    CHECK(!r.HasNondeterminism());
++    r.CheckCallViaJS(1, std::nan(""));
++    CHECK(r.HasNondeterminism());
++  }
++}
++
+ TEST(NondeterminismBinop) {
+   WasmRunner<float> r(TestExecutionTier::kLiftoffForFuzzing);
+ 
+-- 
+2.35.1
+

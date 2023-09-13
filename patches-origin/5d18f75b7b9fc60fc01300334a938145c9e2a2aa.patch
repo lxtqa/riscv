@@ -1,0 +1,99 @@
+From 5d18f75b7b9fc60fc01300334a938145c9e2a2aa Mon Sep 17 00:00:00 2001
+From: QiuJi <qiuji@iscas.ac.cn>
+Date: Mon, 9 Aug 2021 11:19:35 +0800
+Subject: [PATCH] [riscv64][codegen] Remove PrepareForTailCall
+
+Port: ec7171608b49e16ba7231d298af3f08ac55163d3
+Bug: v8:11879
+Change-Id: I1e2f1d712a14fee383227c5a2b479cf00dde9e9c
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3062031
+Reviewed-by: Ji Qiu <qiuji@iscas.ac.cn>
+Reviewed-by: Brice Dobry <brice.dobry@futurewei.com>
+Commit-Queue: Ji Qiu <qiuji@iscas.ac.cn>
+Auto-Submit: Ji Qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/master@{#76151}
+---
+ .../riscv64/macro-assembler-riscv64.cc        | 46 -------------------
+ src/codegen/riscv64/macro-assembler-riscv64.h |  9 ----
+ 2 files changed, 55 deletions(-)
+
+diff --git a/src/codegen/riscv64/macro-assembler-riscv64.cc b/src/codegen/riscv64/macro-assembler-riscv64.cc
+index f2a2bf9f2d..6cda489f70 100644
+--- a/src/codegen/riscv64/macro-assembler-riscv64.cc
++++ b/src/codegen/riscv64/macro-assembler-riscv64.cc
+@@ -3612,52 +3612,6 @@ void TurboAssembler::MovToFloatParameters(DoubleRegister src1,
+ // -----------------------------------------------------------------------------
+ // JavaScript invokes.
+ 
+-void TurboAssembler::PrepareForTailCall(Register callee_args_count,
+-                                        Register caller_args_count,
+-                                        Register scratch0, Register scratch1) {
+-  // Calculate the end of destination area where we will put the arguments
+-  // after we drop current frame. We add kSystemPointerSize to count the
+-  // receiver argument which is not included into formal parameters count.
+-  Register dst_reg = scratch0;
+-  CalcScaledAddress(dst_reg, fp, caller_args_count, kSystemPointerSizeLog2);
+-  Add64(dst_reg, dst_reg,
+-        Operand(StandardFrameConstants::kCallerSPOffset + kSystemPointerSize));
+-
+-  Register src_reg = caller_args_count;
+-  // Calculate the end of source area. +kSystemPointerSize is for the receiver.
+-  CalcScaledAddress(src_reg, sp, callee_args_count, kSystemPointerSizeLog2);
+-  Add64(src_reg, src_reg, Operand(kSystemPointerSize));
+-
+-  if (FLAG_debug_code) {
+-    Check(Uless, AbortReason::kStackAccessBelowStackPointer, src_reg,
+-          Operand(dst_reg));
+-  }
+-
+-  // Restore caller's frame pointer and return address now as they will be
+-  // overwritten by the copying loop.
+-  Ld(ra, MemOperand(fp, StandardFrameConstants::kCallerPCOffset));
+-  Ld(fp, MemOperand(fp, StandardFrameConstants::kCallerFPOffset));
+-
+-  // Now copy callee arguments to the caller frame going backwards to avoid
+-  // callee arguments corruption (source and destination areas could overlap).
+-
+-  // Both src_reg and dst_reg are pointing to the word after the one to copy,
+-  // so they must be pre-decremented in the loop.
+-  Register tmp_reg = scratch1;
+-  Label loop, entry;
+-  Branch(&entry);
+-  bind(&loop);
+-  Sub64(src_reg, src_reg, Operand(kSystemPointerSize));
+-  Sub64(dst_reg, dst_reg, Operand(kSystemPointerSize));
+-  Ld(tmp_reg, MemOperand(src_reg));
+-  Sd(tmp_reg, MemOperand(dst_reg));
+-  bind(&entry);
+-  Branch(&loop, ne, sp, Operand(src_reg));
+-
+-  // Leave current frame.
+-  Mv(sp, dst_reg);
+-}
+-
+ void MacroAssembler::LoadStackLimit(Register destination, StackLimitKind kind) {
+   DCHECK(root_array_available());
+   Isolate* isolate = this->isolate();
+diff --git a/src/codegen/riscv64/macro-assembler-riscv64.h b/src/codegen/riscv64/macro-assembler-riscv64.h
+index 6ad164d4ea..4dbb482950 100644
+--- a/src/codegen/riscv64/macro-assembler-riscv64.h
++++ b/src/codegen/riscv64/macro-assembler-riscv64.h
+@@ -479,15 +479,6 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+ 
+   void SmiUntag(Register reg) { SmiUntag(reg, reg); }
+ 
+-  // Removes current frame and its arguments from the stack preserving
+-  // the arguments and a return address pushed to the stack for the next call.
+-  // Both |callee_args_count| and |caller_args_count| do not include
+-  // receiver. |callee_args_count| is not modified. |caller_args_count|
+-  // is trashed.
+-  void PrepareForTailCall(Register callee_args_count,
+-                          Register caller_args_count, Register scratch0,
+-                          Register scratch1);
+-
+   int CalculateStackPassedDWords(int num_gp_arguments, int num_fp_arguments);
+ 
+   // Before calling a C-function from generated code, align arguments on stack.
+-- 
+2.35.1
+

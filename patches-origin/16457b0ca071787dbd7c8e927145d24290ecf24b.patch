@@ -1,0 +1,781 @@
+From 16457b0ca071787dbd7c8e927145d24290ecf24b Mon Sep 17 00:00:00 2001
+From: Shu-yu Guo <syg@chromium.org>
+Date: Wed, 9 Mar 2022 17:16:21 -0800
+Subject: [PATCH] [shared-struct] Support shared structs in
+ Atomics.{load,store}
+
+Atomics.load and Atomics.store now accept string field names as the
+2nd argument when the 1st argument is a shared struct.
+
+Currently these are implemented in C++ and not yet in CSA.
+
+Bug: v8:12547
+Change-Id: Ideeafc13fb6a925540edf3dc17428c8e50bcee79
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3510837
+Commit-Queue: Shu-yu Guo <syg@chromium.org>
+Reviewed-by: Michael Lippautz <mlippautz@chromium.org>
+Reviewed-by: Jakob Kummerow <jkummerow@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#79431}
+---
+ src/base/atomic-utils.h                       | 15 ++++++
+ src/base/atomicops.h                          | 15 ++++++
+ src/builtins/builtins-definitions.h           |  7 +--
+ .../builtins-sharedarraybuffer-gen.cc         | 49 ++++++++++++++-----
+ src/codegen/code-stub-assembler.cc            |  9 ++++
+ src/codegen/code-stub-assembler.h             |  1 +
+ src/common/globals.h                          |  4 +-
+ src/objects/js-objects-inl.h                  | 38 ++++++++++++++
+ src/objects/js-objects.cc                     |  8 +++
+ src/objects/js-objects.h                      | 11 +++++
+ src/objects/lookup.cc                         | 25 ++++++++++
+ src/objects/lookup.h                          |  2 +
+ src/objects/object-macros.h                   |  6 +++
+ src/objects/property-array-inl.h              | 26 ++++++++++
+ src/objects/property-array.h                  |  4 ++
+ src/objects/tagged-field-inl.h                | 34 +++++++++++++
+ src/objects/tagged-field.h                    |  7 +++
+ src/runtime/runtime-atomics.cc                | 39 +++++++++++++++
+ src/runtime/runtime.h                         |  4 +-
+ test/mjsunit/mjsunit.status                   |  1 +
+ .../shared-struct-atomics-workers.js          | 41 ++++++++++++++++
+ .../shared-memory/shared-struct-atomics.js    | 35 +++++++++++++
+ 22 files changed, 364 insertions(+), 17 deletions(-)
+ create mode 100644 test/mjsunit/shared-memory/shared-struct-atomics-workers.js
+ create mode 100644 test/mjsunit/shared-memory/shared-struct-atomics.js
+
+diff --git a/src/base/atomic-utils.h b/src/base/atomic-utils.h
+index 84015af362..be045b0e68 100644
+--- a/src/base/atomic-utils.h
++++ b/src/base/atomic-utils.h
+@@ -66,6 +66,13 @@ class AsAtomicImpl {
+  public:
+   using AtomicStorageType = TAtomicStorageType;
+ 
++  template <typename T>
++  static T SeqCst_Load(T* addr) {
++    STATIC_ASSERT(sizeof(T) <= sizeof(AtomicStorageType));
++    return cast_helper<T>::to_return_type(
++        base::SeqCst_Load(to_storage_addr(addr)));
++  }
++
+   template <typename T>
+   static T Acquire_Load(T* addr) {
+     STATIC_ASSERT(sizeof(T) <= sizeof(AtomicStorageType));
+@@ -80,6 +87,14 @@ class AsAtomicImpl {
+         base::Relaxed_Load(to_storage_addr(addr)));
+   }
+ 
++  template <typename T>
++  static void SeqCst_Store(T* addr,
++                           typename std::remove_reference<T>::type new_value) {
++    STATIC_ASSERT(sizeof(T) <= sizeof(AtomicStorageType));
++    base::SeqCst_Store(to_storage_addr(addr),
++                       cast_helper<T>::to_storage_type(new_value));
++  }
++
+   template <typename T>
+   static void Release_Store(T* addr,
+                             typename std::remove_reference<T>::type new_value) {
+diff --git a/src/base/atomicops.h b/src/base/atomicops.h
+index fb7d30d672..f6b516ad9e 100644
+--- a/src/base/atomicops.h
++++ b/src/base/atomicops.h
+@@ -241,6 +241,16 @@ inline Atomic32 Acquire_Load(volatile const Atomic32* ptr) {
+                                    std::memory_order_acquire);
+ }
+ 
++inline Atomic8 SeqCst_Load(volatile const Atomic8* ptr) {
++  return std::atomic_load_explicit(helper::to_std_atomic_const(ptr),
++                                   std::memory_order_seq_cst);
++}
++
++inline Atomic32 SeqCst_Load(volatile const Atomic32* ptr) {
++  return std::atomic_load_explicit(helper::to_std_atomic_const(ptr),
++                                   std::memory_order_seq_cst);
++}
++
+ #if defined(V8_HOST_ARCH_64_BIT)
+ 
+ inline Atomic64 Relaxed_CompareAndSwap(volatile Atomic64* ptr,
+@@ -314,6 +324,11 @@ inline Atomic64 Acquire_Load(volatile const Atomic64* ptr) {
+                                    std::memory_order_acquire);
+ }
+ 
++inline Atomic64 SeqCst_Load(volatile const Atomic64* ptr) {
++  return std::atomic_load_explicit(helper::to_std_atomic_const(ptr),
++                                   std::memory_order_seq_cst);
++}
++
+ #endif  // defined(V8_HOST_ARCH_64_BIT)
+ 
+ inline void Relaxed_Memcpy(volatile Atomic8* dst, volatile const Atomic8* src,
+diff --git a/src/builtins/builtins-definitions.h b/src/builtins/builtins-definitions.h
+index fcf1f9843a..f2cf8c5b24 100644
+--- a/src/builtins/builtins-definitions.h
++++ b/src/builtins/builtins-definitions.h
+@@ -888,9 +888,10 @@ namespace internal {
+   /* https://tc39.es/proposal-resizablearraybuffer/ */                         \
+   CPP(SharedArrayBufferPrototypeGrow)                                          \
+                                                                                \
+-  TFJ(AtomicsLoad, kJSArgcReceiverSlots + 2, kReceiver, kArray, kIndex)        \
+-  TFJ(AtomicsStore, kJSArgcReceiverSlots + 3, kReceiver, kArray, kIndex,       \
+-      kValue)                                                                  \
++  TFJ(AtomicsLoad, kJSArgcReceiverSlots + 2, kReceiver, kArrayOrSharedStruct,  \
++      kIndexOrFieldName)                                                       \
++  TFJ(AtomicsStore, kJSArgcReceiverSlots + 3, kReceiver, kArrayOrSharedStruct, \
++      kIndexOrFieldName, kValue)                                               \
+   TFJ(AtomicsExchange, kJSArgcReceiverSlots + 3, kReceiver, kArray, kIndex,    \
+       kValue)                                                                  \
+   TFJ(AtomicsCompareExchange, kJSArgcReceiverSlots + 4, kReceiver, kArray,     \
+diff --git a/src/builtins/builtins-sharedarraybuffer-gen.cc b/src/builtins/builtins-sharedarraybuffer-gen.cc
+index 154c6d39f8..4222cf9c79 100644
+--- a/src/builtins/builtins-sharedarraybuffer-gen.cc
++++ b/src/builtins/builtins-sharedarraybuffer-gen.cc
+@@ -168,20 +168,26 @@ TNode<BigInt> SharedArrayBufferBuiltinsAssembler::BigIntFromUnsigned64(
+ 
+ // https://tc39.es/ecma262/#sec-atomicload
+ TF_BUILTIN(AtomicsLoad, SharedArrayBufferBuiltinsAssembler) {
+-  auto maybe_array = Parameter<Object>(Descriptor::kArray);
+-  auto index = Parameter<Object>(Descriptor::kIndex);
++  auto maybe_array_or_shared_struct =
++      Parameter<Object>(Descriptor::kArrayOrSharedStruct);
++  auto index_or_field_name = Parameter<Object>(Descriptor::kIndexOrFieldName);
+   auto context = Parameter<Context>(Descriptor::kContext);
+ 
++  Label shared_struct(this);
++  GotoIf(IsJSSharedStruct(maybe_array_or_shared_struct), &shared_struct);
++
+   // 1. Let buffer be ? ValidateIntegerTypedArray(typedArray).
+   Label detached(this);
+   TNode<Int32T> elements_kind;
+   TNode<RawPtrT> backing_store;
+-  TNode<JSArrayBuffer> array_buffer = ValidateIntegerTypedArray(
+-      maybe_array, context, &elements_kind, &backing_store, &detached);
+-  TNode<JSTypedArray> array = CAST(maybe_array);
++  TNode<JSArrayBuffer> array_buffer =
++      ValidateIntegerTypedArray(maybe_array_or_shared_struct, context,
++                                &elements_kind, &backing_store, &detached);
++  TNode<JSTypedArray> array = CAST(maybe_array_or_shared_struct);
+ 
+   // 2. Let i be ? ValidateAtomicAccess(typedArray, index).
+-  TNode<UintPtrT> index_word = ValidateAtomicAccess(array, index, context);
++  TNode<UintPtrT> index_word =
++      ValidateAtomicAccess(array, index_or_field_name, context);
+ 
+   // 3. If IsDetachedBuffer(buffer) is true, throw a TypeError exception.
+   // 4. NOTE: The above check is not redundant with the check in
+@@ -254,25 +260,37 @@ TF_BUILTIN(AtomicsLoad, SharedArrayBufferBuiltinsAssembler) {
+     ThrowTypeError(context, MessageTemplate::kDetachedOperation,
+                    "Atomics.load");
+   }
++
++  BIND(&shared_struct);
++  {
++    Return(CallRuntime(Runtime::kAtomicsLoadSharedStructField, context,
++                       maybe_array_or_shared_struct, index_or_field_name));
++  }
+ }
+ 
+ // https://tc39.es/ecma262/#sec-atomics.store
+ TF_BUILTIN(AtomicsStore, SharedArrayBufferBuiltinsAssembler) {
+-  auto maybe_array = Parameter<Object>(Descriptor::kArray);
+-  auto index = Parameter<Object>(Descriptor::kIndex);
++  auto maybe_array_or_shared_struct =
++      Parameter<Object>(Descriptor::kArrayOrSharedStruct);
++  auto index_or_field_name = Parameter<Object>(Descriptor::kIndexOrFieldName);
+   auto value = Parameter<Object>(Descriptor::kValue);
+   auto context = Parameter<Context>(Descriptor::kContext);
+ 
++  Label shared_struct(this);
++  GotoIf(IsJSSharedStruct(maybe_array_or_shared_struct), &shared_struct);
++
+   // 1. Let buffer be ? ValidateIntegerTypedArray(typedArray).
+   Label detached(this);
+   TNode<Int32T> elements_kind;
+   TNode<RawPtrT> backing_store;
+-  TNode<JSArrayBuffer> array_buffer = ValidateIntegerTypedArray(
+-      maybe_array, context, &elements_kind, &backing_store, &detached);
+-  TNode<JSTypedArray> array = CAST(maybe_array);
++  TNode<JSArrayBuffer> array_buffer =
++      ValidateIntegerTypedArray(maybe_array_or_shared_struct, context,
++                                &elements_kind, &backing_store, &detached);
++  TNode<JSTypedArray> array = CAST(maybe_array_or_shared_struct);
+ 
+   // 2. Let i be ? ValidateAtomicAccess(typedArray, index).
+-  TNode<UintPtrT> index_word = ValidateAtomicAccess(array, index, context);
++  TNode<UintPtrT> index_word =
++      ValidateAtomicAccess(array, index_or_field_name, context);
+ 
+   Label u8(this), u16(this), u32(this), u64(this), other(this);
+ 
+@@ -356,6 +374,13 @@ TF_BUILTIN(AtomicsStore, SharedArrayBufferBuiltinsAssembler) {
+     ThrowTypeError(context, MessageTemplate::kDetachedOperation,
+                    "Atomics.store");
+   }
++
++  BIND(&shared_struct);
++  {
++    Return(CallRuntime(Runtime::kAtomicsStoreSharedStructField, context,
++                       maybe_array_or_shared_struct, index_or_field_name,
++                       value));
++  }
+ }
+ 
+ // https://tc39.es/ecma262/#sec-atomics.exchange
+diff --git a/src/codegen/code-stub-assembler.cc b/src/codegen/code-stub-assembler.cc
+index 67a603ca3f..c90b644a3c 100644
+--- a/src/codegen/code-stub-assembler.cc
++++ b/src/codegen/code-stub-assembler.cc
+@@ -6576,6 +6576,15 @@ TNode<BoolT> CodeStubAssembler::IsJSSharedStruct(TNode<HeapObject> object) {
+   return IsJSSharedStructMap(LoadMap(object));
+ }
+ 
++TNode<BoolT> CodeStubAssembler::IsJSSharedStruct(TNode<Object> object) {
++  return Select<BoolT>(
++      TaggedIsSmi(object), [=] { return Int32FalseConstant(); },
++      [=] {
++        TNode<HeapObject> heap_object = CAST(object);
++        return IsJSSharedStruct(heap_object);
++      });
++}
++
+ TNode<BoolT> CodeStubAssembler::IsJSAsyncGeneratorObject(
+     TNode<HeapObject> object) {
+   return HasInstanceType(object, JS_ASYNC_GENERATOR_OBJECT_TYPE);
+diff --git a/src/codegen/code-stub-assembler.h b/src/codegen/code-stub-assembler.h
+index c33de22677..55485d004a 100644
+--- a/src/codegen/code-stub-assembler.h
++++ b/src/codegen/code-stub-assembler.h
+@@ -2597,6 +2597,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
+   TNode<BoolT> IsJSSharedStructInstanceType(TNode<Int32T> instance_type);
+   TNode<BoolT> IsJSSharedStructMap(TNode<Map> map);
+   TNode<BoolT> IsJSSharedStruct(TNode<HeapObject> object);
++  TNode<BoolT> IsJSSharedStruct(TNode<Object> object);
+   TNode<BoolT> IsJSWrappedFunction(TNode<HeapObject> object);
+   TNode<BoolT> IsMap(TNode<HeapObject> object);
+   TNode<BoolT> IsName(TNode<HeapObject> object);
+diff --git a/src/common/globals.h b/src/common/globals.h
+index 050683988b..5f5a95a8c1 100644
+--- a/src/common/globals.h
++++ b/src/common/globals.h
+@@ -1907,15 +1907,17 @@ enum class StringTransitionStrategy {
+ 
+ }  // namespace internal
+ 
+-// Tag dispatching support for acquire loads and release stores.
++// Tag dispatching support for atomic loads and stores.
+ struct AcquireLoadTag {};
+ struct RelaxedLoadTag {};
+ struct ReleaseStoreTag {};
+ struct RelaxedStoreTag {};
++struct SeqCstAccessTag {};
+ static constexpr AcquireLoadTag kAcquireLoad;
+ static constexpr RelaxedLoadTag kRelaxedLoad;
+ static constexpr ReleaseStoreTag kReleaseStore;
+ static constexpr RelaxedStoreTag kRelaxedStore;
++static constexpr SeqCstAccessTag kSeqCstAccess;
+ 
+ }  // namespace v8
+ 
+diff --git a/src/objects/js-objects-inl.h b/src/objects/js-objects-inl.h
+index 5307f07bec..dc0e77f9c0 100644
+--- a/src/objects/js-objects-inl.h
++++ b/src/objects/js-objects-inl.h
+@@ -338,6 +338,24 @@ Object JSObject::RawFastPropertyAt(PtrComprCageBase cage_base,
+   }
+ }
+ 
++// The SeqCst versions of RawFastPropertyAt are used for atomically accessing
++// shared struct fields.
++Object JSObject::RawFastPropertyAt(FieldIndex index,
++                                   SeqCstAccessTag tag) const {
++  PtrComprCageBase cage_base = GetPtrComprCageBase(*this);
++  return RawFastPropertyAt(cage_base, index, tag);
++}
++
++Object JSObject::RawFastPropertyAt(PtrComprCageBase cage_base, FieldIndex index,
++                                   SeqCstAccessTag tag) const {
++  if (index.is_inobject()) {
++    return TaggedField<Object>::SeqCst_Load(cage_base, *this, index.offset());
++  } else {
++    return property_array(cage_base).get(cage_base,
++                                         index.outobject_array_index(), tag);
++  }
++}
++
+ base::Optional<Object> JSObject::RawInobjectPropertyAt(
+     PtrComprCageBase cage_base, Map original_map, FieldIndex index) const {
+   CHECK(index.is_inobject());
+@@ -381,6 +399,17 @@ void JSObject::RawFastInobjectPropertyAtPut(FieldIndex index, Object value,
+   CONDITIONAL_WRITE_BARRIER(*this, offset, value, mode);
+ }
+ 
++void JSObject::RawFastInobjectPropertyAtPut(FieldIndex index, Object value,
++                                            SeqCstAccessTag tag) {
++  DCHECK(index.is_inobject());
++  DCHECK(value.IsShared());
++  SEQ_CST_WRITE_FIELD(*this, index.offset(), value);
++  // JSSharedStructs are allocated in the shared old space, which is currently
++  // collected by stopping the world, so the incremental write barrier is not
++  // needed. They can only store Smis and other HeapObjects in the shared old
++  // space, so the generational write barrier is also not needed.
++}
++
+ void JSObject::FastPropertyAtPut(FieldIndex index, Object value,
+                                  WriteBarrierMode mode) {
+   if (index.is_inobject()) {
+@@ -391,6 +420,15 @@ void JSObject::FastPropertyAtPut(FieldIndex index, Object value,
+   }
+ }
+ 
++void JSObject::FastPropertyAtPut(FieldIndex index, Object value,
++                                 SeqCstAccessTag tag) {
++  if (index.is_inobject()) {
++    RawFastInobjectPropertyAtPut(index, value, tag);
++  } else {
++    property_array().set(index.outobject_array_index(), value, tag);
++  }
++}
++
+ void JSObject::WriteToField(InternalIndex descriptor, PropertyDetails details,
+                             Object value) {
+   DCHECK_EQ(PropertyLocation::kField, details.location());
+diff --git a/src/objects/js-objects.cc b/src/objects/js-objects.cc
+index de0728f7d9..6a21f3c0a2 100644
+--- a/src/objects/js-objects.cc
++++ b/src/objects/js-objects.cc
+@@ -4323,6 +4323,14 @@ Handle<Object> JSObject::FastPropertyAt(Isolate* isolate,
+   return Object::WrapForRead(isolate, raw_value, representation);
+ }
+ 
++Handle<Object> JSObject::FastPropertyAt(Isolate* isolate,
++                                        Handle<JSObject> object,
++                                        Representation representation,
++                                        FieldIndex index, SeqCstAccessTag tag) {
++  Handle<Object> raw_value(object->RawFastPropertyAt(index, tag), isolate);
++  return Object::WrapForRead(isolate, raw_value, representation);
++}
++
+ // static
+ Handle<Object> JSObject::DictionaryPropertyAt(Isolate* isolate,
+                                               Handle<JSObject> object,
+diff --git a/src/objects/js-objects.h b/src/objects/js-objects.h
+index 9dba1e13d2..2cfdde8391 100644
+--- a/src/objects/js-objects.h
++++ b/src/objects/js-objects.h
+@@ -679,9 +679,16 @@ class JSObject : public TorqueGeneratedJSObject<JSObject, JSReceiver> {
+                                        Handle<JSObject> object,
+                                        Representation representation,
+                                        FieldIndex index);
++  static Handle<Object> FastPropertyAt(Isolate* isolate,
++                                       Handle<JSObject> object,
++                                       Representation representation,
++                                       FieldIndex index, SeqCstAccessTag tag);
+   inline Object RawFastPropertyAt(FieldIndex index) const;
+   inline Object RawFastPropertyAt(PtrComprCageBase cage_base,
+                                   FieldIndex index) const;
++  inline Object RawFastPropertyAt(FieldIndex index, SeqCstAccessTag tag) const;
++  inline Object RawFastPropertyAt(PtrComprCageBase cage_base, FieldIndex index,
++                                  SeqCstAccessTag tag) const;
+ 
+   // See comment in the body of the method to understand the conditions
+   // in which this method is meant to be used, and what guarantees it
+@@ -692,9 +699,13 @@ class JSObject : public TorqueGeneratedJSObject<JSObject, JSReceiver> {
+ 
+   inline void FastPropertyAtPut(FieldIndex index, Object value,
+                                 WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
++  inline void FastPropertyAtPut(FieldIndex index, Object value,
++                                SeqCstAccessTag tag);
+   inline void RawFastInobjectPropertyAtPut(
+       FieldIndex index, Object value,
+       WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
++  inline void RawFastInobjectPropertyAtPut(FieldIndex index, Object value,
++                                           SeqCstAccessTag tag);
+   inline void WriteToField(InternalIndex descriptor, PropertyDetails details,
+                            Object value);
+ 
+diff --git a/src/objects/lookup.cc b/src/objects/lookup.cc
+index 11bb65e2b6..790b9c0e08 100644
+--- a/src/objects/lookup.cc
++++ b/src/objects/lookup.cc
+@@ -15,6 +15,7 @@
+ #include "src/objects/field-type.h"
+ #include "src/objects/hash-table-inl.h"
+ #include "src/objects/heap-number-inl.h"
++#include "src/objects/js-struct-inl.h"
+ #include "src/objects/map-updater.h"
+ #include "src/objects/ordered-hash-table.h"
+ #include "src/objects/property-details.h"
+@@ -1053,6 +1054,18 @@ Handle<Object> LookupIterator::GetDataValue(
+   return value;
+ }
+ 
++Handle<Object> LookupIterator::GetDataValue(SeqCstAccessTag tag) const {
++  DCHECK_EQ(DATA, state_);
++  DCHECK_EQ(PropertyLocation::kField, property_details_.location());
++  DCHECK_EQ(PropertyKind::kData, property_details_.kind());
++  // Currently only shared structs support sequentially consistent access.
++  Handle<JSSharedStruct> holder = GetHolder<JSSharedStruct>();
++  FieldIndex field_index =
++      FieldIndex::ForDescriptor(holder->map(isolate_), descriptor_number());
++  return JSObject::FastPropertyAt(
++      isolate_, holder, property_details_.representation(), field_index, tag);
++}
++
+ void LookupIterator::WriteDataValue(Handle<Object> value,
+                                     bool initializing_store) {
+   DCHECK_EQ(DATA, state_);
+@@ -1112,6 +1125,18 @@ void LookupIterator::WriteDataValue(Handle<Object> value,
+   }
+ }
+ 
++void LookupIterator::WriteDataValue(Handle<Object> value, SeqCstAccessTag tag) {
++  DCHECK_EQ(DATA, state_);
++  DCHECK_EQ(PropertyLocation::kField, property_details_.location());
++  DCHECK_EQ(PropertyKind::kData, property_details_.kind());
++  // Currently only shared structs support sequentially consistent access.
++  Handle<JSSharedStruct> holder = GetHolder<JSSharedStruct>();
++  DisallowGarbageCollection no_gc;
++  FieldIndex field_index =
++      FieldIndex::ForDescriptor(holder->map(isolate_), descriptor_number());
++  holder->FastPropertyAtPut(field_index, *value, tag);
++}
++
+ #if V8_ENABLE_WEBASSEMBLY
+ 
+ wasm::ValueType LookupIterator::wasm_value_type() const {
+diff --git a/src/objects/lookup.h b/src/objects/lookup.h
+index de678f35b0..fb62f407eb 100644
+--- a/src/objects/lookup.h
++++ b/src/objects/lookup.h
+@@ -188,6 +188,8 @@ class V8_EXPORT_PRIVATE LookupIterator final {
+   Handle<Object> GetDataValue(AllocationPolicy allocation_policy =
+                                   AllocationPolicy::kAllocationAllowed) const;
+   void WriteDataValue(Handle<Object> value, bool initializing_store);
++  Handle<Object> GetDataValue(SeqCstAccessTag tag) const;
++  void WriteDataValue(Handle<Object> value, SeqCstAccessTag tag);
+   inline void UpdateProtector();
+   static inline void UpdateProtector(Isolate* isolate, Handle<Object> receiver,
+                                      Handle<Name> name);
+diff --git a/src/objects/object-macros.h b/src/objects/object-macros.h
+index e62fbeb50e..70651aab83 100644
+--- a/src/objects/object-macros.h
++++ b/src/objects/object-macros.h
+@@ -412,6 +412,9 @@
+ 
+ #define FIELD_ADDR(p, offset) ((p).ptr() + offset - kHeapObjectTag)
+ 
++#define SEQ_CST_READ_FIELD(p, offset) \
++  TaggedField<Object>::SeqCst_Load(p, offset)
++
+ #define ACQUIRE_READ_FIELD(p, offset) \
+   TaggedField<Object>::Acquire_Load(p, offset)
+ 
+@@ -424,6 +427,9 @@
+ #define WRITE_FIELD(p, offset, value) \
+   TaggedField<Object>::store(p, offset, value)
+ 
++#define SEQ_CST_WRITE_FIELD(p, offset, value) \
++  TaggedField<Object>::SeqCst_Store(p, offset, value)
++
+ #define RELEASE_WRITE_FIELD(p, offset, value) \
+   TaggedField<Object>::Release_Store(p, offset, value)
+ 
+diff --git a/src/objects/property-array-inl.h b/src/objects/property-array-inl.h
+index df5f2a1502..3bc39847e6 100644
+--- a/src/objects/property-array-inl.h
++++ b/src/objects/property-array-inl.h
+@@ -38,6 +38,19 @@ Object PropertyArray::get(PtrComprCageBase cage_base, int index) const {
+                                            OffsetOfElementAt(index));
+ }
+ 
++Object PropertyArray::get(int index, SeqCstAccessTag tag) const {
++  PtrComprCageBase cage_base = GetPtrComprCageBase(*this);
++  return get(cage_base, index, tag);
++}
++
++Object PropertyArray::get(PtrComprCageBase cage_base, int index,
++                          SeqCstAccessTag tag) const {
++  DCHECK_LT(static_cast<unsigned>(index),
++            static_cast<unsigned>(this->length(kAcquireLoad)));
++  return TaggedField<Object>::SeqCst_Load(cage_base, *this,
++                                          OffsetOfElementAt(index));
++}
++
+ void PropertyArray::set(int index, Object value) {
+   DCHECK(IsPropertyArray());
+   DCHECK_LT(static_cast<unsigned>(index),
+@@ -55,6 +68,19 @@ void PropertyArray::set(int index, Object value, WriteBarrierMode mode) {
+   CONDITIONAL_WRITE_BARRIER(*this, offset, value, mode);
+ }
+ 
++void PropertyArray::set(int index, Object value, SeqCstAccessTag tag) {
++  DCHECK(IsPropertyArray());
++  DCHECK_LT(static_cast<unsigned>(index),
++            static_cast<unsigned>(this->length(kAcquireLoad)));
++  DCHECK(value.IsShared());
++  int offset = OffsetOfElementAt(index);
++  SEQ_CST_WRITE_FIELD(*this, offset, value);
++  // JSSharedStructs are allocated in the shared old space, which is currently
++  // collected by stopping the world, so the incremental write barrier is not
++  // needed. They can only store Smis and other HeapObjects in the shared old
++  // space, so the generational write barrier is also not needed.
++}
++
+ ObjectSlot PropertyArray::data_start() { return RawField(kHeaderSize); }
+ 
+ int PropertyArray::length() const {
+diff --git a/src/objects/property-array.h b/src/objects/property-array.h
+index 03c2ccd005..9599ca4d1b 100644
+--- a/src/objects/property-array.h
++++ b/src/objects/property-array.h
+@@ -31,8 +31,12 @@ class PropertyArray
+ 
+   inline Object get(int index) const;
+   inline Object get(PtrComprCageBase cage_base, int index) const;
++  inline Object get(int index, SeqCstAccessTag tag) const;
++  inline Object get(PtrComprCageBase cage_base, int index,
++                    SeqCstAccessTag tag) const;
+ 
+   inline void set(int index, Object value);
++  inline void set(int index, Object value, SeqCstAccessTag tag);
+   // Setter with explicit barrier mode.
+   inline void set(int index, Object value, WriteBarrierMode mode);
+ 
+diff --git a/src/objects/tagged-field-inl.h b/src/objects/tagged-field-inl.h
+index 5c3a18982e..e1b73bd2bb 100644
+--- a/src/objects/tagged-field-inl.h
++++ b/src/objects/tagged-field-inl.h
+@@ -202,6 +202,40 @@ Tagged_t TaggedField<T, kFieldOffset>::Release_CompareAndSwap(HeapObject host,
+   return result;
+ }
+ 
++// static
++template <typename T, int kFieldOffset>
++T TaggedField<T, kFieldOffset>::SeqCst_Load(HeapObject host, int offset) {
++  AtomicTagged_t value = AsAtomicTagged::SeqCst_Load(location(host, offset));
++  DCHECK_NE(kFieldOffset + offset, HeapObject::kMapOffset);
++  return T(tagged_to_full(host.ptr(), value));
++}
++
++// static
++template <typename T, int kFieldOffset>
++T TaggedField<T, kFieldOffset>::SeqCst_Load(PtrComprCageBase cage_base,
++                                            HeapObject host, int offset) {
++  AtomicTagged_t value = AsAtomicTagged::SeqCst_Load(location(host, offset));
++  DCHECK_NE(kFieldOffset + offset, HeapObject::kMapOffset);
++  return T(tagged_to_full(cage_base, value));
++}
++
++// static
++template <typename T, int kFieldOffset>
++void TaggedField<T, kFieldOffset>::SeqCst_Store(HeapObject host, T value) {
++  Address ptr = value.ptr();
++  DCHECK_NE(kFieldOffset, HeapObject::kMapOffset);
++  AsAtomicTagged::SeqCst_Store(location(host), full_to_tagged(ptr));
++}
++
++// static
++template <typename T, int kFieldOffset>
++void TaggedField<T, kFieldOffset>::SeqCst_Store(HeapObject host, int offset,
++                                                T value) {
++  Address ptr = value.ptr();
++  DCHECK_NE(kFieldOffset + offset, HeapObject::kMapOffset);
++  AsAtomicTagged::SeqCst_Store(location(host, offset), full_to_tagged(ptr));
++}
++
+ }  // namespace internal
+ }  // namespace v8
+ 
+diff --git a/src/objects/tagged-field.h b/src/objects/tagged-field.h
+index d9fc0bb102..8745d8dfe3 100644
+--- a/src/objects/tagged-field.h
++++ b/src/objects/tagged-field.h
+@@ -60,6 +60,13 @@ class TaggedField : public AllStatic {
+   static inline void Release_Store(HeapObject host, T value);
+   static inline void Release_Store(HeapObject host, int offset, T value);
+ 
++  static inline T SeqCst_Load(HeapObject host, int offset = 0);
++  static inline T SeqCst_Load(PtrComprCageBase cage_base, HeapObject host,
++                              int offset = 0);
++
++  static inline void SeqCst_Store(HeapObject host, T value);
++  static inline void SeqCst_Store(HeapObject host, int offset, T value);
++
+   static inline Tagged_t Release_CompareAndSwap(HeapObject host, T old,
+                                                 T value);
+ 
+diff --git a/src/runtime/runtime-atomics.cc b/src/runtime/runtime-atomics.cc
+index 93a9ae9169..31f1c8f743 100644
+--- a/src/runtime/runtime-atomics.cc
++++ b/src/runtime/runtime-atomics.cc
+@@ -9,6 +9,7 @@
+ #include "src/logging/counters.h"
+ #include "src/numbers/conversions-inl.h"
+ #include "src/objects/js-array-buffer-inl.h"
++#include "src/objects/js-struct-inl.h"
+ #include "src/runtime/runtime-utils.h"
+ 
+ // Implement Atomic accesses to ArrayBuffers and SharedArrayBuffers.
+@@ -607,5 +608,43 @@ RUNTIME_FUNCTION(Runtime_AtomicsXor) { UNREACHABLE(); }
+ #endif  // V8_TARGET_ARCH_MIPS || V8_TARGET_ARCH_MIPS64 || V8_TARGET_ARCH_PPC64
+         // || V8_TARGET_ARCH_PPC || V8_TARGET_ARCH_S390 || V8_TARGET_ARCH_S390X
+         // || V8_TARGET_ARCH_RISCV64 || V8_TARGET_ARCH_LOONG64
++
++RUNTIME_FUNCTION(Runtime_AtomicsLoadSharedStructField) {
++  HandleScope scope(isolate);
++  DCHECK_EQ(2, args.length());
++  Handle<JSSharedStruct> shared_struct = args.at<JSSharedStruct>(0);
++  Handle<Name> field_name;
++  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, field_name,
++                                     Object::ToName(isolate, args.at(1)));
++  // Shared structs are prototypeless.
++  LookupIterator it(isolate, shared_struct, field_name, LookupIterator::OWN);
++  if (it.IsFound()) return *it.GetDataValue(kSeqCstAccess);
++  return ReadOnlyRoots(isolate).undefined_value();
++}
++
++RUNTIME_FUNCTION(Runtime_AtomicsStoreSharedStructField) {
++  HandleScope scope(isolate);
++  DCHECK_EQ(3, args.length());
++  Handle<JSSharedStruct> shared_struct = args.at<JSSharedStruct>(0);
++  Handle<Name> field_name;
++  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, field_name,
++                                     Object::ToName(isolate, args.at(1)));
++  Handle<Object> shared_value;
++  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
++      isolate, shared_value, Object::Share(isolate, args.at(2), kThrowOnError));
++  // Shared structs are prototypeless.
++  LookupIterator it(isolate, shared_struct, field_name, LookupIterator::OWN);
++  if (it.IsFound()) {
++    it.WriteDataValue(shared_value, kSeqCstAccess);
++    return *shared_value;
++  }
++  // Shared structs are non-extensible. Instead of duplicating logic, call
++  // Object::AddDataProperty to handle the error case.
++  CHECK(Object::AddDataProperty(&it, shared_value, NONE, Nothing<ShouldThrow>(),
++                                StoreOrigin::kMaybeKeyed)
++            .IsNothing());
++  return ReadOnlyRoots(isolate).exception();
++}
++
+ }  // namespace internal
+ }  // namespace v8
+diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
+index e02edb17cd..9554a167d8 100644
+--- a/src/runtime/runtime.h
++++ b/src/runtime/runtime.h
+@@ -65,7 +65,9 @@ namespace internal {
+   F(AtomicsOr, 3, 1)                                   \
+   F(AtomicsSub, 3, 1)                                  \
+   F(AtomicsXor, 3, 1)                                  \
+-  F(SetAllowAtomicsWait, 1, 1)
++  F(SetAllowAtomicsWait, 1, 1)                         \
++  F(AtomicsLoadSharedStructField, 2, 1)                \
++  F(AtomicsStoreSharedStructField, 3, 1)
+ 
+ #define FOR_EACH_INTRINSIC_BIGINT(F, I) \
+   F(BigIntBinaryOp, 3, 1)               \
+diff --git a/test/mjsunit/mjsunit.status b/test/mjsunit/mjsunit.status
+index 6b17aef85f..158f9ce819 100644
+--- a/test/mjsunit/mjsunit.status
++++ b/test/mjsunit/mjsunit.status
+@@ -275,6 +275,7 @@
+ 
+   # BUG(v8:12645)
+   'shared-memory/shared-struct-workers': [SKIP],
++  'shared-memory/shared-struct-atomics-workers': [SKIP],
+ }],  # ALWAYS
+ 
+ ##############################################################################
+diff --git a/test/mjsunit/shared-memory/shared-struct-atomics-workers.js b/test/mjsunit/shared-memory/shared-struct-atomics-workers.js
+new file mode 100644
+index 0000000000..453af1478e
+--- /dev/null
++++ b/test/mjsunit/shared-memory/shared-struct-atomics-workers.js
+@@ -0,0 +1,41 @@
++// Copyright 2022 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++//
++// Flags: --shared-string-table --harmony-struct --allow-natives-syntax
++
++"use strict";
++
++if (this.Worker) {
++
++(function TestSharedStructPostMessage() {
++  let workerScript =
++      `onmessage = function(struct) {
++         // Non-atomic write that will be made visible once main thread
++         // observes the atomic write below.
++         struct.struct_field.payload = 42;
++         Atomics.store(struct, "string_field", "worker");
++       };
++       postMessage("started");`;
++
++  let worker = new Worker(workerScript, { type: 'string' });
++  let started = worker.getMessage();
++  assertEquals("started", started);
++
++  let OuterStruct = new SharedStructType(['string_field', 'struct_field']);
++  let InnerStruct = new SharedStructType(['payload']);
++  let struct = new OuterStruct();
++  struct.struct_field = new InnerStruct();
++  struct.string_field = "main";
++  assertEquals("main", struct.string_field);
++  assertEquals(undefined, struct.struct_field.payload);
++  worker.postMessage(struct);
++  // Spin until we observe the worker's write of string_field.
++  while (Atomics.load(struct, "string_field") !== "worker") {}
++  // The non-atomic store write must also be visible.
++  assertEquals(42, struct.struct_field.payload);
++
++  worker.terminate();
++})();
++
++}
+diff --git a/test/mjsunit/shared-memory/shared-struct-atomics.js b/test/mjsunit/shared-memory/shared-struct-atomics.js
+new file mode 100644
+index 0000000000..12b7d57f8b
+--- /dev/null
++++ b/test/mjsunit/shared-memory/shared-struct-atomics.js
+@@ -0,0 +1,35 @@
++// Copyright 2022 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++//
++// Flags: --shared-string-table --harmony-struct
++
++"use strict";
++
++let S = new SharedStructType(['field']);
++
++(function TestPrimitivesUsingAtomics() {
++  // All primitives can be stored in fields.
++  let s = new S();
++  for (let prim of [42, -0, undefined, null, true, false, "foo"]) {
++    Atomics.store(s, 'field', prim);
++    assertEquals(Atomics.load(s, 'field'), prim);
++  }
++})();
++
++(function TestObjectsUsingAtomics() {
++  let s = new S();
++  // Shared objects cannot point to non-shared objects.
++  assertThrows(() => { Atomics.store(s, 'field', []); });
++  assertThrows(() => { Atomics.store(s, 'field', {}); });
++  // Shared objects can point to other shared objects.
++  let shared_rhs = new S();
++  Atomics.store(s, 'field', shared_rhs);
++  assertEquals(Atomics.load(s, 'field'), shared_rhs);
++})();
++
++(function TestNotExtensibleUsingAtomics() {
++  let s = new S();
++  // Shared structs are non-extensible.
++  assertThrows(() => { Atomics.store(s, 'nonExistent', 42); });
++})();
+-- 
+2.35.1
+

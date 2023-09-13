@@ -1,0 +1,667 @@
+From 5a7ed57b10bfd3f6ea42a6836bfacd4c8050c0c1 Mon Sep 17 00:00:00 2001
+From: Igor Sheludko <ishell@chromium.org>
+Date: Mon, 4 Apr 2022 13:30:43 +0200
+Subject: [PATCH] [ext-code-space] Make some EmbeddedData methods inline
+
+Bug: v8:11880
+Change-Id: Id3975d0c10ac5ece5c55d9db5ae7c6786fde2dfe
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3564566
+Reviewed-by: Clemens Backes <clemensb@chromium.org>
+Reviewed-by: Jakob Linke <jgruber@chromium.org>
+Commit-Queue: Igor Sheludko <ishell@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#79739}
+---
+ BUILD.bazel                                   |   1 +
+ BUILD.gn                                      |   1 +
+ src/builtins/builtins.cc                      |   2 +-
+ src/codegen/reloc-info.cc                     |   2 +-
+ src/codegen/turbo-assembler.cc                |   2 +-
+ src/execution/frames.cc                       |   2 +-
+ src/execution/isolate.cc                      |   2 +-
+ src/objects/code.cc                           |   2 +-
+ src/regexp/arm/regexp-macro-assembler-arm.cc  |   2 +-
+ .../loong64/regexp-macro-assembler-loong64.cc |   2 +-
+ .../mips/regexp-macro-assembler-mips.cc       |   2 +-
+ .../mips64/regexp-macro-assembler-mips64.cc   |   2 +-
+ src/regexp/ppc/regexp-macro-assembler-ppc.cc  |   2 +-
+ .../riscv64/regexp-macro-assembler-riscv64.cc |   2 +-
+ src/snapshot/deserializer.cc                  |   2 +-
+ src/snapshot/embedded/embedded-data-inl.h     | 159 ++++++++++++++++++
+ src/snapshot/embedded/embedded-data.cc        | 136 +--------------
+ src/snapshot/embedded/embedded-data.h         |  38 ++---
+ src/snapshot/embedded/embedded-file-writer.cc |   1 +
+ .../platform-embedded-file-writer-win.cc      |   2 +-
+ src/utils/memcopy.cc                          |   2 +-
+ src/wasm/wasm-code-manager.cc                 |   2 +-
+ 22 files changed, 196 insertions(+), 172 deletions(-)
+ create mode 100644 src/snapshot/embedded/embedded-data-inl.h
+
+diff --git a/BUILD.bazel b/BUILD.bazel
+index c7564401f4..985a16e0f5 100644
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -2026,6 +2026,7 @@ filegroup(
+         "src/snapshot/deserializer.cc",
+         "src/snapshot/deserializer.h",
+         "src/snapshot/embedded/embedded-data.cc",
++        "src/snapshot/embedded/embedded-data-inl.h",
+         "src/snapshot/embedded/embedded-data.h",
+         "src/snapshot/embedded/embedded-file-writer-interface.h",
+         "src/snapshot/object-deserializer.cc",
+diff --git a/BUILD.gn b/BUILD.gn
+index f2822757bf..0d8248a66a 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -3394,6 +3394,7 @@ v8_header_set("v8_internal_headers") {
+     "src/snapshot/context-deserializer.h",
+     "src/snapshot/context-serializer.h",
+     "src/snapshot/deserializer.h",
++    "src/snapshot/embedded/embedded-data-inl.h",
+     "src/snapshot/embedded/embedded-data.h",
+     "src/snapshot/embedded/embedded-file-writer-interface.h",
+     "src/snapshot/object-deserializer.h",
+diff --git a/src/builtins/builtins.cc b/src/builtins/builtins.cc
+index c0ab3bc564..cb0ad9f22b 100644
+--- a/src/builtins/builtins.cc
++++ b/src/builtins/builtins.cc
+@@ -18,7 +18,7 @@
+ #include "src/objects/fixed-array.h"
+ #include "src/objects/objects-inl.h"
+ #include "src/objects/visitors.h"
+-#include "src/snapshot/embedded/embedded-data.h"
++#include "src/snapshot/embedded/embedded-data-inl.h"
+ #include "src/utils/ostreams.h"
+ 
+ namespace v8 {
+diff --git a/src/codegen/reloc-info.cc b/src/codegen/reloc-info.cc
+index d1b4ed2b92..d110e387b4 100644
+--- a/src/codegen/reloc-info.cc
++++ b/src/codegen/reloc-info.cc
+@@ -12,7 +12,7 @@
+ #include "src/deoptimizer/deoptimizer.h"
+ #include "src/heap/heap-write-barrier-inl.h"
+ #include "src/objects/code-inl.h"
+-#include "src/snapshot/embedded/embedded-data.h"
++#include "src/snapshot/embedded/embedded-data-inl.h"
+ 
+ namespace v8 {
+ namespace internal {
+diff --git a/src/codegen/turbo-assembler.cc b/src/codegen/turbo-assembler.cc
+index 24a237c16a..e12be0d567 100644
+--- a/src/codegen/turbo-assembler.cc
++++ b/src/codegen/turbo-assembler.cc
+@@ -10,7 +10,7 @@
+ #include "src/common/globals.h"
+ #include "src/execution/isolate-data.h"
+ #include "src/execution/isolate-inl.h"
+-#include "src/snapshot/embedded/embedded-data.h"
++#include "src/snapshot/embedded/embedded-data-inl.h"
+ 
+ namespace v8 {
+ namespace internal {
+diff --git a/src/execution/frames.cc b/src/execution/frames.cc
+index 2676c8d020..c40c6e6857 100644
+--- a/src/execution/frames.cc
++++ b/src/execution/frames.cc
+@@ -23,7 +23,7 @@
+ #include "src/objects/slots.h"
+ #include "src/objects/smi.h"
+ #include "src/objects/visitors.h"
+-#include "src/snapshot/embedded/embedded-data.h"
++#include "src/snapshot/embedded/embedded-data-inl.h"
+ #include "src/strings/string-stream.h"
+ #include "src/zone/zone-containers.h"
+ 
+diff --git a/src/execution/isolate.cc b/src/execution/isolate.cc
+index 93ca92a89c..6c69b1a37a 100644
+--- a/src/execution/isolate.cc
++++ b/src/execution/isolate.cc
+@@ -96,7 +96,7 @@
+ #include "src/profiler/heap-profiler.h"
+ #include "src/profiler/tracing-cpu-profiler.h"
+ #include "src/regexp/regexp-stack.h"
+-#include "src/snapshot/embedded/embedded-data.h"
++#include "src/snapshot/embedded/embedded-data-inl.h"
+ #include "src/snapshot/embedded/embedded-file-writer-interface.h"
+ #include "src/snapshot/read-only-deserializer.h"
+ #include "src/snapshot/shared-heap-deserializer.h"
+diff --git a/src/objects/code.cc b/src/objects/code.cc
+index a1b83947aa..695a3320d7 100644
+--- a/src/objects/code.cc
++++ b/src/objects/code.cc
+@@ -20,7 +20,7 @@
+ #include "src/objects/code-kind.h"
+ #include "src/objects/fixed-array.h"
+ #include "src/roots/roots-inl.h"
+-#include "src/snapshot/embedded/embedded-data.h"
++#include "src/snapshot/embedded/embedded-data-inl.h"
+ #include "src/utils/ostreams.h"
+ 
+ #ifdef ENABLE_DISASSEMBLER
+diff --git a/src/regexp/arm/regexp-macro-assembler-arm.cc b/src/regexp/arm/regexp-macro-assembler-arm.cc
+index 78be35552e..b4c9471131 100644
+--- a/src/regexp/arm/regexp-macro-assembler-arm.cc
++++ b/src/regexp/arm/regexp-macro-assembler-arm.cc
+@@ -12,7 +12,7 @@
+ #include "src/logging/log.h"
+ #include "src/objects/code-inl.h"
+ #include "src/regexp/regexp-stack.h"
+-#include "src/snapshot/embedded/embedded-data.h"
++#include "src/snapshot/embedded/embedded-data-inl.h"
+ 
+ namespace v8 {
+ namespace internal {
+diff --git a/src/regexp/loong64/regexp-macro-assembler-loong64.cc b/src/regexp/loong64/regexp-macro-assembler-loong64.cc
+index c60a714339..f347f8c189 100644
+--- a/src/regexp/loong64/regexp-macro-assembler-loong64.cc
++++ b/src/regexp/loong64/regexp-macro-assembler-loong64.cc
+@@ -11,7 +11,7 @@
+ #include "src/logging/log.h"
+ #include "src/objects/code-inl.h"
+ #include "src/regexp/regexp-stack.h"
+-#include "src/snapshot/embedded/embedded-data.h"
++#include "src/snapshot/embedded/embedded-data-inl.h"
+ 
+ namespace v8 {
+ namespace internal {
+diff --git a/src/regexp/mips/regexp-macro-assembler-mips.cc b/src/regexp/mips/regexp-macro-assembler-mips.cc
+index dafc657f81..8904201d02 100644
+--- a/src/regexp/mips/regexp-macro-assembler-mips.cc
++++ b/src/regexp/mips/regexp-macro-assembler-mips.cc
+@@ -11,7 +11,7 @@
+ #include "src/logging/log.h"
+ #include "src/objects/code-inl.h"
+ #include "src/regexp/regexp-stack.h"
+-#include "src/snapshot/embedded/embedded-data.h"
++#include "src/snapshot/embedded/embedded-data-inl.h"
+ 
+ namespace v8 {
+ namespace internal {
+diff --git a/src/regexp/mips64/regexp-macro-assembler-mips64.cc b/src/regexp/mips64/regexp-macro-assembler-mips64.cc
+index 17546ed52d..b5c54848f4 100644
+--- a/src/regexp/mips64/regexp-macro-assembler-mips64.cc
++++ b/src/regexp/mips64/regexp-macro-assembler-mips64.cc
+@@ -12,7 +12,7 @@
+ #include "src/logging/log.h"
+ #include "src/objects/code-inl.h"
+ #include "src/regexp/regexp-stack.h"
+-#include "src/snapshot/embedded/embedded-data.h"
++#include "src/snapshot/embedded/embedded-data-inl.h"
+ 
+ namespace v8 {
+ namespace internal {
+diff --git a/src/regexp/ppc/regexp-macro-assembler-ppc.cc b/src/regexp/ppc/regexp-macro-assembler-ppc.cc
+index fb9425f008..da81f89320 100644
+--- a/src/regexp/ppc/regexp-macro-assembler-ppc.cc
++++ b/src/regexp/ppc/regexp-macro-assembler-ppc.cc
+@@ -12,7 +12,7 @@
+ #include "src/logging/log.h"
+ #include "src/objects/code-inl.h"
+ #include "src/regexp/regexp-stack.h"
+-#include "src/snapshot/embedded/embedded-data.h"
++#include "src/snapshot/embedded/embedded-data-inl.h"
+ 
+ namespace v8 {
+ namespace internal {
+diff --git a/src/regexp/riscv64/regexp-macro-assembler-riscv64.cc b/src/regexp/riscv64/regexp-macro-assembler-riscv64.cc
+index 8f6b5e278d..bea3a7cb3d 100644
+--- a/src/regexp/riscv64/regexp-macro-assembler-riscv64.cc
++++ b/src/regexp/riscv64/regexp-macro-assembler-riscv64.cc
+@@ -12,7 +12,7 @@
+ #include "src/objects/objects-inl.h"
+ #include "src/regexp/regexp-macro-assembler.h"
+ #include "src/regexp/regexp-stack.h"
+-#include "src/snapshot/embedded/embedded-data.h"
++#include "src/snapshot/embedded/embedded-data-inl.h"
+ #include "src/strings/unicode.h"
+ 
+ namespace v8 {
+diff --git a/src/snapshot/deserializer.cc b/src/snapshot/deserializer.cc
+index 9c7813352e..e1383ca2b7 100644
+--- a/src/snapshot/deserializer.cc
++++ b/src/snapshot/deserializer.cc
+@@ -33,7 +33,7 @@
+ #include "src/objects/string.h"
+ #include "src/roots/roots.h"
+ #include "src/sandbox/external-pointer.h"
+-#include "src/snapshot/embedded/embedded-data.h"
++#include "src/snapshot/embedded/embedded-data-inl.h"
+ #include "src/snapshot/references.h"
+ #include "src/snapshot/serializer-deserializer.h"
+ #include "src/snapshot/shared-heap-serializer.h"
+diff --git a/src/snapshot/embedded/embedded-data-inl.h b/src/snapshot/embedded/embedded-data-inl.h
+new file mode 100644
+index 0000000000..1817ff6287
+--- /dev/null
++++ b/src/snapshot/embedded/embedded-data-inl.h
+@@ -0,0 +1,159 @@
++// Copyright 2022 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef V8_SNAPSHOT_EMBEDDED_EMBEDDED_DATA_INL_H_
++#define V8_SNAPSHOT_EMBEDDED_EMBEDDED_DATA_INL_H_
++
++#include "src/snapshot/embedded/embedded-data.h"
++
++namespace v8 {
++namespace internal {
++
++Address EmbeddedData::InstructionStartOfBuiltin(Builtin builtin) const {
++  DCHECK(Builtins::IsBuiltinId(builtin));
++  const struct LayoutDescription& desc = LayoutDescription(builtin);
++  const uint8_t* result = RawCode() + desc.instruction_offset;
++  DCHECK_LT(result, code_ + code_size_);
++  return reinterpret_cast<Address>(result);
++}
++
++uint32_t EmbeddedData::InstructionSizeOfBuiltin(Builtin builtin) const {
++  DCHECK(Builtins::IsBuiltinId(builtin));
++  const struct LayoutDescription& desc = LayoutDescription(builtin);
++  return desc.instruction_length;
++}
++
++Address EmbeddedData::MetadataStartOfBuiltin(Builtin builtin) const {
++  DCHECK(Builtins::IsBuiltinId(builtin));
++  const struct LayoutDescription& desc = LayoutDescription(builtin);
++  const uint8_t* result = RawMetadata() + desc.metadata_offset;
++  DCHECK_LE(desc.metadata_offset, data_size_);
++  return reinterpret_cast<Address>(result);
++}
++
++uint32_t EmbeddedData::MetadataSizeOfBuiltin(Builtin builtin) const {
++  DCHECK(Builtins::IsBuiltinId(builtin));
++  const struct LayoutDescription& desc = LayoutDescription(builtin);
++  return desc.metadata_length;
++}
++
++Address EmbeddedData::SafepointTableStartOf(Builtin builtin) const {
++  DCHECK(Builtins::IsBuiltinId(builtin));
++  const struct LayoutDescription& desc = LayoutDescription(builtin);
++  const uint8_t* result = RawMetadata() + desc.metadata_offset;
++  DCHECK_LE(desc.handler_table_offset, data_size_);
++  return reinterpret_cast<Address>(result);
++}
++
++uint32_t EmbeddedData::SafepointTableSizeOf(Builtin builtin) const {
++  DCHECK(Builtins::IsBuiltinId(builtin));
++  const struct LayoutDescription& desc = LayoutDescription(builtin);
++#if V8_EMBEDDED_CONSTANT_POOL
++  DCHECK_LE(desc.handler_table_offset, desc.constant_pool_offset);
++#else
++  DCHECK_LE(desc.handler_table_offset, desc.code_comments_offset_offset);
++#endif
++  return desc.handler_table_offset;
++}
++
++Address EmbeddedData::HandlerTableStartOf(Builtin builtin) const {
++  DCHECK(Builtins::IsBuiltinId(builtin));
++  const struct LayoutDescription& desc = LayoutDescription(builtin);
++  const uint8_t* result = RawMetadata() + desc.handler_table_offset;
++  DCHECK_LE(desc.handler_table_offset, data_size_);
++  return reinterpret_cast<Address>(result);
++}
++
++uint32_t EmbeddedData::HandlerTableSizeOf(Builtin builtin) const {
++  DCHECK(Builtins::IsBuiltinId(builtin));
++  const struct LayoutDescription& desc = LayoutDescription(builtin);
++#if V8_EMBEDDED_CONSTANT_POOL
++  DCHECK_LE(desc.handler_table_offset, desc.constant_pool_offset);
++  return desc.constant_pool_offset - desc.handler_table_offset;
++#else
++  DCHECK_LE(desc.handler_table_offset, desc.code_comments_offset_offset);
++  return desc.code_comments_offset_offset - desc.handler_table_offset;
++#endif
++}
++
++Address EmbeddedData::ConstantPoolStartOf(Builtin builtin) const {
++  DCHECK(Builtins::IsBuiltinId(builtin));
++#if V8_EMBEDDED_CONSTANT_POOL
++  const struct LayoutDescription& desc = LayoutDescription(builtin);
++  const uint8_t* result = RawMetadata() + desc.constant_pool_offset;
++  DCHECK_LE(desc.constant_pool_offset, data_size_);
++  return reinterpret_cast<Address>(result);
++#else
++  return kNullAddress;
++#endif
++}
++
++uint32_t EmbeddedData::ConstantPoolSizeOf(Builtin builtin) const {
++  DCHECK(Builtins::IsBuiltinId(builtin));
++#if V8_EMBEDDED_CONSTANT_POOL
++  const struct LayoutDescription& desc = LayoutDescription(builtin);
++  DCHECK_LE(desc.constant_pool_offset, desc.code_comments_offset_offset);
++  return desc.code_comments_offset_offset - desc.constant_pool_offset;
++#else
++  return 0;
++#endif
++}
++
++Address EmbeddedData::CodeCommentsStartOf(Builtin builtin) const {
++  DCHECK(Builtins::IsBuiltinId(builtin));
++  const struct LayoutDescription& desc = LayoutDescription(builtin);
++  const uint8_t* result = RawMetadata() + desc.code_comments_offset_offset;
++  DCHECK_LE(desc.code_comments_offset_offset, data_size_);
++  return reinterpret_cast<Address>(result);
++}
++
++uint32_t EmbeddedData::CodeCommentsSizeOf(Builtin builtin) const {
++  DCHECK(Builtins::IsBuiltinId(builtin));
++  const struct LayoutDescription& desc = LayoutDescription(builtin);
++  DCHECK_LE(desc.code_comments_offset_offset,
++            desc.unwinding_info_offset_offset);
++  return desc.unwinding_info_offset_offset - desc.code_comments_offset_offset;
++}
++
++Address EmbeddedData::UnwindingInfoStartOf(Builtin builtin) const {
++  DCHECK(Builtins::IsBuiltinId(builtin));
++  const struct LayoutDescription& desc = LayoutDescription(builtin);
++  const uint8_t* result = RawMetadata() + desc.unwinding_info_offset_offset;
++  DCHECK_LE(desc.unwinding_info_offset_offset, data_size_);
++  return reinterpret_cast<Address>(result);
++}
++
++uint32_t EmbeddedData::UnwindingInfoSizeOf(Builtin builtin) const {
++  DCHECK(Builtins::IsBuiltinId(builtin));
++  const struct LayoutDescription& desc = LayoutDescription(builtin);
++  DCHECK_LE(desc.unwinding_info_offset_offset, desc.metadata_length);
++  return desc.metadata_length - desc.unwinding_info_offset_offset;
++}
++
++Address EmbeddedData::InstructionStartOfBytecodeHandlers() const {
++  return InstructionStartOfBuiltin(Builtin::kFirstBytecodeHandler);
++}
++
++Address EmbeddedData::InstructionEndOfBytecodeHandlers() const {
++  STATIC_ASSERT(static_cast<int>(Builtin::kFirstBytecodeHandler) +
++                    kNumberOfBytecodeHandlers +
++                    2 * kNumberOfWideBytecodeHandlers ==
++                Builtins::kBuiltinCount);
++  Builtin lastBytecodeHandler = Builtins::FromInt(Builtins::kBuiltinCount - 1);
++  return InstructionStartOfBuiltin(lastBytecodeHandler) +
++         InstructionSizeOfBuiltin(lastBytecodeHandler);
++}
++
++// Padded with kCodeAlignment.
++// TODO(v8:11045): Consider removing code alignment.
++uint32_t EmbeddedData::PaddedInstructionSizeOfBuiltin(Builtin builtin) const {
++  uint32_t size = InstructionSizeOfBuiltin(builtin);
++  CHECK_NE(size, 0);
++  return PadAndAlignCode(size);
++}
++
++}  // namespace internal
++}  // namespace v8
++
++#endif  // V8_SNAPSHOT_EMBEDDED_EMBEDDED_DATA_INL_H_
+diff --git a/src/snapshot/embedded/embedded-data.cc b/src/snapshot/embedded/embedded-data.cc
+index 36d381d5f3..89ce411d3e 100644
+--- a/src/snapshot/embedded/embedded-data.cc
++++ b/src/snapshot/embedded/embedded-data.cc
+@@ -8,6 +8,7 @@
+ #include "src/codegen/callable.h"
+ #include "src/codegen/interface-descriptors-inl.h"
+ #include "src/objects/objects-inl.h"
++#include "src/snapshot/embedded/embedded-data-inl.h"
+ #include "src/snapshot/snapshot-utils.h"
+ #include "src/snapshot/snapshot.h"
+ #include "v8-internal.h"
+@@ -411,141 +412,6 @@ EmbeddedData EmbeddedData::FromIsolate(Isolate* isolate) {
+   return d;
+ }
+ 
+-Address EmbeddedData::InstructionStartOfBuiltin(Builtin builtin) const {
+-  DCHECK(Builtins::IsBuiltinId(builtin));
+-  const struct LayoutDescription& desc = LayoutDescription(builtin);
+-  const uint8_t* result = RawCode() + desc.instruction_offset;
+-  DCHECK_LT(result, code_ + code_size_);
+-  return reinterpret_cast<Address>(result);
+-}
+-
+-uint32_t EmbeddedData::InstructionSizeOfBuiltin(Builtin builtin) const {
+-  DCHECK(Builtins::IsBuiltinId(builtin));
+-  const struct LayoutDescription& desc = LayoutDescription(builtin);
+-  return desc.instruction_length;
+-}
+-
+-Address EmbeddedData::MetadataStartOfBuiltin(Builtin builtin) const {
+-  DCHECK(Builtins::IsBuiltinId(builtin));
+-  const struct LayoutDescription& desc = LayoutDescription(builtin);
+-  const uint8_t* result = RawMetadata() + desc.metadata_offset;
+-  DCHECK_LE(desc.metadata_offset, data_size_);
+-  return reinterpret_cast<Address>(result);
+-}
+-
+-uint32_t EmbeddedData::MetadataSizeOfBuiltin(Builtin builtin) const {
+-  DCHECK(Builtins::IsBuiltinId(builtin));
+-  const struct LayoutDescription& desc = LayoutDescription(builtin);
+-  return desc.metadata_length;
+-}
+-
+-Address EmbeddedData::SafepointTableStartOf(Builtin builtin) const {
+-  DCHECK(Builtins::IsBuiltinId(builtin));
+-  const struct LayoutDescription& desc = LayoutDescription(builtin);
+-  const uint8_t* result = RawMetadata() + desc.metadata_offset;
+-  DCHECK_LE(desc.handler_table_offset, data_size_);
+-  return reinterpret_cast<Address>(result);
+-}
+-
+-uint32_t EmbeddedData::SafepointTableSizeOf(Builtin builtin) const {
+-  DCHECK(Builtins::IsBuiltinId(builtin));
+-  const struct LayoutDescription& desc = LayoutDescription(builtin);
+-#if V8_EMBEDDED_CONSTANT_POOL
+-  DCHECK_LE(desc.handler_table_offset, desc.constant_pool_offset);
+-#else
+-  DCHECK_LE(desc.handler_table_offset, desc.code_comments_offset_offset);
+-#endif
+-  return desc.handler_table_offset;
+-}
+-
+-Address EmbeddedData::HandlerTableStartOf(Builtin builtin) const {
+-  DCHECK(Builtins::IsBuiltinId(builtin));
+-  const struct LayoutDescription& desc = LayoutDescription(builtin);
+-  const uint8_t* result = RawMetadata() + desc.handler_table_offset;
+-  DCHECK_LE(desc.handler_table_offset, data_size_);
+-  return reinterpret_cast<Address>(result);
+-}
+-
+-uint32_t EmbeddedData::HandlerTableSizeOf(Builtin builtin) const {
+-  DCHECK(Builtins::IsBuiltinId(builtin));
+-  const struct LayoutDescription& desc = LayoutDescription(builtin);
+-#if V8_EMBEDDED_CONSTANT_POOL
+-  DCHECK_LE(desc.handler_table_offset, desc.constant_pool_offset);
+-  return desc.constant_pool_offset - desc.handler_table_offset;
+-#else
+-  DCHECK_LE(desc.handler_table_offset, desc.code_comments_offset_offset);
+-  return desc.code_comments_offset_offset - desc.handler_table_offset;
+-#endif
+-}
+-
+-Address EmbeddedData::ConstantPoolStartOf(Builtin builtin) const {
+-  DCHECK(Builtins::IsBuiltinId(builtin));
+-#if V8_EMBEDDED_CONSTANT_POOL
+-  const struct LayoutDescription& desc = LayoutDescription(builtin);
+-  const uint8_t* result = RawMetadata() + desc.constant_pool_offset;
+-  DCHECK_LE(desc.constant_pool_offset, data_size_);
+-  return reinterpret_cast<Address>(result);
+-#else
+-  return kNullAddress;
+-#endif
+-}
+-
+-uint32_t EmbeddedData::ConstantPoolSizeOf(Builtin builtin) const {
+-  DCHECK(Builtins::IsBuiltinId(builtin));
+-#if V8_EMBEDDED_CONSTANT_POOL
+-  const struct LayoutDescription& desc = LayoutDescription(builtin);
+-  DCHECK_LE(desc.constant_pool_offset, desc.code_comments_offset_offset);
+-  return desc.code_comments_offset_offset - desc.constant_pool_offset;
+-#else
+-  return 0;
+-#endif
+-}
+-
+-Address EmbeddedData::CodeCommentsStartOf(Builtin builtin) const {
+-  DCHECK(Builtins::IsBuiltinId(builtin));
+-  const struct LayoutDescription& desc = LayoutDescription(builtin);
+-  const uint8_t* result = RawMetadata() + desc.code_comments_offset_offset;
+-  DCHECK_LE(desc.code_comments_offset_offset, data_size_);
+-  return reinterpret_cast<Address>(result);
+-}
+-
+-uint32_t EmbeddedData::CodeCommentsSizeOf(Builtin builtin) const {
+-  DCHECK(Builtins::IsBuiltinId(builtin));
+-  const struct LayoutDescription& desc = LayoutDescription(builtin);
+-  DCHECK_LE(desc.code_comments_offset_offset,
+-            desc.unwinding_info_offset_offset);
+-  return desc.unwinding_info_offset_offset - desc.code_comments_offset_offset;
+-}
+-
+-Address EmbeddedData::UnwindingInfoStartOf(Builtin builtin) const {
+-  DCHECK(Builtins::IsBuiltinId(builtin));
+-  const struct LayoutDescription& desc = LayoutDescription(builtin);
+-  const uint8_t* result = RawMetadata() + desc.unwinding_info_offset_offset;
+-  DCHECK_LE(desc.unwinding_info_offset_offset, data_size_);
+-  return reinterpret_cast<Address>(result);
+-}
+-
+-uint32_t EmbeddedData::UnwindingInfoSizeOf(Builtin builtin) const {
+-  DCHECK(Builtins::IsBuiltinId(builtin));
+-  const struct LayoutDescription& desc = LayoutDescription(builtin);
+-  DCHECK_LE(desc.unwinding_info_offset_offset, desc.metadata_length);
+-  return desc.metadata_length - desc.unwinding_info_offset_offset;
+-}
+-
+-Address EmbeddedData::InstructionStartOfBytecodeHandlers() const {
+-  return InstructionStartOfBuiltin(Builtin::kFirstBytecodeHandler);
+-}
+-
+-Address EmbeddedData::InstructionEndOfBytecodeHandlers() const {
+-  STATIC_ASSERT(static_cast<int>(Builtin::kFirstBytecodeHandler) +
+-                    kNumberOfBytecodeHandlers +
+-                    2 * kNumberOfWideBytecodeHandlers ==
+-                Builtins::kBuiltinCount);
+-  Builtin lastBytecodeHandler = Builtins::FromInt(Builtins::kBuiltinCount - 1);
+-  return InstructionStartOfBuiltin(lastBytecodeHandler) +
+-         InstructionSizeOfBuiltin(lastBytecodeHandler);
+-}
+-
+ size_t EmbeddedData::CreateEmbeddedBlobDataHash() const {
+   STATIC_ASSERT(EmbeddedBlobDataHashOffset() == 0);
+   STATIC_ASSERT(EmbeddedBlobCodeHashOffset() == EmbeddedBlobDataHashSize());
+diff --git a/src/snapshot/embedded/embedded-data.h b/src/snapshot/embedded/embedded-data.h
+index c1682b1278..ef43e2089e 100644
+--- a/src/snapshot/embedded/embedded-data.h
++++ b/src/snapshot/embedded/embedded-data.h
+@@ -128,29 +128,29 @@ class EmbeddedData final {
+   }
+ 
+   // TODO(ishell): rename XyzOfBuiltin() to XyzOf().
+-  Address InstructionStartOfBuiltin(Builtin builtin) const;
+-  uint32_t InstructionSizeOfBuiltin(Builtin builtin) const;
++  inline Address InstructionStartOfBuiltin(Builtin builtin) const;
++  inline uint32_t InstructionSizeOfBuiltin(Builtin builtin) const;
+ 
+-  Address InstructionStartOfBytecodeHandlers() const;
+-  Address InstructionEndOfBytecodeHandlers() const;
++  inline Address InstructionStartOfBytecodeHandlers() const;
++  inline Address InstructionEndOfBytecodeHandlers() const;
+ 
+-  Address MetadataStartOfBuiltin(Builtin builtin) const;
+-  uint32_t MetadataSizeOfBuiltin(Builtin builtin) const;
++  inline Address MetadataStartOfBuiltin(Builtin builtin) const;
++  inline uint32_t MetadataSizeOfBuiltin(Builtin builtin) const;
+ 
+-  Address SafepointTableStartOf(Builtin builtin) const;
+-  uint32_t SafepointTableSizeOf(Builtin builtin) const;
++  inline Address SafepointTableStartOf(Builtin builtin) const;
++  inline uint32_t SafepointTableSizeOf(Builtin builtin) const;
+ 
+-  Address HandlerTableStartOf(Builtin builtin) const;
+-  uint32_t HandlerTableSizeOf(Builtin builtin) const;
++  inline Address HandlerTableStartOf(Builtin builtin) const;
++  inline uint32_t HandlerTableSizeOf(Builtin builtin) const;
+ 
+-  Address ConstantPoolStartOf(Builtin builtin) const;
+-  uint32_t ConstantPoolSizeOf(Builtin builtin) const;
++  inline Address ConstantPoolStartOf(Builtin builtin) const;
++  inline uint32_t ConstantPoolSizeOf(Builtin builtin) const;
+ 
+-  Address CodeCommentsStartOf(Builtin builtin) const;
+-  uint32_t CodeCommentsSizeOf(Builtin builtin) const;
++  inline Address CodeCommentsStartOf(Builtin builtin) const;
++  inline uint32_t CodeCommentsSizeOf(Builtin builtin) const;
+ 
+-  Address UnwindingInfoStartOf(Builtin builtin) const;
+-  uint32_t UnwindingInfoSizeOf(Builtin builtin) const;
++  inline Address UnwindingInfoStartOf(Builtin builtin) const;
++  inline uint32_t UnwindingInfoSizeOf(Builtin builtin) const;
+ 
+   uint32_t AddressForHashing(Address addr) {
+     DCHECK(IsInCodeRange(addr));
+@@ -160,11 +160,7 @@ class EmbeddedData final {
+ 
+   // Padded with kCodeAlignment.
+   // TODO(v8:11045): Consider removing code alignment.
+-  uint32_t PaddedInstructionSizeOfBuiltin(Builtin builtin) const {
+-    uint32_t size = InstructionSizeOfBuiltin(builtin);
+-    CHECK_NE(size, 0);
+-    return PadAndAlignCode(size);
+-  }
++  inline uint32_t PaddedInstructionSizeOfBuiltin(Builtin builtin) const;
+ 
+   size_t CreateEmbeddedBlobDataHash() const;
+   size_t CreateEmbeddedBlobCodeHash() const;
+diff --git a/src/snapshot/embedded/embedded-file-writer.cc b/src/snapshot/embedded/embedded-file-writer.cc
+index 0f0129f310..ff77021baa 100644
+--- a/src/snapshot/embedded/embedded-file-writer.cc
++++ b/src/snapshot/embedded/embedded-file-writer.cc
+@@ -10,6 +10,7 @@
+ #include "src/codegen/source-position-table.h"
+ #include "src/flags/flags.h"  // For ENABLE_CONTROL_FLOW_INTEGRITY_BOOL
+ #include "src/objects/code-inl.h"
++#include "src/snapshot/embedded/embedded-data-inl.h"
+ 
+ namespace v8 {
+ namespace internal {
+diff --git a/src/snapshot/embedded/platform-embedded-file-writer-win.cc b/src/snapshot/embedded/platform-embedded-file-writer-win.cc
+index fedd9975c5..d4232939af 100644
+--- a/src/snapshot/embedded/platform-embedded-file-writer-win.cc
++++ b/src/snapshot/embedded/platform-embedded-file-writer-win.cc
+@@ -11,7 +11,7 @@
+ #if defined(V8_OS_WIN64)
+ #include "src/builtins/builtins.h"
+ #include "src/diagnostics/unwinding-info-win64.h"
+-#include "src/snapshot/embedded/embedded-data.h"
++#include "src/snapshot/embedded/embedded-data-inl.h"
+ #include "src/snapshot/embedded/embedded-file-writer.h"
+ #endif  // V8_OS_WIN64
+ 
+diff --git a/src/utils/memcopy.cc b/src/utils/memcopy.cc
+index 7e0fdb9a00..6bf529e7f9 100644
+--- a/src/utils/memcopy.cc
++++ b/src/utils/memcopy.cc
+@@ -4,7 +4,7 @@
+ 
+ #include "src/utils/memcopy.h"
+ 
+-#include "src/snapshot/embedded/embedded-data.h"
++#include "src/snapshot/embedded/embedded-data-inl.h"
+ 
+ namespace v8 {
+ namespace internal {
+diff --git a/src/wasm/wasm-code-manager.cc b/src/wasm/wasm-code-manager.cc
+index 8dd25fce22..08842909a1 100644
+--- a/src/wasm/wasm-code-manager.cc
++++ b/src/wasm/wasm-code-manager.cc
+@@ -23,7 +23,7 @@
+ #include "src/logging/counters.h"
+ #include "src/logging/log.h"
+ #include "src/objects/objects-inl.h"
+-#include "src/snapshot/embedded/embedded-data.h"
++#include "src/snapshot/embedded/embedded-data-inl.h"
+ #include "src/utils/ostreams.h"
+ #include "src/wasm/code-space-access.h"
+ #include "src/wasm/compilation-environment.h"
+-- 
+2.35.1
+

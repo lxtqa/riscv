@@ -1,0 +1,549 @@
+From 10b36d8c2ff83912c5008c3765e9ea31ab4ae597 Mon Sep 17 00:00:00 2001
+From: Ng Zhi An <zhin@chromium.org>
+Date: Mon, 15 Nov 2021 13:52:12 -0800
+Subject: [PATCH] [cleanup][objects] Make FunctionKind an enum class
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Bug: v8:12244,v8:12245
+Change-Id: Id74afa611b2b8556ef86c715497b6daddc8ea7a0
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3276931
+Reviewed-by: Jakob Gruber <jgruber@chromium.org>
+Reviewed-by: Omer Katz <omerkatz@chromium.org>
+Reviewed-by: Marja Hölttä <marja@chromium.org>
+Commit-Queue: Zhi An Ng <zhin@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#77928}
+---
+ src/ast/prettyprinter.cc                 |  4 ++--
+ src/ast/scopes.cc                        | 10 ++++++----
+ src/ast/scopes.h                         |  4 ++--
+ src/builtins/arm/builtins-arm.cc         |  6 ++++--
+ src/builtins/arm64/builtins-arm64.cc     |  6 ++++--
+ src/builtins/builtins-intl.cc            |  3 ++-
+ src/builtins/ia32/builtins-ia32.cc       |  6 ++++--
+ src/builtins/loong64/builtins-loong64.cc |  6 ++++--
+ src/builtins/mips/builtins-mips.cc       |  6 ++++--
+ src/builtins/mips64/builtins-mips64.cc   |  6 ++++--
+ src/builtins/ppc/builtins-ppc.cc         |  6 ++++--
+ src/builtins/riscv64/builtins-riscv64.cc |  7 +++++--
+ src/builtins/s390/builtins-s390.cc       |  6 ++++--
+ src/builtins/x64/builtins-x64.cc         |  6 ++++--
+ src/codegen/code-stub-assembler.cc       |  6 ++++--
+ src/debug/debug-stack-trace-iterator.cc  |  3 ++-
+ src/heap/factory-base.h                  |  2 +-
+ src/heap/factory.cc                      |  3 ++-
+ src/heap/factory.h                       |  2 +-
+ src/objects/function-kind.h              |  5 +++--
+ src/objects/scope-info.cc                |  4 ++--
+ src/objects/scope-info.h                 |  2 +-
+ src/objects/shared-function-info.h       |  2 +-
+ src/objects/templates.cc                 |  4 ++--
+ src/parsing/parser-base.h                |  5 +++--
+ src/parsing/parser.cc                    | 13 +++++++------
+ test/cctest/test-object.cc               | 13 +++++++------
+ 27 files changed, 89 insertions(+), 57 deletions(-)
+
+diff --git a/src/ast/prettyprinter.cc b/src/ast/prettyprinter.cc
+index 44f4ea155f..c8be8bf47a 100644
+--- a/src/ast/prettyprinter.cc
++++ b/src/ast/prettyprinter.cc
+@@ -35,7 +35,7 @@ CallPrinter::CallPrinter(Isolate* isolate, bool is_user_js,
+   is_user_js_ = is_user_js;
+   error_in_spread_args_ = error_in_spread_args;
+   spread_arg_ = nullptr;
+-  function_kind_ = kNormalFunction;
++  function_kind_ = FunctionKind::kNormalFunction;
+   InitializeAstVisitor(isolate);
+ }
+ 
+@@ -823,7 +823,7 @@ const char* AstPrinter::PrintProgram(FunctionLiteral* program) {
+   Init();
+   { IndentedScope indent(this, "FUNC", program->position());
+     PrintIndented("KIND");
+-    Print(" %d\n", program->kind());
++    Print(" %d\n", static_cast<uint32_t>(program->kind()));
+     PrintIndented("LITERAL ID");
+     Print(" %d\n", program->function_literal_id());
+     PrintIndented("SUSPEND COUNT");
+diff --git a/src/ast/scopes.cc b/src/ast/scopes.cc
+index 6fc1313bf5..8b90286e9c 100644
+--- a/src/ast/scopes.cc
++++ b/src/ast/scopes.cc
+@@ -143,8 +143,9 @@ DeclarationScope::DeclarationScope(Zone* zone,
+                                    AstValueFactory* ast_value_factory,
+                                    REPLMode repl_mode)
+     : Scope(zone),
+-      function_kind_(repl_mode == REPLMode::kYes ? kAsyncFunction
+-                                                 : kNormalFunction),
++      function_kind_(repl_mode == REPLMode::kYes
++                         ? FunctionKind::kAsyncFunction
++                         : FunctionKind::kNormalFunction),
+       params_(4, zone) {
+   DCHECK_EQ(scope_type_, SCRIPT_SCOPE);
+   SetDefaults();
+@@ -165,7 +166,8 @@ DeclarationScope::DeclarationScope(Zone* zone, Scope* outer_scope,
+ 
+ ModuleScope::ModuleScope(DeclarationScope* script_scope,
+                          AstValueFactory* avfactory)
+-    : DeclarationScope(avfactory->zone(), script_scope, MODULE_SCOPE, kModule),
++    : DeclarationScope(avfactory->zone(), script_scope, MODULE_SCOPE,
++                       FunctionKind::kModule),
+       module_descriptor_(avfactory->zone()->New<SourceTextModuleDescriptor>(
+           avfactory->zone())) {
+   set_language_mode(LanguageMode::kStrict);
+@@ -1823,7 +1825,7 @@ void Scope::Print(int n) {
+   // Print header.
+   FunctionKind function_kind = is_function_scope()
+                                    ? AsDeclarationScope()->function_kind()
+-                                   : kNormalFunction;
++                                   : FunctionKind::kNormalFunction;
+   Indent(n0, Header(scope_type_, function_kind, is_declaration_scope()));
+   if (scope_name_ != nullptr && !scope_name_->IsEmpty()) {
+     PrintF(" ");
+diff --git a/src/ast/scopes.h b/src/ast/scopes.h
+index 2aa0c23767..3dbdca1e10 100644
+--- a/src/ast/scopes.h
++++ b/src/ast/scopes.h
+@@ -850,7 +850,7 @@ class V8_EXPORT_PRIVATE Scope : public NON_EXPORTED_BASE(ZoneObject) {
+ class V8_EXPORT_PRIVATE DeclarationScope : public Scope {
+  public:
+   DeclarationScope(Zone* zone, Scope* outer_scope, ScopeType scope_type,
+-                   FunctionKind function_kind = kNormalFunction);
++                   FunctionKind function_kind = FunctionKind::kNormalFunction);
+   DeclarationScope(Zone* zone, ScopeType scope_type,
+                    AstValueFactory* ast_value_factory,
+                    Handle<ScopeInfo> scope_info);
+@@ -987,7 +987,7 @@ class V8_EXPORT_PRIVATE DeclarationScope : public Scope {
+ 
+   void set_is_async_module() {
+     DCHECK(IsModule(function_kind_));
+-    function_kind_ = kAsyncModule;
++    function_kind_ = FunctionKind::kAsyncModule;
+   }
+ 
+   void DeclareThis(AstValueFactory* ast_value_factory);
+diff --git a/src/builtins/arm/builtins-arm.cc b/src/builtins/arm/builtins-arm.cc
+index a55f662802..008e726150 100644
+--- a/src/builtins/arm/builtins-arm.cc
++++ b/src/builtins/arm/builtins-arm.cc
+@@ -209,8 +209,10 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
+   __ ldr(r4, FieldMemOperand(r1, JSFunction::kSharedFunctionInfoOffset));
+   __ ldr(r4, FieldMemOperand(r4, SharedFunctionInfo::kFlagsOffset));
+   __ DecodeField<SharedFunctionInfo::FunctionKindBits>(r4);
+-  __ JumpIfIsInRange(r4, kDefaultDerivedConstructor, kDerivedConstructor,
+-                     &not_create_implicit_receiver);
++  __ JumpIfIsInRange(
++      r4, static_cast<uint32_t>(FunctionKind::kDefaultDerivedConstructor),
++      static_cast<uint32_t>(FunctionKind::kDerivedConstructor),
++      &not_create_implicit_receiver);
+ 
+   // If not derived class constructor: Allocate the new receiver object.
+   __ IncrementCounter(masm->isolate()->counters()->constructed_objects(), 1, r4,
+diff --git a/src/builtins/arm64/builtins-arm64.cc b/src/builtins/arm64/builtins-arm64.cc
+index f7e0499ded..a054b1e4dc 100644
+--- a/src/builtins/arm64/builtins-arm64.cc
++++ b/src/builtins/arm64/builtins-arm64.cc
+@@ -253,8 +253,10 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
+       x4, FieldMemOperand(x1, JSFunction::kSharedFunctionInfoOffset));
+   __ Ldr(w4, FieldMemOperand(x4, SharedFunctionInfo::kFlagsOffset));
+   __ DecodeField<SharedFunctionInfo::FunctionKindBits>(w4);
+-  __ JumpIfIsInRange(w4, kDefaultDerivedConstructor, kDerivedConstructor,
+-                     &not_create_implicit_receiver);
++  __ JumpIfIsInRange(
++      w4, static_cast<uint32_t>(FunctionKind::kDefaultDerivedConstructor),
++      static_cast<uint32_t>(FunctionKind::kDerivedConstructor),
++      &not_create_implicit_receiver);
+ 
+   // If not derived class constructor: Allocate the new receiver object.
+   __ IncrementCounter(masm->isolate()->counters()->constructed_objects(), 1, x4,
+diff --git a/src/builtins/builtins-intl.cc b/src/builtins/builtins-intl.cc
+index 6fd36dd8e0..1d72a3ae32 100644
+--- a/src/builtins/builtins-intl.cc
++++ b/src/builtins/builtins-intl.cc
+@@ -238,7 +238,8 @@ Handle<JSFunction> CreateBoundFunction(Isolate* isolate,
+ 
+   Handle<SharedFunctionInfo> info =
+       isolate->factory()->NewSharedFunctionInfoForBuiltin(
+-          isolate->factory()->empty_string(), builtin, kNormalFunction);
++          isolate->factory()->empty_string(), builtin,
++          FunctionKind::kNormalFunction);
+   info->set_internal_formal_parameter_count(JSParameterCount(len));
+   info->set_length(len);
+ 
+diff --git a/src/builtins/ia32/builtins-ia32.cc b/src/builtins/ia32/builtins-ia32.cc
+index c16687c15d..298023c317 100644
+--- a/src/builtins/ia32/builtins-ia32.cc
++++ b/src/builtins/ia32/builtins-ia32.cc
+@@ -214,8 +214,10 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
+   __ mov(eax, FieldOperand(edi, JSFunction::kSharedFunctionInfoOffset));
+   __ mov(eax, FieldOperand(eax, SharedFunctionInfo::kFlagsOffset));
+   __ DecodeField<SharedFunctionInfo::FunctionKindBits>(eax);
+-  __ JumpIfIsInRange(eax, kDefaultDerivedConstructor, kDerivedConstructor, ecx,
+-                     &not_create_implicit_receiver, Label::kNear);
++  __ JumpIfIsInRange(
++      eax, static_cast<uint32_t>(FunctionKind::kDefaultDerivedConstructor),
++      static_cast<uint32_t>(FunctionKind::kDerivedConstructor), ecx,
++      &not_create_implicit_receiver, Label::kNear);
+ 
+   // If not derived class constructor: Allocate the new receiver object.
+   __ IncrementCounter(masm->isolate()->counters()->constructed_objects(), 1,
+diff --git a/src/builtins/loong64/builtins-loong64.cc b/src/builtins/loong64/builtins-loong64.cc
+index a684fa5a31..c8e4e031b6 100644
+--- a/src/builtins/loong64/builtins-loong64.cc
++++ b/src/builtins/loong64/builtins-loong64.cc
+@@ -186,8 +186,10 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
+   __ Ld_d(t2, FieldMemOperand(a1, JSFunction::kSharedFunctionInfoOffset));
+   __ Ld_wu(t2, FieldMemOperand(t2, SharedFunctionInfo::kFlagsOffset));
+   __ DecodeField<SharedFunctionInfo::FunctionKindBits>(t2);
+-  __ JumpIfIsInRange(t2, kDefaultDerivedConstructor, kDerivedConstructor,
+-                     &not_create_implicit_receiver);
++  __ JumpIfIsInRange(
++      t2, static_cast<uint32_t>(FunctionKind::kDefaultDerivedConstructor),
++      static_cast<uint32_t>(FunctionKind::kDerivedConstructor),
++      &not_create_implicit_receiver);
+ 
+   // If not derived class constructor: Allocate the new receiver object.
+   __ IncrementCounter(masm->isolate()->counters()->constructed_objects(), 1, t2,
+diff --git a/src/builtins/mips/builtins-mips.cc b/src/builtins/mips/builtins-mips.cc
+index 2225df851f..bda40ab025 100644
+--- a/src/builtins/mips/builtins-mips.cc
++++ b/src/builtins/mips/builtins-mips.cc
+@@ -185,8 +185,10 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
+   __ lw(t2, FieldMemOperand(a1, JSFunction::kSharedFunctionInfoOffset));
+   __ lw(t2, FieldMemOperand(t2, SharedFunctionInfo::kFlagsOffset));
+   __ DecodeField<SharedFunctionInfo::FunctionKindBits>(t2);
+-  __ JumpIfIsInRange(t2, kDefaultDerivedConstructor, kDerivedConstructor,
+-                     &not_create_implicit_receiver);
++  __ JumpIfIsInRange(
++      t2, static_cast<uint32_t>(FunctionKind::kDefaultDerivedConstructor),
++      static_cast<uint32_t>(FunctionKind::kDerivedConstructor),
++      &not_create_implicit_receiver);
+ 
+   // If not derived class constructor: Allocate the new receiver object.
+   __ IncrementCounter(masm->isolate()->counters()->constructed_objects(), 1,
+diff --git a/src/builtins/mips64/builtins-mips64.cc b/src/builtins/mips64/builtins-mips64.cc
+index 6e4e58ac2e..aba1a0ff8b 100644
+--- a/src/builtins/mips64/builtins-mips64.cc
++++ b/src/builtins/mips64/builtins-mips64.cc
+@@ -186,8 +186,10 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
+   __ Ld(t2, FieldMemOperand(a1, JSFunction::kSharedFunctionInfoOffset));
+   __ lwu(t2, FieldMemOperand(t2, SharedFunctionInfo::kFlagsOffset));
+   __ DecodeField<SharedFunctionInfo::FunctionKindBits>(t2);
+-  __ JumpIfIsInRange(t2, kDefaultDerivedConstructor, kDerivedConstructor,
+-                     &not_create_implicit_receiver);
++  __ JumpIfIsInRange(
++      t2, static_cast<uint32_t>(FunctionKind::kDefaultDerivedConstructor),
++      static_cast<uint32_t>(FunctionKind::kDerivedConstructor),
++      &not_create_implicit_receiver);
+ 
+   // If not derived class constructor: Allocate the new receiver object.
+   __ IncrementCounter(masm->isolate()->counters()->constructed_objects(), 1,
+diff --git a/src/builtins/ppc/builtins-ppc.cc b/src/builtins/ppc/builtins-ppc.cc
+index 870ed9a2ef..e114a99c56 100644
+--- a/src/builtins/ppc/builtins-ppc.cc
++++ b/src/builtins/ppc/builtins-ppc.cc
+@@ -209,8 +209,10 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
+       r7, FieldMemOperand(r4, JSFunction::kSharedFunctionInfoOffset), r0);
+   __ lwz(r7, FieldMemOperand(r7, SharedFunctionInfo::kFlagsOffset));
+   __ DecodeField<SharedFunctionInfo::FunctionKindBits>(r7);
+-  __ JumpIfIsInRange(r7, kDefaultDerivedConstructor, kDerivedConstructor,
+-                     &not_create_implicit_receiver);
++  __ JumpIfIsInRange(
++      r7, static_cast<uint32_t>(FunctionKind::kDefaultDerivedConstructor),
++      static_cast<uint32_t>(FunctionKind::kDerivedConstructor),
++      &not_create_implicit_receiver);
+ 
+   // If not derived class constructor: Allocate the new receiver object.
+   __ IncrementCounter(masm->isolate()->counters()->constructed_objects(), 1, r7,
+diff --git a/src/builtins/riscv64/builtins-riscv64.cc b/src/builtins/riscv64/builtins-riscv64.cc
+index 746c989e42..76f51d321a 100644
+--- a/src/builtins/riscv64/builtins-riscv64.cc
++++ b/src/builtins/riscv64/builtins-riscv64.cc
+@@ -194,8 +194,11 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
+     __ Lwu(func_info,
+            FieldMemOperand(func_info, SharedFunctionInfo::kFlagsOffset));
+     __ DecodeField<SharedFunctionInfo::FunctionKindBits>(func_info);
+-    __ JumpIfIsInRange(func_info, kDefaultDerivedConstructor,
+-                       kDerivedConstructor, &not_create_implicit_receiver);
++    __ JumpIfIsInRange(
++        func_info,
++        static_cast<uint32_t>(FunctionKind::kDefaultDerivedConstructor),
++        static_cast<uint32_t>(FunctionKind::kDerivedConstructor),
++        &not_create_implicit_receiver);
+     Register scratch = func_info;
+     Register scratch2 = temps.Acquire();
+     // If not derived class constructor: Allocate the new receiver object.
+diff --git a/src/builtins/s390/builtins-s390.cc b/src/builtins/s390/builtins-s390.cc
+index 7a76f2d7e1..0c764d0f73 100644
+--- a/src/builtins/s390/builtins-s390.cc
++++ b/src/builtins/s390/builtins-s390.cc
+@@ -452,8 +452,10 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
+       r6, FieldMemOperand(r3, JSFunction::kSharedFunctionInfoOffset));
+   __ LoadU32(r6, FieldMemOperand(r6, SharedFunctionInfo::kFlagsOffset));
+   __ DecodeField<SharedFunctionInfo::FunctionKindBits>(r6);
+-  __ JumpIfIsInRange(r6, kDefaultDerivedConstructor, kDerivedConstructor,
+-                     &not_create_implicit_receiver);
++  __ JumpIfIsInRange(
++      r6, static_cast<uint8_t>(FunctionKind::kDefaultDerivedConstructor),
++      static_cast<uint8_t>(FunctionKind::kDerivedConstructor),
++      &not_create_implicit_receiver);
+ 
+   // If not derived class constructor: Allocate the new receiver object.
+   __ IncrementCounter(masm->isolate()->counters()->constructed_objects(), 1, r6,
+diff --git a/src/builtins/x64/builtins-x64.cc b/src/builtins/x64/builtins-x64.cc
+index 5cfc97fd21..4ef0289deb 100644
+--- a/src/builtins/x64/builtins-x64.cc
++++ b/src/builtins/x64/builtins-x64.cc
+@@ -212,8 +212,10 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
+       rbx, FieldOperand(rdi, JSFunction::kSharedFunctionInfoOffset));
+   __ movl(rbx, FieldOperand(rbx, SharedFunctionInfo::kFlagsOffset));
+   __ DecodeField<SharedFunctionInfo::FunctionKindBits>(rbx);
+-  __ JumpIfIsInRange(rbx, kDefaultDerivedConstructor, kDerivedConstructor,
+-                     &not_create_implicit_receiver, Label::kNear);
++  __ JumpIfIsInRange(
++      rbx, static_cast<uint32_t>(FunctionKind::kDefaultDerivedConstructor),
++      static_cast<uint32_t>(FunctionKind::kDerivedConstructor),
++      &not_create_implicit_receiver, Label::kNear);
+ 
+   // If not derived class constructor: Allocate the new receiver object.
+   __ IncrementCounter(masm->isolate()->counters()->constructed_objects(), 1);
+diff --git a/src/codegen/code-stub-assembler.cc b/src/codegen/code-stub-assembler.cc
+index e9a493a03e..977fdde691 100644
+--- a/src/codegen/code-stub-assembler.cc
++++ b/src/codegen/code-stub-assembler.cc
+@@ -2892,8 +2892,10 @@ TNode<BoolT> CodeStubAssembler::IsGeneratorFunction(
+                                    SharedFunctionInfo::kFlagsOffset));
+ 
+   // See IsGeneratorFunction(FunctionKind kind).
+-  return IsInRange(function_kind, FunctionKind::kAsyncConciseGeneratorMethod,
+-                   FunctionKind::kConciseGeneratorMethod);
++  return IsInRange(
++      function_kind,
++      static_cast<uint32_t>(FunctionKind::kAsyncConciseGeneratorMethod),
++      static_cast<uint32_t>(FunctionKind::kConciseGeneratorMethod));
+ }
+ 
+ TNode<BoolT> CodeStubAssembler::IsJSFunctionWithPrototypeSlot(
+diff --git a/src/debug/debug-stack-trace-iterator.cc b/src/debug/debug-stack-trace-iterator.cc
+index 09485741f1..81b2487a5b 100644
+--- a/src/debug/debug-stack-trace-iterator.cc
++++ b/src/debug/debug-stack-trace-iterator.cc
+@@ -82,7 +82,8 @@ int DebugStackTraceIterator::GetContextId() const {
+ v8::MaybeLocal<v8::Value> DebugStackTraceIterator::GetReceiver() const {
+   DCHECK(!Done());
+   if (frame_inspector_->IsJavaScript() &&
+-      frame_inspector_->GetFunction()->shared().kind() == kArrowFunction) {
++      frame_inspector_->GetFunction()->shared().kind() ==
++          FunctionKind::kArrowFunction) {
+     // FrameInspector is not able to get receiver for arrow function.
+     // So let's try to fetch it using same logic as is used to retrieve 'this'
+     // during DebugEvaluate::Local.
+diff --git a/src/heap/factory-base.h b/src/heap/factory-base.h
+index 5a94c3289f..0918e7a394 100644
+--- a/src/heap/factory-base.h
++++ b/src/heap/factory-base.h
+@@ -280,7 +280,7 @@ class EXPORT_TEMPLATE_DECLARE(V8_EXPORT_PRIVATE) FactoryBase
+   Handle<SharedFunctionInfo> NewSharedFunctionInfo(
+       MaybeHandle<String> maybe_name,
+       MaybeHandle<HeapObject> maybe_function_data, Builtin builtin,
+-      FunctionKind kind = kNormalFunction);
++      FunctionKind kind = FunctionKind::kNormalFunction);
+ 
+   Handle<String> MakeOrFindTwoCharacterString(uint16_t c1, uint16_t c2);
+ 
+diff --git a/src/heap/factory.cc b/src/heap/factory.cc
+index 318f090608..f2f8a3a0ba 100644
+--- a/src/heap/factory.cc
++++ b/src/heap/factory.cc
+@@ -1646,7 +1646,8 @@ Handle<SharedFunctionInfo> Factory::NewSharedFunctionInfoForWasmJSFunction(
+ Handle<SharedFunctionInfo> Factory::NewSharedFunctionInfoForWasmCapiFunction(
+     Handle<WasmCapiFunctionData> data) {
+   return NewSharedFunctionInfo(MaybeHandle<String>(), data,
+-                               Builtin::kNoBuiltinId, kConciseMethod);
++                               Builtin::kNoBuiltinId,
++                               FunctionKind::kConciseMethod);
+ }
+ #endif  // V8_ENABLE_WEBASSEMBLY
+ 
+diff --git a/src/heap/factory.h b/src/heap/factory.h
+index bdb0cefd90..eb2dd8d1a0 100644
+--- a/src/heap/factory.h
++++ b/src/heap/factory.h
+@@ -739,7 +739,7 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
+ 
+   Handle<SharedFunctionInfo> NewSharedFunctionInfoForBuiltin(
+       MaybeHandle<String> name, Builtin builtin,
+-      FunctionKind kind = kNormalFunction);
++      FunctionKind kind = FunctionKind::kNormalFunction);
+ 
+   Handle<SharedFunctionInfo> NewSharedFunctionInfoForWebSnapshot();
+ 
+diff --git a/src/objects/function-kind.h b/src/objects/function-kind.h
+index 9115f8b6ce..da8dfe6f95 100644
+--- a/src/objects/function-kind.h
++++ b/src/objects/function-kind.h
+@@ -11,7 +11,7 @@
+ namespace v8 {
+ namespace internal {
+ 
+-enum FunctionKind : uint8_t {
++enum class FunctionKind : uint8_t {
+   // BEGIN constructable functions
+   kNormalFunction,
+   kModule,
+@@ -66,7 +66,8 @@ enum FunctionKind : uint8_t {
+ };
+ 
+ constexpr int kFunctionKindBitSize = 5;
+-STATIC_ASSERT(kLastFunctionKind < (1 << kFunctionKindBitSize));
++STATIC_ASSERT(static_cast<int>(FunctionKind::kLastFunctionKind) <
++              (1 << kFunctionKindBitSize));
+ 
+ inline bool IsArrowFunction(FunctionKind kind) {
+   return base::IsInRange(kind, FunctionKind::kArrowFunction,
+diff --git a/src/objects/scope-info.cc b/src/objects/scope-info.cc
+index cd5530abef..e20493d468 100644
+--- a/src/objects/scope-info.cc
++++ b/src/objects/scope-info.cc
+@@ -189,7 +189,7 @@ Handle<ScopeInfo> ScopeInfo::Create(IsolateT* isolate, Zone* zone, Scope* scope,
+       is_asm_module = function_scope->is_asm_module();
+ #endif  // V8_ENABLE_WEBASSEMBLY
+     }
+-    FunctionKind function_kind = kNormalFunction;
++    FunctionKind function_kind = FunctionKind::kNormalFunction;
+     if (scope->is_declaration_scope()) {
+       function_kind = scope->AsDeclarationScope()->function_kind();
+       sloppy_eval_can_extend_vars =
+@@ -401,7 +401,7 @@ Handle<ScopeInfo> ScopeInfo::CreateForWithScope(
+       HasNewTargetBit::encode(false) |
+       FunctionVariableBits::encode(VariableAllocationInfo::NONE) |
+       IsAsmModuleBit::encode(false) | HasSimpleParametersBit::encode(true) |
+-      FunctionKindBits::encode(kNormalFunction) |
++      FunctionKindBits::encode(FunctionKind::kNormalFunction) |
+       HasOuterScopeInfoBit::encode(has_outer_scope_info) |
+       IsDebugEvaluateScopeBit::encode(false) |
+       ForceContextAllocationBit::encode(false) |
+diff --git a/src/objects/scope-info.h b/src/objects/scope-info.h
+index 11c06a76b5..5544efea9d 100644
+--- a/src/objects/scope-info.h
++++ b/src/objects/scope-info.h
+@@ -274,7 +274,7 @@ class ScopeInfo : public TorqueGeneratedScopeInfo<ScopeInfo, HeapObject> {
+   };
+ 
+   STATIC_ASSERT(LanguageModeSize == 1 << LanguageModeBit::kSize);
+-  STATIC_ASSERT(kLastFunctionKind <= FunctionKindBits::kMax);
++  STATIC_ASSERT(FunctionKind::kLastFunctionKind <= FunctionKindBits::kMax);
+ 
+   bool IsEmpty() const;
+ 
+diff --git a/src/objects/shared-function-info.h b/src/objects/shared-function-info.h
+index ac2ae77c0a..366b35be43 100644
+--- a/src/objects/shared-function-info.h
++++ b/src/objects/shared-function-info.h
+@@ -641,7 +641,7 @@ class SharedFunctionInfo
+   STATIC_ASSERT(BailoutReason::kLastErrorMessage <=
+                 DisabledOptimizationReasonBits::kMax);
+ 
+-  STATIC_ASSERT(kLastFunctionKind <= FunctionKindBits::kMax);
++  STATIC_ASSERT(FunctionKind::kLastFunctionKind <= FunctionKindBits::kMax);
+   STATIC_ASSERT(FunctionSyntaxKind::kLastFunctionSyntaxKind <=
+                 FunctionSyntaxKindBits::kMax);
+ 
+diff --git a/src/objects/templates.cc b/src/objects/templates.cc
+index 91306861e6..93c0220878 100644
+--- a/src/objects/templates.cc
++++ b/src/objects/templates.cc
+@@ -40,9 +40,9 @@ Handle<SharedFunctionInfo> FunctionTemplateInfo::GetOrCreateSharedFunctionInfo(
+   }
+   FunctionKind function_kind;
+   if (info->remove_prototype()) {
+-    function_kind = kConciseMethod;
++    function_kind = FunctionKind::kConciseMethod;
+   } else {
+-    function_kind = kNormalFunction;
++    function_kind = FunctionKind::kNormalFunction;
+   }
+   Handle<SharedFunctionInfo> result =
+       isolate->factory()->NewSharedFunctionInfoForApiFunction(name_string, info,
+diff --git a/src/parsing/parser-base.h b/src/parsing/parser-base.h
+index 64d491f312..6e587ad165 100644
+--- a/src/parsing/parser-base.h
++++ b/src/parsing/parser-base.h
+@@ -4559,7 +4559,7 @@ ParserBase<Impl>::ParseArrowFunctionLiteral(
+         // parameters.
+         int dummy_num_parameters = -1;
+         int dummy_function_length = -1;
+-        DCHECK_NE(kind & FunctionKind::kArrowFunction, 0);
++        DCHECK(IsArrowFunction(kind));
+         bool did_preparse_successfully = impl()->SkipFunction(
+             nullptr, kind, FunctionSyntaxKind::kAnonymousExpression,
+             formal_parameters.scope, &dummy_num_parameters,
+@@ -5618,7 +5618,8 @@ typename ParserBase<Impl>::StatementT ParserBase<Impl>::ParseReturnStatement() {
+     case BLOCK_SCOPE:
+       // Class static blocks disallow return. They are their own var scopes and
+       // have a varblock scope.
+-      if (function_state_->kind() == kClassStaticInitializerFunction) {
++      if (function_state_->kind() ==
++          FunctionKind::kClassStaticInitializerFunction) {
+         impl()->ReportMessageAt(loc, MessageTemplate::kIllegalReturn);
+         return impl()->NullStatement();
+       }
+diff --git a/src/parsing/parser.cc b/src/parsing/parser.cc
+index b0664817c6..1ffa517aec 100644
+--- a/src/parsing/parser.cc
++++ b/src/parsing/parser.cc
+@@ -583,8 +583,8 @@ FunctionLiteral* Parser::DoParseProgram(Isolate* isolate, ParseInfo* info) {
+       DCHECK(flags().is_module());
+ 
+       PrepareGeneratorVariables();
+-      Expression* initial_yield =
+-          BuildInitialYield(kNoSourcePosition, kGeneratorFunction);
++      Expression* initial_yield = BuildInitialYield(
++          kNoSourcePosition, FunctionKind::kGeneratorFunction);
+       body.Add(
+           factory()->NewExpressionStatement(initial_yield, kNoSourcePosition));
+       if (flags().allow_harmony_top_level_await()) {
+@@ -741,10 +741,11 @@ void Parser::ParseWrapped(Isolate* isolate, ParseInfo* info,
+   ZonePtrList<const AstRawString>* arguments_for_wrapped_function =
+       PrepareWrappedArguments(isolate, info, zone);
+ 
+-  FunctionLiteral* function_literal = ParseFunctionLiteral(
+-      function_name, location, kSkipFunctionNameCheck, kNormalFunction,
+-      kNoSourcePosition, FunctionSyntaxKind::kWrapped, LanguageMode::kSloppy,
+-      arguments_for_wrapped_function);
++  FunctionLiteral* function_literal =
++      ParseFunctionLiteral(function_name, location, kSkipFunctionNameCheck,
++                           FunctionKind::kNormalFunction, kNoSourcePosition,
++                           FunctionSyntaxKind::kWrapped, LanguageMode::kSloppy,
++                           arguments_for_wrapped_function);
+ 
+   Statement* return_statement =
+       factory()->NewReturnStatement(function_literal, kNoSourcePosition);
+diff --git a/test/cctest/test-object.cc b/test/cctest/test-object.cc
+index 36cbfd3b3a..d6c8821935 100644
+--- a/test/cctest/test-object.cc
++++ b/test/cctest/test-object.cc
+@@ -283,12 +283,13 @@ TEST(ObjectMethodsThatTruncateMinusZero) {
+   CHECK(result->IsZero());
+ }
+ 
+-#define TEST_FUNCTION_KIND(Name)                                \
+-  TEST(Name) {                                                  \
+-    for (int i = 0; i < FunctionKind::kLastFunctionKind; i++) { \
+-      FunctionKind kind = static_cast<FunctionKind>(i);         \
+-      CHECK_EQ(FunctionKind##Name(kind), Name(kind));           \
+-    }                                                           \
++#define TEST_FUNCTION_KIND(Name)                                            \
++  TEST(Name) {                                                              \
++    for (uint32_t i = 0;                                                    \
++         i < static_cast<uint32_t>(FunctionKind::kLastFunctionKind); i++) { \
++      FunctionKind kind = static_cast<FunctionKind>(i);                     \
++      CHECK_EQ(FunctionKind##Name(kind), Name(kind));                       \
++    }                                                                       \
+   }
+ 
+ bool FunctionKindIsArrowFunction(FunctionKind kind) {
+-- 
+2.35.1
+

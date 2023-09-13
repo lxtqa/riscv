@@ -1,0 +1,358 @@
+From 47b87ac1243a09e4f2682ea7a6ab4c02f1a43ad1 Mon Sep 17 00:00:00 2001
+From: Andreas Haas <ahaas@chromium.org>
+Date: Mon, 16 Jan 2023 11:46:58 +0100
+Subject: [PATCH] [wasm] Optimize lazy compilation initialization
+
+With https://crrev.com/c/4111524 the jump table of a newly created
+NativeModule gets initialized with CompileLazy stubs. This CL optimizes
+the initialization by hoisting function-index independent code out of
+the iteration over all functions.
+
+R=clemensb@chromium.org
+
+Bug: chromium:1402732
+Change-Id: I531335e2a5e36a939a63ec3d2f8822beea4f315b
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4128098
+Reviewed-by: Clemens Backes <clemensb@chromium.org>
+Commit-Queue: Andreas Haas <ahaas@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#85312}
+---
+ src/wasm/jump-table-assembler.cc | 101 +++++++++++++++++++++++++++++--
+ src/wasm/jump-table-assembler.h  |  14 ++++-
+ src/wasm/wasm-code-manager.cc    |  48 ++++++++++-----
+ src/wasm/wasm-code-manager.h     |   4 ++
+ 4 files changed, 145 insertions(+), 22 deletions(-)
+
+diff --git a/src/wasm/jump-table-assembler.cc b/src/wasm/jump-table-assembler.cc
+index 5aec89a638..d48c299c40 100644
+--- a/src/wasm/jump-table-assembler.cc
++++ b/src/wasm/jump-table-assembler.cc
+@@ -10,6 +10,43 @@ namespace v8 {
+ namespace internal {
+ namespace wasm {
+ 
++void JumpTableAssembler::InitializeJumpsToLazyCompileTable(
++    Address base, uint32_t num_slots, Address lazy_compile_table_start) {
++  uint32_t jump_table_size = SizeForNumberOfSlots(num_slots);
++  JumpTableAssembler jtasm(base, jump_table_size + 256);
++
++  for (uint32_t slot_index = 0; slot_index < num_slots; ++slot_index) {
++    // Make sure we write at the correct offset.
++    int slot_offset =
++        static_cast<int>(JumpTableAssembler::JumpSlotIndexToOffset(slot_index));
++
++    jtasm.SkipUntil(slot_offset);
++
++    Address target =
++        lazy_compile_table_start +
++        JumpTableAssembler::LazyCompileSlotIndexToOffset(slot_index);
++
++    int offset_before_emit = jtasm.pc_offset();
++    // This function initializes the first jump table with jumps to the lazy
++    // compile table. Both get allocated in the constructor of the
++    // {NativeModule}, so they both should end up in the initial code space.
++    // Jumps within one code space can always be near jumps, so the following
++    // call to {EmitJumpSlot} should always succeed. If the call fails, then
++    // either the jump table allocation was changed incorrectly so that the lazy
++    // compile table was not within near-jump distance of the jump table
++    // anymore (e.g. the initial code space was too small to fit both tables),
++    // or the code space was allocated larger than the maximum near-jump
++    // distance.
++    CHECK(jtasm.EmitJumpSlot(target));
++    int written_bytes = jtasm.pc_offset() - offset_before_emit;
++    // We write nops here instead of skipping to avoid partial instructions in
++    // the jump table. Partial instructions can cause problems for the
++    // disassembler.
++    jtasm.NopBytes(kJumpTableSlotSize - written_bytes);
++  }
++  FlushInstructionCache(base, jump_table_size);
++}
++
+ // The implementation is compact enough to implement it inline here. If it gets
+ // much bigger, we might want to split it in a separate file per architecture.
+ #if V8_TARGET_ARCH_X64
+@@ -54,8 +91,12 @@ void JumpTableAssembler::PatchFarJumpSlot(Address slot, Address target) {
+ }
+ 
+ void JumpTableAssembler::NopBytes(int bytes) {
+-  DCHECK_LE(0, bytes);
+-  Nop(bytes);
++  if (bytes) Nop(bytes);
++}
++
++void JumpTableAssembler::SkipUntil(int offset) {
++  DCHECK_GE(offset, pc_offset());
++  pc_ += offset - pc_offset();
+ }
+ 
+ #elif V8_TARGET_ARCH_IA32
+@@ -80,8 +121,12 @@ void JumpTableAssembler::PatchFarJumpSlot(Address slot, Address target) {
+ }
+ 
+ void JumpTableAssembler::NopBytes(int bytes) {
+-  DCHECK_LE(0, bytes);
+-  Nop(bytes);
++  if (bytes) Nop(bytes);
++}
++
++void JumpTableAssembler::SkipUntil(int offset) {
++  DCHECK_GE(offset, pc_offset());
++  pc_ += offset - pc_offset();
+ }
+ 
+ #elif V8_TARGET_ARCH_ARM
+@@ -129,6 +174,12 @@ void JumpTableAssembler::NopBytes(int bytes) {
+   }
+ }
+ 
++void JumpTableAssembler::SkipUntil(int offset) {
++  // On this platform the jump table is not zapped with valid instructions, so
++  // skipping over bytes is not allowed.
++  DCHECK_EQ(offset, pc_offset());
++}
++
+ #elif V8_TARGET_ARCH_ARM64
+ void JumpTableAssembler::EmitLazyCompileJumpSlot(uint32_t func_index,
+                                                  Address lazy_compile_target) {
+@@ -212,6 +263,12 @@ void JumpTableAssembler::NopBytes(int bytes) {
+   }
+ }
+ 
++void JumpTableAssembler::SkipUntil(int offset) {
++  // On this platform the jump table is not zapped with valid instructions, so
++  // skipping over bytes is not allowed.
++  DCHECK_EQ(offset, pc_offset());
++}
++
+ #elif V8_TARGET_ARCH_S390X
+ void JumpTableAssembler::EmitLazyCompileJumpSlot(uint32_t func_index,
+                                                  Address lazy_compile_target) {
+@@ -259,6 +316,12 @@ void JumpTableAssembler::NopBytes(int bytes) {
+   }
+ }
+ 
++void JumpTableAssembler::SkipUntil(int offset) {
++  // On this platform the jump table is not zapped with valid instructions, so
++  // skipping over bytes is not allowed.
++  DCHECK_EQ(offset, pc_offset());
++}
++
+ #elif V8_TARGET_ARCH_MIPS64
+ void JumpTableAssembler::EmitLazyCompileJumpSlot(uint32_t func_index,
+                                                  Address lazy_compile_target) {
+@@ -294,6 +357,12 @@ void JumpTableAssembler::NopBytes(int bytes) {
+   }
+ }
+ 
++void JumpTableAssembler::SkipUntil(int offset) {
++  // On this platform the jump table is not zapped with valid instructions, so
++  // skipping over bytes is not allowed.
++  DCHECK_EQ(offset, pc_offset());
++}
++
+ #elif V8_TARGET_ARCH_LOONG64
+ void JumpTableAssembler::EmitLazyCompileJumpSlot(uint32_t func_index,
+                                                  Address lazy_compile_target) {
+@@ -324,6 +393,12 @@ void JumpTableAssembler::NopBytes(int bytes) {
+   }
+ }
+ 
++void JumpTableAssembler::SkipUntil(int offset) {
++  // On this platform the jump table is not zapped with valid instructions, so
++  // skipping over bytes is not allowed.
++  DCHECK_EQ(offset, pc_offset());
++}
++
+ #elif V8_TARGET_ARCH_PPC64
+ void JumpTableAssembler::EmitLazyCompileJumpSlot(uint32_t func_index,
+                                                  Address lazy_compile_target) {
+@@ -380,6 +455,12 @@ void JumpTableAssembler::NopBytes(int bytes) {
+   }
+ }
+ 
++void JumpTableAssembler::SkipUntil(int offset) {
++  // On this platform the jump table is not zapped with valid instructions, so
++  // skipping over bytes is not allowed.
++  DCHECK_EQ(offset, pc_offset());
++}
++
+ #elif V8_TARGET_ARCH_RISCV64
+ void JumpTableAssembler::EmitLazyCompileJumpSlot(uint32_t func_index,
+                                                  Address lazy_compile_target) {
+@@ -420,6 +501,12 @@ void JumpTableAssembler::NopBytes(int bytes) {
+   }
+ }
+ 
++void JumpTableAssembler::SkipUntil(int offset) {
++  // On this platform the jump table is not zapped with valid instructions, so
++  // skipping over bytes is not allowed.
++  DCHECK_EQ(offset, pc_offset());
++}
++
+ #elif V8_TARGET_ARCH_RISCV32
+ void JumpTableAssembler::EmitLazyCompileJumpSlot(uint32_t func_index,
+                                                  Address lazy_compile_target) {
+@@ -460,6 +547,12 @@ void JumpTableAssembler::NopBytes(int bytes) {
+   }
+ }
+ 
++void JumpTableAssembler::SkipUntil(int offset) {
++  // On this platform the jump table is not zapped with valid instructions, so
++  // skipping over bytes is not allowed.
++  DCHECK_EQ(offset, pc_offset());
++}
++
+ #else
+ #error Unknown architecture.
+ #endif
+diff --git a/src/wasm/jump-table-assembler.h b/src/wasm/jump-table-assembler.h
+index c69cd9bc81..b545d51a28 100644
+--- a/src/wasm/jump-table-assembler.h
++++ b/src/wasm/jump-table-assembler.h
+@@ -57,7 +57,7 @@ namespace wasm {
+ // execute the old code afterwards, which is no problem, since that code remains
+ // available until it is garbage collected. Garbage collection itself is a
+ // synchronization barrier though.
+-class V8_EXPORT_PRIVATE JumpTableAssembler : public MacroAssembler {
++class V8_EXPORT_PRIVATE JumpTableAssembler : public TurboAssembler {
+  public:
+   // Translate an offset into the continuous jump table to a jump table index.
+   static uint32_t SlotOffsetToIndex(uint32_t slot_offset) {
+@@ -127,6 +127,11 @@ class V8_EXPORT_PRIVATE JumpTableAssembler : public MacroAssembler {
+     FlushInstructionCache(base, lazy_compile_table_size);
+   }
+ 
++  // Initializes the jump table starting at {base} with jumps to the lazy
++  // compile table starting at {lazy_compile_table_start}.
++  static void InitializeJumpsToLazyCompileTable(
++      Address base, uint32_t num_slots, Address lazy_compile_table_start);
++
+   static void GenerateFarJumpTable(Address base, Address* stub_targets,
+                                    int num_runtime_slots,
+                                    int num_function_slots) {
+@@ -160,6 +165,9 @@ class V8_EXPORT_PRIVATE JumpTableAssembler : public MacroAssembler {
+       JumpTableAssembler::PatchFarJumpSlot(far_jump_table_slot, target);
+       CHECK(jtasm.EmitJumpSlot(far_jump_table_slot));
+     }
++    // We write nops here instead of skipping to avoid partial instructions in
++    // the jump table. Partial instructions can cause problems for the
++    // disassembler.
+     jtasm.NopBytes(kJumpTableSlotSize - jtasm.pc_offset());
+     FlushInstructionCache(jump_table_slot, kJumpTableSlotSize);
+   }
+@@ -167,7 +175,7 @@ class V8_EXPORT_PRIVATE JumpTableAssembler : public MacroAssembler {
+  private:
+   // Instantiate a {JumpTableAssembler} for patching.
+   explicit JumpTableAssembler(Address slot_addr, int size = 256)
+-      : MacroAssembler(nullptr, JumpTableAssemblerOptions(),
++      : TurboAssembler(nullptr, JumpTableAssemblerOptions(),
+                        CodeObjectRequired::kNo,
+                        ExternalAssemblerBuffer(
+                            reinterpret_cast<uint8_t*>(slot_addr), size)) {}
+@@ -262,6 +270,8 @@ class V8_EXPORT_PRIVATE JumpTableAssembler : public MacroAssembler {
+   static void PatchFarJumpSlot(Address slot, Address target);
+ 
+   void NopBytes(int bytes);
++
++  void SkipUntil(int offset);
+ };
+ 
+ }  // namespace wasm
+diff --git a/src/wasm/wasm-code-manager.cc b/src/wasm/wasm-code-manager.cc
+index 9a70ffa5cd..f648e3b925 100644
+--- a/src/wasm/wasm-code-manager.cc
++++ b/src/wasm/wasm-code-manager.cc
+@@ -836,6 +836,8 @@ void NativeModule::ReserveCodeTableForTesting(uint32_t max_functions) {
+       JumpTableAssembler::SizeForNumberOfSlots(max_functions),
+       single_code_space_region);
+   code_space_data_[0].jump_table = main_jump_table_;
++  CodeSpaceWriteScope code_space_write_scope(this);
++  InitializeJumpTableForLazyCompilation(max_functions);
+ }
+ 
+ void NativeModule::LogWasmCodes(Isolate* isolate, Script script) {
+@@ -956,6 +958,34 @@ WasmCode* NativeModule::AddCodeForTesting(Handle<Code> code) {
+   return PublishCodeLocked(std::move(new_code));
+ }
+ 
++void NativeModule::InitializeJumpTableForLazyCompilation(
++    uint32_t num_wasm_functions) {
++  if (!num_wasm_functions) return;
++  allocation_mutex_.AssertHeld();
++  DCHECK(CodeSpaceWriteScope::IsInScope());
++
++  DCHECK_NULL(lazy_compile_table_);
++  lazy_compile_table_ = CreateEmptyJumpTableLocked(
++      JumpTableAssembler::SizeForNumberOfLazyFunctions(num_wasm_functions));
++
++  DCHECK_EQ(1, code_space_data_.size());
++  const CodeSpaceData& code_space_data = code_space_data_[0];
++  DCHECK_NOT_NULL(code_space_data.jump_table);
++  DCHECK_NOT_NULL(code_space_data.far_jump_table);
++
++  Address compile_lazy_address =
++      code_space_data.far_jump_table->instruction_start() +
++      JumpTableAssembler::FarJumpSlotIndexToOffset(WasmCode::kWasmCompileLazy);
++
++  JumpTableAssembler::GenerateLazyCompileTable(
++      lazy_compile_table_->instruction_start(), num_wasm_functions,
++      module_->num_imported_functions, compile_lazy_address);
++
++  JumpTableAssembler::InitializeJumpsToLazyCompileTable(
++      code_space_data.jump_table->instruction_start(), num_wasm_functions,
++      lazy_compile_table_->instruction_start());
++}
++
+ void NativeModule::UseLazyStubLocked(uint32_t func_index) {
+   allocation_mutex_.AssertHeld();
+   DCHECK_LE(module_->num_imported_functions, func_index);
+@@ -965,19 +995,7 @@ void NativeModule::UseLazyStubLocked(uint32_t func_index) {
+   // scope instead.
+   DCHECK(CodeSpaceWriteScope::IsInScope());
+ 
+-  if (!lazy_compile_table_) {
+-    uint32_t num_slots = module_->num_declared_functions;
+-    WasmCodeRefScope code_ref_scope;
+-    lazy_compile_table_ = CreateEmptyJumpTableLocked(
+-        JumpTableAssembler::SizeForNumberOfLazyFunctions(num_slots));
+-    Address compile_lazy_address = GetNearRuntimeStubEntry(
+-        WasmCode::kWasmCompileLazy,
+-        FindJumpTablesForRegionLocked(
+-            base::AddressRegionOf(lazy_compile_table_->instructions())));
+-    JumpTableAssembler::GenerateLazyCompileTable(
+-        lazy_compile_table_->instruction_start(), num_slots,
+-        module_->num_imported_functions, compile_lazy_address);
+-  }
++  DCHECK_NOT_NULL(lazy_compile_table_);
+ 
+   // Add jump table entry for jump to the lazy compile stub.
+   uint32_t slot_index = declared_function_index(module(), func_index);
+@@ -1461,9 +1479,7 @@ void NativeModule::AddCodeSpaceLocked(base::AddressRegion region) {
+   code_space_data_.push_back(CodeSpaceData{region, jump_table, far_jump_table});
+ 
+   if (is_first_code_space) {
+-    for (uint32_t i = 0; i < num_wasm_functions; ++i) {
+-      UseLazyStubLocked(module_->num_imported_functions + i);
+-    }
++    InitializeJumpTableForLazyCompilation(num_wasm_functions);
+   }
+ 
+   if (jump_table && !is_first_code_space) {
+diff --git a/src/wasm/wasm-code-manager.h b/src/wasm/wasm-code-manager.h
+index 3b63e61b4d..d23c656819 100644
+--- a/src/wasm/wasm-code-manager.h
++++ b/src/wasm/wasm-code-manager.h
+@@ -637,6 +637,10 @@ class V8_EXPORT_PRIVATE NativeModule final {
+   // Adds anonymous code for testing purposes.
+   WasmCode* AddCodeForTesting(Handle<Code> code);
+ 
++  // Allocates and initializes the {lazy_compile_table_} and initializes the
++  // first jump table with jumps to the {lazy_compile_table_}.
++  void InitializeJumpTableForLazyCompilation(uint32_t num_wasm_functions);
++
+   // Use {UseLazyStubLocked} to setup lazy compilation per function. It will use
+   // the existing {WasmCode::kWasmCompileLazy} runtime stub and populate the
+   // jump table with trampolines accordingly.
+-- 
+2.35.1
+

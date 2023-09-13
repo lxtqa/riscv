@@ -1,0 +1,160 @@
+From ac0cedf1615db8d38a68de29210c5fff83a6f327 Mon Sep 17 00:00:00 2001
+From: Milad Fa <mfarazma@redhat.com>
+Date: Mon, 12 Sep 2022 11:21:42 -0400
+Subject: [PATCH] Fix LoadSpillAddress on big endian
+
+BE machines use a 4 byte bias to spill/fill 32-bit values on
+the stack. This is done so because TF always fills 64-bit values
+even if the spilled value was 32-bits. To make sure this holds between
+LO and TF we have added a 4 byte bias in this CL:
+crrev.com/c/2756712
+
+LoadSpillAddress needs to also take this into account and
+add a bias if the spilled value was 4 bytes.
+
+Change-Id: Ibd2b2071ce1fb11a9c5884611ae8edd1f17cb0c9
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3891196
+Commit-Queue: Milad Farazmand <mfarazma@redhat.com>
+Reviewed-by: Thibaud Michaud <thibaudm@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#83163}
+---
+ src/wasm/baseline/arm/liftoff-assembler-arm.h     | 3 ++-
+ src/wasm/baseline/arm64/liftoff-assembler-arm64.h | 3 ++-
+ src/wasm/baseline/ia32/liftoff-assembler-ia32.h   | 3 ++-
+ src/wasm/baseline/liftoff-assembler.h             | 2 +-
+ src/wasm/baseline/liftoff-compiler.cc             | 2 +-
+ src/wasm/baseline/ppc/liftoff-assembler-ppc.h     | 4 +++-
+ src/wasm/baseline/riscv/liftoff-assembler-riscv.h | 3 ++-
+ src/wasm/baseline/s390/liftoff-assembler-s390.h   | 4 +++-
+ src/wasm/baseline/x64/liftoff-assembler-x64.h     | 3 ++-
+ 9 files changed, 18 insertions(+), 9 deletions(-)
+
+diff --git a/src/wasm/baseline/arm/liftoff-assembler-arm.h b/src/wasm/baseline/arm/liftoff-assembler-arm.h
+index 74438b7a35..324b4860c8 100644
+--- a/src/wasm/baseline/arm/liftoff-assembler-arm.h
++++ b/src/wasm/baseline/arm/liftoff-assembler-arm.h
+@@ -1550,7 +1550,8 @@ void LiftoffAssembler::FillStackSlotsWithZero(int start, int size) {
+   pop(r0);
+ }
+ 
+-void LiftoffAssembler::LoadSpillAddress(Register dst, int offset) {
++void LiftoffAssembler::LoadSpillAddress(Register dst, int offset,
++                                        ValueKind /* kind */) {
+   sub(dst, fp, Operand(offset));
+ }
+ 
+diff --git a/src/wasm/baseline/arm64/liftoff-assembler-arm64.h b/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
+index 403dd61687..b2b3c3ff00 100644
+--- a/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
++++ b/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
+@@ -1033,7 +1033,8 @@ void LiftoffAssembler::FillStackSlotsWithZero(int start, int size) {
+   }
+ }
+ 
+-void LiftoffAssembler::LoadSpillAddress(Register dst, int offset) {
++void LiftoffAssembler::LoadSpillAddress(Register dst, int offset,
++                                        ValueKind /* kind */) {
+   Sub(dst, fp, offset);
+ }
+ 
+diff --git a/src/wasm/baseline/ia32/liftoff-assembler-ia32.h b/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
+index 6c5e3a0788..fad96ab52e 100644
+--- a/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
++++ b/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
+@@ -1286,7 +1286,8 @@ void LiftoffAssembler::FillStackSlotsWithZero(int start, int size) {
+   }
+ }
+ 
+-void LiftoffAssembler::LoadSpillAddress(Register dst, int offset) {
++void LiftoffAssembler::LoadSpillAddress(Register dst, int offset,
++                                        ValueKind /* kind */) {
+   lea(dst, liftoff::GetStackSlot(offset));
+ }
+ 
+diff --git a/src/wasm/baseline/liftoff-assembler.h b/src/wasm/baseline/liftoff-assembler.h
+index 91e957c31a..189509e724 100644
+--- a/src/wasm/baseline/liftoff-assembler.h
++++ b/src/wasm/baseline/liftoff-assembler.h
+@@ -658,7 +658,7 @@ class LiftoffAssembler : public TurboAssembler {
+   void Spill(VarState* slot);
+   void SpillLocals();
+   void SpillAllRegisters();
+-  inline void LoadSpillAddress(Register dst, int offset);
++  inline void LoadSpillAddress(Register dst, int offset, ValueKind kind);
+ 
+   // Clear any uses of {reg} in both the cache and in {possible_uses}.
+   // Any use in the stack is spilled. If any register in {possible_uses} matches
+diff --git a/src/wasm/baseline/liftoff-compiler.cc b/src/wasm/baseline/liftoff-compiler.cc
+index f3748f7dd6..deacfaf943 100644
+--- a/src/wasm/baseline/liftoff-compiler.cc
++++ b/src/wasm/baseline/liftoff-compiler.cc
+@@ -2360,7 +2360,7 @@ class LiftoffCompiler {
+         __ Spill(&return_slot);
+       }
+       DCHECK(return_slot.is_stack());
+-      __ LoadSpillAddress(param_reg, return_slot.offset());
++      __ LoadSpillAddress(param_reg, return_slot.offset(), return_slot.kind());
+     }
+ 
+     source_position_table_builder_.AddPosition(
+diff --git a/src/wasm/baseline/ppc/liftoff-assembler-ppc.h b/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
+index 7b8b5837fd..25d1411cd3 100644
+--- a/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
++++ b/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
+@@ -1093,7 +1093,9 @@ void LiftoffAssembler::FillStackSlotsWithZero(int start, int size) {
+   }
+ }
+ 
+-void LiftoffAssembler::LoadSpillAddress(Register dst, int offset) {
++void LiftoffAssembler::LoadSpillAddress(Register dst, int offset,
++                                        ValueKind kind) {
++  if (kind == kI32) offset = offset + stack_bias;
+   SubS64(dst, fp, Operand(offset));
+ }
+ 
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv.h
+index fb2dcf62cc..e5838031ab 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv.h
+@@ -157,7 +157,8 @@ void LiftoffAssembler::PatchPrepareStackFrame(
+   GenPCRelativeJump(kScratchReg, imm32);
+ }
+ 
+-void LiftoffAssembler::LoadSpillAddress(Register dst, int offset) {
++void LiftoffAssembler::LoadSpillAddress(Register dst, int offset,
++                                        ValueKind /* kind */) {
+   SubWord(dst, fp, offset);
+ }
+ 
+diff --git a/src/wasm/baseline/s390/liftoff-assembler-s390.h b/src/wasm/baseline/s390/liftoff-assembler-s390.h
+index 0476818b2f..8a45f09bf6 100644
+--- a/src/wasm/baseline/s390/liftoff-assembler-s390.h
++++ b/src/wasm/baseline/s390/liftoff-assembler-s390.h
+@@ -1552,7 +1552,9 @@ void LiftoffAssembler::FillStackSlotsWithZero(int start, int size) {
+   pop(r0);
+ }
+ 
+-void LiftoffAssembler::LoadSpillAddress(Register dst, int offset) {
++void LiftoffAssembler::LoadSpillAddress(Register dst, int offset,
++                                        ValueKind kind) {
++  if (kind == kI32) offset = offset + stack_bias;
+   SubS64(dst, fp, Operand(offset));
+ }
+ 
+diff --git a/src/wasm/baseline/x64/liftoff-assembler-x64.h b/src/wasm/baseline/x64/liftoff-assembler-x64.h
+index fe3e897c6b..3d3c16b187 100644
+--- a/src/wasm/baseline/x64/liftoff-assembler-x64.h
++++ b/src/wasm/baseline/x64/liftoff-assembler-x64.h
+@@ -1018,7 +1018,8 @@ void LiftoffAssembler::FillStackSlotsWithZero(int start, int size) {
+   }
+ }
+ 
+-void LiftoffAssembler::LoadSpillAddress(Register dst, int offset) {
++void LiftoffAssembler::LoadSpillAddress(Register dst, int offset,
++                                        ValueKind /* kind */) {
+   leaq(dst, liftoff::GetStackSlot(offset));
+ }
+ 
+-- 
+2.35.1
+

@@ -1,0 +1,1723 @@
+From 9fc11f9163883157e15595c55e629b7b67faa34c Mon Sep 17 00:00:00 2001
+From: Ng Zhi An <zhin@chromium.org>
+Date: Wed, 17 Nov 2021 10:14:02 -0800
+Subject: [PATCH] [cleanup] Rename RelocInfo::NONE to RelocInfo::NO_INFO to fix
+ -Wshadow
+
+NONE clashes with the PropertyAttributes::NONE, which is defined in
+v8::internal namespace. PropertyAttributes have too many call sites
+and depend on using the enums as masks, making it hard to convert
+to an enum class. So we are changing the name instead.
+
+Bug: v8:12244
+Change-Id: Iec0be12c626549cca137aceeaee0e30fafab8b05
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3284003
+Commit-Queue: Zhi An Ng <zhin@chromium.org>
+Reviewed-by: Andreas Haas <ahaas@chromium.org>
+Reviewed-by: Maya Lekova <mslekova@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#77956}
+---
+ src/codegen/arm/assembler-arm-inl.h           |  2 +-
+ src/codegen/arm/assembler-arm.cc              | 10 ++---
+ src/codegen/arm/assembler-arm.h               | 12 +++---
+ src/codegen/arm64/assembler-arm64-inl.h       |  4 +-
+ src/codegen/arm64/assembler-arm64.cc          |  8 ++--
+ src/codegen/arm64/assembler-arm64.h           | 12 +++---
+ src/codegen/assembler.h                       |  2 +-
+ src/codegen/constant-pool.h                   |  8 ++--
+ src/codegen/ia32/assembler-ia32-inl.h         |  6 +--
+ src/codegen/ia32/assembler-ia32.cc            | 14 +++----
+ src/codegen/ia32/assembler-ia32.h             | 28 +++++++------
+ src/codegen/loong64/assembler-loong64.cc      |  6 +--
+ src/codegen/loong64/assembler-loong64.h       | 11 ++---
+ .../loong64/macro-assembler-loong64.cc        |  4 +-
+ src/codegen/mips/assembler-mips.cc            | 12 +++---
+ src/codegen/mips/assembler-mips.h             | 11 ++---
+ src/codegen/mips/macro-assembler-mips.cc      |  6 +--
+ src/codegen/mips64/assembler-mips64.cc        |  6 +--
+ src/codegen/mips64/assembler-mips64.h         | 11 ++---
+ src/codegen/ppc/assembler-ppc-inl.h           |  2 +-
+ src/codegen/ppc/assembler-ppc.cc              |  8 ++--
+ src/codegen/ppc/assembler-ppc.h               | 12 +++---
+ src/codegen/reloc-info.cc                     |  4 +-
+ src/codegen/reloc-info.h                      |  6 +--
+ src/codegen/riscv64/assembler-riscv64.cc      |  6 +--
+ src/codegen/riscv64/assembler-riscv64.h       | 11 ++---
+ src/codegen/s390/assembler-s390-inl.h         |  2 +-
+ src/codegen/s390/assembler-s390.cc            |  6 +--
+ src/codegen/s390/assembler-s390.h             | 10 ++---
+ src/codegen/s390/macro-assembler-s390.cc      | 12 +++---
+ src/codegen/x64/assembler-x64-inl.h           |  4 +-
+ src/codegen/x64/assembler-x64.cc              | 15 +++----
+ src/codegen/x64/assembler-x64.h               | 10 ++---
+ src/codegen/x64/macro-assembler-x64.cc        | 12 +++---
+ src/codegen/x64/macro-assembler-x64.h         |  2 +-
+ src/compiler/backend/instruction.h            |  4 +-
+ src/diagnostics/disassembler.cc               |  4 +-
+ src/wasm/baseline/arm/liftoff-assembler-arm.h |  2 +-
+ .../baseline/ia32/liftoff-assembler-ia32.h    |  2 +-
+ src/wasm/baseline/liftoff-assembler.h         |  2 +-
+ .../baseline/mips/liftoff-assembler-mips.h    |  2 +-
+ src/wasm/baseline/x64/liftoff-assembler-x64.h |  4 +-
+ src/wasm/jump-table-assembler.cc              | 18 ++++-----
+ test/cctest/test-assembler-arm64.cc           |  2 +-
+ test/cctest/test-assembler-ia32.cc            |  2 +-
+ test/cctest/test-assembler-s390.cc            |  6 +--
+ test/cctest/test-disasm-ia32.cc               |  2 +-
+ test/cctest/test-macro-assembler-x64.cc       |  2 +-
+ test/cctest/wasm/test-jump-table-assembler.cc | 40 +++++++++----------
+ .../wasm/trap-handler-x64-unittest.cc         | 14 +++----
+ 50 files changed, 205 insertions(+), 196 deletions(-)
+
+diff --git a/src/codegen/arm/assembler-arm-inl.h b/src/codegen/arm/assembler-arm-inl.h
+index 0ee81b2f94..9080b3e0b3 100644
+--- a/src/codegen/arm/assembler-arm-inl.h
++++ b/src/codegen/arm/assembler-arm-inl.h
+@@ -195,7 +195,7 @@ Operand::Operand(const ExternalReference& f)
+   value_.immediate = static_cast<int32_t>(f.address());
+ }
+ 
+-Operand::Operand(Smi value) : rmode_(RelocInfo::NONE) {
++Operand::Operand(Smi value) : rmode_(RelocInfo::NO_INFO) {
+   value_.immediate = static_cast<intptr_t>(value.ptr());
+ }
+ 
+diff --git a/src/codegen/arm/assembler-arm.cc b/src/codegen/arm/assembler-arm.cc
+index 38d691007f..e434cac32d 100644
+--- a/src/codegen/arm/assembler-arm.cc
++++ b/src/codegen/arm/assembler-arm.cc
+@@ -1132,7 +1132,7 @@ bool MustOutputRelocInfo(RelocInfo::Mode rmode, const Assembler* assembler) {
+   if (RelocInfo::IsOnlyForSerializer(rmode)) {
+     if (assembler->predictable_code_size()) return true;
+     return assembler->options().record_reloc_info_for_serialization;
+-  } else if (RelocInfo::IsNone(rmode)) {
++  } else if (RelocInfo::IsNoInfo(rmode)) {
+     return false;
+   }
+   return true;
+@@ -1464,7 +1464,7 @@ int Assembler::branch_offset(Label* L) {
+ 
+ // Branch instructions.
+ void Assembler::b(int branch_offset, Condition cond, RelocInfo::Mode rmode) {
+-  if (!RelocInfo::IsNone(rmode)) RecordRelocInfo(rmode);
++  if (!RelocInfo::IsNoInfo(rmode)) RecordRelocInfo(rmode);
+   DCHECK_EQ(branch_offset & 3, 0);
+   int imm24 = branch_offset >> 2;
+   const bool b_imm_check = is_int24(imm24);
+@@ -1478,7 +1478,7 @@ void Assembler::b(int branch_offset, Condition cond, RelocInfo::Mode rmode) {
+ }
+ 
+ void Assembler::bl(int branch_offset, Condition cond, RelocInfo::Mode rmode) {
+-  if (!RelocInfo::IsNone(rmode)) RecordRelocInfo(rmode);
++  if (!RelocInfo::IsNoInfo(rmode)) RecordRelocInfo(rmode);
+   DCHECK_EQ(branch_offset & 3, 0);
+   int imm24 = branch_offset >> 2;
+   const bool bl_imm_check = is_int24(imm24);
+@@ -5226,7 +5226,7 @@ void Assembler::dd(uint32_t data, RelocInfo::Mode rmode) {
+   // blocked before using dd.
+   DCHECK(is_const_pool_blocked() || pending_32_bit_constants_.empty());
+   CheckBuffer();
+-  if (!RelocInfo::IsNone(rmode)) {
++  if (!RelocInfo::IsNoInfo(rmode)) {
+     DCHECK(RelocInfo::IsDataEmbeddedObject(rmode) ||
+            RelocInfo::IsLiteralConstant(rmode));
+     RecordRelocInfo(rmode);
+@@ -5240,7 +5240,7 @@ void Assembler::dq(uint64_t value, RelocInfo::Mode rmode) {
+   // blocked before using dq.
+   DCHECK(is_const_pool_blocked() || pending_32_bit_constants_.empty());
+   CheckBuffer();
+-  if (!RelocInfo::IsNone(rmode)) {
++  if (!RelocInfo::IsNoInfo(rmode)) {
+     DCHECK(RelocInfo::IsDataEmbeddedObject(rmode) ||
+            RelocInfo::IsLiteralConstant(rmode));
+     RecordRelocInfo(rmode);
+diff --git a/src/codegen/arm/assembler-arm.h b/src/codegen/arm/assembler-arm.h
+index a7d224a094..4cce50f795 100644
+--- a/src/codegen/arm/assembler-arm.h
++++ b/src/codegen/arm/assembler-arm.h
+@@ -87,7 +87,7 @@ class V8_EXPORT_PRIVATE Operand {
+  public:
+   // immediate
+   V8_INLINE explicit Operand(int32_t immediate,
+-                             RelocInfo::Mode rmode = RelocInfo::NONE)
++                             RelocInfo::Mode rmode = RelocInfo::NO_INFO)
+       : rmode_(rmode) {
+     value_.immediate = immediate;
+   }
+@@ -405,9 +405,9 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+ 
+   // Branch instructions
+   void b(int branch_offset, Condition cond = al,
+-         RelocInfo::Mode rmode = RelocInfo::NONE);
++         RelocInfo::Mode rmode = RelocInfo::NO_INFO);
+   void bl(int branch_offset, Condition cond = al,
+-          RelocInfo::Mode rmode = RelocInfo::NONE);
++          RelocInfo::Mode rmode = RelocInfo::NO_INFO);
+   void blx(int branch_offset);                     // v5 and above
+   void blx(Register target, Condition cond = al);  // v5 and above
+   void bx(Register target, Condition cond = al);   // v5 and above, plus v4t
+@@ -1095,9 +1095,9 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // called before any use of db/dd/dq/dp to ensure that constant pools
+   // are not emitted as part of the tables generated.
+   void db(uint8_t data);
+-  void dd(uint32_t data, RelocInfo::Mode rmode = RelocInfo::NONE);
+-  void dq(uint64_t data, RelocInfo::Mode rmode = RelocInfo::NONE);
+-  void dp(uintptr_t data, RelocInfo::Mode rmode = RelocInfo::NONE) {
++  void dd(uint32_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO);
++  void dq(uint64_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO);
++  void dp(uintptr_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO) {
+     dd(data, rmode);
+   }
+ 
+diff --git a/src/codegen/arm64/assembler-arm64-inl.h b/src/codegen/arm64/assembler-arm64-inl.h
+index c5a1d4fd8a..40b9a94dd8 100644
+--- a/src/codegen/arm64/assembler-arm64-inl.h
++++ b/src/codegen/arm64/assembler-arm64-inl.h
+@@ -192,7 +192,7 @@ inline VRegister CPURegister::Q() const {
+ // Default initializer is for int types
+ template <typename T>
+ struct ImmediateInitializer {
+-  static inline RelocInfo::Mode rmode_for(T) { return RelocInfo::NONE; }
++  static inline RelocInfo::Mode rmode_for(T) { return RelocInfo::NO_INFO; }
+   static inline int64_t immediate_for(T t) {
+     STATIC_ASSERT(sizeof(T) <= 8);
+     STATIC_ASSERT(std::is_integral<T>::value || std::is_enum<T>::value);
+@@ -202,7 +202,7 @@ struct ImmediateInitializer {
+ 
+ template <>
+ struct ImmediateInitializer<Smi> {
+-  static inline RelocInfo::Mode rmode_for(Smi t) { return RelocInfo::NONE; }
++  static inline RelocInfo::Mode rmode_for(Smi t) { return RelocInfo::NO_INFO; }
+   static inline int64_t immediate_for(Smi t) {
+     return static_cast<int64_t>(t.ptr());
+   }
+diff --git a/src/codegen/arm64/assembler-arm64.cc b/src/codegen/arm64/assembler-arm64.cc
+index 627c7ae021..fd5cd326ec 100644
+--- a/src/codegen/arm64/assembler-arm64.cc
++++ b/src/codegen/arm64/assembler-arm64.cc
+@@ -314,7 +314,7 @@ bool Operand::NeedsRelocation(const Assembler* assembler) const {
+     return assembler->options().record_reloc_info_for_serialization;
+   }
+ 
+-  return !RelocInfo::IsNone(rmode);
++  return !RelocInfo::IsNoInfo(rmode);
+ }
+ 
+ // Assembler
+@@ -4375,13 +4375,15 @@ void Assembler::RecordRelocInfo(RelocInfo::Mode rmode, intptr_t data,
+ 
+ void Assembler::near_jump(int offset, RelocInfo::Mode rmode) {
+   BlockPoolsScope no_pool_before_b_instr(this);
+-  if (!RelocInfo::IsNone(rmode)) RecordRelocInfo(rmode, offset, NO_POOL_ENTRY);
++  if (!RelocInfo::IsNoInfo(rmode))
++    RecordRelocInfo(rmode, offset, NO_POOL_ENTRY);
+   b(offset);
+ }
+ 
+ void Assembler::near_call(int offset, RelocInfo::Mode rmode) {
+   BlockPoolsScope no_pool_before_bl_instr(this);
+-  if (!RelocInfo::IsNone(rmode)) RecordRelocInfo(rmode, offset, NO_POOL_ENTRY);
++  if (!RelocInfo::IsNoInfo(rmode))
++    RecordRelocInfo(rmode, offset, NO_POOL_ENTRY);
+   bl(offset);
+ }
+ 
+diff --git a/src/codegen/arm64/assembler-arm64.h b/src/codegen/arm64/assembler-arm64.h
+index dac90f8058..df8fadf1f1 100644
+--- a/src/codegen/arm64/assembler-arm64.h
++++ b/src/codegen/arm64/assembler-arm64.h
+@@ -2065,27 +2065,27 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+ 
+   // Required by V8.
+   void db(uint8_t data) { dc8(data); }
+-  void dd(uint32_t data, RelocInfo::Mode rmode = RelocInfo::NONE) {
++  void dd(uint32_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO) {
+     BlockPoolsScope no_pool_scope(this);
+-    if (!RelocInfo::IsNone(rmode)) {
++    if (!RelocInfo::IsNoInfo(rmode)) {
+       DCHECK(RelocInfo::IsDataEmbeddedObject(rmode) ||
+              RelocInfo::IsLiteralConstant(rmode));
+       RecordRelocInfo(rmode);
+     }
+     dc32(data);
+   }
+-  void dq(uint64_t data, RelocInfo::Mode rmode = RelocInfo::NONE) {
++  void dq(uint64_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO) {
+     BlockPoolsScope no_pool_scope(this);
+-    if (!RelocInfo::IsNone(rmode)) {
++    if (!RelocInfo::IsNoInfo(rmode)) {
+       DCHECK(RelocInfo::IsDataEmbeddedObject(rmode) ||
+              RelocInfo::IsLiteralConstant(rmode));
+       RecordRelocInfo(rmode);
+     }
+     dc64(data);
+   }
+-  void dp(uintptr_t data, RelocInfo::Mode rmode = RelocInfo::NONE) {
++  void dp(uintptr_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO) {
+     BlockPoolsScope no_pool_scope(this);
+-    if (!RelocInfo::IsNone(rmode)) {
++    if (!RelocInfo::IsNoInfo(rmode)) {
+       DCHECK(RelocInfo::IsDataEmbeddedObject(rmode) ||
+              RelocInfo::IsLiteralConstant(rmode));
+       RecordRelocInfo(rmode);
+diff --git a/src/codegen/assembler.h b/src/codegen/assembler.h
+index cba6052078..42330b7def 100644
+--- a/src/codegen/assembler.h
++++ b/src/codegen/assembler.h
+@@ -387,7 +387,7 @@ class V8_EXPORT_PRIVATE AssemblerBase : public Malloced {
+   void RequestHeapObject(HeapObjectRequest request);
+ 
+   bool ShouldRecordRelocInfo(RelocInfo::Mode rmode) const {
+-    DCHECK(!RelocInfo::IsNone(rmode));
++    DCHECK(!RelocInfo::IsNoInfo(rmode));
+     if (options().disable_reloc_info_for_patching) return false;
+     if (RelocInfo::IsOnlyForSerializer(rmode) &&
+         !options().record_reloc_info_for_serialization && !FLAG_debug_code) {
+diff --git a/src/codegen/constant-pool.h b/src/codegen/constant-pool.h
+index b2d890c6f4..76956381a2 100644
+--- a/src/codegen/constant-pool.h
++++ b/src/codegen/constant-pool.h
+@@ -24,13 +24,13 @@ class ConstantPoolEntry {
+  public:
+   ConstantPoolEntry() = default;
+   ConstantPoolEntry(int position, intptr_t value, bool sharing_ok,
+-                    RelocInfo::Mode rmode = RelocInfo::NONE)
++                    RelocInfo::Mode rmode = RelocInfo::NO_INFO)
+       : position_(position),
+         merged_index_(sharing_ok ? SHARING_ALLOWED : SHARING_PROHIBITED),
+         value_(value),
+         rmode_(rmode) {}
+   ConstantPoolEntry(int position, base::Double value,
+-                    RelocInfo::Mode rmode = RelocInfo::NONE)
++                    RelocInfo::Mode rmode = RelocInfo::NO_INFO)
+       : position_(position),
+         merged_index_(SHARING_ALLOWED),
+         value64_(value.AsUint64()),
+@@ -168,11 +168,11 @@ class ConstantPoolBuilder {
+ class ConstantPoolKey {
+  public:
+   explicit ConstantPoolKey(uint64_t value,
+-                           RelocInfo::Mode rmode = RelocInfo::NONE)
++                           RelocInfo::Mode rmode = RelocInfo::NO_INFO)
+       : is_value32_(false), value64_(value), rmode_(rmode) {}
+ 
+   explicit ConstantPoolKey(uint32_t value,
+-                           RelocInfo::Mode rmode = RelocInfo::NONE)
++                           RelocInfo::Mode rmode = RelocInfo::NO_INFO)
+       : is_value32_(true), value32_(value), rmode_(rmode) {}
+ 
+   uint64_t value64() const {
+diff --git a/src/codegen/ia32/assembler-ia32-inl.h b/src/codegen/ia32/assembler-ia32-inl.h
+index 2d2b368c7b..607c0aca6e 100644
+--- a/src/codegen/ia32/assembler-ia32-inl.h
++++ b/src/codegen/ia32/assembler-ia32-inl.h
+@@ -179,7 +179,7 @@ void Assembler::emit(Handle<HeapObject> handle) {
+ }
+ 
+ void Assembler::emit(uint32_t x, RelocInfo::Mode rmode) {
+-  if (!RelocInfo::IsNone(rmode)) {
++  if (!RelocInfo::IsNoInfo(rmode)) {
+     RecordRelocInfo(rmode);
+   }
+   emit(x);
+@@ -195,7 +195,7 @@ void Assembler::emit(const Immediate& x) {
+     emit_code_relative_offset(label);
+     return;
+   }
+-  if (!RelocInfo::IsNone(x.rmode_)) RecordRelocInfo(x.rmode_);
++  if (!RelocInfo::IsNoInfo(x.rmode_)) RecordRelocInfo(x.rmode_);
+   if (x.is_heap_object_request()) {
+     RequestHeapObject(x.heap_object_request());
+     emit(0);
+@@ -221,7 +221,7 @@ void Assembler::emit_b(Immediate x) {
+ }
+ 
+ void Assembler::emit_w(const Immediate& x) {
+-  DCHECK(RelocInfo::IsNone(x.rmode_));
++  DCHECK(RelocInfo::IsNoInfo(x.rmode_));
+   uint16_t value = static_cast<uint16_t>(x.immediate());
+   WriteUnalignedValue(reinterpret_cast<Address>(pc_), value);
+   pc_ += sizeof(uint16_t);
+diff --git a/src/codegen/ia32/assembler-ia32.cc b/src/codegen/ia32/assembler-ia32.cc
+index 7888654ff7..389640e89a 100644
+--- a/src/codegen/ia32/assembler-ia32.cc
++++ b/src/codegen/ia32/assembler-ia32.cc
+@@ -235,11 +235,11 @@ uint32_t RelocInfo::wasm_call_tag() const {
+ 
+ Operand::Operand(Register base, int32_t disp, RelocInfo::Mode rmode) {
+   // [base + disp/r]
+-  if (disp == 0 && RelocInfo::IsNone(rmode) && base != ebp) {
++  if (disp == 0 && RelocInfo::IsNoInfo(rmode) && base != ebp) {
+     // [base]
+     set_modrm(0, base);
+     if (base == esp) set_sib(times_1, esp, base);
+-  } else if (is_int8(disp) && RelocInfo::IsNone(rmode)) {
++  } else if (is_int8(disp) && RelocInfo::IsNoInfo(rmode)) {
+     // [base + disp8]
+     set_modrm(1, base);
+     if (base == esp) set_sib(times_1, esp, base);
+@@ -256,11 +256,11 @@ Operand::Operand(Register base, Register index, ScaleFactor scale, int32_t disp,
+                  RelocInfo::Mode rmode) {
+   DCHECK(index != esp);  // illegal addressing mode
+   // [base + index*scale + disp/r]
+-  if (disp == 0 && RelocInfo::IsNone(rmode) && base != ebp) {
++  if (disp == 0 && RelocInfo::IsNoInfo(rmode) && base != ebp) {
+     // [base + index*scale]
+     set_modrm(0, esp);
+     set_sib(scale, index, base);
+-  } else if (is_int8(disp) && RelocInfo::IsNone(rmode)) {
++  } else if (is_int8(disp) && RelocInfo::IsNoInfo(rmode)) {
+     // [base + index*scale + disp8]
+     set_modrm(1, esp);
+     set_sib(scale, index, base);
+@@ -3378,7 +3378,7 @@ void Assembler::emit_operand(int code, Operand adr) {
+   for (unsigned i = 1; i < length; i++) EMIT(adr.encoded_bytes()[i]);
+ 
+   // Emit relocation information if necessary.
+-  if (length >= sizeof(int32_t) && !RelocInfo::IsNone(adr.rmode())) {
++  if (length >= sizeof(int32_t) && !RelocInfo::IsNoInfo(adr.rmode())) {
+     pc_ -= sizeof(int32_t);  // pc_ must be *at* disp32
+     RecordRelocInfo(adr.rmode());
+     if (adr.rmode() == RelocInfo::INTERNAL_REFERENCE) {  // Fixup for labels
+@@ -3412,7 +3412,7 @@ void Assembler::db(uint8_t data) {
+ 
+ void Assembler::dd(uint32_t data, RelocInfo::Mode rmode) {
+   EnsureSpace ensure_space(this);
+-  if (!RelocInfo::IsNone(rmode)) {
++  if (!RelocInfo::IsNoInfo(rmode)) {
+     DCHECK(RelocInfo::IsDataEmbeddedObject(rmode) ||
+            RelocInfo::IsLiteralConstant(rmode));
+     RecordRelocInfo(rmode);
+@@ -3422,7 +3422,7 @@ void Assembler::dd(uint32_t data, RelocInfo::Mode rmode) {
+ 
+ void Assembler::dq(uint64_t data, RelocInfo::Mode rmode) {
+   EnsureSpace ensure_space(this);
+-  if (!RelocInfo::IsNone(rmode)) {
++  if (!RelocInfo::IsNoInfo(rmode)) {
+     DCHECK(RelocInfo::IsDataEmbeddedObject(rmode));
+     RecordRelocInfo(rmode);
+   }
+diff --git a/src/codegen/ia32/assembler-ia32.h b/src/codegen/ia32/assembler-ia32.h
+index 5f259b25f0..8c5f20a112 100644
+--- a/src/codegen/ia32/assembler-ia32.h
++++ b/src/codegen/ia32/assembler-ia32.h
+@@ -106,7 +106,7 @@ enum RoundingMode {
+ class Immediate {
+  public:
+   // Calls where x is an Address (uintptr_t) resolve to this overload.
+-  inline explicit Immediate(int x, RelocInfo::Mode rmode = RelocInfo::NONE) {
++  inline explicit Immediate(int x, RelocInfo::Mode rmode = RelocInfo::NO_INFO) {
+     value_.immediate = x;
+     rmode_ = rmode;
+   }
+@@ -157,19 +157,21 @@ class Immediate {
+     return bit_cast<ExternalReference>(immediate());
+   }
+ 
+-  bool is_zero() const { return RelocInfo::IsNone(rmode_) && immediate() == 0; }
++  bool is_zero() const {
++    return RelocInfo::IsNoInfo(rmode_) && immediate() == 0;
++  }
+   bool is_int8() const {
+-    return RelocInfo::IsNone(rmode_) && i::is_int8(immediate());
++    return RelocInfo::IsNoInfo(rmode_) && i::is_int8(immediate());
+   }
+   bool is_uint8() const {
+-    return RelocInfo::IsNone(rmode_) && i::is_uint8(immediate());
++    return RelocInfo::IsNoInfo(rmode_) && i::is_uint8(immediate());
+   }
+   bool is_int16() const {
+-    return RelocInfo::IsNone(rmode_) && i::is_int16(immediate());
++    return RelocInfo::IsNoInfo(rmode_) && i::is_int16(immediate());
+   }
+ 
+   bool is_uint16() const {
+-    return RelocInfo::IsNone(rmode_) && i::is_uint16(immediate());
++    return RelocInfo::IsNoInfo(rmode_) && i::is_uint16(immediate());
+   }
+ 
+   RelocInfo::Mode rmode() const { return rmode_; }
+@@ -234,7 +236,7 @@ class V8_EXPORT_PRIVATE Operand {
+ 
+   // [base + disp/r]
+   explicit Operand(Register base, int32_t disp,
+-                   RelocInfo::Mode rmode = RelocInfo::NONE);
++                   RelocInfo::Mode rmode = RelocInfo::NO_INFO);
+ 
+   // [rip + disp/r]
+   explicit Operand(Label* label) {
+@@ -244,11 +246,11 @@ class V8_EXPORT_PRIVATE Operand {
+ 
+   // [base + index*scale + disp/r]
+   explicit Operand(Register base, Register index, ScaleFactor scale,
+-                   int32_t disp, RelocInfo::Mode rmode = RelocInfo::NONE);
++                   int32_t disp, RelocInfo::Mode rmode = RelocInfo::NO_INFO);
+ 
+   // [index*scale + disp/r]
+   explicit Operand(Register index, ScaleFactor scale, int32_t disp,
+-                   RelocInfo::Mode rmode = RelocInfo::NONE);
++                   RelocInfo::Mode rmode = RelocInfo::NO_INFO);
+ 
+   static Operand JumpTable(Register index, ScaleFactor scale, Label* table) {
+     return Operand(index, scale, reinterpret_cast<int32_t>(table),
+@@ -301,7 +303,7 @@ class V8_EXPORT_PRIVATE Operand {
+   // The number of bytes in buf_.
+   uint8_t len_ = 0;
+   // Only valid if len_ > 4.
+-  RelocInfo::Mode rmode_ = RelocInfo::NONE;
++  RelocInfo::Mode rmode_ = RelocInfo::NO_INFO;
+ };
+ ASSERT_TRIVIALLY_COPYABLE(Operand);
+ static_assert(sizeof(Operand) <= 2 * kSystemPointerSize,
+@@ -1639,9 +1641,9 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // Writes a single byte or word of data in the code stream.  Used for
+   // inline tables, e.g., jump-tables.
+   void db(uint8_t data);
+-  void dd(uint32_t data, RelocInfo::Mode rmode = RelocInfo::NONE);
+-  void dq(uint64_t data, RelocInfo::Mode rmode = RelocInfo::NONE);
+-  void dp(uintptr_t data, RelocInfo::Mode rmode = RelocInfo::NONE) {
++  void dd(uint32_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO);
++  void dq(uint64_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO);
++  void dp(uintptr_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO) {
+     dd(data, rmode);
+   }
+   void dd(Label* label);
+diff --git a/src/codegen/loong64/assembler-loong64.cc b/src/codegen/loong64/assembler-loong64.cc
+index 131fff9a6a..d212bec035 100644
+--- a/src/codegen/loong64/assembler-loong64.cc
++++ b/src/codegen/loong64/assembler-loong64.cc
+@@ -672,7 +672,7 @@ int Assembler::BranchOffset(Instr instr) {
+ // instruction space. There is no guarantee that the relocated location can be
+ // similarly encoded.
+ bool Assembler::MustUseReg(RelocInfo::Mode rmode) {
+-  return !RelocInfo::IsNone(rmode);
++  return !RelocInfo::IsNoInfo(rmode);
+ }
+ 
+ void Assembler::GenB(Opcode opcode, Register rj, int32_t si21) {
+@@ -2168,7 +2168,7 @@ void Assembler::dd(uint32_t data, RelocInfo::Mode rmode) {
+   if (!is_buffer_growth_blocked()) {
+     CheckBuffer();
+   }
+-  if (!RelocInfo::IsNone(rmode)) {
++  if (!RelocInfo::IsNoInfo(rmode)) {
+     DCHECK(RelocInfo::IsDataEmbeddedObject(rmode) ||
+            RelocInfo::IsLiteralConstant(rmode));
+     RecordRelocInfo(rmode);
+@@ -2181,7 +2181,7 @@ void Assembler::dq(uint64_t data, RelocInfo::Mode rmode) {
+   if (!is_buffer_growth_blocked()) {
+     CheckBuffer();
+   }
+-  if (!RelocInfo::IsNone(rmode)) {
++  if (!RelocInfo::IsNoInfo(rmode)) {
+     DCHECK(RelocInfo::IsDataEmbeddedObject(rmode) ||
+            RelocInfo::IsLiteralConstant(rmode));
+     RecordRelocInfo(rmode);
+diff --git a/src/codegen/loong64/assembler-loong64.h b/src/codegen/loong64/assembler-loong64.h
+index 5264258d93..63fe001d22 100644
+--- a/src/codegen/loong64/assembler-loong64.h
++++ b/src/codegen/loong64/assembler-loong64.h
+@@ -33,7 +33,7 @@ class Operand {
+  public:
+   // Immediate.
+   V8_INLINE explicit Operand(int64_t immediate,
+-                             RelocInfo::Mode rmode = RelocInfo::NONE)
++                             RelocInfo::Mode rmode = RelocInfo::NO_INFO)
+       : rm_(no_reg), rmode_(rmode) {
+     value_.immediate = immediate;
+   }
+@@ -43,7 +43,8 @@ class Operand {
+   }
+   V8_INLINE explicit Operand(const char* s);
+   explicit Operand(Handle<HeapObject> handle);
+-  V8_INLINE explicit Operand(Smi value) : rm_(no_reg), rmode_(RelocInfo::NONE) {
++  V8_INLINE explicit Operand(Smi value)
++      : rm_(no_reg), rmode_(RelocInfo::NO_INFO) {
+     value_.immediate = static_cast<intptr_t>(value.ptr());
+   }
+ 
+@@ -738,9 +739,9 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // Writes a single byte or word of data in the code stream.  Used for
+   // inline tables, e.g., jump-tables.
+   void db(uint8_t data);
+-  void dd(uint32_t data, RelocInfo::Mode rmode = RelocInfo::NONE);
+-  void dq(uint64_t data, RelocInfo::Mode rmode = RelocInfo::NONE);
+-  void dp(uintptr_t data, RelocInfo::Mode rmode = RelocInfo::NONE) {
++  void dd(uint32_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO);
++  void dq(uint64_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO);
++  void dp(uintptr_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO) {
+     dq(data, rmode);
+   }
+   void dd(Label* label);
+diff --git a/src/codegen/loong64/macro-assembler-loong64.cc b/src/codegen/loong64/macro-assembler-loong64.cc
+index b7f1e99e32..96d8a34f93 100644
+--- a/src/codegen/loong64/macro-assembler-loong64.cc
++++ b/src/codegen/loong64/macro-assembler-loong64.cc
+@@ -2677,9 +2677,9 @@ void TurboAssembler::Call(Address target, RelocInfo::Mode rmode, Condition cond,
+     BranchShort(&skip, NegateCondition(cond), rj, rk);
+   }
+   intptr_t offset_diff = target - pc_offset();
+-  if (RelocInfo::IsNone(rmode) && is_int28(offset_diff)) {
++  if (RelocInfo::IsNoInfo(rmode) && is_int28(offset_diff)) {
+     bl(offset_diff >> 2);
+-  } else if (RelocInfo::IsNone(rmode) && is_int38(offset_diff)) {
++  } else if (RelocInfo::IsNoInfo(rmode) && is_int38(offset_diff)) {
+     pcaddu18i(t7, static_cast<int32_t>(offset_diff) >> 18);
+     jirl(ra, t7, (offset_diff & 0x3ffff) >> 2);
+   } else {
+diff --git a/src/codegen/mips/assembler-mips.cc b/src/codegen/mips/assembler-mips.cc
+index e1ba6e511f..267281396a 100644
+--- a/src/codegen/mips/assembler-mips.cc
++++ b/src/codegen/mips/assembler-mips.cc
+@@ -1133,7 +1133,7 @@ int Assembler::BranchOffset(Instr instr) {
+ // space.  There is no guarantee that the relocated location can be similarly
+ // encoded.
+ bool Assembler::MustUseReg(RelocInfo::Mode rmode) {
+-  return !RelocInfo::IsNone(rmode);
++  return !RelocInfo::IsNoInfo(rmode);
+ }
+ 
+ void Assembler::GenInstrRegister(Opcode opcode, Register rs, Register rt,
+@@ -3591,7 +3591,7 @@ void Assembler::db(uint8_t data) {
+ 
+ void Assembler::dd(uint32_t data, RelocInfo::Mode rmode) {
+   CheckForEmitInForbiddenSlot();
+-  if (!RelocInfo::IsNone(rmode)) {
++  if (!RelocInfo::IsNoInfo(rmode)) {
+     DCHECK(RelocInfo::IsDataEmbeddedObject(rmode) ||
+            RelocInfo::IsLiteralConstant(rmode));
+     RecordRelocInfo(rmode);
+@@ -3602,7 +3602,7 @@ void Assembler::dd(uint32_t data, RelocInfo::Mode rmode) {
+ 
+ void Assembler::dq(uint64_t data, RelocInfo::Mode rmode) {
+   CheckForEmitInForbiddenSlot();
+-  if (!RelocInfo::IsNone(rmode)) {
++  if (!RelocInfo::IsNoInfo(rmode)) {
+     DCHECK(RelocInfo::IsDataEmbeddedObject(rmode) ||
+            RelocInfo::IsLiteralConstant(rmode));
+     RecordRelocInfo(rmode);
+@@ -3677,7 +3677,7 @@ void Assembler::CheckTrampolinePool() {
+             bc(&after_pool);
+             nop();
+           } else {
+-            GenPCRelativeJump(t8, t9, 0, RelocInfo::NONE,
++            GenPCRelativeJump(t8, t9, 0, RelocInfo::NO_INFO,
+                               BranchDelaySlot::PROTECT);
+           }
+         }
+@@ -3799,7 +3799,7 @@ void Assembler::GenPCRelativeJump(Register tf, Register ts, int32_t imm32,
+   // or when changing imm32 that lui/ori pair loads.
+   or_(tf, ra, zero_reg);
+   nal();  // Relative place of nal instruction determines kLongBranchPCOffset.
+-  if (!RelocInfo::IsNone(rmode)) {
++  if (!RelocInfo::IsNoInfo(rmode)) {
+     RecordRelocInfo(rmode);
+   }
+   lui(ts, (imm32 & kHiMask) >> kLuiShift);
+@@ -3817,7 +3817,7 @@ void Assembler::GenPCRelativeJump(Register tf, Register ts, int32_t imm32,
+ void Assembler::GenPCRelativeJumpAndLink(Register t, int32_t imm32,
+                                          RelocInfo::Mode rmode,
+                                          BranchDelaySlot bdslot) {
+-  if (!RelocInfo::IsNone(rmode)) {
++  if (!RelocInfo::IsNoInfo(rmode)) {
+     RecordRelocInfo(rmode);
+   }
+   // Order of these instructions is relied upon when patching them
+diff --git a/src/codegen/mips/assembler-mips.h b/src/codegen/mips/assembler-mips.h
+index 7b5ee5996b..0acee5e39d 100644
+--- a/src/codegen/mips/assembler-mips.h
++++ b/src/codegen/mips/assembler-mips.h
+@@ -63,7 +63,7 @@ class Operand {
+  public:
+   // Immediate.
+   V8_INLINE explicit Operand(int32_t immediate,
+-                             RelocInfo::Mode rmode = RelocInfo::NONE)
++                             RelocInfo::Mode rmode = RelocInfo::NO_INFO)
+       : rm_(no_reg), rmode_(rmode) {
+     value_.immediate = immediate;
+   }
+@@ -73,7 +73,8 @@ class Operand {
+   }
+   V8_INLINE explicit Operand(const char* s);
+   explicit Operand(Handle<HeapObject> handle);
+-  V8_INLINE explicit Operand(Smi value) : rm_(no_reg), rmode_(RelocInfo::NONE) {
++  V8_INLINE explicit Operand(Smi value)
++      : rm_(no_reg), rmode_(RelocInfo::NO_INFO) {
+     value_.immediate = static_cast<intptr_t>(value.ptr());
+   }
+ 
+@@ -1399,9 +1400,9 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // Writes a single byte or word of data in the code stream.  Used for
+   // inline tables, e.g., jump-tables.
+   void db(uint8_t data);
+-  void dd(uint32_t data, RelocInfo::Mode rmode = RelocInfo::NONE);
+-  void dq(uint64_t data, RelocInfo::Mode rmode = RelocInfo::NONE);
+-  void dp(uintptr_t data, RelocInfo::Mode rmode = RelocInfo::NONE) {
++  void dd(uint32_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO);
++  void dq(uint64_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO);
++  void dp(uintptr_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO) {
+     dd(data, rmode);
+   }
+   void dd(Label* label);
+diff --git a/src/codegen/mips/macro-assembler-mips.cc b/src/codegen/mips/macro-assembler-mips.cc
+index 4c76a1c1ec..aedf0b7fa3 100644
+--- a/src/codegen/mips/macro-assembler-mips.cc
++++ b/src/codegen/mips/macro-assembler-mips.cc
+@@ -4047,7 +4047,7 @@ void TurboAssembler::BranchLong(Label* L, BranchDelaySlot bdslot) {
+     BlockTrampolinePoolScope block_trampoline_pool(this);
+     int32_t imm32;
+     imm32 = branch_long_offset(L);
+-    GenPCRelativeJump(t8, t9, imm32, RelocInfo::NONE, bdslot);
++    GenPCRelativeJump(t8, t9, imm32, RelocInfo::NO_INFO, bdslot);
+   }
+ }
+ 
+@@ -4057,7 +4057,7 @@ void TurboAssembler::BranchLong(int32_t offset, BranchDelaySlot bdslot) {
+   } else {
+     // Generate position independent long branch.
+     BlockTrampolinePoolScope block_trampoline_pool(this);
+-    GenPCRelativeJump(t8, t9, offset, RelocInfo::NONE, bdslot);
++    GenPCRelativeJump(t8, t9, offset, RelocInfo::NO_INFO, bdslot);
+   }
+ }
+ 
+@@ -4070,7 +4070,7 @@ void TurboAssembler::BranchAndLinkLong(Label* L, BranchDelaySlot bdslot) {
+     BlockTrampolinePoolScope block_trampoline_pool(this);
+     int32_t imm32;
+     imm32 = branch_long_offset(L);
+-    GenPCRelativeJumpAndLink(t8, imm32, RelocInfo::NONE, bdslot);
++    GenPCRelativeJumpAndLink(t8, imm32, RelocInfo::NO_INFO, bdslot);
+   }
+ }
+ 
+diff --git a/src/codegen/mips64/assembler-mips64.cc b/src/codegen/mips64/assembler-mips64.cc
+index a82bd5511e..2747ddd027 100644
+--- a/src/codegen/mips64/assembler-mips64.cc
++++ b/src/codegen/mips64/assembler-mips64.cc
+@@ -1061,7 +1061,7 @@ int Assembler::BranchOffset(Instr instr) {
+ // space.  There is no guarantee that the relocated location can be similarly
+ // encoded.
+ bool Assembler::MustUseReg(RelocInfo::Mode rmode) {
+-  return !RelocInfo::IsNone(rmode);
++  return !RelocInfo::IsNoInfo(rmode);
+ }
+ 
+ void Assembler::GenInstrRegister(Opcode opcode, Register rs, Register rt,
+@@ -3790,7 +3790,7 @@ void Assembler::db(uint8_t data) {
+ 
+ void Assembler::dd(uint32_t data, RelocInfo::Mode rmode) {
+   CheckForEmitInForbiddenSlot();
+-  if (!RelocInfo::IsNone(rmode)) {
++  if (!RelocInfo::IsNoInfo(rmode)) {
+     DCHECK(RelocInfo::IsDataEmbeddedObject(rmode) ||
+            RelocInfo::IsLiteralConstant(rmode));
+     RecordRelocInfo(rmode);
+@@ -3801,7 +3801,7 @@ void Assembler::dd(uint32_t data, RelocInfo::Mode rmode) {
+ 
+ void Assembler::dq(uint64_t data, RelocInfo::Mode rmode) {
+   CheckForEmitInForbiddenSlot();
+-  if (!RelocInfo::IsNone(rmode)) {
++  if (!RelocInfo::IsNoInfo(rmode)) {
+     DCHECK(RelocInfo::IsDataEmbeddedObject(rmode) ||
+            RelocInfo::IsLiteralConstant(rmode));
+     RecordRelocInfo(rmode);
+diff --git a/src/codegen/mips64/assembler-mips64.h b/src/codegen/mips64/assembler-mips64.h
+index f714dda764..f17d47e990 100644
+--- a/src/codegen/mips64/assembler-mips64.h
++++ b/src/codegen/mips64/assembler-mips64.h
+@@ -63,7 +63,7 @@ class Operand {
+  public:
+   // Immediate.
+   V8_INLINE explicit Operand(int64_t immediate,
+-                             RelocInfo::Mode rmode = RelocInfo::NONE)
++                             RelocInfo::Mode rmode = RelocInfo::NO_INFO)
+       : rm_(no_reg), rmode_(rmode) {
+     value_.immediate = immediate;
+   }
+@@ -73,7 +73,8 @@ class Operand {
+   }
+   V8_INLINE explicit Operand(const char* s);
+   explicit Operand(Handle<HeapObject> handle);
+-  V8_INLINE explicit Operand(Smi value) : rm_(no_reg), rmode_(RelocInfo::NONE) {
++  V8_INLINE explicit Operand(Smi value)
++      : rm_(no_reg), rmode_(RelocInfo::NO_INFO) {
+     value_.immediate = static_cast<intptr_t>(value.ptr());
+   }
+ 
+@@ -1459,9 +1460,9 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // Writes a single byte or word of data in the code stream.  Used for
+   // inline tables, e.g., jump-tables.
+   void db(uint8_t data);
+-  void dd(uint32_t data, RelocInfo::Mode rmode = RelocInfo::NONE);
+-  void dq(uint64_t data, RelocInfo::Mode rmode = RelocInfo::NONE);
+-  void dp(uintptr_t data, RelocInfo::Mode rmode = RelocInfo::NONE) {
++  void dd(uint32_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO);
++  void dq(uint64_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO);
++  void dp(uintptr_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO) {
+     dq(data, rmode);
+   }
+   void dd(Label* label);
+diff --git a/src/codegen/ppc/assembler-ppc-inl.h b/src/codegen/ppc/assembler-ppc-inl.h
+index 9274c502a8..364b20e596 100644
+--- a/src/codegen/ppc/assembler-ppc-inl.h
++++ b/src/codegen/ppc/assembler-ppc-inl.h
+@@ -252,7 +252,7 @@ void RelocInfo::WipeOut() {
+   }
+ }
+ 
+-Operand::Operand(Register rm) : rm_(rm), rmode_(RelocInfo::NONE) {}
++Operand::Operand(Register rm) : rm_(rm), rmode_(RelocInfo::NO_INFO) {}
+ 
+ void Assembler::UntrackBranch() {
+   DCHECK(!trampoline_emitted_);
+diff --git a/src/codegen/ppc/assembler-ppc.cc b/src/codegen/ppc/assembler-ppc.cc
+index e71b09e2bc..b65fe2e729 100644
+--- a/src/codegen/ppc/assembler-ppc.cc
++++ b/src/codegen/ppc/assembler-ppc.cc
+@@ -1185,7 +1185,7 @@ bool Operand::must_output_reloc_info(const Assembler* assembler) const {
+   if (rmode_ == RelocInfo::EXTERNAL_REFERENCE) {
+     if (assembler != nullptr && assembler->predictable_code_size()) return true;
+     return assembler->options().record_reloc_info_for_serialization;
+-  } else if (RelocInfo::IsNone(rmode_)) {
++  } else if (RelocInfo::IsNoInfo(rmode_)) {
+     return false;
+   }
+   return true;
+@@ -1987,7 +1987,7 @@ void Assembler::db(uint8_t data) {
+ 
+ void Assembler::dd(uint32_t data, RelocInfo::Mode rmode) {
+   CheckBuffer();
+-  if (!RelocInfo::IsNone(rmode)) {
++  if (!RelocInfo::IsNoInfo(rmode)) {
+     DCHECK(RelocInfo::IsDataEmbeddedObject(rmode) ||
+            RelocInfo::IsLiteralConstant(rmode));
+     RecordRelocInfo(rmode);
+@@ -1998,7 +1998,7 @@ void Assembler::dd(uint32_t data, RelocInfo::Mode rmode) {
+ 
+ void Assembler::dq(uint64_t value, RelocInfo::Mode rmode) {
+   CheckBuffer();
+-  if (!RelocInfo::IsNone(rmode)) {
++  if (!RelocInfo::IsNoInfo(rmode)) {
+     DCHECK(RelocInfo::IsDataEmbeddedObject(rmode) ||
+            RelocInfo::IsLiteralConstant(rmode));
+     RecordRelocInfo(rmode);
+@@ -2009,7 +2009,7 @@ void Assembler::dq(uint64_t value, RelocInfo::Mode rmode) {
+ 
+ void Assembler::dp(uintptr_t data, RelocInfo::Mode rmode) {
+   CheckBuffer();
+-  if (!RelocInfo::IsNone(rmode)) {
++  if (!RelocInfo::IsNoInfo(rmode)) {
+     DCHECK(RelocInfo::IsDataEmbeddedObject(rmode) ||
+            RelocInfo::IsLiteralConstant(rmode));
+     RecordRelocInfo(rmode);
+diff --git a/src/codegen/ppc/assembler-ppc.h b/src/codegen/ppc/assembler-ppc.h
+index c7199aad4f..ea82539afb 100644
+--- a/src/codegen/ppc/assembler-ppc.h
++++ b/src/codegen/ppc/assembler-ppc.h
+@@ -67,7 +67,7 @@ class V8_EXPORT_PRIVATE Operand {
+  public:
+   // immediate
+   V8_INLINE explicit Operand(intptr_t immediate,
+-                             RelocInfo::Mode rmode = RelocInfo::NONE)
++                             RelocInfo::Mode rmode = RelocInfo::NO_INFO)
+       : rmode_(rmode) {
+     value_.immediate = immediate;
+   }
+@@ -77,7 +77,7 @@ class V8_EXPORT_PRIVATE Operand {
+     value_.immediate = static_cast<intptr_t>(f.address());
+   }
+   explicit Operand(Handle<HeapObject> handle);
+-  V8_INLINE explicit Operand(Smi value) : rmode_(RelocInfo::NONE) {
++  V8_INLINE explicit Operand(Smi value) : rmode_(RelocInfo::NO_INFO) {
+     value_.immediate = static_cast<intptr_t>(value.ptr());
+   }
+   // rm
+@@ -1210,9 +1210,9 @@ class Assembler : public AssemblerBase {
+   // Writes a single byte or word of data in the code stream.  Used
+   // for inline tables, e.g., jump-tables.
+   void db(uint8_t data);
+-  void dd(uint32_t data, RelocInfo::Mode rmode = RelocInfo::NONE);
+-  void dq(uint64_t data, RelocInfo::Mode rmode = RelocInfo::NONE);
+-  void dp(uintptr_t data, RelocInfo::Mode rmode = RelocInfo::NONE);
++  void dd(uint32_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO);
++  void dq(uint64_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO);
++  void dp(uintptr_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO);
+ 
+   // Read/patch instructions
+   Instr instr_at(int pos) {
+@@ -1307,7 +1307,7 @@ class Assembler : public AssemblerBase {
+   ConstantPoolEntry::Access ConstantPoolAddEntry(RelocInfo::Mode rmode,
+                                                  intptr_t value) {
+     bool sharing_ok =
+-        RelocInfo::IsNone(rmode) ||
++        RelocInfo::IsNoInfo(rmode) ||
+         (!options().record_reloc_info_for_serialization &&
+          RelocInfo::IsShareableRelocMode(rmode) &&
+          !is_constant_pool_entry_sharing_blocked() &&
+diff --git a/src/codegen/reloc-info.cc b/src/codegen/reloc-info.cc
+index 1985ff28bc..4850cf8c03 100644
+--- a/src/codegen/reloc-info.cc
++++ b/src/codegen/reloc-info.cc
+@@ -394,7 +394,7 @@ bool RelocInfo::RequiresRelocation(Code code) {
+ #ifdef ENABLE_DISASSEMBLER
+ const char* RelocInfo::RelocModeName(RelocInfo::Mode rmode) {
+   switch (rmode) {
+-    case NONE:
++    case NO_INFO:
+       return "no reloc";
+     case COMPRESSED_EMBEDDED_OBJECT:
+       return "compressed embedded object";
+@@ -537,7 +537,7 @@ void RelocInfo::Verify(Isolate* isolate) {
+     case VENEER_POOL:
+     case WASM_CALL:
+     case WASM_STUB_CALL:
+-    case NONE:
++    case NO_INFO:
+       break;
+     case NUMBER_OF_MODES:
+     case PC_JUMP:
+diff --git a/src/codegen/reloc-info.h b/src/codegen/reloc-info.h
+index cb1a04860d..b92907fbf0 100644
+--- a/src/codegen/reloc-info.h
++++ b/src/codegen/reloc-info.h
+@@ -54,7 +54,7 @@ class RelocInfo {
+     // Please note the order is important (see IsRealRelocMode, IsGCRelocMode,
+     // and IsShareableRelocMode predicates below).
+ 
+-    NONE,  // Never recorded value. Most common one, hence value 0.
++    NO_INFO,  // Never recorded value. Most common one, hence value 0.
+ 
+     CODE_TARGET,
+     RELATIVE_CODE_TARGET,  // LAST_CODE_TARGET_MODE
+@@ -132,7 +132,7 @@ class RelocInfo {
+     return mode <= LAST_GCED_ENUM;
+   }
+   static constexpr bool IsShareableRelocMode(Mode mode) {
+-    return mode == RelocInfo::NONE ||
++    return mode == RelocInfo::NO_INFO ||
+            mode >= RelocInfo::FIRST_SHAREABLE_RELOC_MODE;
+   }
+   static constexpr bool IsCodeTarget(Mode mode) { return mode == CODE_TARGET; }
+@@ -191,7 +191,7 @@ class RelocInfo {
+   static constexpr bool IsOffHeapTarget(Mode mode) {
+     return mode == OFF_HEAP_TARGET;
+   }
+-  static constexpr bool IsNone(Mode mode) { return mode == NONE; }
++  static constexpr bool IsNoInfo(Mode mode) { return mode == NO_INFO; }
+ 
+   static bool IsOnlyForSerializer(Mode mode) {
+ #ifdef V8_TARGET_ARCH_IA32
+diff --git a/src/codegen/riscv64/assembler-riscv64.cc b/src/codegen/riscv64/assembler-riscv64.cc
+index 46b1de6978..46d0136429 100644
+--- a/src/codegen/riscv64/assembler-riscv64.cc
++++ b/src/codegen/riscv64/assembler-riscv64.cc
+@@ -798,7 +798,7 @@ int Assembler::AuipcOffset(Instr instr) {
+ // space.  There is no guarantee that the relocated location can be similarly
+ // encoded.
+ bool Assembler::MustUseReg(RelocInfo::Mode rmode) {
+-  return !RelocInfo::IsNone(rmode);
++  return !RelocInfo::IsNoInfo(rmode);
+ }
+ 
+ void Assembler::disassembleInstr(Instr instr) {
+@@ -3609,7 +3609,7 @@ void Assembler::db(uint8_t data) {
+ }
+ 
+ void Assembler::dd(uint32_t data, RelocInfo::Mode rmode) {
+-  if (!RelocInfo::IsNone(rmode)) {
++  if (!RelocInfo::IsNoInfo(rmode)) {
+     DCHECK(RelocInfo::IsDataEmbeddedObject(rmode) ||
+            RelocInfo::IsLiteralConstant(rmode));
+     RecordRelocInfo(rmode);
+@@ -3620,7 +3620,7 @@ void Assembler::dd(uint32_t data, RelocInfo::Mode rmode) {
+ }
+ 
+ void Assembler::dq(uint64_t data, RelocInfo::Mode rmode) {
+-  if (!RelocInfo::IsNone(rmode)) {
++  if (!RelocInfo::IsNoInfo(rmode)) {
+     DCHECK(RelocInfo::IsDataEmbeddedObject(rmode) ||
+            RelocInfo::IsLiteralConstant(rmode));
+     RecordRelocInfo(rmode);
+diff --git a/src/codegen/riscv64/assembler-riscv64.h b/src/codegen/riscv64/assembler-riscv64.h
+index 31ec95f488..cb5655afa8 100644
+--- a/src/codegen/riscv64/assembler-riscv64.h
++++ b/src/codegen/riscv64/assembler-riscv64.h
+@@ -68,7 +68,7 @@ class Operand {
+  public:
+   // Immediate.
+   V8_INLINE explicit Operand(int64_t immediate,
+-                             RelocInfo::Mode rmode = RelocInfo::NONE)
++                             RelocInfo::Mode rmode = RelocInfo::NO_INFO)
+       : rm_(no_reg), rmode_(rmode) {
+     value_.immediate = immediate;
+   }
+@@ -78,7 +78,8 @@ class Operand {
+   }
+   V8_INLINE explicit Operand(const char* s);
+   explicit Operand(Handle<HeapObject> handle);
+-  V8_INLINE explicit Operand(Smi value) : rm_(no_reg), rmode_(RelocInfo::NONE) {
++  V8_INLINE explicit Operand(Smi value)
++      : rm_(no_reg), rmode_(RelocInfo::NO_INFO) {
+     value_.immediate = static_cast<intptr_t>(value.ptr());
+   }
+ 
+@@ -1150,9 +1151,9 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // Writes a single byte or word of data in the code stream.  Used for
+   // inline tables, e.g., jump-tables.
+   void db(uint8_t data);
+-  void dd(uint32_t data, RelocInfo::Mode rmode = RelocInfo::NONE);
+-  void dq(uint64_t data, RelocInfo::Mode rmode = RelocInfo::NONE);
+-  void dp(uintptr_t data, RelocInfo::Mode rmode = RelocInfo::NONE) {
++  void dd(uint32_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO);
++  void dq(uint64_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO);
++  void dp(uintptr_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO) {
+     dq(data, rmode);
+   }
+   void dd(Label* label);
+diff --git a/src/codegen/s390/assembler-s390-inl.h b/src/codegen/s390/assembler-s390-inl.h
+index b3d0ffa1da..8170c02204 100644
+--- a/src/codegen/s390/assembler-s390-inl.h
++++ b/src/codegen/s390/assembler-s390-inl.h
+@@ -247,7 +247,7 @@ void RelocInfo::WipeOut() {
+ }
+ 
+ // Operand constructors
+-Operand::Operand(Register rm) : rm_(rm), rmode_(RelocInfo::NONE) {}
++Operand::Operand(Register rm) : rm_(rm), rmode_(RelocInfo::NO_INFO) {}
+ 
+ // Fetch the 32bit value from the FIXED_SEQUENCE IIHF / IILF
+ Address Assembler::target_address_at(Address pc, Address constant_pool) {
+diff --git a/src/codegen/s390/assembler-s390.cc b/src/codegen/s390/assembler-s390.cc
+index 8457e7c536..1283c87317 100644
+--- a/src/codegen/s390/assembler-s390.cc
++++ b/src/codegen/s390/assembler-s390.cc
+@@ -802,7 +802,7 @@ void Assembler::db(uint8_t data) {
+ 
+ void Assembler::dd(uint32_t data, RelocInfo::Mode rmode) {
+   CheckBuffer();
+-  if (!RelocInfo::IsNone(rmode)) {
++  if (!RelocInfo::IsNoInfo(rmode)) {
+     DCHECK(RelocInfo::IsDataEmbeddedObject(rmode) ||
+            RelocInfo::IsLiteralConstant(rmode));
+     RecordRelocInfo(rmode);
+@@ -813,7 +813,7 @@ void Assembler::dd(uint32_t data, RelocInfo::Mode rmode) {
+ 
+ void Assembler::dq(uint64_t value, RelocInfo::Mode rmode) {
+   CheckBuffer();
+-  if (!RelocInfo::IsNone(rmode)) {
++  if (!RelocInfo::IsNoInfo(rmode)) {
+     DCHECK(RelocInfo::IsDataEmbeddedObject(rmode) ||
+            RelocInfo::IsLiteralConstant(rmode));
+     RecordRelocInfo(rmode);
+@@ -824,7 +824,7 @@ void Assembler::dq(uint64_t value, RelocInfo::Mode rmode) {
+ 
+ void Assembler::dp(uintptr_t data, RelocInfo::Mode rmode) {
+   CheckBuffer();
+-  if (!RelocInfo::IsNone(rmode)) {
++  if (!RelocInfo::IsNoInfo(rmode)) {
+     DCHECK(RelocInfo::IsDataEmbeddedObject(rmode) ||
+            RelocInfo::IsLiteralConstant(rmode));
+     RecordRelocInfo(rmode);
+diff --git a/src/codegen/s390/assembler-s390.h b/src/codegen/s390/assembler-s390.h
+index 86fd0190b9..cfc65f70d4 100644
+--- a/src/codegen/s390/assembler-s390.h
++++ b/src/codegen/s390/assembler-s390.h
+@@ -93,7 +93,7 @@ class V8_EXPORT_PRIVATE Operand {
+  public:
+   // immediate
+   V8_INLINE explicit Operand(intptr_t immediate,
+-                             RelocInfo::Mode rmode = RelocInfo::NONE)
++                             RelocInfo::Mode rmode = RelocInfo::NO_INFO)
+       : rmode_(rmode) {
+     value_.immediate = immediate;
+   }
+@@ -103,7 +103,7 @@ class V8_EXPORT_PRIVATE Operand {
+     value_.immediate = static_cast<intptr_t>(f.address());
+   }
+   explicit Operand(Handle<HeapObject> handle);
+-  V8_INLINE explicit Operand(Smi value) : rmode_(RelocInfo::NONE) {
++  V8_INLINE explicit Operand(Smi value) : rmode_(RelocInfo::NO_INFO) {
+     value_.immediate = static_cast<intptr_t>(value.ptr());
+   }
+ 
+@@ -1312,9 +1312,9 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // Writes a single byte or word of data in the code stream.  Used
+   // for inline tables, e.g., jump-tables.
+   void db(uint8_t data);
+-  void dd(uint32_t data, RelocInfo::Mode rmode = RelocInfo::NONE);
+-  void dq(uint64_t data, RelocInfo::Mode rmode = RelocInfo::NONE);
+-  void dp(uintptr_t data, RelocInfo::Mode rmode = RelocInfo::NONE);
++  void dd(uint32_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO);
++  void dq(uint64_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO);
++  void dp(uintptr_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO);
+ 
+   // Read/patch instructions
+   SixByteInstr instr_at(int pos) {
+diff --git a/src/codegen/s390/macro-assembler-s390.cc b/src/codegen/s390/macro-assembler-s390.cc
+index 9ecbe0f0e6..cb31284e50 100644
+--- a/src/codegen/s390/macro-assembler-s390.cc
++++ b/src/codegen/s390/macro-assembler-s390.cc
+@@ -1578,7 +1578,7 @@ void MacroAssembler::LeaveExitFrame(bool save_doubles, Register argument_count,
+   // Clear top frame.
+   Move(ip, ExternalReference::Create(IsolateAddressId::kCEntryFPAddress,
+                                      isolate()));
+-  StoreU64(MemOperand(ip), Operand(0, RelocInfo::NONE), r0);
++  StoreU64(MemOperand(ip), Operand(0, RelocInfo::NO_INFO), r0);
+ 
+   // Restore current context from top and clear it in debug mode.
+   Move(ip,
+@@ -2460,7 +2460,7 @@ void TurboAssembler::mov(Register dst, const Operand& src) {
+     value = src.immediate();
+   }
+ 
+-  if (src.rmode() != RelocInfo::NONE) {
++  if (src.rmode() != RelocInfo::NO_INFO) {
+     // some form of relocation needed
+     RecordRelocInfo(src.rmode(), value);
+   }
+@@ -2468,7 +2468,7 @@ void TurboAssembler::mov(Register dst, const Operand& src) {
+   int32_t hi_32 = static_cast<int32_t>(value >> 32);
+   int32_t lo_32 = static_cast<int32_t>(value);
+ 
+-  if (src.rmode() == RelocInfo::NONE) {
++  if (src.rmode() == RelocInfo::NO_INFO) {
+     if (hi_32 == 0) {
+       if (is_uint16(lo_32)) {
+         llill(dst, Operand(lo_32));
+@@ -3435,7 +3435,7 @@ void TurboAssembler::CmpS64(Register src1, Register src2) { cgr(src1, src2); }
+ // Compare 32-bit Register vs Immediate
+ // This helper will set up proper relocation entries if required.
+ void TurboAssembler::CmpS32(Register dst, const Operand& opnd) {
+-  if (opnd.rmode() == RelocInfo::NONE) {
++  if (opnd.rmode() == RelocInfo::NO_INFO) {
+     intptr_t value = opnd.immediate();
+     if (is_int16(value))
+       chi(dst, opnd);
+@@ -3451,7 +3451,7 @@ void TurboAssembler::CmpS32(Register dst, const Operand& opnd) {
+ // Compare Pointer Sized  Register vs Immediate
+ // This helper will set up proper relocation entries if required.
+ void TurboAssembler::CmpS64(Register dst, const Operand& opnd) {
+-  if (opnd.rmode() == RelocInfo::NONE) {
++  if (opnd.rmode() == RelocInfo::NO_INFO) {
+     cgfi(dst, opnd);
+   } else {
+     mov(r0, opnd);  // Need to generate 64-bit relocation
+@@ -3623,7 +3623,7 @@ void TurboAssembler::StoreU64(Register src, const MemOperand& mem,
+ void TurboAssembler::StoreU64(const MemOperand& mem, const Operand& opnd,
+                               Register scratch) {
+   // Relocations not supported
+-  DCHECK_EQ(opnd.rmode(), RelocInfo::NONE);
++  DCHECK_EQ(opnd.rmode(), RelocInfo::NO_INFO);
+ 
+   // Try to use MVGHI/MVHI
+   if (CpuFeatures::IsSupported(GENERAL_INSTR_EXT) && is_uint12(mem.offset()) &&
+diff --git a/src/codegen/x64/assembler-x64-inl.h b/src/codegen/x64/assembler-x64-inl.h
+index 8e451e641e..cb2f67850a 100644
+--- a/src/codegen/x64/assembler-x64-inl.h
++++ b/src/codegen/x64/assembler-x64-inl.h
+@@ -45,14 +45,14 @@ void Assembler::emit_runtime_entry(Address entry, RelocInfo::Mode rmode) {
+ }
+ 
+ void Assembler::emit(Immediate x) {
+-  if (!RelocInfo::IsNone(x.rmode_)) {
++  if (!RelocInfo::IsNoInfo(x.rmode_)) {
+     RecordRelocInfo(x.rmode_);
+   }
+   emitl(x.value_);
+ }
+ 
+ void Assembler::emit(Immediate64 x) {
+-  if (!RelocInfo::IsNone(x.rmode_)) {
++  if (!RelocInfo::IsNoInfo(x.rmode_)) {
+     RecordRelocInfo(x.rmode_);
+   }
+   emitq(static_cast<uint64_t>(x.value_));
+diff --git a/src/codegen/x64/assembler-x64.cc b/src/codegen/x64/assembler-x64.cc
+index 432482bb1e..a94e794b23 100644
+--- a/src/codegen/x64/assembler-x64.cc
++++ b/src/codegen/x64/assembler-x64.cc
+@@ -276,7 +276,7 @@ bool ConstPool::TryRecordEntry(intptr_t data, RelocInfo::Mode mode) {
+ 
+   // Currently, partial constant pool only handles the following kinds of
+   // RelocInfo.
+-  if (mode != RelocInfo::NONE && mode != RelocInfo::EXTERNAL_REFERENCE &&
++  if (mode != RelocInfo::NO_INFO && mode != RelocInfo::EXTERNAL_REFERENCE &&
+       mode != RelocInfo::OFF_HEAP_TARGET)
+     return false;
+ 
+@@ -330,7 +330,8 @@ void Assembler::PatchConstPool() {
+ 
+ bool Assembler::UseConstPoolFor(RelocInfo::Mode rmode) {
+   if (!FLAG_partial_constant_pool) return false;
+-  return (rmode == RelocInfo::NONE || rmode == RelocInfo::EXTERNAL_REFERENCE ||
++  return (rmode == RelocInfo::NO_INFO ||
++          rmode == RelocInfo::EXTERNAL_REFERENCE ||
+           rmode == RelocInfo::OFF_HEAP_TARGET);
+ }
+ 
+@@ -703,7 +704,7 @@ void Assembler::immediate_arithmetic_op(byte subcode, Register dst,
+                                         Immediate src, int size) {
+   EnsureSpace ensure_space(this);
+   emit_rex(dst, size);
+-  if (is_int8(src.value_) && RelocInfo::IsNone(src.rmode_)) {
++  if (is_int8(src.value_) && RelocInfo::IsNoInfo(src.rmode_)) {
+     emit(0x83);
+     emit_modrm(subcode, dst);
+     emit(src.value_);
+@@ -721,7 +722,7 @@ void Assembler::immediate_arithmetic_op(byte subcode, Operand dst,
+                                         Immediate src, int size) {
+   EnsureSpace ensure_space(this);
+   emit_rex(dst, size);
+-  if (is_int8(src.value_) && RelocInfo::IsNone(src.rmode_)) {
++  if (is_int8(src.value_) && RelocInfo::IsNoInfo(src.rmode_)) {
+     emit(0x83);
+     emit_operand(subcode, dst);
+     emit(src.value_);
+@@ -1020,7 +1021,7 @@ void Assembler::near_jmp(intptr_t disp, RelocInfo::Mode rmode) {
+   EnsureSpace ensure_space(this);
+   emit(0xE9);
+   DCHECK(is_int32(disp));
+-  if (!RelocInfo::IsNone(rmode)) RecordRelocInfo(rmode);
++  if (!RelocInfo::IsNoInfo(rmode)) RecordRelocInfo(rmode);
+   emitl(static_cast<int32_t>(disp));
+ }
+ 
+@@ -4365,7 +4366,7 @@ void Assembler::db(uint8_t data) {
+ 
+ void Assembler::dd(uint32_t data, RelocInfo::Mode rmode) {
+   EnsureSpace ensure_space(this);
+-  if (!RelocInfo::IsNone(rmode)) {
++  if (!RelocInfo::IsNoInfo(rmode)) {
+     DCHECK(RelocInfo::IsDataEmbeddedObject(rmode) ||
+            RelocInfo::IsLiteralConstant(rmode));
+     RecordRelocInfo(rmode);
+@@ -4375,7 +4376,7 @@ void Assembler::dd(uint32_t data, RelocInfo::Mode rmode) {
+ 
+ void Assembler::dq(uint64_t data, RelocInfo::Mode rmode) {
+   EnsureSpace ensure_space(this);
+-  if (!RelocInfo::IsNone(rmode)) {
++  if (!RelocInfo::IsNoInfo(rmode)) {
+     DCHECK(RelocInfo::IsDataEmbeddedObject(rmode) ||
+            RelocInfo::IsLiteralConstant(rmode));
+     RecordRelocInfo(rmode);
+diff --git a/src/codegen/x64/assembler-x64.h b/src/codegen/x64/assembler-x64.h
+index e5f3f5890c..76c73daf5b 100644
+--- a/src/codegen/x64/assembler-x64.h
++++ b/src/codegen/x64/assembler-x64.h
+@@ -130,7 +130,7 @@ class Immediate {
+ 
+  private:
+   const int32_t value_;
+-  const RelocInfo::Mode rmode_ = RelocInfo::NONE;
++  const RelocInfo::Mode rmode_ = RelocInfo::NO_INFO;
+ 
+   friend class Assembler;
+ };
+@@ -148,7 +148,7 @@ class Immediate64 {
+ 
+  private:
+   const int64_t value_;
+-  const RelocInfo::Mode rmode_ = RelocInfo::NONE;
++  const RelocInfo::Mode rmode_ = RelocInfo::NO_INFO;
+ 
+   friend class Assembler;
+ };
+@@ -1954,9 +1954,9 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // Writes a single word of data in the code stream.
+   // Used for inline tables, e.g., jump-tables.
+   void db(uint8_t data);
+-  void dd(uint32_t data, RelocInfo::Mode rmode = RelocInfo::NONE);
+-  void dq(uint64_t data, RelocInfo::Mode rmode = RelocInfo::NONE);
+-  void dp(uintptr_t data, RelocInfo::Mode rmode = RelocInfo::NONE) {
++  void dd(uint32_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO);
++  void dq(uint64_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO);
++  void dp(uintptr_t data, RelocInfo::Mode rmode = RelocInfo::NO_INFO) {
+     dq(data, rmode);
+   }
+   void dq(Label* label);
+diff --git a/src/codegen/x64/macro-assembler-x64.cc b/src/codegen/x64/macro-assembler-x64.cc
+index 22312f5765..6b8e8426b4 100644
+--- a/src/codegen/x64/macro-assembler-x64.cc
++++ b/src/codegen/x64/macro-assembler-x64.cc
+@@ -371,8 +371,8 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
+   // turned on to provoke errors.
+   if (FLAG_debug_code) {
+     ASM_CODE_COMMENT_STRING(this, "Zap scratch registers");
+-    Move(value, kZapValue, RelocInfo::NONE);
+-    Move(slot_address, kZapValue, RelocInfo::NONE);
++    Move(value, kZapValue, RelocInfo::NO_INFO);
++    Move(slot_address, kZapValue, RelocInfo::NO_INFO);
+   }
+ }
+ 
+@@ -669,8 +669,8 @@ void MacroAssembler::RecordWrite(Register object, Register slot_address,
+   // turned on to provoke errors.
+   if (FLAG_debug_code) {
+     ASM_CODE_COMMENT_STRING(this, "Zap scratch registers");
+-    Move(slot_address, kZapValue, RelocInfo::NONE);
+-    Move(value, kZapValue, RelocInfo::NONE);
++    Move(slot_address, kZapValue, RelocInfo::NO_INFO);
++    Move(value, kZapValue, RelocInfo::NO_INFO);
+   }
+ }
+ 
+@@ -1468,7 +1468,7 @@ void TurboAssembler::Move(Register dst, Smi source) {
+   if (value == 0) {
+     xorl(dst, dst);
+   } else if (SmiValuesAre32Bits() || value < 0) {
+-    Move(dst, source.ptr(), RelocInfo::NONE);
++    Move(dst, source.ptr(), RelocInfo::NO_INFO);
+   } else {
+     uint32_t uvalue = static_cast<uint32_t>(source.ptr());
+     Move(dst, uvalue);
+@@ -1503,7 +1503,7 @@ void TurboAssembler::Move(Register dst, Register src) {
+ 
+ void TurboAssembler::Move(Register dst, Operand src) { movq(dst, src); }
+ void TurboAssembler::Move(Register dst, Immediate src) {
+-  if (src.rmode() == RelocInfo::Mode::NONE) {
++  if (src.rmode() == RelocInfo::Mode::NO_INFO) {
+     Move(dst, src.value());
+   } else {
+     movl(dst, src);
+diff --git a/src/codegen/x64/macro-assembler-x64.h b/src/codegen/x64/macro-assembler-x64.h
+index 55203ae23e..4a1ef3a5e0 100644
+--- a/src/codegen/x64/macro-assembler-x64.h
++++ b/src/codegen/x64/macro-assembler-x64.h
+@@ -326,7 +326,7 @@ class V8_EXPORT_PRIVATE TurboAssembler
+   void Move(Register dst, Address ptr, RelocInfo::Mode rmode) {
+     // This method must not be used with heap object references. The stored
+     // address is not GC safe. Use the handle version instead.
+-    DCHECK(rmode == RelocInfo::NONE || rmode > RelocInfo::LAST_GCED_ENUM);
++    DCHECK(rmode == RelocInfo::NO_INFO || rmode > RelocInfo::LAST_GCED_ENUM);
+     movq(dst, Immediate64(ptr, rmode));
+   }
+ 
+diff --git a/src/compiler/backend/instruction.h b/src/compiler/backend/instruction.h
+index 7000469549..37a8209b6b 100644
+--- a/src/compiler/backend/instruction.h
++++ b/src/compiler/backend/instruction.h
+@@ -1175,7 +1175,7 @@ class V8_EXPORT_PRIVATE Constant final {
+ 
+  private:
+   Type type_;
+-  RelocInfo::Mode rmode_ = RelocInfo::NONE;
++  RelocInfo::Mode rmode_ = RelocInfo::NO_INFO;
+   int64_t value_;
+ };
+ 
+@@ -1742,7 +1742,7 @@ class V8_EXPORT_PRIVATE InstructionSequence final
+   RpoImmediates& rpo_immediates() { return rpo_immediates_; }
+ 
+   ImmediateOperand AddImmediate(const Constant& constant) {
+-    if (RelocInfo::IsNone(constant.rmode())) {
++    if (RelocInfo::IsNoInfo(constant.rmode())) {
+       if (constant.type() == Constant::kRpoNumber) {
+         // Ideally we would inline RPO numbers into the operand, however jump-
+         // threading modifies RPO values and so we indirect through a vector
+diff --git a/src/diagnostics/disassembler.cc b/src/diagnostics/disassembler.cc
+index ddf990da8d..dca5437d16 100644
+--- a/src/diagnostics/disassembler.cc
++++ b/src/diagnostics/disassembler.cc
+@@ -421,8 +421,8 @@ static int DecodeIt(Isolate* isolate, ExternalReferenceEncoder* ref_encoder,
+     // bytes, a constant could accidentally match with the bit-pattern checked
+     // by IsInConstantPool() below.
+     if (pcs.empty() && !code.is_null() && !decoding_constant_pool) {
+-      RelocInfo dummy_rinfo(reinterpret_cast<Address>(prev_pc), RelocInfo::NONE,
+-                            0, Code());
++      RelocInfo dummy_rinfo(reinterpret_cast<Address>(prev_pc),
++                            RelocInfo::NO_INFO, 0, Code());
+       if (dummy_rinfo.IsInConstantPool()) {
+         Address constant_pool_entry_address =
+             dummy_rinfo.constant_pool_entry_address();
+diff --git a/src/wasm/baseline/arm/liftoff-assembler-arm.h b/src/wasm/baseline/arm/liftoff-assembler-arm.h
+index ffe937f0bb..19e4833ebc 100644
+--- a/src/wasm/baseline/arm/liftoff-assembler-arm.h
++++ b/src/wasm/baseline/arm/liftoff-assembler-arm.h
+@@ -584,7 +584,7 @@ void LiftoffAssembler::LoadConstant(LiftoffRegister reg, WasmValue value,
+       TurboAssembler::Move(reg.gp(), Operand(value.to_i32(), rmode));
+       break;
+     case kI64: {
+-      DCHECK(RelocInfo::IsNone(rmode));
++      DCHECK(RelocInfo::IsNoInfo(rmode));
+       int32_t low_word = value.to_i64();
+       int32_t high_word = value.to_i64() >> 32;
+       TurboAssembler::Move(reg.low_gp(), Operand(low_word));
+diff --git a/src/wasm/baseline/ia32/liftoff-assembler-ia32.h b/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
+index 87592d6564..f976e76c6d 100644
+--- a/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
++++ b/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
+@@ -327,7 +327,7 @@ void LiftoffAssembler::LoadConstant(LiftoffRegister reg, WasmValue value,
+       TurboAssembler::Move(reg.gp(), Immediate(value.to_i32(), rmode));
+       break;
+     case kI64: {
+-      DCHECK(RelocInfo::IsNone(rmode));
++      DCHECK(RelocInfo::IsNoInfo(rmode));
+       int32_t low_word = value.to_i64();
+       int32_t high_word = value.to_i64() >> 32;
+       TurboAssembler::Move(reg.low_gp(), Immediate(low_word));
+diff --git a/src/wasm/baseline/liftoff-assembler.h b/src/wasm/baseline/liftoff-assembler.h
+index f834f62e69..a1a08d9a29 100644
+--- a/src/wasm/baseline/liftoff-assembler.h
++++ b/src/wasm/baseline/liftoff-assembler.h
+@@ -694,7 +694,7 @@ class LiftoffAssembler : public TurboAssembler {
+   inline static bool NeedsAlignment(ValueKind kind);
+ 
+   inline void LoadConstant(LiftoffRegister, WasmValue,
+-                           RelocInfo::Mode rmode = RelocInfo::NONE);
++                           RelocInfo::Mode rmode = RelocInfo::NO_INFO);
+   inline void LoadInstanceFromFrame(Register dst);
+   inline void LoadFromInstance(Register dst, Register instance, int offset,
+                                int size);
+diff --git a/src/wasm/baseline/mips/liftoff-assembler-mips.h b/src/wasm/baseline/mips/liftoff-assembler-mips.h
+index f2f81464cf..7dec2ea677 100644
+--- a/src/wasm/baseline/mips/liftoff-assembler-mips.h
++++ b/src/wasm/baseline/mips/liftoff-assembler-mips.h
+@@ -447,7 +447,7 @@ void LiftoffAssembler::LoadConstant(LiftoffRegister reg, WasmValue value,
+       TurboAssembler::li(reg.gp(), Operand(value.to_i32(), rmode));
+       break;
+     case kI64: {
+-      DCHECK(RelocInfo::IsNone(rmode));
++      DCHECK(RelocInfo::IsNoInfo(rmode));
+       int32_t low_word = value.to_i64();
+       int32_t high_word = value.to_i64() >> 32;
+       TurboAssembler::li(reg.low_gp(), Operand(low_word));
+diff --git a/src/wasm/baseline/x64/liftoff-assembler-x64.h b/src/wasm/baseline/x64/liftoff-assembler-x64.h
+index 1f7ff53d80..895ba42c86 100644
+--- a/src/wasm/baseline/x64/liftoff-assembler-x64.h
++++ b/src/wasm/baseline/x64/liftoff-assembler-x64.h
+@@ -305,14 +305,14 @@ void LiftoffAssembler::LoadConstant(LiftoffRegister reg, WasmValue value,
+                                     RelocInfo::Mode rmode) {
+   switch (value.type().kind()) {
+     case kI32:
+-      if (value.to_i32() == 0 && RelocInfo::IsNone(rmode)) {
++      if (value.to_i32() == 0 && RelocInfo::IsNoInfo(rmode)) {
+         xorl(reg.gp(), reg.gp());
+       } else {
+         movl(reg.gp(), Immediate(value.to_i32(), rmode));
+       }
+       break;
+     case kI64:
+-      if (RelocInfo::IsNone(rmode)) {
++      if (RelocInfo::IsNoInfo(rmode)) {
+         TurboAssembler::Move(reg.gp(), value.to_i64());
+       } else {
+         movq(reg.gp(), Immediate64(value.to_i64(), rmode));
+diff --git a/src/wasm/jump-table-assembler.cc b/src/wasm/jump-table-assembler.cc
+index a04422b888..92098439be 100644
+--- a/src/wasm/jump-table-assembler.cc
++++ b/src/wasm/jump-table-assembler.cc
+@@ -25,7 +25,7 @@ bool JumpTableAssembler::EmitJumpSlot(Address target) {
+   intptr_t displacement = static_cast<intptr_t>(
+       reinterpret_cast<byte*>(target) - pc_ - kNearJmpInstrSize);
+   if (!is_int32(displacement)) return false;
+-  near_jmp(displacement, RelocInfo::NONE);  // 5 bytes
++  near_jmp(displacement, RelocInfo::NO_INFO);  // 5 bytes
+   return true;
+ }
+ 
+@@ -63,16 +63,16 @@ void JumpTableAssembler::NopBytes(int bytes) {
+ void JumpTableAssembler::EmitLazyCompileJumpSlot(uint32_t func_index,
+                                                  Address lazy_compile_target) {
+   mov(kWasmCompileLazyFuncIndexRegister, func_index);  // 5 bytes
+-  jmp(lazy_compile_target, RelocInfo::NONE);           // 5 bytes
++  jmp(lazy_compile_target, RelocInfo::NO_INFO);        // 5 bytes
+ }
+ 
+ bool JumpTableAssembler::EmitJumpSlot(Address target) {
+-  jmp(target, RelocInfo::NONE);
++  jmp(target, RelocInfo::NO_INFO);
+   return true;
+ }
+ 
+ void JumpTableAssembler::EmitFarJumpSlot(Address target) {
+-  jmp(target, RelocInfo::NONE);
++  jmp(target, RelocInfo::NO_INFO);
+ }
+ 
+ // static
+@@ -136,7 +136,7 @@ void JumpTableAssembler::EmitLazyCompileJumpSlot(uint32_t func_index,
+   int start = pc_offset();
+   CodeEntry();                                             // 0-1 instr
+   Mov(kWasmCompileLazyFuncIndexRegister.W(), func_index);  // 1-2 instr
+-  Jump(lazy_compile_target, RelocInfo::NONE);              // 1 instr
++  Jump(lazy_compile_target, RelocInfo::NO_INFO);           // 1 instr
+   int nop_bytes = start + kLazyCompileTableSlotSize - pc_offset();
+   DCHECK(nop_bytes == 0 || nop_bytes == kInstrSize);
+   if (nop_bytes) nop();
+@@ -150,7 +150,7 @@ bool JumpTableAssembler::EmitJumpSlot(Address target) {
+ 
+   CodeEntry();
+ 
+-  Jump(target, RelocInfo::NONE);
++  Jump(target, RelocInfo::NO_INFO);
+   return true;
+ }
+ 
+@@ -254,7 +254,7 @@ void JumpTableAssembler::EmitLazyCompileJumpSlot(uint32_t func_index,
+   li(kWasmCompileLazyFuncIndexRegister, func_index);  // max. 2 instr
+   // Jump produces max. 4 instructions for 32-bit platform
+   // and max. 6 instructions for 64-bit platform.
+-  Jump(lazy_compile_target, RelocInfo::NONE);
++  Jump(lazy_compile_target, RelocInfo::NO_INFO);
+   int nop_bytes = start + kLazyCompileTableSlotSize - pc_offset();
+   DCHECK_EQ(nop_bytes % kInstrSize, 0);
+   for (int i = 0; i < nop_bytes; i += kInstrSize) nop();
+@@ -289,7 +289,7 @@ void JumpTableAssembler::EmitLazyCompileJumpSlot(uint32_t func_index,
+   int start = pc_offset();
+   li(kWasmCompileLazyFuncIndexRegister, (int32_t)func_index);  // max. 2 instr
+   // Jump produces max 4 instructions.
+-  Jump(lazy_compile_target, RelocInfo::NONE);
++  Jump(lazy_compile_target, RelocInfo::NO_INFO);
+   int nop_bytes = start + kLazyCompileTableSlotSize - pc_offset();
+   DCHECK_EQ(nop_bytes % kInstrSize, 0);
+   for (int i = 0; i < nop_bytes; i += kInstrSize) nop();
+@@ -374,7 +374,7 @@ void JumpTableAssembler::EmitLazyCompileJumpSlot(uint32_t func_index,
+   int start = pc_offset();
+   li(kWasmCompileLazyFuncIndexRegister, func_index);  // max. 2 instr
+   // Jump produces max. 8 instructions (include constant pool and j)
+-  Jump(lazy_compile_target, RelocInfo::NONE);
++  Jump(lazy_compile_target, RelocInfo::NO_INFO);
+   int nop_bytes = start + kLazyCompileTableSlotSize - pc_offset();
+   DCHECK_EQ(nop_bytes % kInstrSize, 0);
+   for (int i = 0; i < nop_bytes; i += kInstrSize) nop();
+diff --git a/test/cctest/test-assembler-arm64.cc b/test/cctest/test-assembler-arm64.cc
+index 4d9ac4f71a..0c41602514 100644
+--- a/test/cctest/test-assembler-arm64.cc
++++ b/test/cctest/test-assembler-arm64.cc
+@@ -14741,7 +14741,7 @@ TEST(near_call_no_relocation) {
+   {
+     Assembler::BlockConstPoolScope scope(&masm);
+     int offset = (function.pos() - __ pc_offset()) / kInstrSize;
+-    __ near_call(offset, RelocInfo::NONE);
++    __ near_call(offset, RelocInfo::NO_INFO);
+   }
+   END();
+ 
+diff --git a/test/cctest/test-assembler-ia32.cc b/test/cctest/test-assembler-ia32.cc
+index 6294a588db..c5a0950019 100644
+--- a/test/cctest/test-assembler-ia32.cc
++++ b/test/cctest/test-assembler-ia32.cc
+@@ -224,7 +224,7 @@ TEST(AssemblerIa325) {
+   Assembler assm(AssemblerOptions{},
+                  ExternalAssemblerBuffer(buffer, sizeof buffer));
+ 
+-  __ mov(eax, Operand(reinterpret_cast<intptr_t>(&baz), RelocInfo::NONE));
++  __ mov(eax, Operand(reinterpret_cast<intptr_t>(&baz), RelocInfo::NO_INFO));
+   __ ret(0);
+ 
+   CodeDesc desc;
+diff --git a/test/cctest/test-assembler-s390.cc b/test/cctest/test-assembler-s390.cc
+index 8e309c430b..a69bf64988 100644
+--- a/test/cctest/test-assembler-s390.cc
++++ b/test/cctest/test-assembler-s390.cc
+@@ -88,7 +88,7 @@ TEST(1) {
+ #endif
+ 
+   __ lr(r3, r2);
+-  __ lhi(r2, Operand(0, RelocInfo::NONE));
++  __ lhi(r2, Operand(0, RelocInfo::NO_INFO));
+   __ b(&C);
+ 
+   __ bind(&L);
+@@ -96,7 +96,7 @@ TEST(1) {
+   __ ahi(r3, Operand(-1 & 0xFFFF));
+ 
+   __ bind(&C);
+-  __ cfi(r3, Operand(0, RelocInfo::NONE));
++  __ cfi(r3, Operand(0, RelocInfo::NO_INFO));
+   __ bne(&L);
+   __ b(r14);
+ 
+@@ -138,7 +138,7 @@ TEST(2) {
+   __ ahi(r3, Operand(-1 & 0xFFFF));
+ 
+   __ bind(&C);
+-  __ cfi(r3, Operand(0, RelocInfo::NONE));
++  __ cfi(r3, Operand(0, RelocInfo::NO_INFO));
+   __ bne(&L);
+   __ b(r14);
+ 
+diff --git a/test/cctest/test-disasm-ia32.cc b/test/cctest/test-disasm-ia32.cc
+index 3375811a9a..a751c66637 100644
+--- a/test/cctest/test-disasm-ia32.cc
++++ b/test/cctest/test-disasm-ia32.cc
+@@ -68,7 +68,7 @@ TEST(DisasmIa320) {
+ 
+   // ---- All instructions that I can think of
+   __ add(edx, ebx);
+-  __ add(edx, Operand(12, RelocInfo::NONE));
++  __ add(edx, Operand(12, RelocInfo::NO_INFO));
+   __ add(edx, Operand(ebx, 0));
+   __ add(edx, Operand(ebx, 16));
+   __ add(edx, Operand(ebx, 1999));
+diff --git a/test/cctest/test-macro-assembler-x64.cc b/test/cctest/test-macro-assembler-x64.cc
+index 2cff73ccae..365aebb75d 100644
+--- a/test/cctest/test-macro-assembler-x64.cc
++++ b/test/cctest/test-macro-assembler-x64.cc
+@@ -567,7 +567,7 @@ TEST(OperandOffset) {
+   __ leaq(r13, Operand(rbp, -3 * kSystemPointerSize));
+   __ leaq(rbx, Operand(rbp, -5 * kSystemPointerSize));
+   __ movl(rcx, Immediate(2));
+-  __ Move(r8, reinterpret_cast<Address>(&data[128]), RelocInfo::NONE);
++  __ Move(r8, reinterpret_cast<Address>(&data[128]), RelocInfo::NO_INFO);
+   __ movl(rax, Immediate(1));
+ 
+   Operand sp0 = Operand(rsp, 0);
+diff --git a/test/cctest/wasm/test-jump-table-assembler.cc b/test/cctest/wasm/test-jump-table-assembler.cc
+index f1c78fe970..5ff1a422f6 100644
+--- a/test/cctest/wasm/test-jump-table-assembler.cc
++++ b/test/cctest/wasm/test-jump-table-assembler.cc
+@@ -97,64 +97,64 @@ void CompileJumpTableThunk(Address thunk, Address jump_target) {
+   Register scratch = kReturnRegister0;
+   Address stop_bit_address = reinterpret_cast<Address>(&global_stop_bit);
+ #if V8_TARGET_ARCH_X64
+-  __ Move(scratch, stop_bit_address, RelocInfo::NONE);
++  __ Move(scratch, stop_bit_address, RelocInfo::NO_INFO);
+   __ testl(MemOperand(scratch, 0), Immediate(1));
+   __ j(not_zero, &exit);
+-  __ Jump(jump_target, RelocInfo::NONE);
++  __ Jump(jump_target, RelocInfo::NO_INFO);
+ #elif V8_TARGET_ARCH_IA32
+-  __ Move(scratch, Immediate(stop_bit_address, RelocInfo::NONE));
++  __ Move(scratch, Immediate(stop_bit_address, RelocInfo::NO_INFO));
+   __ test(MemOperand(scratch, 0), Immediate(1));
+   __ j(not_zero, &exit);
+-  __ jmp(jump_target, RelocInfo::NONE);
++  __ jmp(jump_target, RelocInfo::NO_INFO);
+ #elif V8_TARGET_ARCH_ARM
+-  __ mov(scratch, Operand(stop_bit_address, RelocInfo::NONE));
++  __ mov(scratch, Operand(stop_bit_address, RelocInfo::NO_INFO));
+   __ ldr(scratch, MemOperand(scratch, 0));
+   __ tst(scratch, Operand(1));
+   __ b(ne, &exit);
+-  __ Jump(jump_target, RelocInfo::NONE);
++  __ Jump(jump_target, RelocInfo::NO_INFO);
+ #elif V8_TARGET_ARCH_ARM64
+   UseScratchRegisterScope temps(&masm);
+   temps.Exclude(x16);
+   scratch = x16;
+-  __ Mov(scratch, Operand(stop_bit_address, RelocInfo::NONE));
++  __ Mov(scratch, Operand(stop_bit_address, RelocInfo::NO_INFO));
+   __ Ldr(scratch, MemOperand(scratch, 0));
+   __ Tbnz(scratch, 0, &exit);
+-  __ Mov(scratch, Immediate(jump_target, RelocInfo::NONE));
++  __ Mov(scratch, Immediate(jump_target, RelocInfo::NO_INFO));
+   __ Br(scratch);
+ #elif V8_TARGET_ARCH_PPC64
+-  __ mov(scratch, Operand(stop_bit_address, RelocInfo::NONE));
++  __ mov(scratch, Operand(stop_bit_address, RelocInfo::NO_INFO));
+   __ LoadU64(scratch, MemOperand(scratch));
+   __ cmpi(scratch, Operand::Zero());
+   __ bne(&exit);
+-  __ mov(scratch, Operand(jump_target, RelocInfo::NONE));
++  __ mov(scratch, Operand(jump_target, RelocInfo::NO_INFO));
+   __ Jump(scratch);
+ #elif V8_TARGET_ARCH_S390X
+-  __ mov(scratch, Operand(stop_bit_address, RelocInfo::NONE));
++  __ mov(scratch, Operand(stop_bit_address, RelocInfo::NO_INFO));
+   __ LoadU64(scratch, MemOperand(scratch));
+   __ CmpP(scratch, Operand(0));
+   __ bne(&exit);
+-  __ mov(scratch, Operand(jump_target, RelocInfo::NONE));
++  __ mov(scratch, Operand(jump_target, RelocInfo::NO_INFO));
+   __ Jump(scratch);
+ #elif V8_TARGET_ARCH_MIPS64
+-  __ li(scratch, Operand(stop_bit_address, RelocInfo::NONE));
++  __ li(scratch, Operand(stop_bit_address, RelocInfo::NO_INFO));
+   __ Lw(scratch, MemOperand(scratch, 0));
+   __ Branch(&exit, ne, scratch, Operand(zero_reg));
+-  __ Jump(jump_target, RelocInfo::NONE);
++  __ Jump(jump_target, RelocInfo::NO_INFO);
+ #elif V8_TARGET_ARCH_LOONG64
+-  __ li(scratch, Operand(stop_bit_address, RelocInfo::NONE));
++  __ li(scratch, Operand(stop_bit_address, RelocInfo::NO_INFO));
+   __ Ld_w(scratch, MemOperand(scratch, 0));
+   __ Branch(&exit, ne, scratch, Operand(zero_reg));
+-  __ Jump(jump_target, RelocInfo::NONE);
++  __ Jump(jump_target, RelocInfo::NO_INFO);
+ #elif V8_TARGET_ARCH_MIPS
+-  __ li(scratch, Operand(stop_bit_address, RelocInfo::NONE));
++  __ li(scratch, Operand(stop_bit_address, RelocInfo::NO_INFO));
+   __ lw(scratch, MemOperand(scratch, 0));
+   __ Branch(&exit, ne, scratch, Operand(zero_reg));
+-  __ Jump(jump_target, RelocInfo::NONE);
++  __ Jump(jump_target, RelocInfo::NO_INFO);
+ #elif V8_TARGET_ARCH_RISCV64
+-  __ li(scratch, Operand(stop_bit_address, RelocInfo::NONE));
++  __ li(scratch, Operand(stop_bit_address, RelocInfo::NO_INFO));
+   __ Lw(scratch, MemOperand(scratch, 0));
+   __ Branch(&exit, ne, scratch, Operand(zero_reg));
+-  __ Jump(jump_target, RelocInfo::NONE);
++  __ Jump(jump_target, RelocInfo::NO_INFO);
+ #else
+ #error Unsupported architecture
+ #endif
+diff --git a/test/unittests/wasm/trap-handler-x64-unittest.cc b/test/unittests/wasm/trap-handler-x64-unittest.cc
+index 545a8d22b6..0356782c17 100644
+--- a/test/unittests/wasm/trap-handler-x64-unittest.cc
++++ b/test/unittests/wasm/trap-handler-x64-unittest.cc
+@@ -209,14 +209,14 @@ class TrapHandlerTest : public TestWithIsolate,
+   void GenerateSetThreadInWasmFlagCode(MacroAssembler* masm) {
+     masm->Move(scratch,
+                i_isolate()->thread_local_top()->thread_in_wasm_flag_address_,
+-               RelocInfo::NONE);
++               RelocInfo::NO_INFO);
+     masm->movl(MemOperand(scratch, 0), Immediate(1));
+   }
+ 
+   void GenerateResetThreadInWasmFlagCode(MacroAssembler* masm) {
+     masm->Move(scratch,
+                i_isolate()->thread_local_top()->thread_in_wasm_flag_address_,
+-               RelocInfo::NONE);
++               RelocInfo::NO_INFO);
+     masm->movl(MemOperand(scratch, 0), Immediate(0));
+   }
+ 
+@@ -276,7 +276,7 @@ TEST_P(TrapHandlerTest, TestTrapHandlerRecovery) {
+                       buffer_->CreateView());
+   __ Push(scratch);
+   GenerateSetThreadInWasmFlagCode(&masm);
+-  __ Move(scratch, crash_address_, RelocInfo::NONE);
++  __ Move(scratch, crash_address_, RelocInfo::NO_INFO);
+   uint32_t crash_offset = __ pc_offset();
+   __ testl(MemOperand(scratch, 0), Immediate(1));
+   uint32_t recovery_offset = __ pc_offset();
+@@ -301,7 +301,7 @@ TEST_P(TrapHandlerTest, TestReleaseHandlerData) {
+                       buffer_->CreateView());
+   __ Push(scratch);
+   GenerateSetThreadInWasmFlagCode(&masm);
+-  __ Move(scratch, crash_address_, RelocInfo::NONE);
++  __ Move(scratch, crash_address_, RelocInfo::NO_INFO);
+   uint32_t crash_offset = __ pc_offset();
+   __ testl(MemOperand(scratch, 0), Immediate(1));
+   uint32_t recovery_offset = __ pc_offset();
+@@ -332,7 +332,7 @@ TEST_P(TrapHandlerTest, TestNoThreadInWasmFlag) {
+   MacroAssembler masm(nullptr, AssemblerOptions{}, CodeObjectRequired::kNo,
+                       buffer_->CreateView());
+   __ Push(scratch);
+-  __ Move(scratch, crash_address_, RelocInfo::NONE);
++  __ Move(scratch, crash_address_, RelocInfo::NO_INFO);
+   uint32_t crash_offset = __ pc_offset();
+   __ testl(MemOperand(scratch, 0), Immediate(1));
+   uint32_t recovery_offset = __ pc_offset();
+@@ -357,7 +357,7 @@ TEST_P(TrapHandlerTest, TestCrashInWasmNoProtectedInstruction) {
+   __ Push(scratch);
+   GenerateSetThreadInWasmFlagCode(&masm);
+   uint32_t no_crash_offset = __ pc_offset();
+-  __ Move(scratch, crash_address_, RelocInfo::NONE);
++  __ Move(scratch, crash_address_, RelocInfo::NO_INFO);
+   __ testl(MemOperand(scratch, 0), Immediate(1));
+   // Offset where the crash is not happening.
+   uint32_t recovery_offset = __ pc_offset();
+@@ -443,7 +443,7 @@ TEST_P(TrapHandlerTest, TestCrashInOtherThread) {
+   MacroAssembler masm(nullptr, AssemblerOptions{}, CodeObjectRequired::kNo,
+                       buffer_->CreateView());
+   __ Push(scratch);
+-  __ Move(scratch, crash_address_, RelocInfo::NONE);
++  __ Move(scratch, crash_address_, RelocInfo::NO_INFO);
+   uint32_t crash_offset = __ pc_offset();
+   __ testl(MemOperand(scratch, 0), Immediate(1));
+   uint32_t recovery_offset = __ pc_offset();
+-- 
+2.35.1
+

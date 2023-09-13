@@ -1,0 +1,568 @@
+From d7966ecda28dba611cafad983835ed43c12e95d7 Mon Sep 17 00:00:00 2001
+From: Milad Fa <mfarazma@redhat.com>
+Date: Thu, 24 Mar 2022 10:32:44 -0400
+Subject: [PATCH] PPC: Introduce Power10 prefixed instructions
+
+P10 comes with prefixed instruction (2 x 4-byte instructions)
+which allow for using larger immediate values. `paddi` has
+been added in this CL which uses a 34-bit immediate.
+
+Prefixed instructions cannot cross 64-byte boundaries, i.e we cannot
+have the first 4-bytes on one side and the second 4-bytes emitted on
+the other side of the boundary. Therefore we need to align generated
+code to 64 bytes and emit a nop whenever the boundary is being crossed
+midway (check emit_prefix).
+
+Change-Id: I90e9953089214e15eeef0d70147ea5943fe05f45
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3528993
+Reviewed-by: Jakob Gruber <jgruber@chromium.org>
+Reviewed-by: Junliang Yan <junyan@redhat.com>
+Commit-Queue: Milad Farazmand <mfarazma@redhat.com>
+Cr-Commit-Position: refs/heads/main@{#79612}
+---
+ src/codegen/ppc/assembler-ppc.cc              | 35 ++++++-
+ src/codegen/ppc/assembler-ppc.h               | 28 ++++++
+ src/codegen/ppc/constants-ppc.h               | 40 ++++++--
+ src/common/globals.h                          |  4 +
+ src/diagnostics/ppc/disasm-ppc.cc             | 96 ++++++++++++++++++-
+ src/execution/ppc/simulator-ppc.cc            | 37 +++++--
+ src/objects/code.h                            |  4 +-
+ .../platform-embedded-file-writer-aix.cc      |  5 +
+ .../platform-embedded-file-writer-generic.cc  |  5 +
+ .../platform-embedded-file-writer-mac.cc      |  5 +
+ .../platform-embedded-file-writer-win.cc      |  5 +
+ 11 files changed, 237 insertions(+), 27 deletions(-)
+
+diff --git a/src/codegen/ppc/assembler-ppc.cc b/src/codegen/ppc/assembler-ppc.cc
+index 9543f5f4b1..a02f63dacf 100644
+--- a/src/codegen/ppc/assembler-ppc.cc
++++ b/src/codegen/ppc/assembler-ppc.cc
+@@ -1135,6 +1135,30 @@ void Assembler::divdu(Register dst, Register src1, Register src2, OEBit o,
+ }
+ #endif
+ 
++// Prefixed instructions.
++void Assembler::paddi(Register dst, Register src, const Operand& imm) {
++  CHECK(CpuFeatures::IsSupported(PPC_10_PLUS));
++  CHECK(is_int34(imm.immediate()));
++  DCHECK(src != r0);  // use pli instead to show intent.
++  int32_t hi = (imm.immediate() >> 16) & kImm18Mask;  // 18 bits.
++  int16_t lo = imm.immediate() & kImm16Mask;          // 16 bits.
++  ppaddi(Operand(hi));
++  addi(dst, src, Operand(lo));
++}
++
++void Assembler::pli(Register dst, const Operand& imm) {
++  CHECK(CpuFeatures::IsSupported(PPC_10_PLUS));
++  CHECK(is_int34(imm.immediate()));
++  int32_t hi = (imm.immediate() >> 16) & kImm18Mask;  // 18 bits.
++  int16_t lo = imm.immediate() & kImm16Mask;          // 16 bits.
++  ppaddi(Operand(hi));
++  li(dst, Operand(lo));
++}
++
++void Assembler::psubi(Register dst, Register src, const Operand& imm) {
++  paddi(dst, src, Operand(-(imm.immediate())));
++}
++
+ int Assembler::instructions_required_for_mov(Register dst,
+                                              const Operand& src) const {
+   bool canOptimize =
+@@ -1162,7 +1186,9 @@ bool Assembler::use_constant_pool_for_mov(Register dst, const Operand& src,
+ #else
+   bool allowOverflow = !(canOptimize || dst == r0);
+ #endif
+-  if (canOptimize && is_int16(value)) {
++  if (canOptimize &&
++      (is_int16(value) ||
++       (CpuFeatures::IsSupported(PPC_10_PLUS) && is_int34(value)))) {
+     // Prefer a single-instruction load-immediate.
+     return false;
+   }
+@@ -1209,7 +1235,10 @@ void Assembler::mov(Register dst, const Operand& src) {
+   bool canOptimize;
+ 
+   canOptimize =
+-      !(relocatable || (is_trampoline_pool_blocked() && !is_int16(value)));
++      !(relocatable ||
++        (is_trampoline_pool_blocked() &&
++         (!is_int16(value) ||
++          !(CpuFeatures::IsSupported(PPC_10_PLUS) && is_int34(value)))));
+ 
+   if (!src.IsHeapObjectRequest() &&
+       use_constant_pool_for_mov(dst, src, canOptimize)) {
+@@ -1239,6 +1268,8 @@ void Assembler::mov(Register dst, const Operand& src) {
+   if (canOptimize) {
+     if (is_int16(value)) {
+       li(dst, Operand(value));
++    } else if (CpuFeatures::IsSupported(PPC_10_PLUS) && is_int34(value)) {
++      pli(dst, Operand(value));
+     } else {
+       uint16_t u16;
+ #if V8_TARGET_ARCH_PPC64
+diff --git a/src/codegen/ppc/assembler-ppc.h b/src/codegen/ppc/assembler-ppc.h
+index fe21a1c8ad..a3820c0dfd 100644
+--- a/src/codegen/ppc/assembler-ppc.h
++++ b/src/codegen/ppc/assembler-ppc.h
+@@ -604,6 +604,16 @@ class Assembler : public AssemblerBase {
+   PPC_VC_OPCODE_LIST(DECLARE_PPC_VC_INSTRUCTIONS)
+ #undef DECLARE_PPC_VC_INSTRUCTIONS
+ 
++#define DECLARE_PPC_PREFIX_INSTRUCTIONS_TYPE_10(name, instr_name, instr_value) \
++  inline void name(const Operand& imm, const PRBit pr = LeavePR) {             \
++    prefix_10_form(instr_name, imm, pr);                                       \
++  }
++  inline void prefix_10_form(Instr instr, const Operand& imm, int pr) {
++    emit_prefix(instr | pr * B20 | (imm.immediate() & kImm18Mask));
++  }
++  PPC_PREFIX_OPCODE_TYPE_10_LIST(DECLARE_PPC_PREFIX_INSTRUCTIONS_TYPE_10)
++#undef DECLARE_PPC_PREFIX_INSTRUCTIONS_TYPE_10
++
+   RegList* GetScratchRegisterList() { return &scratch_register_list_; }
+   // ---------------------------------------------------------------------------
+   // Code generation
+@@ -1119,6 +1129,11 @@ class Assembler : public AssemblerBase {
+   void stxvx(const Simd128Register rt, const MemOperand& dst);
+   void xxspltib(const Simd128Register rt, const Operand& imm);
+ 
++  // Prefixed instructioons.
++  void paddi(Register dst, Register src, const Operand& imm);
++  void pli(Register dst, const Operand& imm);
++  void psubi(Register dst, Register src, const Operand& imm);
++
+   // Pseudo instructions
+ 
+   // Different nop operations are used by the code generator to detect certain
+@@ -1403,6 +1418,19 @@ class Assembler : public AssemblerBase {
+     pc_ += kInstrSize;
+     CheckTrampolinePoolQuick();
+   }
++
++  void emit_prefix(Instr x) {
++    // Prefixed instructions cannot cross 64-byte boundaries. Add a nop if the
++    // boundary will be crossed mid way.
++    // Code is set to be 64-byte aligned on PPC64 after relocation (look for
++    // kCodeAlignment). We use pc_offset() instead of pc_ as current pc_
++    // alignment could be different after relocation.
++    if (((pc_offset() + sizeof(Instr)) & 63) == 0) {
++      nop();
++    }
++    emit(x);
++  }
++
+   void TrackBranch() {
+     DCHECK(!trampoline_emitted_);
+     int count = tracked_branch_count_++;
+diff --git a/src/codegen/ppc/constants-ppc.h b/src/codegen/ppc/constants-ppc.h
+index 37593003e1..725cdaf79b 100644
+--- a/src/codegen/ppc/constants-ppc.h
++++ b/src/codegen/ppc/constants-ppc.h
+@@ -98,6 +98,9 @@ constexpr int kRootRegisterBias = 128;
+ // sign-extend the least significant 26-bits of value <imm>
+ #define SIGN_EXT_IMM26(imm) ((static_cast<int>(imm) << 6) >> 6)
+ 
++// sign-extend the least significant 34-bits of prefix+suffix value <imm>
++#define SIGN_EXT_IMM34(imm) ((static_cast<int64_t>(imm) << 30) >> 30)
++
+ // -----------------------------------------------------------------------------
+ // Conditions.
+ 
+@@ -2672,6 +2675,8 @@ immediate-specified index */                 \
+   /* System Call */           \
+   V(sc, SC, 0x44000002)
+ 
++#define PPC_PREFIX_OPCODE_TYPE_10_LIST(V) V(ppaddi, PPADDI, 0x6000000)
++
+ #define PPC_OPCODE_LIST(V)       \
+   PPC_X_OPCODE_LIST(V)           \
+   PPC_X_OPCODE_EH_S_FORM_LIST(V) \
+@@ -2701,20 +2706,22 @@ immediate-specified index */                 \
+   PPC_XX2_OPCODE_LIST(V)         \
+   PPC_XX3_OPCODE_VECTOR_LIST(V)  \
+   PPC_XX3_OPCODE_SCALAR_LIST(V)  \
+-  PPC_XX4_OPCODE_LIST(V)
++  PPC_XX4_OPCODE_LIST(V)         \
++  PPC_PREFIX_OPCODE_TYPE_10_LIST(V)
+ 
+ enum Opcode : uint32_t {
+ #define DECLARE_INSTRUCTION(name, opcode_name, opcode_value) \
+   opcode_name = opcode_value,
+   PPC_OPCODE_LIST(DECLARE_INSTRUCTION)
+ #undef DECLARE_INSTRUCTION
+-      EXT0 = 0x10000000,  // Extended code set 0
+-  EXT1 = 0x4C000000,      // Extended code set 1
+-  EXT2 = 0x7C000000,      // Extended code set 2
+-  EXT3 = 0xEC000000,      // Extended code set 3
+-  EXT4 = 0xFC000000,      // Extended code set 4
+-  EXT5 = 0x78000000,      // Extended code set 5 - 64bit only
+-  EXT6 = 0xF0000000,      // Extended code set 6
++      EXTP = 0x4000000,  // Extended code set prefixed
++  EXT0 = 0x10000000,     // Extended code set 0
++  EXT1 = 0x4C000000,     // Extended code set 1
++  EXT2 = 0x7C000000,     // Extended code set 2
++  EXT3 = 0xEC000000,     // Extended code set 3
++  EXT4 = 0xFC000000,     // Extended code set 4
++  EXT5 = 0x78000000,     // Extended code set 5 - 64bit only
++  EXT6 = 0xF0000000,     // Extended code set 6
+ };
+ 
+ // Instruction encoding bits and masks.
+@@ -2752,6 +2759,7 @@ enum {
+   kImm24Mask = (1 << 24) - 1,
+   kOff16Mask = (1 << 16) - 1,
+   kImm16Mask = (1 << 16) - 1,
++  kImm18Mask = (1 << 18) - 1,
+   kImm22Mask = (1 << 22) - 1,
+   kImm26Mask = (1 << 26) - 1,
+   kBOfieldMask = 0x1f << 21,
+@@ -2795,6 +2803,9 @@ enum LKBit {   // Bit 0
+   LeaveLK = 0  // No action
+ };
+ 
++// Prefixed R bit.
++enum PRBit { SetPR = 1, LeavePR = 0 };
++
+ enum BOfield {        // Bits 25-21
+   DCBNZF = 0 << 21,   // Decrement CTR; branch if CTR != 0 and condition false
+   DCBEZF = 2 << 21,   // Decrement CTR; branch if CTR == 0 and condition false
+@@ -2968,12 +2979,21 @@ class Instruction {
+   inline uint32_t OpcodeField() const {
+     return static_cast<Opcode>(BitField(31, 26));
+   }
++  inline uint32_t PrefixOpcodeField() const {
++    return static_cast<Opcode>(BitField(31, 25));
++  }
+ 
+ #define OPCODE_CASES(name, opcode_name, opcode_value) case opcode_name:
+ 
+   inline Opcode OpcodeBase() const {
+-    uint32_t opcode = OpcodeField();
+-    uint32_t extcode = OpcodeField();
++    uint32_t opcode = PrefixOpcodeField();
++    uint32_t extcode = PrefixOpcodeField();
++    switch (opcode) {
++      PPC_PREFIX_OPCODE_TYPE_10_LIST(OPCODE_CASES)
++      return static_cast<Opcode>(opcode);
++    }
++    opcode = OpcodeField();
++    extcode = OpcodeField();
+     switch (opcode) {
+       PPC_D_OPCODE_LIST(OPCODE_CASES)
+       PPC_I_OPCODE_LIST(OPCODE_CASES)
+diff --git a/src/common/globals.h b/src/common/globals.h
+index cd374c8238..5eaf1f641c 100644
+--- a/src/common/globals.h
++++ b/src/common/globals.h
+@@ -597,6 +597,10 @@ constexpr intptr_t kDoubleAlignmentMask = kDoubleAlignment - 1;
+ // other architectures.
+ #if V8_TARGET_ARCH_X64
+ constexpr int kCodeAlignmentBits = 6;
++#elif V8_TARGET_ARCH_PPC64
++// 64 byte alignment is needed on ppc64 to make sure p10 prefixed instructions
++// don't cross 64-byte boundaries.
++constexpr int kCodeAlignmentBits = 6;
+ #else
+ constexpr int kCodeAlignmentBits = 5;
+ #endif
+diff --git a/src/diagnostics/ppc/disasm-ppc.cc b/src/diagnostics/ppc/disasm-ppc.cc
+index 03868d5357..e3698794e2 100644
+--- a/src/diagnostics/ppc/disasm-ppc.cc
++++ b/src/diagnostics/ppc/disasm-ppc.cc
+@@ -61,6 +61,16 @@ class Decoder {
+   // Returns the length of the disassembled machine instruction in bytes.
+   int InstructionDecode(byte* instruction);
+ 
++  // Prefixed instructions.
++  enum PrefixType { not_prefixed, is_prefixed };
++  // static is used to retain values even with new instances.
++  static PrefixType PrefixStatus;
++  static uint64_t PrefixValue;
++  uint64_t GetPrefixValue();
++  void SetAsPrefixed(uint64_t v);
++  void ResetPrefix();
++  bool IsPrefixed();
++
+  private:
+   // Bottleneck functions to print into the out_buffer.
+   void PrintChar(const char ch);
+@@ -82,6 +92,7 @@ class Decoder {
+   void Unknown(Instruction* instr);
+   void UnknownFormat(Instruction* instr, const char* opcname);
+ 
++  void DecodeExtP(Instruction* instr);
+   void DecodeExt0(Instruction* instr);
+   void DecodeExt1(Instruction* instr);
+   void DecodeExt2(Instruction* instr);
+@@ -95,6 +106,25 @@ class Decoder {
+   int out_buffer_pos_;
+ };
+ 
++// Define Prefix functions and values.
++// static
++Decoder::PrefixType Decoder::PrefixStatus = not_prefixed;
++uint64_t Decoder::PrefixValue = 0;
++
++uint64_t Decoder::GetPrefixValue() { return PrefixValue; }
++
++void Decoder::SetAsPrefixed(uint64_t v) {
++  PrefixStatus = is_prefixed;
++  PrefixValue = v;
++}
++
++void Decoder::ResetPrefix() {
++  PrefixStatus = not_prefixed;
++  PrefixValue = 0;
++}
++
++bool Decoder::IsPrefixed() { return PrefixStatus == is_prefixed; }
++
+ // Support for assertions in the Decoder formatting functions.
+ #define STRING_STARTS_WITH(string, compare_string) \
+   (strncmp(string, compare_string, strlen(compare_string)) == 0)
+@@ -255,9 +285,17 @@ int Decoder::FormatOption(Instruction* instr, const char* format) {
+       return FormatVectorRegister(instr, format);
+     }
+     case 'i': {  // int16
+-      int32_t value = (instr->Bits(15, 0) << 16) >> 16;
++      int64_t value;
++      uint32_t addi_value = instr->Bits(15, 0);
++      if (IsPrefixed()) {
++        uint64_t prefix_value = GetPrefixValue();
++        value = SIGN_EXT_IMM34(
++            static_cast<int64_t>((prefix_value << 16) | addi_value));
++      } else {
++        value = (static_cast<int64_t>(addi_value) << 48) >> 48;
++      }
+       out_buffer_pos_ +=
+-          base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
++          base::SNPrintF(out_buffer_ + out_buffer_pos_, "%ld", value);
+       return 5;
+     }
+     case 'I': {  // IMM8
+@@ -425,6 +463,32 @@ void Decoder::UnknownFormat(Instruction* instr, const char* name) {
+   Format(instr, buffer);
+ }
+ 
++void Decoder::DecodeExtP(Instruction* instr) {
++  switch (EXTP | (instr->BitField(25, 25))) {
++    case PPADDI: {
++      // Read prefix.
++      SetAsPrefixed(instr->Bits(17, 0));
++      // Read suffix (next instruction).
++      Instruction* next_instr =
++          bit_cast<Instruction*>(bit_cast<intptr_t>(instr) + kInstrSize);
++      CHECK_EQ(ADDI, next_instr->OpcodeField());
++      if (next_instr->RAValue() == 0) {
++        // This is load immediate prefixed.
++        Format(instr, "pli");
++        Format(next_instr, "     'rt, ");
++      } else {
++        Format(instr, "paddi");
++        Format(next_instr, "   'rt, 'ra, ");
++      }
++      Format(next_instr, "'int34");
++      break;
++    }
++    default: {
++      Unknown(instr);
++    }
++  }
++}
++
+ void Decoder::DecodeExt0(Instruction* instr) {
+   // Some encodings have integers hard coded in the middle, handle those first.
+   switch (EXT0 | (instr->BitField(20, 16)) | (instr->BitField(10, 0))) {
+@@ -1432,9 +1496,21 @@ void Decoder::DecodeExt6(Instruction* instr) {
+ // Disassemble the instruction at *instr_ptr into the output buffer.
+ int Decoder::InstructionDecode(byte* instr_ptr) {
+   Instruction* instr = Instruction::At(instr_ptr);
++
++  uint32_t opcode = instr->OpcodeValue() << 26;
+   // Print raw instruction bytes.
+-  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_,
+-                                    "%08x       ", instr->InstructionBits());
++  if (opcode != EXTP) {
++    out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_,
++                                      "%08x       ", instr->InstructionBits());
++  } else {
++    // Prefixed instructions have a 4-byte prefix and a 4-byte suffix. Print
++    // both on the same line.
++    Instruction* next_instr =
++        bit_cast<Instruction*>(bit_cast<intptr_t>(instr) + kInstrSize);
++    out_buffer_pos_ +=
++        base::SNPrintF(out_buffer_ + out_buffer_pos_, "%08x|%08x ",
++                       instr->InstructionBits(), next_instr->InstructionBits());
++  }
+ 
+   if (ABI_USES_FUNCTION_DESCRIPTORS && instr->InstructionBits() == 0) {
+     // The first field will be identified as a jump table entry.  We
+@@ -1443,7 +1519,6 @@ int Decoder::InstructionDecode(byte* instr_ptr) {
+     return kInstrSize;
+   }
+ 
+-  uint32_t opcode = instr->OpcodeValue() << 26;
+   switch (opcode) {
+     case TWI: {
+       PrintSoftwareInterrupt(instr->SvcValue());
+@@ -1563,6 +1638,10 @@ int Decoder::InstructionDecode(byte* instr_ptr) {
+       Format(instr, "b'l'a 'target26");
+       break;
+     }
++    case EXTP: {
++      DecodeExtP(instr);
++      break;
++    }
+     case EXT0: {
+       DecodeExt0(instr);
+       break;
+@@ -1753,6 +1832,13 @@ int Decoder::InstructionDecode(byte* instr_ptr) {
+     }
+   }
+ 
++  if (IsPrefixed()) {
++    // The next instruction (suffix) should have already been decoded as part of
++    // prefix decoding.
++    ResetPrefix();
++    return 2 * kInstrSize;
++  }
++
+   return kInstrSize;
+ }
+ }  // namespace internal
+diff --git a/src/execution/ppc/simulator-ppc.cc b/src/execution/ppc/simulator-ppc.cc
+index ea81e6b1c0..010f0b5f68 100644
+--- a/src/execution/ppc/simulator-ppc.cc
++++ b/src/execution/ppc/simulator-ppc.cc
+@@ -1632,21 +1632,42 @@ void Simulator::ExecuteGeneric(Instruction* instr) {
+       set_register(rt, alu_out);
+       break;
+     }
++#define SET_ADDI_RESULT()               \
++  intptr_t alu_out;                     \
++  if (ra == 0) {                        \
++    alu_out = im_val;                   \
++  } else {                              \
++    intptr_t ra_val = get_register(ra); \
++    alu_out = ra_val + im_val;          \
++  }                                     \
++  set_register(rt, alu_out);
+     case ADDI: {
+       int rt = instr->RTValue();
+       int ra = instr->RAValue();
+       int32_t im_val = SIGN_EXT_IMM16(instr->Bits(15, 0));
+-      intptr_t alu_out;
+-      if (ra == 0) {
+-        alu_out = im_val;
+-      } else {
+-        intptr_t ra_val = get_register(ra);
+-        alu_out = ra_val + im_val;
+-      }
+-      set_register(rt, alu_out);
++      SET_ADDI_RESULT();
+       // todo - handle RC bit
+       break;
+     }
++    case PPADDI: {
++      // Read prefix.
++      uint64_t prefix_value = instr->Bits(17, 0);
++      // Read suffix (next instruction).
++      Instruction* next_instr = bit_cast<Instruction*>(get_pc() + kInstrSize);
++      CHECK_EQ(ADDI, next_instr->OpcodeBase());
++      // Execute as a single instruction.
++      int rt = next_instr->RTValue();
++      int ra = next_instr->RAValue();
++      int64_t im_val;
++      uint16_t addi_value = next_instr->Bits(15, 0);
++      im_val = SIGN_EXT_IMM34(
++          static_cast<int64_t>((prefix_value << 16) | addi_value));
++      SET_ADDI_RESULT();
++      // We have now executed instructions at this as well as next pc.
++      set_pc(get_pc() + (2 * kInstrSize));
++      break;
++    }
++#undef SET_ADDI_RESULT
+     case ADDIS: {
+       int rt = instr->RTValue();
+       int ra = instr->RAValue();
+diff --git a/src/objects/code.h b/src/objects/code.h
+index e582e04a67..53d98ccb04 100644
+--- a/src/objects/code.h
++++ b/src/objects/code.h
+@@ -668,8 +668,8 @@ class Code : public HeapObject {
+   static constexpr int kHeaderPaddingSize = 12;
+ #elif V8_TARGET_ARCH_PPC64
+   static constexpr int kHeaderPaddingSize =
+-      FLAG_enable_embedded_constant_pool ? (COMPRESS_POINTERS_BOOL ? 8 : 20)
+-                                         : (COMPRESS_POINTERS_BOOL ? 12 : 24);
++      FLAG_enable_embedded_constant_pool ? (COMPRESS_POINTERS_BOOL ? 8 : 52)
++                                         : (COMPRESS_POINTERS_BOOL ? 12 : 56);
+ #elif V8_TARGET_ARCH_S390X
+   static constexpr int kHeaderPaddingSize = COMPRESS_POINTERS_BOOL ? 12 : 24;
+ #elif V8_TARGET_ARCH_RISCV64
+diff --git a/src/snapshot/embedded/platform-embedded-file-writer-aix.cc b/src/snapshot/embedded/platform-embedded-file-writer-aix.cc
+index e858da90b5..9b3e887e27 100644
+--- a/src/snapshot/embedded/platform-embedded-file-writer-aix.cc
++++ b/src/snapshot/embedded/platform-embedded-file-writer-aix.cc
+@@ -69,6 +69,11 @@ void PlatformEmbeddedFileWriterAIX::AlignToCodeAlignment() {
+   // On x64 use 64-bytes code alignment to allow 64-bytes loop header alignment.
+   STATIC_ASSERT((1 << 6) >= kCodeAlignment);
+   fprintf(fp_, ".align 6\n");
++#elif V8_TARGET_ARCH_PPC64
++  // 64 byte alignment is needed on ppc64 to make sure p10 prefixed instructions
++  // don't cross 64-byte boundaries.
++  STATIC_ASSERT((1 << 6) >= kCodeAlignment);
++  fprintf(fp_, ".align 6\n");
+ #else
+   STATIC_ASSERT((1 << 5) >= kCodeAlignment);
+   fprintf(fp_, ".align 5\n");
+diff --git a/src/snapshot/embedded/platform-embedded-file-writer-generic.cc b/src/snapshot/embedded/platform-embedded-file-writer-generic.cc
+index 641d3638f3..9309dbdd35 100644
+--- a/src/snapshot/embedded/platform-embedded-file-writer-generic.cc
++++ b/src/snapshot/embedded/platform-embedded-file-writer-generic.cc
+@@ -78,6 +78,11 @@ void PlatformEmbeddedFileWriterGeneric::AlignToCodeAlignment() {
+   // On x64 use 64-bytes code alignment to allow 64-bytes loop header alignment.
+   STATIC_ASSERT(64 >= kCodeAlignment);
+   fprintf(fp_, ".balign 64\n");
++#elif V8_TARGET_ARCH_PPC64
++  // 64 byte alignment is needed on ppc64 to make sure p10 prefixed instructions
++  // don't cross 64-byte boundaries.
++  STATIC_ASSERT(64 >= kCodeAlignment);
++  fprintf(fp_, ".balign 64\n");
+ #else
+   STATIC_ASSERT(32 >= kCodeAlignment);
+   fprintf(fp_, ".balign 32\n");
+diff --git a/src/snapshot/embedded/platform-embedded-file-writer-mac.cc b/src/snapshot/embedded/platform-embedded-file-writer-mac.cc
+index cfe9bbcde1..943635b39b 100644
+--- a/src/snapshot/embedded/platform-embedded-file-writer-mac.cc
++++ b/src/snapshot/embedded/platform-embedded-file-writer-mac.cc
+@@ -64,6 +64,11 @@ void PlatformEmbeddedFileWriterMac::AlignToCodeAlignment() {
+   // On x64 use 64-bytes code alignment to allow 64-bytes loop header alignment.
+   STATIC_ASSERT(64 >= kCodeAlignment);
+   fprintf(fp_, ".balign 64\n");
++#elif V8_TARGET_ARCH_PPC64
++  // 64 byte alignment is needed on ppc64 to make sure p10 prefixed instructions
++  // don't cross 64-byte boundaries.
++  STATIC_ASSERT(64 >= kCodeAlignment);
++  fprintf(fp_, ".balign 64\n");
+ #else
+   STATIC_ASSERT(32 >= kCodeAlignment);
+   fprintf(fp_, ".balign 32\n");
+diff --git a/src/snapshot/embedded/platform-embedded-file-writer-win.cc b/src/snapshot/embedded/platform-embedded-file-writer-win.cc
+index 83b85c8df9..fedd9975c5 100644
+--- a/src/snapshot/embedded/platform-embedded-file-writer-win.cc
++++ b/src/snapshot/embedded/platform-embedded-file-writer-win.cc
+@@ -641,6 +641,11 @@ void PlatformEmbeddedFileWriterWin::AlignToCodeAlignment() {
+   // On x64 use 64-bytes code alignment to allow 64-bytes loop header alignment.
+   STATIC_ASSERT(64 >= kCodeAlignment);
+   fprintf(fp_, ".balign 64\n");
++#elif V8_TARGET_ARCH_PPC64
++  // 64 byte alignment is needed on ppc64 to make sure p10 prefixed instructions
++  // don't cross 64-byte boundaries.
++  STATIC_ASSERT(64 >= kCodeAlignment);
++  fprintf(fp_, ".balign 64\n");
+ #else
+   STATIC_ASSERT(32 >= kCodeAlignment);
+   fprintf(fp_, ".balign 32\n");
+-- 
+2.35.1
+

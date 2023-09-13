@@ -1,0 +1,144 @@
+From d4711df35096cb7d8d25d236a75d3b66a6e39403 Mon Sep 17 00:00:00 2001
+From: Patrick Thier <pthier@chromium.org>
+Date: Wed, 4 Aug 2021 13:09:09 +0000
+Subject: [PATCH] [sparkplug] Fix maximum frame size in prologue.
+
+Maximum frame size (in bytes) is used to check for stack overflows
+in the prologue.
+The maximum number of call arguments is pre-calculated and included
+in this check. However the count was added to the frame size wihout
+converting the count to bytes, resulting in inaccurate stack overflow
+checks.
+
+Bug: chromium:1235182
+Change-Id: I21bca4e183fccfd055f2f1d5a40b71651c14b911
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3071399
+Reviewed-by: Leszek Swirski <leszeks@chromium.org>
+Commit-Queue: Patrick Thier <pthier@chromium.org>
+Cr-Commit-Position: refs/heads/master@{#76090}
+---
+ src/baseline/arm/baseline-compiler-arm-inl.h         | 3 ++-
+ src/baseline/arm64/baseline-compiler-arm64-inl.h     | 3 ++-
+ src/baseline/ia32/baseline-compiler-ia32-inl.h       | 3 ++-
+ src/baseline/mips/baseline-compiler-mips-inl.h       | 3 ++-
+ src/baseline/mips64/baseline-compiler-mips64-inl.h   | 3 ++-
+ src/baseline/riscv64/baseline-compiler-riscv64-inl.h | 3 ++-
+ src/baseline/x64/baseline-compiler-x64-inl.h         | 3 ++-
+ test/mjsunit/regress/regress-crbug-1235182.js        | 7 +++++++
+ 8 files changed, 21 insertions(+), 7 deletions(-)
+ create mode 100644 test/mjsunit/regress/regress-crbug-1235182.js
+
+diff --git a/src/baseline/arm/baseline-compiler-arm-inl.h b/src/baseline/arm/baseline-compiler-arm-inl.h
+index 0fc2389c35..86a62b658b 100644
+--- a/src/baseline/arm/baseline-compiler-arm-inl.h
++++ b/src/baseline/arm/baseline-compiler-arm-inl.h
+@@ -18,7 +18,8 @@ void BaselineCompiler::Prologue() {
+   // Enter the frame here, since CallBuiltin will override lr.
+   __ masm()->EnterFrame(StackFrame::BASELINE);
+   DCHECK_EQ(kJSFunctionRegister, kJavaScriptCallTargetRegister);
+-  int max_frame_size = bytecode_->frame_size() + max_call_args_;
++  int max_frame_size =
++      bytecode_->frame_size() + max_call_args_ * kSystemPointerSize;
+   CallBuiltin<Builtin::kBaselineOutOfLinePrologue>(
+       kContextRegister, kJSFunctionRegister, kJavaScriptCallArgCountRegister,
+       max_frame_size, kJavaScriptCallNewTargetRegister, bytecode_);
+diff --git a/src/baseline/arm64/baseline-compiler-arm64-inl.h b/src/baseline/arm64/baseline-compiler-arm64-inl.h
+index 333c0a2a34..59cffa47b3 100644
+--- a/src/baseline/arm64/baseline-compiler-arm64-inl.h
++++ b/src/baseline/arm64/baseline-compiler-arm64-inl.h
+@@ -18,7 +18,8 @@ void BaselineCompiler::Prologue() {
+   // Enter the frame here, since CallBuiltin will override lr.
+   __ masm()->EnterFrame(StackFrame::BASELINE);
+   DCHECK_EQ(kJSFunctionRegister, kJavaScriptCallTargetRegister);
+-  int max_frame_size = bytecode_->frame_size() + max_call_args_;
++  int max_frame_size =
++      bytecode_->frame_size() + max_call_args_ * kSystemPointerSize;
+   CallBuiltin<Builtin::kBaselineOutOfLinePrologue>(
+       kContextRegister, kJSFunctionRegister, kJavaScriptCallArgCountRegister,
+       max_frame_size, kJavaScriptCallNewTargetRegister, bytecode_);
+diff --git a/src/baseline/ia32/baseline-compiler-ia32-inl.h b/src/baseline/ia32/baseline-compiler-ia32-inl.h
+index 6ce19ec60d..f68d2c21fb 100644
+--- a/src/baseline/ia32/baseline-compiler-ia32-inl.h
++++ b/src/baseline/ia32/baseline-compiler-ia32-inl.h
+@@ -17,7 +17,8 @@ namespace baseline {
+ 
+ void BaselineCompiler::Prologue() {
+   DCHECK_EQ(kJSFunctionRegister, kJavaScriptCallTargetRegister);
+-  int max_frame_size = bytecode_->frame_size() + max_call_args_;
++  int max_frame_size =
++      bytecode_->frame_size() + max_call_args_ * kSystemPointerSize;
+   CallBuiltin<Builtin::kBaselineOutOfLinePrologue>(
+       kContextRegister, kJSFunctionRegister, kJavaScriptCallArgCountRegister,
+       max_frame_size, kJavaScriptCallNewTargetRegister, bytecode_);
+diff --git a/src/baseline/mips/baseline-compiler-mips-inl.h b/src/baseline/mips/baseline-compiler-mips-inl.h
+index 6897d9b48c..3e8bb98e14 100644
+--- a/src/baseline/mips/baseline-compiler-mips-inl.h
++++ b/src/baseline/mips/baseline-compiler-mips-inl.h
+@@ -18,7 +18,8 @@ void BaselineCompiler::Prologue() {
+   ASM_CODE_COMMENT(&masm_);
+   __ masm()->EnterFrame(StackFrame::BASELINE);
+   DCHECK_EQ(kJSFunctionRegister, kJavaScriptCallTargetRegister);
+-  int max_frame_size = bytecode_->frame_size() + max_call_args_;
++  int max_frame_size =
++      bytecode_->frame_size() + max_call_args_ * kSystemPointerSize;
+   CallBuiltin<Builtin::kBaselineOutOfLinePrologue>(
+       kContextRegister, kJSFunctionRegister, kJavaScriptCallArgCountRegister,
+       max_frame_size, kJavaScriptCallNewTargetRegister, bytecode_);
+diff --git a/src/baseline/mips64/baseline-compiler-mips64-inl.h b/src/baseline/mips64/baseline-compiler-mips64-inl.h
+index 5971e17aa4..f919635674 100644
+--- a/src/baseline/mips64/baseline-compiler-mips64-inl.h
++++ b/src/baseline/mips64/baseline-compiler-mips64-inl.h
+@@ -18,7 +18,8 @@ void BaselineCompiler::Prologue() {
+   ASM_CODE_COMMENT(&masm_);
+   __ masm()->EnterFrame(StackFrame::BASELINE);
+   DCHECK_EQ(kJSFunctionRegister, kJavaScriptCallTargetRegister);
+-  int max_frame_size = bytecode_->frame_size() + max_call_args_;
++  int max_frame_size =
++      bytecode_->frame_size() + max_call_args_ * kSystemPointerSize;
+   CallBuiltin<Builtin::kBaselineOutOfLinePrologue>(
+       kContextRegister, kJSFunctionRegister, kJavaScriptCallArgCountRegister,
+       max_frame_size, kJavaScriptCallNewTargetRegister, bytecode_);
+diff --git a/src/baseline/riscv64/baseline-compiler-riscv64-inl.h b/src/baseline/riscv64/baseline-compiler-riscv64-inl.h
+index deb5aba0ef..fc73105b8e 100644
+--- a/src/baseline/riscv64/baseline-compiler-riscv64-inl.h
++++ b/src/baseline/riscv64/baseline-compiler-riscv64-inl.h
+@@ -18,7 +18,8 @@ void BaselineCompiler::Prologue() {
+   // Enter the frame here, since CallBuiltin will override lr.
+   __ masm()->EnterFrame(StackFrame::BASELINE);
+   DCHECK_EQ(kJSFunctionRegister, kJavaScriptCallTargetRegister);
+-  int max_frame_size = bytecode_->frame_size() + max_call_args_;
++  int max_frame_size =
++      bytecode_->frame_size() + max_call_args_ * kSystemPointerSize;
+   CallBuiltin<Builtin::kBaselineOutOfLinePrologue>(
+       kContextRegister, kJSFunctionRegister, kJavaScriptCallArgCountRegister,
+       max_frame_size, kJavaScriptCallNewTargetRegister, bytecode_);
+diff --git a/src/baseline/x64/baseline-compiler-x64-inl.h b/src/baseline/x64/baseline-compiler-x64-inl.h
+index cc7956fadc..a2a45c0ea7 100644
+--- a/src/baseline/x64/baseline-compiler-x64-inl.h
++++ b/src/baseline/x64/baseline-compiler-x64-inl.h
+@@ -18,7 +18,8 @@ namespace baseline {
+ void BaselineCompiler::Prologue() {
+   ASM_CODE_COMMENT(&masm_);
+   DCHECK_EQ(kJSFunctionRegister, kJavaScriptCallTargetRegister);
+-  int max_frame_size = bytecode_->frame_size() + max_call_args_;
++  int max_frame_size =
++      bytecode_->frame_size() + max_call_args_ * kSystemPointerSize;
+   CallBuiltin<Builtin::kBaselineOutOfLinePrologue>(
+       kContextRegister, kJSFunctionRegister, kJavaScriptCallArgCountRegister,
+       max_frame_size, kJavaScriptCallNewTargetRegister, bytecode_);
+diff --git a/test/mjsunit/regress/regress-crbug-1235182.js b/test/mjsunit/regress/regress-crbug-1235182.js
+new file mode 100644
+index 0000000000..0a3b1e71e9
+--- /dev/null
++++ b/test/mjsunit/regress/regress-crbug-1235182.js
+@@ -0,0 +1,7 @@
++// Copyright 2021 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++var call_f = new Function('f(' + ('0,').repeat(7023) + ')');
++function f() {[1, 2, 3].sort(call_f);}
++assertThrows(call_f, RangeError);
+-- 
+2.35.1
+

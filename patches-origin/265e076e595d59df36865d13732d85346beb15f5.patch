@@ -1,0 +1,44 @@
+From 265e076e595d59df36865d13732d85346beb15f5 Mon Sep 17 00:00:00 2001
+From: QiuJi <qiuji@iscas.ac.cn>
+Date: Thu, 13 May 2021 17:02:02 +0800
+Subject: [PATCH] [riscv64][compiler] Keep WriteBarrier Smi check on the main
+ code path
+
+Port: d3d4a89652ff14264bbd18bc63f1d99c4d324aea
+Bug: v8:11420
+Change-Id: I995bb6f9e4f0d62d2e048fbae0d17747c301db4d
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/2894036
+Commit-Queue: Brice Dobry <brice.dobry@futurewei.com>
+Reviewed-by: Brice Dobry <brice.dobry@futurewei.com>
+Cr-Commit-Position: refs/heads/master@{#74555}
+---
+ src/compiler/backend/riscv64/code-generator-riscv64.cc | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/src/compiler/backend/riscv64/code-generator-riscv64.cc b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+index 0b344c7eba..007edd7a96 100644
+--- a/src/compiler/backend/riscv64/code-generator-riscv64.cc
++++ b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+@@ -157,9 +157,6 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
+         zone_(gen->zone()) {}
+ 
+   void Generate() final {
+-    if (mode_ > RecordWriteMode::kValueIsPointer) {
+-      __ JumpIfSmi(value_, exit());
+-    }
+     __ CheckPageFlag(value_, scratch0_,
+                      MemoryChunk::kPointersToHereAreInterestingMask, eq,
+                      exit());
+@@ -824,6 +821,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+                                                    DetermineStubCallMode());
+       __ Add64(kScratchReg, object, index);
+       __ Sd(value, MemOperand(kScratchReg));
++      if (mode > RecordWriteMode::kValueIsPointer) {
++        __ JumpIfSmi(value, ool->exit());
++      }
+       __ CheckPageFlag(object, scratch0,
+                        MemoryChunk::kPointersFromHereAreInterestingMask, ne,
+                        ool->entry());
+-- 
+2.35.1
+

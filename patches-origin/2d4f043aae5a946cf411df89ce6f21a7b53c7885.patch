@@ -1,0 +1,185 @@
+From 2d4f043aae5a946cf411df89ce6f21a7b53c7885 Mon Sep 17 00:00:00 2001
+From: Jakob Kummerow <jkummerow@chromium.org>
+Date: Fri, 15 Jul 2022 15:05:33 +0200
+Subject: [PATCH] [stringrefs][test] Speed up stringrefs-exec test
+
+By about 10x-20x depending on platform and configuration.
+Shorter test strings make the set of all possible substrings
+considerably smaller.
+
+Fixed: v8:13074
+Bug: v8:12868
+Change-Id: I46ae94fbcba43080d06b1b825feae6b2acf819d1
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3763861
+Reviewed-by: Andy Wingo <wingo@igalia.com>
+Commit-Queue: Jakob Kummerow <jkummerow@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#81753}
+---
+ test/mjsunit/mjsunit.status             |  8 ---
+ test/mjsunit/wasm/stringrefs-exec-gc.js | 26 +++++-----
+ test/mjsunit/wasm/stringrefs-exec.js    | 69 +++++++++++++------------
+ 3 files changed, 51 insertions(+), 52 deletions(-)
+
+diff --git a/test/mjsunit/mjsunit.status b/test/mjsunit/mjsunit.status
+index d6899f86ca..8c0fd65722 100644
+--- a/test/mjsunit/mjsunit.status
++++ b/test/mjsunit/mjsunit.status
+@@ -167,7 +167,6 @@
+   'wasm/atomics64-stress': [PASS, SLOW, NO_VARIANTS, ['mode != release or dcheck_always_on', SKIP], ['tsan', SKIP]],
+   'wasm/compare-exchange-stress': [PASS, SLOW, NO_VARIANTS],
+   'wasm/compare-exchange64-stress': [PASS, SLOW, NO_VARIANTS],
+-  'wasm/stringrefs-exec': [PASS, SLOW],
+ 
+   # Very slow on ARM, MIPS, RISCV and LOONG, contains no architecture dependent code.
+   'unicode-case-overoptimization0': [PASS, NO_VARIANTS, ['arch in (arm, arm64, mipsel, mips64el, mips64, mips, riscv64, loong64)', SKIP]],
+@@ -362,7 +361,6 @@
+   'es6/regress/regress-crbug-465671-null': [SKIP],
+   'regress/regress-148378': [SKIP],
+   'regress/regress-crbug-762472': [SKIP],
+-  'wasm/stringrefs-exec': [PASS, ['arch == arm64 and simulator_run', SKIP]],
+ 
+   # BUG(v8:10035)
+   'compiler/deopt-array-builtins': [SKIP],
+@@ -1272,12 +1270,6 @@
+   'regress/wasm/regress-7785': [SKIP],
+ }],  # variant == nooptimization
+ 
+-##############################################################################
+-['variant in (nooptimization, turboshaft)', {
+-  # Slow test:
+-  'wasm/stringrefs-exec': [PASS, ['arch in (arm, arm64) and simulator_run and mode == debug', SKIP]],
+-}],  # variant in (nooptimization, turboshaft)
+-
+ ##############################################################################
+ ['gcov_coverage', {
+   # Tests taking too long.
+diff --git a/test/mjsunit/wasm/stringrefs-exec-gc.js b/test/mjsunit/wasm/stringrefs-exec-gc.js
+index 8390abe408..439cddf374 100644
+--- a/test/mjsunit/wasm/stringrefs-exec-gc.js
++++ b/test/mjsunit/wasm/stringrefs-exec-gc.js
+@@ -35,18 +35,20 @@ function encodeWtf8(str) {
+   return out;
+ }
+ 
+-let interestingStrings = ['',
+-                          'ascii',
+-                          'latin \xa9 1',
+-                          'two \ucccc byte',
+-                          'surrogate \ud800\udc000 pair',
+-                          'isolated \ud800 leading',
+-                          'isolated \udc00 trailing',
+-                          '\ud800 isolated leading at beginning',
+-                          '\udc00 isolated trailing at beginning',
+-                          'isolated leading at end \ud800',
+-                          'isolated trailing at end \udc00',
+-                          'swapped surrogate \udc00\ud800 pair'];
++let interestingStrings = [
++  '',
++  'ascii',
++  'latin\xa91',        // Latin-1.
++  '2 \ucccc b',        // Two-byte.
++  'a \ud800\udc00 b',  // Proper surrogate pair.
++  'a \ud800 b',        // Lone lead surrogate.
++  'a \udc00 b',        // Lone trail surrogate.
++  '\ud800 bc',         // Lone lead surrogate at the start.
++  '\udc00 bc',         // Lone trail surrogate at the start.
++  'ab \ud800',         // Lone lead surrogate at the end.
++  'ab \udc00',         // Lone trail surrogate at the end.
++  'a \udc00\ud800 b',  // Swapped surrogate pair.
++];
+ 
+ function IsSurrogate(codepoint) {
+   return 0xD800 <= codepoint && codepoint <= 0xDFFF
+diff --git a/test/mjsunit/wasm/stringrefs-exec.js b/test/mjsunit/wasm/stringrefs-exec.js
+index 99a3aa9bb1..333b68905a 100644
+--- a/test/mjsunit/wasm/stringrefs-exec.js
++++ b/test/mjsunit/wasm/stringrefs-exec.js
+@@ -88,18 +88,23 @@ function decodeWtf8(wtf8, start, end) {
+   return result;
+ }
+ 
+-let interestingStrings = ['',
+-                          'ascii',
+-                          'latin \xa9 1',
+-                          'two \ucccc byte',
+-                          'surrogate \ud800\udc00 pair',
+-                          'isolated \ud800 leading',
+-                          'isolated \udc00 trailing',
+-                          '\ud800 isolated leading at beginning',
+-                          '\udc00 isolated trailing at beginning',
+-                          'isolated leading at end \ud800',
+-                          'isolated trailing at end \udc00',
+-                          'swapped surrogate \udc00\ud800 pair'];
++// We iterate over every one of these strings and every substring of it,
++// so to keep test execution times fast on slow platforms, keep both this
++// list and the individual strings reasonably short.
++let interestingStrings = [
++  '',
++  'ascii',
++  'latin\xa91',        // Latin-1.
++  '2 \ucccc b',        // Two-byte.
++  'a \ud800\udc00 b',  // Proper surrogate pair.
++  'a \ud800 b',        // Lone lead surrogate.
++  'a \udc00 b',        // Lone trail surrogate.
++  '\ud800 bc',         // Lone lead surrogate at the start.
++  '\udc00 bc',         // Lone trail surrogate at the start.
++  'ab \ud800',         // Lone lead surrogate at the end.
++  'ab \udc00',         // Lone trail surrogate at the end.
++  'a \udc00\ud800 b',  // Swapped surrogate pair.
++];
+ 
+ function IsSurrogate(codepoint) {
+   return 0xD800 <= codepoint && codepoint <= 0xDFFF
+@@ -936,29 +941,29 @@ function makeWtf16TestDataSegment() {
+     }
+   }
+ 
+-  function checkEncoding(variant, str, slice, start, length) {
+-    let all_bytes = encodeWtf8(str);
+-    let bytes = encodeWtf8(slice);
+-    function clearMemory(low, high) {
+-      for (let i = low; i < high; i++) {
+-        memory[i] = 0;
+-      }
++  function clearMemory(low, high) {
++    for (let i = low; i < high; i++) {
++      memory[i] = 0;
+     }
+-    function assertMemoryBytesZero(low, high) {
+-      for (let i = low; i < high; i++) {
+-        assertEquals(0, memory[i]);
+-      }
++  }
++  function assertMemoryBytesZero(low, high) {
++    for (let i = low; i < high; i++) {
++      assertEquals(0, memory[i]);
+     }
+-    function checkMemory(offset, bytes) {
+-      let slop = 64;
+-      assertMemoryBytesZero(Math.max(0, offset - slop), offset);
+-      for (let i = 0; i < bytes.length; i++) {
+-        assertEquals(bytes[i], memory[offset + i]);
+-      }
+-      assertMemoryBytesZero(offset + bytes.length,
+-                            Math.min(memory.length,
+-                                     offset + bytes.length + slop));
++  }
++  function checkMemory(offset, bytes) {
++    let slop = 16;
++    assertMemoryBytesZero(Math.max(0, offset - slop), offset);
++    for (let i = 0; i < bytes.length; i++) {
++      assertEquals(bytes[i], memory[offset + i]);
+     }
++    assertMemoryBytesZero(offset + bytes.length,
++                          Math.min(memory.length,
++                                   offset + bytes.length + slop));
++  }
++  function checkEncoding(variant, str, slice, start, length) {
++    let all_bytes = encodeWtf8(str);
++    let bytes = encodeWtf8(slice);
+ 
+     let encode = instance.exports[`encode_${variant}`];
+     let expected_start = Wtf8PositionTreatment(all_bytes, start);
+-- 
+2.35.1
+

@@ -1,0 +1,147 @@
+From 4504fbe2358ff04d6fab29fd890010e4ffd83432 Mon Sep 17 00:00:00 2001
+From: Yahan Lu <yahan@iscas.ac.cn>
+Date: Fri, 9 Apr 2021 13:44:26 +0800
+Subject: [PATCH] [riscv64] Re enable constant pool
+
+Change-Id: Ic84fbda771a89ee20c43795dd5c1ab4a91057862
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/2814724
+Reviewed-by: Jakob Gruber <jgruber@chromium.org>
+Reviewed-by: Brice Dobry <brice.dobry@futurewei.com>
+Commit-Queue: Yahan Lu <yahan@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/master@{#74116}
+---
+ src/codegen/riscv64/assembler-riscv64.h       | 57 ++++++++++---------
+ .../backend/riscv64/code-generator-riscv64.cc |  2 +-
+ src/flags/flag-definitions.h                  |  4 +-
+ .../riscv64/liftoff-assembler-riscv64.h       |  4 +-
+ 4 files changed, 34 insertions(+), 33 deletions(-)
+
+diff --git a/src/codegen/riscv64/assembler-riscv64.h b/src/codegen/riscv64/assembler-riscv64.h
+index 21349fda76..e83c8fd17d 100644
+--- a/src/codegen/riscv64/assembler-riscv64.h
++++ b/src/codegen/riscv64/assembler-riscv64.h
+@@ -160,6 +160,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+ 
+   virtual ~Assembler() { CHECK(constpool_.IsEmpty()); }
+ 
++  void AbortedCodeGeneration() { constpool_.Clear(); }
+   // GetCode emits any pending (non-emitted) code and fills the descriptor desc.
+   static constexpr int kNoHandlerTable = 0;
+   static constexpr SafepointTableBuilder* kNoSafepointTable = nullptr;
+@@ -873,6 +874,34 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+ 
+   inline int UnboundLabelsCount() { return unbound_labels_count_; }
+ 
++  using BlockPoolsScope = BlockTrampolinePoolScope;
++
++  void RecordConstPool(int size);
++
++  void ForceConstantPoolEmissionWithoutJump() {
++    constpool_.Check(Emission::kForced, Jump::kOmitted);
++  }
++  void ForceConstantPoolEmissionWithJump() {
++    constpool_.Check(Emission::kForced, Jump::kRequired);
++  }
++  // Check if the const pool needs to be emitted while pretending that {margin}
++  // more bytes of instructions have already been emitted.
++  void EmitConstPoolWithJumpIfNeeded(size_t margin = 0) {
++    constpool_.Check(Emission::kIfNeeded, Jump::kRequired, margin);
++  }
++
++  void EmitConstPoolWithoutJumpIfNeeded(size_t margin = 0) {
++    constpool_.Check(Emission::kIfNeeded, Jump::kOmitted, margin);
++  }
++
++  void RecordEntry(uint32_t data, RelocInfo::Mode rmode) {
++    constpool_.RecordEntry(data, rmode);
++  }
++
++  void RecordEntry(uint64_t data, RelocInfo::Mode rmode) {
++    constpool_.RecordEntry(data, rmode);
++  }
++
+  protected:
+   // Readable constants for base and offset adjustment helper, these indicate if
+   // aside from offset, another value like offset + 4 should fit into int16.
+@@ -958,34 +987,6 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+     }
+   }
+ 
+-  using BlockPoolsScope = BlockTrampolinePoolScope;
+-
+-  void RecordConstPool(int size);
+-
+-  void ForceConstantPoolEmissionWithoutJump() {
+-    constpool_.Check(Emission::kForced, Jump::kOmitted);
+-  }
+-  void ForceConstantPoolEmissionWithJump() {
+-    constpool_.Check(Emission::kForced, Jump::kRequired);
+-  }
+-  // Check if the const pool needs to be emitted while pretending that {margin}
+-  // more bytes of instructions have already been emitted.
+-  void EmitConstPoolWithJumpIfNeeded(size_t margin = 0) {
+-    constpool_.Check(Emission::kIfNeeded, Jump::kRequired, margin);
+-  }
+-
+-  void EmitConstPoolWithoutJumpIfNeeded(size_t margin = 0) {
+-    constpool_.Check(Emission::kIfNeeded, Jump::kOmitted, margin);
+-  }
+-
+-  void RecordEntry(uint32_t data, RelocInfo::Mode rmode) {
+-    constpool_.RecordEntry(data, rmode);
+-  }
+-
+-  void RecordEntry(uint64_t data, RelocInfo::Mode rmode) {
+-    constpool_.RecordEntry(data, rmode);
+-  }
+-
+  private:
+   // Avoid overflows for displacements etc.
+   static const int kMaximalBufferSize = 512 * MB;
+diff --git a/src/compiler/backend/riscv64/code-generator-riscv64.cc b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+index 71b63005bd..2beed504ee 100644
+--- a/src/compiler/backend/riscv64/code-generator-riscv64.cc
++++ b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+@@ -2579,7 +2579,7 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+   __ Ret();
+ }
+ 
+-void CodeGenerator::FinishCode() {}
++void CodeGenerator::FinishCode() { __ ForceConstantPoolEmissionWithoutJump(); }
+ 
+ void CodeGenerator::PrepareForDeoptimizationExits(
+     ZoneDeque<DeoptimizationExit*>* exits) {}
+diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
+index a6ba98d72f..7a2dcd0940 100644
+--- a/src/flags/flag-definitions.h
++++ b/src/flags/flag-definitions.h
+@@ -1293,8 +1293,8 @@ DEFINE_STRING(sim_arm64_optional_features, "none",
+               "enable optional features on the simulator for testing: none or "
+               "all")
+ DEFINE_BOOL(debug_riscv, false, "enable debug prints")
+-// TODO(RISCV): https://github.com/v8-riscv/v8/issues/330
+-DEFINE_BOOL(disable_riscv_constant_pool, true,
++
++DEFINE_BOOL(disable_riscv_constant_pool, false,
+             "disable constant pool (RISCV only)")
+ 
+ // Controlling source positions for Torque/CSA code.
+diff --git a/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h b/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
+index 7cccd980aa..b04d8a10a2 100644
+--- a/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
++++ b/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
+@@ -325,9 +325,9 @@ void LiftoffAssembler::PatchPrepareStackFrame(int offset) {
+   patching_assembler.Add64(sp, sp, Operand(-frame_size));
+ }
+ 
+-void LiftoffAssembler::FinishCode() {}
++void LiftoffAssembler::FinishCode() { ForceConstantPoolEmissionWithoutJump(); }
+ 
+-void LiftoffAssembler::AbortCompilation() {}
++void LiftoffAssembler::AbortCompilation() { AbortedCodeGeneration(); }
+ 
+ // static
+ constexpr int LiftoffAssembler::StaticStackFrameSize() {
+-- 
+2.35.1
+
