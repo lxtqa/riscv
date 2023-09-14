@@ -1,1 +1,1 @@
-python3 split_and_filter.py input.txt ./classfied_patch
+python3 split_and_filter.py ./classfied_patch

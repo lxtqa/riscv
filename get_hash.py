@@ -15,22 +15,17 @@ def main():
             hash = line_info[1]
             hash = hash.split("\n")[0]
             os.system("git show " + hash +" > ../my_shell/InfoFile-origin.txt")
-            #os.system("git show --stat " + hash +" > ../my_shell/StatFile.txt")
             info_file = codecs.open("../my_shell/InfoFile-origin.txt","r",encoding='utf-8',errors="ignore")
-            #stat_file = codecs.open("../my_shell/StatFile.txt","r",encoding='utf-8',errors="ignore")
             info_lines = info_file.readlines()
-#            stat_lines = stat_file.readlines()
             ## file name and path
             for info_line in info_lines:
                 if re.match(res,info_line):
                 #if "risc" in info_line or "Risc" in info_line or "RISC" in info_line:
                     hash_file.write(hash+'\n')
                     break
-                            # for stat_line in stat_lines:
-                            #     if re.search(res,stat_line) != None:
             ## 
             info_file.close()
-            #stat_file.close()
+            os.system("rm ../my_shell/InfoFile-origin.txt")
 
 if __name__ == "__main__":
     main()

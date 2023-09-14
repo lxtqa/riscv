@@ -43,7 +43,7 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_):
     cfile_name1为架构a下的文件，cfile2_name2为架构b下的文件，cfile_name1_为cfile_name1修改后的文件
     取cfile1和cfile2的match部分，取cfile1与cfile1_的diff部分
     '''
-    gumtreefile_name1 = "gumtree_12.txt"
+    gumtreefile_name1 = "gumtree_12"
     gumtreefile_name2 = "gumtree_11_.txt"
     os.system("./gumtree/gumtree textdiff " + cfile_name1 + " " + cfile_name2 + " > " + gumtreefile_name1)
     os.system("./gumtree/gumtree textdiff " + cfile_name1 + " " + cfile_name1_ + " > " + gumtreefile_name2)

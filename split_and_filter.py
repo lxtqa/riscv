@@ -15,14 +15,12 @@ def match_pattern(tomatch,pattern):
     return True
 
 
-def split_and_filter(input_file, dir):
-    global threshold
-    f = open(input_file)
-    patches = f.readlines()
-    for hash in patches:
+def split_and_filter(dir):
+    patches = os.listdir(dir)
+    for item in patches:
+        hash = item.split('.')[0]
         #split
-        hash = hash.split("\n")[0]
-        patch_file = dir + "/" +hash + ".patch"
+        patch_file = dir + "/" + item
         path = "./tmp/"+hash
         if not os.path.exists(path):
             os.system("mkdir " + path)
@@ -88,5 +86,5 @@ if __name__ == "__main__":
     #创建tmp文件夹
     if not os.path.exists("./tmp"):
         os.system("mkdir ./tmp")
-    #split_and_filter("input.txt","./patches-origin")
-    split_and_filter(sys.argv[1],sys.argv[2])
+    split_and_filter("./classfied_patch")
+    #split_and_filter(sys.argv[1])
