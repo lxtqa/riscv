@@ -1,5 +1,4 @@
 import os
-
 #from get_ast import get_ast
 from gumtree_parser import gumtree_parser
 
@@ -49,6 +48,8 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_):
     os.system("./gumtree/gumtree textdiff " + cfile_name1 + " " + cfile_name1_ + " > " + gumtreefile_name2)
     matches, _= gumtree_parser(gumtreefile_name1)
     _, diffs = gumtree_parser(gumtreefile_name2)
+    os.system("rm "+gumtreefile_name1)
+    os.system("rm "+gumtreefile_name2)
     print(diffs)  
     #parse match
     match_list = []

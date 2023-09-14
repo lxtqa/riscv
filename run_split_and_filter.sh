@@ -1,1 +1,0 @@
-python3 split_and_filter.py ./classfied_patch

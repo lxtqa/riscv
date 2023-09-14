@@ -79,12 +79,12 @@ def split_and_filter(dir):
                 else:
                     print("ERROR:FLIE EXISTS")
                     exit(100)
-
+    shutil.rmtree(dir)
             
 
 if __name__ == "__main__":
     #创建tmp文件夹
     if not os.path.exists("./tmp"):
         os.system("mkdir ./tmp")
-    split_and_filter("./classfied_patch")
-    #split_and_filter(sys.argv[1])
+    # split_and_filter("./classfied_patch")
+    split_and_filter(sys.argv[1])

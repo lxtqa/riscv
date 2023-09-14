@@ -2,6 +2,7 @@
 import re
 import sys
 import os
+import shutil
 
 
 res1 = r"^\s[/a-zA-Z0-9_\-]+\.(.+)\s+\|\s+[0-9]+\s+[+-]+\n$"
@@ -61,7 +62,6 @@ def main(patch_path):
                 os.system("cp "+patch_path + patchname+" "+savepath)
 
 
-
-
 if __name__=="__main__":
     main("./patches-origin/")
+    shutil.rmtree("./patches-origin/")
