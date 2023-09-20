@@ -1,5 +1,5 @@
 import os
-#from get_ast import get_ast
+from get_ast import get_ast
 from gumtree_parser import gumtree_parser
 
 
@@ -42,14 +42,12 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_):
     cfile_name1为架构a下的文件，cfile2_name2为架构b下的文件，cfile_name1_为cfile_name1修改后的文件
     取cfile1和cfile2的match部分，取cfile1与cfile1_的diff部分
     '''
-    gumtreefile_name1 = "gumtree_12"
+    gumtreefile_name1 = "gumtree_12.txt"
     gumtreefile_name2 = "gumtree_11_.txt"
     os.system("./gumtree/gumtree textdiff " + cfile_name1 + " " + cfile_name2 + " > " + gumtreefile_name1)
     os.system("./gumtree/gumtree textdiff " + cfile_name1 + " " + cfile_name1_ + " > " + gumtreefile_name2)
     matches, _= gumtree_parser(gumtreefile_name1)
     _, diffs = gumtree_parser(gumtreefile_name2)
-    os.system("rm "+gumtreefile_name1)
-    os.system("rm "+gumtreefile_name2)
     print(diffs)  
     #parse match
     match_list = []
@@ -66,8 +64,7 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_):
             if diff[1] != "---":
                 exit(202)
             #内容 需要找到存在于原代码片段的位置
-            if diff[4] in match_dic:
-                b = match_dic[diff[4]]
+            if diff[2] in match_dic:
                 diff[2] = match_dic[diff[2]]
             else:
                 #进行简单的映射
@@ -98,6 +95,8 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_):
             exit(206)
         diffs[i] = diff 
     print(diffs)
+    os.system("rm "+gumtreefile_name1)
+    os.system("rm "+gumtreefile_name2)
     pass
 
 if __name__ == "__main__":
