@@ -38,7 +38,8 @@ def print_tree(node, indent=0):
         print_tree(child, indent + 1)
 
 
-def get_ast(cpp_file_name,ast_file_name):
+def get_ast(cpp_file_name):
+    ast_file_name = "./ast_tree.txt"
     os.system("./gumtree/gumtree parse "+cpp_file_name+" > " + ast_file_name)
     ast_file = open(ast_file_name,"r");
     # 示例用法
@@ -59,7 +60,6 @@ def get_ast(cpp_file_name,ast_file_name):
     return root
 
 if __name__ == "__main__":
-    ast_file_name = "./ast_tree.txt"
     cpp_file_name = "./test1.cpp"
-    root = get_ast(cpp_file_name,ast_file_name)
+    root = get_ast(cpp_file_name)
     print_tree(root)
