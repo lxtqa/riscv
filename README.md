@@ -1,5 +1,23 @@
 # README
 
+## Javascript V8项目简介
+
+是解析javascript语言的的虚拟机
+
+V8引擎转换成字节码(bytecode)，此时是可以跨平台的，将字节码转化汇编指令，在不同环境的cpu下执行。
+
+![image-20220822140358681](/Users/yuhaonan/Library/Application Support/typora-user-images/image-20220822140358681.png)
+
+![image-20220822140344154](/Users/yuhaonan/Library/Application Support/typora-user-images/image-20220822140344154.png)
+
+ 由于公司项目的需求,现在主要是做脱Flash的工作(历史原因用AS3.0做的)!现在全部转为C++, 并且发布PC版与Web版。其中Web的版本就是使用的Wasm（WebAssembly技术）。
+ WASM ，全称：WebAssembly ，是一种可以使用非 Java 编程语言编写代码并且能在浏览器上运行的技术方案，也是自 Web 诞生以来首个 Java 原生替代方案（ 程序本质上都是脚本程序，即由程序翻译指令并执行，而不是由本地机器CPU读取指令并执行，因此效率非常低。而Java的操作相对重复繁琐，在执行过程中耗时较长。）
+ 其实创建Wasm的初衷并非为了替代JavaScript，而是为了实现两者之间的补充和配合。随着WebAssembly的引入，现代web浏览器的虚拟机将同时运行JavaScript和Wasm代码。
+
+![image-20220822154219022](/Users/yuhaonan/Library/Application Support/typora-user-images/image-20220822154219022.png)
+
+
+
 ## 程序与脚本
 
 ### git_info.sh

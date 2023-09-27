@@ -36,7 +36,7 @@ def remove(lst,item):
         lst.remove(item)
     return lst
 
-def mapping_node(diff,ast1_,match_dic12,match_dic1_1,file1__string):
+def mapping_node(diff,ast1,match_dic12,match_dic1_1,file1__string):
     #截取产生修改部分的补丁代码
     parts = diff[2].split(" ")
     remove(parts,"")
@@ -46,7 +46,7 @@ def mapping_node(diff,ast1_,match_dic12,match_dic1_1,file1__string):
     #获取产生修改部分的补丁代码中需要进行映射的操作
     operations = []
     for i in range(len(diff)):
-        node = map(diff[i],ast1_,match_dic12,match_dic1_1)
+        node = map(diff[i],ast1,match_dic12,match_dic1_1)
         if node:
             parts = diff[i].split(" ")
             remove(parts,"")
@@ -55,7 +55,7 @@ def mapping_node(diff,ast1_,match_dic12,match_dic1_1,file1__string):
             operations.append(Operation(int(rank[0])-start,  int(rank[1])-start,  parts[1]))
     return replace(temp_string,operations)
 
-def mapping_tree(diff,ast1_,match_dic12,match_dic1_1,file1__string):
+def mapping_tree(diff,ast1,match_dic12,match_dic1_1,file1__string):
     diff = diff[2:-3].copy()
     #截取产生修改部分的补丁代码
     lst = diff[0].split(" ")
@@ -66,7 +66,7 @@ def mapping_tree(diff,ast1_,match_dic12,match_dic1_1,file1__string):
     #获取产生修改部分的补丁代码中需要进行映射的操作
     operations = []
     for i in range(len(diff)):
-        node = map(diff[i],ast1_,match_dic12,match_dic1_1)
+        node = map(diff[i],ast1,match_dic12,match_dic1_1)
         if node:
             parts = diff[i].split(" ")
             remove(parts,"")
@@ -75,13 +75,13 @@ def mapping_tree(diff,ast1_,match_dic12,match_dic1_1,file1__string):
             operations.append(Operation(int(rank[0])-start,  int(rank[1])-start,  parts[1]))
     return replace(temp_string,operations)
 
-def map(node,ast1_,match_dic12,match_dic1_1):
+def map(node,ast1,match_dic12,match_dic1_1):
     #对不同种类进行分类讨论，对有name的进行映射
     parts = node.split(" ")
     while "" in parts:
         parts.remove("")
     if parts[0] == "name:":
-        same_name = find_same_name(parts[1],ast1_)
+        same_name = find_same_name(parts[1],ast1)
         #找到了相同的变量
         if len(same_name) > 1:
             #多个候选node的处理方法
@@ -166,9 +166,9 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_):
             #内容 需要找到存在于原代码片段的位置
             #进行简单的映射:先找到1_所有同名变量，进行 1_->1 的映射，再进行 1->2 的映射
             if diff[0] == "insert-node":
-                content = mapping_node(diff,ast1_,match_dic12,match_dic1_1,file1__string)
+                content = mapping_node(diff,ast1,match_dic12,match_dic1_1,file1__string)
             else:
-                content = mapping_tree(diff,ast1_,match_dic12,match_dic1_1,file1__string)
+                content = mapping_tree(diff,ast1,match_dic12,match_dic1_1,file1__string)
             operation = Operation(start,start,content)
             operation.rank = child_rank
             operations.append(operation)
