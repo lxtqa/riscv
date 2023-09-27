@@ -32,10 +32,6 @@
 
 依次输入三个cpp名称【架构1下代码，架构2下代码，架构1下修改后代码】，使用gumtree textdiff命令，获取match和diff，并进行映射操作
 
-### diff_to_file.py
-
-将diff操作实现到文件中
-
 ### init_vendor.py
 
 初始化tree-sitter相关内容

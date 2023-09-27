@@ -24,11 +24,11 @@ def generate_tree(diff):
 
 def replace(text,operations):
     #排序
-    operations = sorted(operations, key=lambda x: x.start)
+    operations = sorted(operations, key=lambda x:  (x.start, x.rank))
     offset = 0
     for op in operations:
         text = text[:op.start+offset] + op.content + text[op.end+offset:]
-        offset = len(op.content) - op.end + op.start
+        offset += len(op.content) - op.end + op.start
     return text
 
 def remove(lst,item):
@@ -114,7 +114,7 @@ def bfs_search(root, target):
             return node
         queue.extend(node.children)
 
-def generate_diff(cfile_name1,cfile_name2,cfile_name1_):
+def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_):
     '''
     cfile_name1为架构a下的文件，cfile2_name2为架构b下的文件，cfile_name1_为cfile_name1修改后的文件
     取cfile1和cfile2的match部分，取cfile1与cfile1_的diff部分
@@ -129,11 +129,9 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_):
     file1_string =  read_file(cfile_name1)
     file2_string = read_file(cfile_name2)
     file1__string = read_file(cfile_name1_)
+    file2_ = open(cfile_name2_,"w")
     matches12, _= gumtree_parser(gumtreefile_name1)
-    matches11_, diffs11_ = gumtree_parser(gumtreefile_name2)
-    print()
-    print("Origin DIFFs:")
-    print(diffs11_)  
+    matches11_, diffs11_ = gumtree_parser(gumtreefile_name2) 
     #parse match
     match_list = []
     match_dic12 = {}
@@ -188,13 +186,14 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_):
             exit(205)
         else:
             exit(206)
-    print()
-    print("Parsed DIFFs:")
-    print(diffs11_)
+    
+    file2__string = replace(file2_string,operations)
+    file2_.write(file2__string)
+    file2_.close()
 
     os.system("rm "+gumtreefile_name1)
     os.system("rm "+gumtreefile_name2)
     pass
 
 if __name__ == "__main__":
-    generate_diff("test1.cpp","test2.cpp","test1_.cpp")
+    generate_diff("test1.cpp","test2.cpp","test1_.cpp","test2_.cpp")

@@ -7,11 +7,11 @@
 namespace v8 {
 namespace internal {
 
-const int Deoptimizer::kEagerDeoptExitSize = 2 * KIS / KIS = 1;
+const int Deoptimizer::kEagerDeoptExitSize = 2 * KIS;
 const int Deoptimizer::kLazyDeoptExitSize = 2 * KIS;
 
 Float32 RegisterValues::GetFloatRegister(unsigned n) const {
-  int a = 0;
+  KIS = KIS > 0 ? KIS : 2;
   return Float32::FromBits(
       static_cast<uint32_t>(double_registers_[n].get_bits()));
 }
