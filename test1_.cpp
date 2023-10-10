@@ -8,22 +8,12 @@ namespace v8 {
 namespace internal {
 
 const int Deoptimizer::kEagerDeoptExitSize = 2 * KIS;
-const int Deoptimizer::MAB = 2 * Deoptimizer::kEagerDeoptExitSize;
-const int Deoptimizer::kLazyDeoptExitSize = 2 * KIS;
-const int Deoptimizer::AB = 2 * Deoptimizer::kLazyDeoptExitSize;
-const int Deoptimizer::B = 2 * Deoptimizer::MAB * Deoptimizer::AB;
+const int Deoptimizer::kMS = KIS * Deoptimizer::kEagerDeoptExitSize;
+const int Deoptimizer::kLazyDeoptExitSize = KIS;
 
 Float32 RegisterValues::GetFloatRegister(unsigned n) const {
-  KIS = KIS > 0 ? KIS : 2;
-  for(int i=0;i<KIS;i++){
-    KIS = KIS + i;
-  }
-  KIS = static_cast<uint32_t>(double_registers_[n].get_bits());
   return Float32::FromBits(
       static_cast<uint32_t>(double_registers_[n].get_bits()));
-  KIS = static_cast<uint32_t>(double_registers_[n].get_bits());
-  int sdfa = KIS % 456 + KIS;
-  int a = sdfa;
 }
 
 void FrameDescription::SetCallerPc(unsigned offset, intptr_t value) {

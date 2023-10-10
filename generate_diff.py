@@ -41,7 +41,7 @@ def mapping_node(diff,ast1,match_dic12,match_dic1_1,file1__string):
     #截取产生修改部分的补丁代码
     parts = diff[2].split(" ")
     remove(parts,"")
-    [start,end] = parts[1][1:-1].split(",")
+    [start,end] = parts[-1][1:-1].split(",")
     start, end = int(start), int(end)
     temp_string = file1__string[start:end]
     #获取产生修改部分的补丁代码中需要进行映射的操作
@@ -51,7 +51,7 @@ def mapping_node(diff,ast1,match_dic12,match_dic1_1,file1__string):
         if node:
             parts = diff[i].split(" ")
             remove(parts,"")
-            rank = parts[2][1:-1].split(",")
+            rank = parts[-1][1:-1].split(",")
             parts = node.split(" ")
             operations.append(Operation(int(rank[0])-start,  int(rank[1])-start,  parts[1]))
     return replace(temp_string,operations)
@@ -61,7 +61,7 @@ def mapping_tree(diff,ast1,match_dic12,match_dic1_1,file1__string):
     #截取产生修改部分的补丁代码
     lst = diff[0].split(" ")
     remove(lst,"")
-    [start,end] = lst[1][1:-1].split(",")
+    [start,end] = lst[-1][1:-1].split(",")
     start,end = int(start), int(end)
     temp_string = file1__string[start:end]
     #获取产生修改部分的补丁代码中需要进行映射的操作
@@ -71,7 +71,7 @@ def mapping_tree(diff,ast1,match_dic12,match_dic1_1,file1__string):
         if node:
             parts = diff[i].split(" ")
             remove(parts,"")
-            rank = parts[2][1:-1].split(",")
+            rank = parts[-1][1:-1].split(",")
             parts = node.split(" ")
             operations.append(Operation(int(rank[0])-start,  int(rank[1])-start,  parts[1]))
     return replace(temp_string,operations)
@@ -99,12 +99,11 @@ def map(node,ast1,match_dic12,match_dic1_1):
 
 def find_same_name(name,ast):
     result = []
-    if ast.value != "VAL":
-        if ast.value.split(" ")[1] == name:
-            result.append(ast.value)
-        if ast.children != []:
-            for child in ast.children:
-                result = result + find_same_name(name,child)
+    if ast.value.split(" ")[1] == name:
+        result.append(ast.value)
+    if ast.children != []:
+        for child in ast.children:
+            result = result + find_same_name(name,child)
     return result
 
 def bfs_search(root, target):
@@ -122,11 +121,11 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,tempfile):
     '''
     gumtreefile_name1 = "gumtree_12.txt"
     gumtreefile_name2 = "gumtree_11_.txt"
-    os.system("./gumtree/gumtree textdiff " + cfile_name1 + " " + cfile_name2 + " > " + gumtreefile_name1)
-    os.system("./gumtree/gumtree textdiff " + cfile_name1 + " " + cfile_name1_ + " > " + gumtreefile_name2)
+    os.system("./gumtree/gumtree textdiff " + cfile_name1 + " " + cfile_name2 + " -m gumtree-simple-id-theta > " + gumtreefile_name1 )
+    os.system("./gumtree/gumtree textdiff " + cfile_name1 + " " + cfile_name1_ + " -m gumtree-simple-id-theta  > " + gumtreefile_name2)
     ast1 = get_ast(cfile_name1,rm_tempfile=rm_tempfile)
     ast2 = get_ast(cfile_name2,rm_tempfile=rm_tempfile)
-    # ast1_ = get_ast(cfile_name1_,rm_tempfile=rm_tempfile)
+    ast1_ = get_ast(cfile_name1_,rm_tempfile=rm_tempfile)
     # file1_string =  read_file(cfile_name1)
     file2_string = read_file(cfile_name2)
     file1__string = read_file(cfile_name1_)
@@ -171,7 +170,6 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,tempfile):
             next_node = None
             start = -1
             for i in range(child_rank,len(des1.children)):
-                    if des1.children[i].value != "VAL":
                         if des1.children[i].value in match_dic12:
                             next_node = match_dic12[des1.children[i].value]
                             for j in range(len(des2.children)):
@@ -183,7 +181,6 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,tempfile):
                         break
             if start == -1:
                 for i in range(child_rank-1,-1,-1):
-                    if des1.children[i].value != "VAL":
                         if des1.children[i].value in match_dic12:
                             last_node = match_dic12[des1.children[i].value]
                             for j in range(len(des2.children)):
@@ -198,7 +195,8 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,tempfile):
                 [start,_] = des2.value.split(" ")[-1][1:-1].split(",")
                 start = int(start)
                 child_rank = 0
-            des1.children.insert(child_rank,TreeNode("VAL"));
+            tree = parse_tree_from_text(diff[2:-3])
+            des1.children.insert(child_rank,tree);
     
             #内容 需要找到存在于原代码片段的位置
             #进行简单的映射:先找到1_所有同名变量，进行 1_->1 的映射，再进行 1->2 的映射
@@ -214,12 +212,21 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,tempfile):
             if diff[1] != "---":
                 exit(201)
             #位置 可以改map
-            for j in range(len(match_list)):
-                if match_list[j][0] == diff[2]:
-                    diff[2] = match_list[j][1]
-                    break
+            des = match_dic12[diff[2].strip()]
+            lst = des.split(" ")
+            [start,end] = lst[-1][1:-1].split(",")
+            operation = Operation(int(start),int(end),"")
+            operations.append(operation)
         elif diff[0] == "delete-tree":
-            exit(204)
+            if diff[1] != "---":
+                exit(202)
+            #位置
+            if diff[2] in match_dic12:
+                des = match_dic12[diff[2].strip()]
+                lst = des.split(" ")
+                [start,end] = lst[-1][1:-1].split(",")
+                operation = Operation(int(start),int(end),"")
+                operations.append(operation)
         elif diff[0] == "update-node":
             exit(205)
         elif diff[0] == "move-node":

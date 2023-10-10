@@ -19,22 +19,12 @@ ASSERT_OFFSET(Builtin::kDeoptimizationEntry_Lazy);
 #undef ASSERT_OFFSET
 
 const int Deoptimizer::kEagerDeoptExitSize = 2 * kInstrSize;
-const int Deoptimizer::MAB = 2 * Deoptimizer::kEagerDeoptExitSize;
-const int Deoptimizer::kLazyDeoptExitSize = 2 * kInstrSize;
+const int Deoptimizer::kMS = kInstrSize * Deoptimizer::kEagerDeoptExitSize;
+const int Deoptimizer::kLazyDeoptExitSize =   kInstrSize;
 
-const int Deoptimizer::AB = 2 * Deoptimizer::kLazyDeoptExitSize;
-const int Deoptimizer::B = 2 * Deoptimizer::MAB * Deoptimizer::AB;
 Float32 RegisterValues::GetFloatRegister(unsigned n) const {
-  kInstrSize = kInstrSize > 0 ? kInstrSize : 2;
-for(int i=0;i<kInstrSize;i++){
-    kInstrSize = kInstrSize + i;
-  }
-kInstrSize = static_cast<uint32_t>(double_registers_[n].get_bits());
-return Float32::FromBits(
-      static_cast<uint32_t>(double_registers_[n / 2].get_bits() >> kShift));kInstrSize = static_cast<uint32_t>(double_registers_[n].get_bits());
-int sdfa = kInstrSize % 456 + kInstrSize;
-int a = sdfa;
-
+  return Float32::FromBits(
+      static_cast<uint32_t>(double_registers_[n / 2].get_bits() >> kShift));
 }
 
 void FrameDescription::SetCallerPc(unsigned offset, intptr_t value) {

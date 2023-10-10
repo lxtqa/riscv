@@ -1,3 +1,4 @@
+# 生成分类号的文件
 cd v8
 git log > ../GitLog-origin.txt
 python3 ../get_hash.py > ../GitHash-origin.txt
