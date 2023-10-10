@@ -101,9 +101,10 @@ def find_same_name(name,ast):
     result = []
     if ast.value.split(" ")[1] == name:
         result.append(ast.value)
-    if ast.children != []:
-        for child in ast.children:
-            result = result + find_same_name(name,child)
+    if ast.value != "VAL":
+        if ast.children != []:
+            for child in ast.children:
+                result = result + find_same_name(name,child)
     return result
 
 def bfs_search(root, target):
@@ -125,7 +126,7 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,tempfile):
     os.system("./gumtree/gumtree textdiff " + cfile_name1 + " " + cfile_name1_ + " -m gumtree-simple-id-theta  > " + gumtreefile_name2)
     ast1 = get_ast(cfile_name1,rm_tempfile=rm_tempfile)
     ast2 = get_ast(cfile_name2,rm_tempfile=rm_tempfile)
-    ast1_ = get_ast(cfile_name1_,rm_tempfile=rm_tempfile)
+    # ast1_ = get_ast(cfile_name1_,rm_tempfile=rm_tempfile)
     # file1_string =  read_file(cfile_name1)
     file2_string = read_file(cfile_name2)
     file1__string = read_file(cfile_name1_)
@@ -170,17 +171,19 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,tempfile):
             next_node = None
             start = -1
             for i in range(child_rank,len(des1.children)):
-                        if des1.children[i].value in match_dic12:
-                            next_node = match_dic12[des1.children[i].value]
-                            for j in range(len(des2.children)):
-                                if des2.children[j].value == next_node:
-                                    child_rank2 = j
-                                    [start,_] = des2.children[j].value.split(" ")[-1][1:-1].split(",")
-                                    start = int(start)
-                                    break
+                if des1.children[i].value != "VAL":
+                    if des1.children[i].value in match_dic12:
+                        next_node = match_dic12[des1.children[i].value]
+                        for j in range(len(des2.children)):
+                            if des2.children[j].value == next_node:
+                                child_rank2 = j
+                                [start,_] = des2.children[j].value.split(" ")[-1][1:-1].split(",")
+                                start = int(start)
+                                break
                         break
             if start == -1:
                 for i in range(child_rank-1,-1,-1):
+                    if des1.children[i].value != "VAL":
                         if des1.children[i].value in match_dic12:
                             last_node = match_dic12[des1.children[i].value]
                             for j in range(len(des2.children)):
@@ -189,14 +192,15 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,tempfile):
                                     [_,start] = des2.children[j].value.split(" ")[-1][1:-1].split(",")
                                     start = int(start)
                                     break
-                        break
+                            break
             
             if start == -1:
                 [start,_] = des2.value.split(" ")[-1][1:-1].split(",")
                 start = int(start)
                 child_rank = 0
-            tree = parse_tree_from_text(diff[2:-3])
-            des1.children.insert(child_rank,tree);
+            # tree = parse_tree_from_text(diff[2:-3])
+            # des1.children.insert(child_rank,tree);
+            des1.children.insert(child_rank,TreeNode("VAL"));
     
             #内容 需要找到存在于原代码片段的位置
             #进行简单的映射:先找到1_所有同名变量，进行 1_->1 的映射，再进行 1->2 的映射
