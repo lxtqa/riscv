@@ -1,6 +1,7 @@
 import os
 from get_ast import get_ast
 from get_ast import parse_tree_from_text
+from get_ast import TreeNode
 from gumtree_parser import gumtree_parser
 
 class Operation:
@@ -40,7 +41,7 @@ def mapping_node(diff,ast1,match_dic12,match_dic1_1,file1__string):
     #截取产生修改部分的补丁代码
     parts = diff[2].split(" ")
     remove(parts,"")
-    [start,end] = parts[2][1:-1].split(",")
+    [start,end] = parts[1][1:-1].split(",")
     start, end = int(start), int(end)
     temp_string = file1__string[start:end]
     #获取产生修改部分的补丁代码中需要进行映射的操作
@@ -90,20 +91,20 @@ def map(node,ast1,match_dic12,match_dic1_1):
                     if match_dic1_1[name] in match_dic12:
                         mapped_node = match_dic12[match_dic1_1[name]]
                         return mapped_node
-        else:
-            #TODO: 找不到相同的变量，进行架构关键字的映射
-            mapped_node = node.lstrip()
+        #TODO: 找不到相同的变量，进行架构关键字的映射
+        mapped_node = node.lstrip()
         return mapped_node
     else:
         return None
 
 def find_same_name(name,ast):
     result = []
-    if ast.value.split(" ")[1] == name:
-        result.append(ast.value)
-    if ast.children != []:
-        for child in ast.children:
-            result = result + find_same_name(name,child)
+    if ast.value != "VAL":
+        if ast.value.split(" ")[1] == name:
+            result.append(ast.value)
+        if ast.children != []:
+            for child in ast.children:
+                result = result + find_same_name(name,child)
     return result
 
 def bfs_search(root, target):
@@ -114,7 +115,7 @@ def bfs_search(root, target):
             return node
         queue.extend(node.children)
 
-def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_):
+def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,tempfile):
     '''
     cfile_name1为架构a下的文件，cfile2_name2为架构b下的文件，cfile_name1_为cfile_name1修改后的文件
     取cfile1和cfile2的match部分，取cfile1与cfile1_的diff部分
@@ -123,10 +124,10 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_):
     gumtreefile_name2 = "gumtree_11_.txt"
     os.system("./gumtree/gumtree textdiff " + cfile_name1 + " " + cfile_name2 + " > " + gumtreefile_name1)
     os.system("./gumtree/gumtree textdiff " + cfile_name1 + " " + cfile_name1_ + " > " + gumtreefile_name2)
-    ast1 = get_ast(cfile_name1)
-    ast2 = get_ast(cfile_name2)
-    ast1_ = get_ast(cfile_name1_)
-    file1_string =  read_file(cfile_name1)
+    ast1 = get_ast(cfile_name1,rm_tempfile=rm_tempfile)
+    ast2 = get_ast(cfile_name2,rm_tempfile=rm_tempfile)
+    # ast1_ = get_ast(cfile_name1_,rm_tempfile=rm_tempfile)
+    # file1_string =  read_file(cfile_name1)
     file2_string = read_file(cfile_name2)
     file1__string = read_file(cfile_name1_)
     file2_ = open(cfile_name2_,"w")
@@ -154,23 +155,60 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_):
             #位置
             if diff[-2] in match_dic12:
                 des = match_dic12[diff[-2]]
-            #在ast2中找到pos,根据其child找到位置
-            des = bfs_search(ast2,des)
-            child_rank = int(diff[-1].split(" ")[-1])
-            #判断是否超出了des的孩子个数
-            if len(des.children)<=child_rank:
-                [_,start] = des.value.split(" ")[-1][1:-1].split(",")
             else:
-                [start,_] = des.children[child_rank].value.split(" ")[-1][1:-1].split(",")
-            start = int(start)
+                exit(207)
+            #在ast1,2中找到pos,根据其child找到位置
+            des1 = bfs_search(ast1,diff[-2])
+            des2 = bfs_search(ast2,des)
+
+            # TODO:找到相对位置，而非绝对位置
+            # 找到插入节点的后一个节点，进行映射，如果能映射到，则插入到后一个节点的前面
+            # 找不到，则找到插入节点的前一个节点，进行映射，如果能映射到，则插入到前一个节点的后面
+            # 全都找不到，就放在最前面
+            child_rank = int(diff[-1].split(" ")[-1])
+            child_rank2 = -1
+            last_node = None
+            next_node = None
+            start = -1
+            for i in range(child_rank,len(des1.children)):
+                    if des1.children[i].value != "VAL":
+                        if des1.children[i].value in match_dic12:
+                            next_node = match_dic12[des1.children[i].value]
+                            for j in range(len(des2.children)):
+                                if des2.children[j].value == next_node:
+                                    child_rank2 = j
+                                    [start,_] = des2.children[j].value.split(" ")[-1][1:-1].split(",")
+                                    start = int(start)
+                                    break
+                        break
+            if start == -1:
+                for i in range(child_rank-1,-1,-1):
+                    if des1.children[i].value != "VAL":
+                        if des1.children[i].value in match_dic12:
+                            last_node = match_dic12[des1.children[i].value]
+                            for j in range(len(des2.children)):
+                                if des2.children[j].value == last_node:
+                                    child_rank2 = j+1
+                                    [_,start] = des2.children[j].value.split(" ")[-1][1:-1].split(",")
+                                    start = int(start)
+                                    break
+                        break
+            
+            if start == -1:
+                [start,_] = des2.value.split(" ")[-1][1:-1].split(",")
+                start = int(start)
+                child_rank = 0
+            des1.children.insert(child_rank,TreeNode("VAL"));
+    
             #内容 需要找到存在于原代码片段的位置
             #进行简单的映射:先找到1_所有同名变量，进行 1_->1 的映射，再进行 1->2 的映射
             if diff[0] == "insert-node":
                 content = mapping_node(diff,ast1,match_dic12,match_dic1_1,file1__string)
             else:
                 content = mapping_tree(diff,ast1,match_dic12,match_dic1_1,file1__string)
+                content =  content + "\n"
             operation = Operation(start,start,content)
-            operation.rank = child_rank
+            operation.rank = child_rank2
             operations.append(operation)
         elif diff[0] == "delete-node":
             if diff[1] != "---":
@@ -185,15 +223,18 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_):
         elif diff[0] == "update-node":
             exit(205)
         else:
-            exit(206)
+            pass
+            # exit(206)
     
     file2__string = replace(file2_string,operations)
     file2_.write(file2__string)
     file2_.close()
 
-    os.system("rm "+gumtreefile_name1)
-    os.system("rm "+gumtreefile_name2)
+    if rm_tempfile:
+        os.system("rm "+gumtreefile_name1)
+        os.system("rm "+gumtreefile_name2)
     pass
 
 if __name__ == "__main__":
-    generate_diff("test1.cpp","test2.cpp","test1_.cpp","test2_.cpp")
+    rm_tempfile = True
+    generate_diff("test1.cpp","test2.cpp","test1_.cpp","test2_.cpp",rm_tempfile)

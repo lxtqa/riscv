@@ -27,7 +27,6 @@ def parse_tree_from_text(text_lines):
                 node.children.append(child)
             else:
                 return node
-
         return node
 
     return build_tree_helper(text_lines, 0)
@@ -38,25 +37,14 @@ def print_tree(node, indent=0):
         print_tree(child, indent + 1)
 
 
-def get_ast(cpp_file_name):
-    ast_file_name = "./ast_tree.txt"
+def get_ast(cpp_file_name,rm_tempfile):
+    ast_file_name = "./"+cpp_file_name.split(".")[0]+".txt"
     os.system("./gumtree/gumtree parse "+cpp_file_name+" > " + ast_file_name)
     ast_file = open(ast_file_name,"r");
-    # 示例用法
-    # tree_text = [
-    #     "Root",
-    #     "    Child 1",
-    #     "        Grandchild 1",
-    #     "        Grandchild 2",
-    #     "    Child 2",
-    #     "        Grandchild 3",
-    #     "        Grandchild 4",
-    #     "            Great Grandchild 1",
-    #     "    Child 3",
-    # ]
     tree_text = ast_file.readlines()
     root = parse_tree_from_text(tree_text)
-    os.remove(ast_file_name)
+    if rm_tempfile:
+        os.remove(ast_file_name)
     return root
 
 if __name__ == "__main__":
