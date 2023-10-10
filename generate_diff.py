@@ -222,6 +222,10 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,tempfile):
             exit(204)
         elif diff[0] == "update-node":
             exit(205)
+        elif diff[0] == "move-node":
+            exit(208)
+        elif diff[0] == "move-tree":
+            exit(209)
         else:
             pass
             # exit(206)
