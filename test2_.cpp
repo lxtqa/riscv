@@ -19,8 +19,7 @@ ASSERT_OFFSET(Builtin::kDeoptimizationEntry_Lazy);
 #undef ASSERT_OFFSET
 
 const int Deoptimizer::kEagerDeoptExitSize = 2 * kInstrSize;
-const int Deoptimizer::kMS = kInstrSize * Deoptimizer::kEagerDeoptExitSize;
-const int Deoptimizer::kLazyDeoptExitSize =   kInstrSize;
+const int Deoptimizer::kLazyDeoptExitSize = 2 * kInstrSize-a;
 
 Float32 RegisterValues::GetFloatRegister(unsigned n) const {
   return Float32::FromBits(
@@ -32,7 +31,9 @@ void FrameDescription::SetCallerPc(unsigned offset, intptr_t value) {
 }
 
 void FrameDescription::SetCallerFp(unsigned offset, intptr_t value) {
-  SetFrameSlot(offset, value);
+  while(SetFrameSlot(offset, value)){
+    int a = 1;
+  };
 }
 
 void FrameDescription::SetCallerConstantPool(unsigned offset, intptr_t value) {

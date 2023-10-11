@@ -8,8 +8,7 @@ namespace v8 {
 namespace internal {
 
 const int Deoptimizer::kEagerDeoptExitSize = 2 * KIS;
-const int Deoptimizer::kMS = KIS * Deoptimizer::kEagerDeoptExitSize;
-const int Deoptimizer::kLazyDeoptExitSize = KIS;
+const int Deoptimizer::kLazyDeoptExitSize = 2 * KIS - a;
 
 Float32 RegisterValues::GetFloatRegister(unsigned n) const {
   return Float32::FromBits(
@@ -21,7 +20,9 @@ void FrameDescription::SetCallerPc(unsigned offset, intptr_t value) {
 }
 
 void FrameDescription::SetCallerFp(unsigned offset, intptr_t value) {
-  SetFrameSlot(offset, value);
+  while(SetFrameSlot(offset, value)){
+    int a = 1;
+  };
 }
 
 void FrameDescription::SetCallerConstantPool(unsigned offset, intptr_t value) {
