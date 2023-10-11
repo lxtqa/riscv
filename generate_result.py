@@ -16,6 +16,10 @@ def read_file(file_name):
     file.close()
     return file_string
 
+def get_start_end(string):
+    [start,end] = string.split(" ")[-1][1:-1].split(",")
+    return int(start), int(end)
+
 def replace(text,operations):
     #排序
     operations = sorted(operations, key=lambda x:  (x.start, x.rank))
@@ -32,10 +36,7 @@ def remove(lst,item):
 
 def mapping(diffOp,ast1,match_dic12,match_dic1_1,file1__string):
     #截取产生修改部分的补丁代码
-    lst = diffOp.source.value.split(" ")
-    remove(lst,"")
-    [start,end] = lst[-1][1:-1].split(",")
-    start,end = int(start), int(end)
+    start,end = get_start_end(diffOp.source.value)
     temp_string = file1__string[start:end]
     #获取产生修改部分的补丁代码中需要进行映射的操作
     operations = []
@@ -46,7 +47,6 @@ def mapping(diffOp,ast1,match_dic12,match_dic1_1,file1__string):
         stri = map(node.value,ast1,match_dic12,match_dic1_1)
         if stri:
             parts = node.value.split(" ")
-            remove(parts,"")
             rank = parts[-1][1:-1].split(",")
             parts = stri.split(" ")
             operations.append(Operation(int(rank[0])-start,  int(rank[1])-start,  parts[1]))
@@ -58,8 +58,7 @@ def mapping(diffOp,ast1,match_dic12,match_dic1_1,file1__string):
 def map(node,ast1,match_dic12,match_dic1_1):
     #对不同种类进行分类讨论，对有name的进行映射
     parts = node.split(" ")
-    while "" in parts:
-        parts.remove("")
+    remove(parts,"")
     if parts[0] == "name:":
         same_name = find_same_name(parts[1],ast1)
         #找到了相同的变量
@@ -104,12 +103,14 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
     file1__string = read_file(cfile_name1_)
     file2_ = open(cfile_name2_,"w")
     matches12, _= gumtree_parser(gumtreefile_name1)
-    matches11_, diffs11_ = gumtree_parser(gumtreefile_name2) 
+    matches11_, diffs11_ = gumtree_parser(gumtreefile_name2)
+
     #parse match
     match_list = []
     match_dic12 = {}
     match_dic1_1 = {}
     match_dic11_ = {}
+
     for match in matches12:
         if match[1]!="---":
             exit(201)
@@ -127,6 +128,8 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
     operations = []
     #先对diff操作进行parse
     diffOps = diff_parser(diffs11_,match_dic11_,ast1_)
+
+
     for diffOp in diffOps:
         if diffOp.op == "insert-node" or diffOp.op == "insert-tree":
             #位置
@@ -153,8 +156,7 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
                         for j in range(len(des2.children)):
                             if des2.children[j].value == next_node:
                                 child_rank2 = j
-                                [start,_] = des2.children[j].value.split(" ")[-1][1:-1].split(",")
-                                start = int(start)
+                                start,_ = get_start_end(des2.children[j].value)
                                 break
                         break
             if start == -1:
@@ -164,15 +166,13 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
                             last_node = match_dic12[des1.children[i].value]
                             for j in range(len(des2.children)):
                                 if des2.children[j].value == last_node:
-                                    child_rank2 = j+1
-                                    [_,start] = des2.children[j].value.split(" ")[-1][1:-1].split(",")
-                                    start = int(start)
+                                    child_rank2 = j + 1
+                                    _,start = get_start_end(des2.children[j].value)
                                     break
                             break
             
             if start == -1:
-                [start,_] = des2.value.split(" ")[-1][1:-1].split(",")
-                start = int(start)
+                start,_ = get_start_end(des2.value)
                 child_rank = 0
             des1.children.insert(child_rank,TreeNode("VAL"));
     
@@ -184,27 +184,22 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
             operation = Operation(start,start,content)
             operation.rank = child_rank2
             operations.append(operation)
-        elif diffOp.op == "delete-node":
+
+        elif diffOp.op == "delete-node" or diffOp.op == "delete-tree":
             #位置 可以改map
             if diffOp.source.value in match_dic12:
                 des = match_dic12[diffOp.source.value]
-                lst = des.split(" ")
-                [start,end] = lst[-1][1:-1].split(",")
-                operation = Operation(int(start),int(end),"")
-                operations.append(operation)
-        elif diffOp.op == "delete-tree":
-            #位置
-            if diffOp.source.value in match_dic12:
-                des = match_dic12[diffOp.source.value]
-                lst = des.split(" ")
-                [start,end] = lst[-1][1:-1].split(",")
-                operation = Operation(int(start),int(end),"")
+                start,end = get_start_end(des)
+                operation = Operation(start,end,"")
                 operations.append(operation)
         elif diffOp.op == "update-node":
-            exit(205)
+            if diffOp.desNode in match_dic12:
+                des = match_dic12[diffOp.desNode]
+                start,end = get_start_end(des)
+                operation = Operation(start,end,diffOp.update)
+                operations.append(operation)
         else:
-            pass
-            # exit(206)
+            exit(206)
     
     file2__string = replace(file2_string,operations)
     file2_.write(file2__string)

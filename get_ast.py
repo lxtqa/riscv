@@ -49,5 +49,6 @@ def get_ast(cpp_file_name,rm_tempfile):
 
 if __name__ == "__main__":
     cpp_file_name = "./test1.cpp"
-    root = get_ast(cpp_file_name)
+    rm_tempfile = False
+    root = get_ast(cpp_file_name,rm_tempfile=rm_tempfile)
     print_tree(root)

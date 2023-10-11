@@ -3,8 +3,9 @@ from get_ast import parse_tree_from_text
 class DiffOp:
     def __init__(self,op):
         self.op = op
-        self.source = ""
+        self.source = None
         self.desNode = ""
+        self.update = ""
         self.desRank = 0
 
 def bfs_search(root, target):
@@ -19,6 +20,7 @@ def fun(diffOps):
     for i in range(len(diffOps)):
         if diffOps[i].desNode != "":
             for j in range(len(diffOps)):
+                if diffOps[j].source != None:
                     node =  bfs_search(diffOps[j].source,diffOps[i].desNode)
                     if node != None:
                         node.children.insert(diffOps[i].desRank,diffOps[i].source)
@@ -51,7 +53,8 @@ def diff_parser(diffs,match,ast):
             diffOps.append(diffOp)
         elif diff[0] == "update-node":
             diffOp = DiffOp("update-node")
-            #TODO finish this
+            diffOp.desNode = diff[2].strip()
+            diffOp.update = diff[-1].split(" ")[-1]
             diffOps.append(diffOp)
         elif diff[0] == "move-node":
             diffOp1 = DiffOp("insert-node")
