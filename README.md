@@ -46,7 +46,7 @@ V8引擎转换成字节码(bytecode)，此时是可以跨平台的，将字节�
 
 利用`gumtree parse`命令生成ast到txt文件，并返回一个经过parse的抽象语法树
 
-### diff_parse.py
+### diff_parser.py
 
 处理diff操作，将原始diff进行合并处理
 

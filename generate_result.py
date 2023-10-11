@@ -1,7 +1,7 @@
 import os
-from get_ast import get_ast, parse_tree_from_text, TreeNode
+from get_ast import get_ast, TreeNode
 from gumtree_parser import gumtree_parser
-from diff_parser import diff_parser
+from diff_parser import diff_parser,bfs_search
 
 class Operation:
     def __init__(self, start, end, content):
@@ -9,18 +9,12 @@ class Operation:
         self.end = end
         self.content = content
         self.rank = 0
-    
 
 def read_file(file_name):
     file = open(file_name,"r")
     file_string = file.read()
     file.close()
     return file_string
-
-def generate_tree(diff):
-    diff = diff[2:-3].copy()
-    tree = parse_tree_from_text(diff)
-    return tree
 
 def replace(text,operations):
     #排序
@@ -57,9 +51,9 @@ def mapping(diffOp,ast1,match_dic12,match_dic1_1,file1__string):
             parts = stri.split(" ")
             operations.append(Operation(int(rank[0])-start,  int(rank[1])-start,  parts[1]))
         queue.extend(node.children)
-
-        
     return replace(temp_string,operations)
+
+
 
 def map(node,ast1,match_dic12,match_dic1_1):
     #对不同种类进行分类讨论，对有name的进行映射
@@ -91,14 +85,6 @@ def find_same_name(name,ast):
                 for child in ast.children:
                     result = result + find_same_name(name,child)
     return result
-
-def bfs_search(root, target):
-    queue = [root]
-    while queue:
-        node = queue.pop(0)
-        if node.value == target:
-            return node
-        queue.extend(node.children)
 
 
 def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile):
@@ -139,7 +125,7 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
         match_dic11_[match[2]] = match[3]
     #位置，内容
     operations = []
-    #TODO:先对操作进行parse
+    #先对diff操作进行parse
     diffOps = diff_parser(diffs11_,match_dic11_,ast1_)
     for diffOp in diffOps:
         if diffOp.op == "insert-node" or diffOp.op == "insert-tree":
@@ -152,7 +138,6 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
             des1 = bfs_search(ast1,diffOp.desNode)
             des2 = bfs_search(ast2,des)
 
-            # TODO:找到相对位置，而非绝对位置
             # 找到插入节点的后一个节点，进行映射，如果能映射到，则插入到后一个节点的前面
             # 找不到，则找到插入节点的前一个节点，进行映射，如果能映射到，则插入到前一个节点的后面
             # 全都找不到，就放在最前面
@@ -189,8 +174,6 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
                 [start,_] = des2.value.split(" ")[-1][1:-1].split(",")
                 start = int(start)
                 child_rank = 0
-            # tree = parse_tree_from_text(diff[2:-3])
-            # des1.children.insert(child_rank,tree);
             des1.children.insert(child_rank,TreeNode("VAL"));
     
             #内容 需要找到存在于原代码片段的位置
