@@ -79,6 +79,12 @@ def split_and_filter(dir):
                 else:
                     print("ERROR:FLIE EXISTS")
                     exit(100)
+        dirlist = os.listdir(path)
+        rank = 0
+        for item in dirlist:
+            if item != ".DS_Store":
+                os.system("mv "+path+"/"+item+" "+path+"/"+"patch_type"+str(rank))
+                rank = rank+1
     shutil.rmtree(dir)
             
 
