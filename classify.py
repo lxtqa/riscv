@@ -35,7 +35,7 @@ def matchdir(dir1,dir2):
 
 def main(patch_path):
     patchname_list = os.listdir(patch_path)
-    savepath = "./classfied_patch"
+    savepath = "./classified_patch"
     if not os.path.exists(savepath):
         os.mkdir(savepath)
     for patchname in patchname_list:
