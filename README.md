@@ -36,7 +36,7 @@ V8引擎转换成字节码(bytecode)，此时是可以跨平台的，将字节�
 
 ### split_and_filter.py 
 
-读取classified_patch中的内容，使用splitdiff，将分割并组织好的patch输出到tmp
+读取`/classified_patch`中的内容，使用splitdiff，将分割并组织好的patch输出到`/tmp`
 
 ### gumtree_parser.py
 
