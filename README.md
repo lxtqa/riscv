@@ -20,15 +20,17 @@ V8引擎转换成字节码(bytecode)，此时是可以跨平台的，将字节�
 
 ## 程序与脚本
 
-### git_info.sh
+### git_log.py
 
 将v8仓库中main分支的git信息读取到`GitLog-origin.txt`中
 
-运行`get_hash.py`并将结果重定向到`GitHash-origin.txt`中
+### get_hash.py
 
-运行`gen_patch.py`，将每一个commit的结果输出到`patches-origin`文件夹下
+获取所有commit的哈希值到`GitHash-origin.txt`中
 
-移除`GitLog-origin.txt`与`GitHash-origin.txt`
+### gen_patch.py
+
+将每一个commit的结果输出到`patches-origin`文件夹下
 
 ### classify.py
 
@@ -54,11 +56,11 @@ V8引擎转换成字节码(bytecode)，此时是可以跨平台的，将字节�
 
 依次输入三个cpp名称【架构1下代码，架构2下代码，架构1下修改后代码】，使用gumtree textdiff命令，获取match和diff，并进行映射操作
 
-### init_vendor.py
-
-初始化tree-sitter相关内容
-
 ## 库
+
+### V8
+
+v8仓库 ： https://github.com/v8/v8.git
 
 ### Splitdiff
 
