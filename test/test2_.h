@@ -35,13 +35,13 @@
 #ifndef V8_CODEGEN_RISCV64_ASSEMBLER_RISCV64_INL_H_
 #define V8_CODEGEN_RISCV64_ASSEMBLER_RISCV64_INL_H_
 
-// Copyright (c) 1994-2006 Sun Microsystems Inc.// All Rights Reserved.//// Redistribution and use in source and binary forms, with or without// modification, are permitted provided that the following conditions// are met://// - Redistributions of source code must retain the above copyright notice,// this list of conditions and the following disclaimer.//// - Redistribution in binary form must reproduce the above copyright// notice, this list of conditions and the following disclaimer in the// documentation and/or other materials provided with the// distribution.//// - Neither the name of Sun Microsystems or the names of contributors may// be used to endorse or promote products derived from this software without// specific prior written permission.//// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS// FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE// COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,// INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES// (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR// SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)// HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,// STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)// ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED// OF THE POSSIBILITY OF SUCH DAMAGE.// The original source code covered by the above license above has been modified// significantly by Google Inc.// Copyright 2014 the V8 project authors. All rights reserved.#include "src/codegen/assembler.h"
+#include "src/codegen/assembler.h"
 #include "src/codegen/riscv64/assembler-riscv64.h"
 #include "src/debug/debug.h"
 #include "src/objects/objects-inl.h"
 
-namespace v8 v8{
-namespace internal internal{
+namespace v8 {
+namespace internal {
 
 bool CpuFeatures::SupportsOptimizer() { return IsSupported(FPU); }
 
@@ -128,7 +128,7 @@ Handle<HeapObject> Assembler::compressed_embedded_object_handle_at(
   return GetEmbeddedObject(target_compressed_address_at(pc, const_pool));
 }
 
-// Operand constructors// Fetch the 32bit value from the FIXED_SEQUENCE IIHF / IILF// This sets the branch destination (which gets loaded at the call address).// This is for calls and branches within generated code.  The serializer// has already deserialized the mov instructions etc.// There is a FIXED_SEQUENCE assumption herevoid Assembler::deserialization_set_special_target_at(
+void Assembler::deserialization_set_special_target_at(
     Address instruction_payload, Code code, Address target) {
   set_target_address_at(instruction_payload,
                         !code.is_null() ? code.constant_pool() : kNullAddress,
@@ -154,7 +154,7 @@ void Assembler::deserialization_set_target_internal_reference_at(
     DCHECK(RelocInfo::IsInternalReference(mode));
     Memory<Address>(pc) = target;
   }
-}// This code assumes the FIXED_SEQUENCE of IIHF/IILF
+}
 
 HeapObject RelocInfo::target_object() {
   DCHECK(IsCodeTarget(rmode_) || IsEmbeddedObjectMode(rmode_));
@@ -331,7 +331,7 @@ void Assembler::emit(uint64_t data) {
 
 EnsureSpace::EnsureSpace(Assembler* assembler) { assembler->CheckBuffer(); }
 
-}// namespace internal  // namespace internal
+}  // namespace internal
 }  // namespace v8
 
-// namespace v8#endif// V8_CODEGEN_S390_ASSEMBLER_S390_INL_H_  // V8_CODEGEN_RISCV64_ASSEMBLER_RISCV64_INL_H_
+#endif  // V8_CODEGEN_RISCV64_ASSEMBLER_RISCV64_INL_H_

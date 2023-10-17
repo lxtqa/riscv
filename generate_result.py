@@ -2,6 +2,8 @@ import os
 from get_ast import get_ast, TreeNode
 from gumtree_parser import gumtree_parser
 from diff_parser import diff_parser,bfs_search
+from get_cfile import get_cfile
+
 
 class Operation:
     def __init__(self, start, end, content):
@@ -220,11 +222,17 @@ if __name__ == "__main__":
     #               "./test/test2_.cc",
     #               rm_tempfile,
     #               )
-    
+
+    # commit_id = "1ff685d8b1a13794abaca3adf36cfd9838b1f6fc"
+    commit_id = "3ac59282af1ceb1930dd958f00e96fb0b27bcbaa"
+    get_cfile(commit_id=commit_id,src_file="src/codegen/s390/assembler-s390-inl.h",dst_file="test/test1.h")
+    get_cfile(commit_id=commit_id,src_file="src/codegen/riscv64/assembler-riscv64-inl.h",dst_file="test/test2.h")
+    get_cfile(commit_id=commit_id,src_file="src/codegen/s390/assembler-s390-inl.h",dst_file="test/test1_.h")
+
     # .h文件按照.cc文件处理，挂载到镜像的.cc文件中
-    generate_diff("./test/codegen/s390/assembler-s390-inl.h",
-                  "./test/codegen/riscv64/assembler-riscv64-inl.h",
-                  "./test/codegen_/s390/assembler-s390-inl.h",
+    generate_diff("./test/test1.h",
+                  "./test/test2.h",
+                  "./test/test1_.h",
                   "./test/test2_.h",
                   rm_tempfile,
                   )
