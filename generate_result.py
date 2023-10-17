@@ -3,6 +3,7 @@ from get_ast import get_ast, TreeNode
 from gumtree_parser import gumtree_parser
 from diff_parser import diff_parser,bfs_search
 from get_cfile import get_cfile
+from time import time
 
 
 class Operation:
@@ -241,9 +242,12 @@ if __name__ == "__main__":
     
 
     # .h文件按照.cc文件处理，挂载到镜像的.cc文件中
+    start_time = time()
     generate_diff("./test/test1.h",
                   "./test/test2.h",
                   "./test/test1_.h",
                   "./test/test2_.h",
                   rm_tempfile,
                   )
+    end_time = time()
+    print("生成修改后代码耗时：{}s".format(end_time-start_time))
