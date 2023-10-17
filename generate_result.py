@@ -216,18 +216,29 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
 
 if __name__ == "__main__":
     rm_tempfile = True
-    # generate_diff("./test/src/deoptimizer/x64/deoptimizer-x64.cc",
-    #               "./test/src/deoptimizer/riscv64/deoptimizer-riscv64.cc",
-    #               "./test/src_/deoptimizer/x64/deoptimizer-x64.cc",
-    #               "./test/test2_.cc",
-    #               rm_tempfile,
-    #               )
+    if not os.path.exists("./test"):
+        os.mkdir("./test")
+
+    # get_cfile(commit_id=commit_id,
+    #           src_file1="src/deoptimizer/x64/deoptimizer-x64.cc",
+    #           dst_file1="test/test1.cc",
+    #           src_file2="src/deoptimizer/riscv64/deoptimizer-riscv64.cc",
+    #           dst_file2="test/test2.cc",
+    #           src_file1_="test/src_/deoptimizer/x64/deoptimizer-x64.cc",
+    #           dst_file1_="test/test1_.cc"
+    #           )
 
     # commit_id = "1ff685d8b1a13794abaca3adf36cfd9838b1f6fc"
     commit_id = "3ac59282af1ceb1930dd958f00e96fb0b27bcbaa"
-    get_cfile(commit_id=commit_id,src_file="src/codegen/s390/assembler-s390-inl.h",dst_file="test/test1.h")
-    get_cfile(commit_id=commit_id,src_file="src/codegen/riscv64/assembler-riscv64-inl.h",dst_file="test/test2.h")
-    get_cfile(commit_id=commit_id,src_file="src/codegen/s390/assembler-s390-inl.h",dst_file="test/test1_.h")
+    get_cfile(commit_id=commit_id,
+              src_file1="src/codegen/s390/assembler-s390-inl.h",
+              dst_file1="test/test1.h",
+              src_file2="src/codegen/riscv64/assembler-riscv64-inl.h",
+              dst_file2="test/test2.h",
+              src_file1_="src/codegen/s390/assembler-s390-inl.h",
+              dst_file1_="test/test1_.h"
+              )
+    
 
     # .h文件按照.cc文件处理，挂载到镜像的.cc文件中
     generate_diff("./test/test1.h",
