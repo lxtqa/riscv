@@ -54,7 +54,7 @@ V8引擎转换成字节码(bytecode)，此时是可以跨平台的，将字节�
 
 ### generate_result.py
 
-依次输入三个cpp名称【架构1下代码，架构2下代码，架构1下修改后代码】，使用gumtree textdiff命令，获取match和diff，并进行映射操作
+依次输入三个cpp名称【架构1下代码，架构2下代码，架构1下修改后代码】，使用docker镜像中的gumtree textdiff命令，获取match和diff，并进行映射操作
 
 ## 库
 
@@ -78,9 +78,9 @@ OPTIONS are:
 
 官方文档：https://github.com/GumTreeDiff/gumtree/wiki/Commands#overriding-properties
 
-使用教程：https://blog.csdn.net/weixin_39278265/article/details/101427644
+Docker使用教程：https://github.com/GumTreeDiff/gumtree/tree/main/docker
 
-使用`gumtree -m gumtree-simple-id-theta`来简化生成的diff
+下载镜像：`docker pull gumtreediff/gumtree`
 
 ### tree-sitter
 

@@ -93,8 +93,10 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
     '''
     gumtreefile_name1 = "gumtree_12.txt"
     gumtreefile_name2 = "gumtree_11_.txt"
-    os.system("./gumtree/gumtree textdiff " + cfile_name1 + " " + cfile_name2 + " -m gumtree-simple-id-theta > " + gumtreefile_name1 )
-    os.system("./gumtree/gumtree textdiff " + cfile_name1 + " " + cfile_name1_ + " -m gumtree-simple-id-theta  > " + gumtreefile_name2)
+    os.system("docker run -v {}:/left.cc -v {}:/right.cc gumtreediff/gumtree textdiff /left.cc /right.cc  > {}".format(
+        cfile_name1, cfile_name2, gumtreefile_name1))
+    os.system("docker run -v {}:/left.cc -v {}:/right.cc gumtreediff/gumtree textdiff /left.cc  /right.cc  > {}".format(
+        cfile_name1, cfile_name1_, gumtreefile_name2))
     ast1 = get_ast(cfile_name1,rm_tempfile=rm_tempfile)
     ast2 = get_ast(cfile_name2,rm_tempfile=rm_tempfile)
     ast1_ = get_ast(cfile_name1_,rm_tempfile=rm_tempfile)
@@ -212,4 +214,17 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
 
 if __name__ == "__main__":
     rm_tempfile = True
-    generate_diff("test1.cpp","test2.cpp","test1_.cpp","test2_.cpp",rm_tempfile)
+    # generate_diff("./src/deoptimizer/x64/deoptimizer-x64.cc",
+    #               "./src/deoptimizer/riscv64/deoptimizer-riscv64.cc",
+    #               "./src_/deoptimizer/x64/deoptimizer-x64.cc",
+    #               "test2_.cc",
+    #               rm_tempfile,
+    #               )
+    
+    # .h文件按照.cc文件处理，挂载到镜像的.cc文件中
+    generate_diff("./codegen/s390/assembler-s390-inl.h",
+                  "./codegen/riscv64/assembler-riscv64-inl.h",
+                  "./codegen_/s390/assembler-s390-inl.h",
+                  "test2_.h",
+                  rm_tempfile,
+                  )
