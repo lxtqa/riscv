@@ -96,9 +96,9 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
     '''
     gumtreefile_name1 = "gumtree_12.txt"
     gumtreefile_name2 = "gumtree_11_.txt"
-    os.system("docker run -v {}:/left.cc -v {}:/right.cc gumtreediff/gumtree textdiff /left.cc /right.cc  > {}".format(
+    os.system("docker run -v {}:/left.cc -v {}:/right.cc gumtreediff/gumtree textdiff /left.cc /right.cc -m gumtree-simple  > {}".format(
         cfile_name1, cfile_name2, gumtreefile_name1))
-    os.system("docker run -v {}:/left.cc -v {}:/right.cc gumtreediff/gumtree textdiff /left.cc  /right.cc  > {}".format(
+    os.system("docker run -v {}:/left.cc -v {}:/right.cc gumtreediff/gumtree textdiff /left.cc  /right.cc -m gumtree-simple > {}".format(
         cfile_name1, cfile_name1_, gumtreefile_name2))
     ast1 = get_ast(cfile_name1,rm_tempfile=rm_tempfile)
     ast2 = get_ast(cfile_name2,rm_tempfile=rm_tempfile)
@@ -193,6 +193,7 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
         elif diffOp.op == "delete-node" or diffOp.op == "delete-tree":
             #位置 可以改map
             if diffOp.source.value in match_dic12:
+                #删除结点
                 des = match_dic12[diffOp.source.value]
                 start,end = get_start_end(des)
                 operation = Operation(start,end,"")
@@ -209,6 +210,7 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
     file2__string = replace(file2_string,operations)
     file2_.write(file2__string)
     file2_.close()
+    os.system("diff {} {} > test/new_patch.patch".format(cfile_name2,cfile_name2_))
 
     if rm_tempfile:
         os.system("rm "+gumtreefile_name1)
@@ -219,7 +221,7 @@ if __name__ == "__main__":
     rm_tempfile = True
     if not os.path.exists("./test"):
         os.mkdir("./test")
-
+    # commit_id = "1ff685d8b1a13794abaca3adf36cfd9838b1f6fc"
     # get_cfile(commit_id=commit_id,
     #           src_file1="src/deoptimizer/x64/deoptimizer-x64.cc",
     #           dst_file1="test/test1.cc",
@@ -229,7 +231,7 @@ if __name__ == "__main__":
     #           dst_file1_="test/test1_.cc"
     #           )
 
-    # commit_id = "1ff685d8b1a13794abaca3adf36cfd9838b1f6fc"
+    
     commit_id = "3ac59282af1ceb1930dd958f00e96fb0b27bcbaa"
     get_cfile(commit_id=commit_id,
               src_file1="src/codegen/s390/assembler-s390-inl.h",
