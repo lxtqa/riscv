@@ -37,7 +37,7 @@ def print_tree(node, indent=0):
         print_tree(child, indent + 1)
 
 
-def get_ast(cpp_file_name,rm_tempfile,):
+def get_ast(cpp_file_name,rm_tempfile):
     ast_file_name = "./ast.txt"
     os.system("docker run -v {}:/left.cc gumtreediff/gumtree parse /left.cc > {}".format(cpp_file_name,ast_file_name))
     ast_file = open(ast_file_name,"r");

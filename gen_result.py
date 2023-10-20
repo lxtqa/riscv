@@ -184,7 +184,7 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
             #内容 需要找到存在于原代码片段的位置
             #进行简单的映射:先找到1_所有同名变量，进行 1_->1 的映射，再进行 1->2 的映射
             content = mapping(diffOp,ast1,match_dic12,match_dic1_1,file1__string)
-            if diffOp.op == "insert-tree":
+            if diffOp.op == "insert-tree" or diffOp.source.value.split(":")[0]=="comment":
                 content =  content + "\n"           
             operation = Operation(start,start,content)
             operation.rank = child_rank2
@@ -232,15 +232,25 @@ if __name__ == "__main__":
     #           )
 
     
-    commit_id = "3ac59282af1ceb1930dd958f00e96fb0b27bcbaa"
-    get_cfile(commit_id=commit_id,
-              src_file1="src/codegen/s390/assembler-s390-inl.h",
-              dst_file1="test/test1.h",
-              src_file2="src/codegen/riscv64/assembler-riscv64-inl.h",
-              dst_file2="test/test2.h",
-              src_file1_="src/codegen/s390/assembler-s390-inl.h",
-              dst_file1_="test/test1_.h"
-              )
+    # commit_id = "3ac59282af1ceb1930dd958f00e96fb0b27bcbaa"
+    # get_cfile(commit_id=commit_id,
+    #           src_file1="src/codegen/s390/assembler-s390-inl.h",
+    #           dst_file1="test/test1.h",
+    #           src_file2="src/codegen/riscv64/assembler-riscv64-inl.h",
+    #           dst_file2="test/test2.h",
+    #           src_file1_="src/codegen/s390/assembler-s390-inl.h",
+    #           dst_file1_="test/test1_.h"
+    #           )
+    
+    commit_id = "6c0716d8af6eb2cfebc0ac7bb87db768765fde24"
+    # get_cfile(commit_id=commit_id,
+    #           src_file1="src/wasm/baseline/ppc/liftoff-assembler-ppc.h",
+    #           dst_file1="test/test1.h",
+    #           src_file2="src/wasm/baseline/s390/liftoff-assembler-s390.h",
+    #           dst_file2="test/test2.h",
+    #           src_file1_="src/wasm/baseline/ppc/liftoff-assembler-ppc.h",
+    #           dst_file1_="test/test1_.h"
+    #           )
     
 
     # .h文件按照.cc文件处理，挂载到镜像的.cc文件中

@@ -52,7 +52,7 @@ V8引擎转换成字节码(bytecode)，此时是可以跨平台的，将字节�
 
 处理diff操作，将原始diff进行合并处理
 
-### generate_result.py
+### gen_result.py
 
 依次输入三个cpp名称【架构1下代码，架构2下代码，架构1下修改后代码】，使用docker镜像中的gumtree textdiff命令，获取match和diff，并进行映射操作
 
