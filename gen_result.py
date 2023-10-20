@@ -210,7 +210,7 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
     file2__string = replace(file2_string,operations)
     file2_.write(file2__string)
     file2_.close()
-    os.system("diff {} {} > test/new_patch.patch".format(cfile_name2,cfile_name2_))
+    os.system("diff -up {} {} > test/new_patch.patch".format(cfile_name2,cfile_name2_))
 
     if rm_tempfile:
         os.system("rm "+gumtreefile_name1)
