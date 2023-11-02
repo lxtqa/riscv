@@ -4,6 +4,7 @@ from gumtree_parser import gumtree_parser
 from diff_parser import diff_parser,bfs_search
 from get_cfile import get_cfile
 from time import time
+import sys
 
 
 class Operation:
@@ -26,6 +27,7 @@ def get_start_end(string):
 def replace(text,operations):
     #排序
     operations = sorted(operations, key=lambda x:  (x.start, x.rank))
+    # 排序先插入再删除
     offset = 0
     for op in operations:
         text = text[:op.start+offset] + op.content + text[op.end+offset:]
@@ -94,15 +96,17 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
     cfile_name1为架构a下的文件，cfile2_name2为架构b下的文件，cfile_name1_为cfile_name1修改后的文件
     取cfile1和cfile2的match部分，取cfile1与cfile1_的diff部分
     '''
+    start_time = time()
     gumtreefile_name1 = "gumtree_12.txt"
     gumtreefile_name2 = "gumtree_11_.txt"
-    os.system("docker run -v {}:/left.cc -v {}:/right.cc gumtreediff/gumtree textdiff /left.cc /right.cc -m gumtree-simple  > {}".format(
+    os.system("docker run -v {}:/left.cc -v {}:/right.cc gumtreediff/gumtree textdiff /left.cc /right.cc -m gumtree-simple-id  > {}".format(
         cfile_name1, cfile_name2, gumtreefile_name1))
-    os.system("docker run -v {}:/left.cc -v {}:/right.cc gumtreediff/gumtree textdiff /left.cc  /right.cc -m gumtree-simple > {}".format(
+    os.system("docker run -v {}:/left.cc -v {}:/right.cc gumtreediff/gumtree textdiff /left.cc  /right.cc -m gumtree-simple-id > {}".format(
         cfile_name1, cfile_name1_, gumtreefile_name2))
     ast1 = get_ast(cfile_name1,rm_tempfile=rm_tempfile)
     ast2 = get_ast(cfile_name2,rm_tempfile=rm_tempfile)
     ast1_ = get_ast(cfile_name1_,rm_tempfile=rm_tempfile)
+    print("生成ast及diff耗时：{}s".format(time()-start_time))
     # file1_string =  read_file(cfile_name1)
     file2_string = read_file(cfile_name2)
     file1__string = read_file(cfile_name1_)
@@ -141,7 +145,7 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
             if diffOp.desNode in match_dic12:
                 des = match_dic12[diffOp.desNode]
             else:
-                exit(207)
+                continue
             #在ast1,2中找到pos,根据其child找到位置
             des1 = bfs_search(ast1,diffOp.desNode)
             des2 = bfs_search(ast2,des)
@@ -197,6 +201,7 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
                 des = match_dic12[diffOp.source.value]
                 start,end = get_start_end(des)
                 operation = Operation(start,end,"")
+                operation.rank = sys.maxsize
                 operations.append(operation)
         elif diffOp.op == "update-node":
             if diffOp.desNode in match_dic12:
@@ -213,12 +218,13 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
     os.system("diff -up {} {} > test/new_patch.patch".format(cfile_name2,cfile_name2_))
 
     if rm_tempfile:
-        os.system("rm "+gumtreefile_name1)
-        os.system("rm "+gumtreefile_name2)
-    pass
-
+        os.system("rm " + gumtreefile_name1)
+        os.system("rm " + gumtreefile_name2)
+    end_time = time()
+    print("生成修改后代码总耗时：{}s".format(end_time-start_time))
+    
 if __name__ == "__main__":
-    rm_tempfile = True
+    rm_tempfile = False
     if not os.path.exists("./test"):
         os.mkdir("./test")
     # commit_id = "1ff685d8b1a13794abaca3adf36cfd9838b1f6fc"
@@ -227,39 +233,93 @@ if __name__ == "__main__":
     #           dst_file1="test/test1.cc",
     #           src_file2="src/deoptimizer/riscv64/deoptimizer-riscv64.cc",
     #           dst_file2="test/test2.cc",
-    #           src_file1_="test/src_/deoptimizer/x64/deoptimizer-x64.cc",
+    #           src_file1_="src/deoptimizer/x64/deoptimizer-x64.cc",
+    #           dst_file1_="test/test1_.cc"
+    #           )
+    
+
+    # commit_id = "3ac59282af1ceb1930dd958f00e96fb0b27bcbaa"
+    # get_cfile(commit_id=commit_id,
+    #           src_file1="src/codegen/x64/assembler-x64-inl.h",
+    #           dst_file1="test/test1.cc",
+    #           src_file2="src/codegen/riscv64/assembler-riscv64-inl.h",
+    #           dst_file2="test/test2.cc",
+    #           src_file1_="src/codegen/x64/assembler-x64-inl.h",
+    #           dst_file1_="test/test1_.cc"
+    #           )
+    
+    # commit_id = "6c0716d8af6eb2cfebc0ac7bb87db768765fde24"
+    # get_cfile(commit_id=commit_id,
+    #           src_file1="src/wasm/baseline/ppc/liftoff-assembler-ppc.h",
+    #           dst_file1="test/test1.cc",
+    #           src_file2="src/wasm/baseline/s390/liftoff-assembler-s390.h",
+    #           dst_file2="test/test2.cc",
+    #           src_file1_="src/wasm/baseline/ppc/liftoff-assembler-ppc.h",
+    #           dst_file1_="test/test1_.cc"
+    #           )
+    
+
+    # commit_id = "0bd3033a54e5b42cd35395b495669be3ebf9b6c0"
+    # get_cfile(commit_id=commit_id,
+    #           src_file1="src/wasm/baseline/x64/liftoff-assembler-x64.h",
+    #           dst_file1="test/test1.cc",
+    #           src_file2="src/wasm/baseline/riscv/liftoff-assembler-riscv64.h",
+    #           dst_file2="test/test2.cc",
+    #           src_file1_="src/wasm/baseline/x64/liftoff-assembler-x64.h",
     #           dst_file1_="test/test1_.cc"
     #           )
 
-    
-    # commit_id = "3ac59282af1ceb1930dd958f00e96fb0b27bcbaa"
+
+    # commit_id = "3aec86ef6f7c358ec29700f27a50c67db6a56414"
     # get_cfile(commit_id=commit_id,
-    #           src_file1="src/codegen/s390/assembler-s390-inl.h",
-    #           dst_file1="test/test1.h",
-    #           src_file2="src/codegen/riscv64/assembler-riscv64-inl.h",
-    #           dst_file2="test/test2.h",
-    #           src_file1_="src/codegen/s390/assembler-s390-inl.h",
-    #           dst_file1_="test/test1_.h"
-    #           )
-    
-    commit_id = "6c0716d8af6eb2cfebc0ac7bb87db768765fde24"
-    # get_cfile(commit_id=commit_id,
-    #           src_file1="src/wasm/baseline/ppc/liftoff-assembler-ppc.h",
-    #           dst_file1="test/test1.h",
-    #           src_file2="src/wasm/baseline/s390/liftoff-assembler-s390.h",
-    #           dst_file2="test/test2.h",
-    #           src_file1_="src/wasm/baseline/ppc/liftoff-assembler-ppc.h",
-    #           dst_file1_="test/test1_.h"
+    #           src_file1="src/codegen/x64/assembler-x64-inl.h",
+    #           dst_file1="test/test1.cc",
+    #           src_file2="src/codegen/riscv/assembler-riscv-inl.h",
+    #           dst_file2="test/test2.cc",
+    #           src_file1_="src/codegen/x64/assembler-x64-inl.h",
+    #           dst_file1_="test/test1_.cc"
     #           )
     
 
+    # 有问题
+    # commit_id = "4a97c8c7e94b2aa4353896807079619ea8626892"
+    # get_cfile(commit_id=commit_id,
+    #           src_file1="src/wasm/baseline/x64/liftoff-assembler-x64.h",
+    #           dst_file1="test/test1.cc",
+    #           src_file2="src/wasm/baseline/riscv/liftoff-assembler-riscv64.h",
+    #           dst_file2="test/test2.cc",
+    #           src_file1_="src/wasm/baseline/x64/liftoff-assembler-x64.h",
+    #           dst_file1_="test/test1_.cc"
+    #           )
+
+    #匹配失败
+    # commit_id = "4ab70f6b218b719d9ba282a6a733c978216943d6"
+    # get_cfile(commit_id=commit_id,
+    #           src_file1="src/wasm/baseline/x64/liftoff-assembler-x64.h",
+    #           dst_file1="test/test1.cc",
+    #           src_file2="src/wasm/baseline/ia32/liftoff-assembler-ia32.h",
+    #           dst_file2="test/test2.cc",
+    #           src_file1_="src/wasm/baseline/x64/liftoff-assembler-x64.h",
+    #           dst_file1_="test/test1_.cc"
+    #           )
+
+    # commit_id = "0a110021d21a43a376f29a5ff1672ac6293c71cc"
+    # get_cfile(commit_id=commit_id,
+    #           src_file1="src/compiler/backend/ppc/code-generator-ppc.cc",
+    #           dst_file1="test/test1.cc",
+    #           src_file2="src/compiler/backend/riscv64/code-generator-riscv64.cc",
+    #           dst_file2="test/test2.cc",
+    #           src_file1_="src/compiler/backend/ppc/code-generator-ppc.cc",
+    #           dst_file1_="test/test1_.cc"
+    #           )
+
+
     # .h文件按照.cc文件处理，挂载到镜像的.cc文件中
-    start_time = time()
-    generate_diff("./test/test1.h",
-                  "./test/test2.h",
-                  "./test/test1_.h",
-                  "./test/test2_.h",
+    
+    generate_diff("./test/test1.cc",
+                  "./test/test2.cc",
+                  "./test/test1_.cc",
+                  "./test/test2_.cc",
                   rm_tempfile,
                   )
-    end_time = time()
-    print("生成修改后代码耗时：{}s".format(end_time-start_time))
+    
