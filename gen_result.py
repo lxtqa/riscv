@@ -227,99 +227,17 @@ if __name__ == "__main__":
     rm_tempfile = False
     if not os.path.exists("./test"):
         os.mkdir("./test")
-    # commit_id = "1ff685d8b1a13794abaca3adf36cfd9838b1f6fc"
-    # get_cfile(commit_id=commit_id,
-    #           src_file1="src/deoptimizer/x64/deoptimizer-x64.cc",
-    #           dst_file1="test/test1.cc",
-    #           src_file2="src/deoptimizer/riscv64/deoptimizer-riscv64.cc",
-    #           dst_file2="test/test2.cc",
-    #           src_file1_="src/deoptimizer/x64/deoptimizer-x64.cc",
-    #           dst_file1_="test/test1_.cc"
-    #           )
     
-
-    # commit_id = "3ac59282af1ceb1930dd958f00e96fb0b27bcbaa"
-    # get_cfile(commit_id=commit_id,
-    #           src_file1="src/codegen/x64/assembler-x64-inl.h",
-    #           dst_file1="test/test1.cc",
-    #           src_file2="src/codegen/riscv64/assembler-riscv64-inl.h",
-    #           dst_file2="test/test2.cc",
-    #           src_file1_="src/codegen/x64/assembler-x64-inl.h",
-    #           dst_file1_="test/test1_.cc"
-    #           )
-    
-    # commit_id = "6c0716d8af6eb2cfebc0ac7bb87db768765fde24"
-    # get_cfile(commit_id=commit_id,
-    #           src_file1="src/wasm/baseline/ppc/liftoff-assembler-ppc.h",
-    #           dst_file1="test/test1.cc",
-    #           src_file2="src/wasm/baseline/s390/liftoff-assembler-s390.h",
-    #           dst_file2="test/test2.cc",
-    #           src_file1_="src/wasm/baseline/ppc/liftoff-assembler-ppc.h",
-    #           dst_file1_="test/test1_.cc"
-    #           )
-    
-
-    # commit_id = "0bd3033a54e5b42cd35395b495669be3ebf9b6c0"
-    # get_cfile(commit_id=commit_id,
-    #           src_file1="src/wasm/baseline/x64/liftoff-assembler-x64.h",
-    #           dst_file1="test/test1.cc",
-    #           src_file2="src/wasm/baseline/riscv/liftoff-assembler-riscv64.h",
-    #           dst_file2="test/test2.cc",
-    #           src_file1_="src/wasm/baseline/x64/liftoff-assembler-x64.h",
-    #           dst_file1_="test/test1_.cc"
-    #           )
-
-
-    # commit_id = "3aec86ef6f7c358ec29700f27a50c67db6a56414"
-    # get_cfile(commit_id=commit_id,
-    #           src_file1="src/codegen/x64/assembler-x64-inl.h",
-    #           dst_file1="test/test1.cc",
-    #           src_file2="src/codegen/riscv/assembler-riscv-inl.h",
-    #           dst_file2="test/test2.cc",
-    #           src_file1_="src/codegen/x64/assembler-x64-inl.h",
-    #           dst_file1_="test/test1_.cc"
-    #           )
-    
-
-    # 有问题
-    # commit_id = "4a97c8c7e94b2aa4353896807079619ea8626892"
-    # get_cfile(commit_id=commit_id,
-    #           src_file1="src/wasm/baseline/x64/liftoff-assembler-x64.h",
-    #           dst_file1="test/test1.cc",
-    #           src_file2="src/wasm/baseline/riscv/liftoff-assembler-riscv64.h",
-    #           dst_file2="test/test2.cc",
-    #           src_file1_="src/wasm/baseline/x64/liftoff-assembler-x64.h",
-    #           dst_file1_="test/test1_.cc"
-    #           )
-
-    #匹配失败
-    # commit_id = "4ab70f6b218b719d9ba282a6a733c978216943d6"
-    # get_cfile(commit_id=commit_id,
-    #           src_file1="src/wasm/baseline/x64/liftoff-assembler-x64.h",
-    #           dst_file1="test/test1.cc",
-    #           src_file2="src/wasm/baseline/ia32/liftoff-assembler-ia32.h",
-    #           dst_file2="test/test2.cc",
-    #           src_file1_="src/wasm/baseline/x64/liftoff-assembler-x64.h",
-    #           dst_file1_="test/test1_.cc"
-    #           )
-
-    # commit_id = "0a110021d21a43a376f29a5ff1672ac6293c71cc"
-    # get_cfile(commit_id=commit_id,
-    #           src_file1="src/compiler/backend/ppc/code-generator-ppc.cc",
-    #           dst_file1="test/test1.cc",
-    #           src_file2="src/compiler/backend/riscv64/code-generator-riscv64.cc",
-    #           dst_file2="test/test2.cc",
-    #           src_file1_="src/compiler/backend/ppc/code-generator-ppc.cc",
-    #           dst_file1_="test/test1_.cc"
-    #           )
-
-
-    # .h文件按照.cc文件处理，挂载到镜像的.cc文件中
-    
-    generate_diff("./test/test1.cc",
-                  "./test/test2.cc",
-                  "./test/test1_.cc",
-                  "./test/test2_.cc",
+    # generate_diff("./test/test1.cc",
+    #               "./test/test2.cc",
+    #               "./test/test1_.cc",
+    #               "./test/test2_.cc",
+    #               rm_tempfile,
+    #               )
+    generate_diff(sys.argv[1],
+                  sys.argv[2],
+                  sys.argv[3],
+                  sys.argv[4],
                   rm_tempfile,
                   )
     
