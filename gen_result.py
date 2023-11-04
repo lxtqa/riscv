@@ -66,14 +66,15 @@ def mapping(diffOp,ast1,match_dic12,match_dic1_1,fileString):
 def map(node,ast1,match_dic12,match_dic1_1):
     #对不同种类进行分类讨论，对有name的进行映射
     if node.split(" ")[0] == "name:":
-        same_name = find_same_name(get_name(node),ast1)
-        #找到了相同的变量
-        if len(same_name) > 1:
-            #多个候选node的处理方法
-            for name in same_name:
-                if name in match_dic1_1:
-                    if match_dic1_1[name] in match_dic12:
-                        mapped_node = match_dic12[match_dic1_1[name]]
+        if node in match_dic1_1:
+            name = get_name(node)
+            same_names = find_same_name(get_name(match_dic1_1[node]) ,ast1)
+            #找到了相同的变量
+            if len(same_names) > 1:
+                #TODO:多个候选node的处理方法，目前选择找到第一个后返回
+                for same_name in same_names:
+                    if same_name in match_dic12:
+                        mapped_node = match_dic12[same_name]
                         return get_name(mapped_node)
         #TODO: 找不到相同的变量，进行架构关键字的映射
         mapped_node = node.lstrip()
@@ -83,12 +84,12 @@ def map(node,ast1,match_dic12,match_dic1_1):
 
 def find_same_name(name,ast):
     result = []
-    if ast.value != "VAL":
-        if get_name(ast.value) == name:
-            result.append(ast.value)
-            if ast.children != []:
-                for child in ast.children:
-                    result = result + find_same_name(name,child)
+    queue = [ast]
+    while queue:
+        node = queue.pop(0)
+        if node.value != "VAL" and get_name(node.value) == name:
+            result.append(node.value)
+        queue.extend(node.children)
     return result
 
 
@@ -116,7 +117,6 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
     matches11_, diffs11_ = gumtree_parser(gumtreefile_name2)
 
     #parse match
-    match_list = []
     match_dic12 = {}
     match_dic1_1 = {}
     match_dic11_ = {}
@@ -125,14 +125,10 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
         if match[1]!="---":
             exit(201)
         match_dic12[match[2]] = match[3]
-        match_list.append([match[2],match[3]])
     for match in matches11_:
         if match[1]!="---":
             exit(201)
         match_dic1_1[match[3]] = match[2]
-    for match in matches11_:
-        if match[1]!="---":
-            exit(201)
         match_dic11_[match[2]] = match[3]
     #位置，内容
     operations = []
@@ -182,15 +178,12 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
                             break
             
             if start == -1:
+                print("Genaration Failed")
                 exit(300)
                 start,_ = get_start_end(des2.value)
                 child_rank = 0
             des1.children.insert(child_rank,TreeNode("VAL"));
     
-            #内容 需要找到存在于原代码片段的位置
-            #进行简单的映射:先找到1_所有同名变量，进行 1_->1 的映射，再进行 1->2 的映射
-            
-
             #使用映射解决问题
             queue = [diffOp.source]
             while queue:
@@ -199,7 +192,8 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
                     node.value = match_dic11_[node.value]
                 queue.extend(node.children)
             
-            
+            #内容 需要找到存在于原代码片段的位置
+            #进行简单的映射:先找到1_所有同名变量，进行 1_->1 的映射，再进行 1->2 的映射
             content = mapping(diffOp,ast1,match_dic12,match_dic1_1,file1_String)
             if diffOp.op == "insert-tree" or diffOp.source.value.split(":")[0]=="comment":
                 content =  content + "\n"           
@@ -208,7 +202,7 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
             content = re.sub(r'//.*$', '', content, flags=re.MULTILINE)
             # 删除多行注释
             content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
-            # 删除空行注释
+            # 删除空行
             content = re.sub(r'\n\s*\n',r'\n',content)
             operation = Operation(start,start,content)
             operation.rank = child_rank2
