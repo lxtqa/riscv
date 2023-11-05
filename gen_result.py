@@ -2,7 +2,6 @@ import os
 from get_ast import get_ast, TreeNode
 from gumtree_parser import gumtree_parser
 from diff_parser import diff_parser,bfs_search
-from get_cfile import get_cfile
 from time import time
 import sys
 import re
@@ -43,7 +42,7 @@ def remove(lst,item):
         lst.remove(item)
     return lst
 
-def mapping(diffOp,ast1,match_dic12,match_dic1_1,fileString):
+def map(diffOp,match_dic12,match_dic1_1,fileString):
     #截取产生修改部分的补丁代码
     start,end = get_start_end(diffOp.source.value)
     temp_string = fileString[start:end]
@@ -53,9 +52,8 @@ def mapping(diffOp,ast1,match_dic12,match_dic1_1,fileString):
     queue = [diffOp.source]
     while queue:
         node = queue.pop(0)
-        new_name = map(node.value,ast1,match_dic12,match_dic1_1)
+        new_name = get_newname(node.value,match_dic12,match_dic1_1)
         if new_name:
-            name = get_name(node.value)
             start_end = get_start_end(node.value)
             operations.append(Operation(start_end[0]-start,  start_end[1]-start,  new_name))
         queue.extend(node.children)
@@ -63,12 +61,19 @@ def mapping(diffOp,ast1,match_dic12,match_dic1_1,fileString):
 
 
 
-def map(node,ast1,match_dic12,match_dic1_1):
+def get_newname(node,match_dic12,match_dic1_1):
     #对不同种类进行分类讨论，对有name的进行映射
+    # 如果能直接进行1_->1->2的映射，则采用该映射
+    # 如果不能则在1_中寻找同名变量，然后再进行上一步的映射
     if node.split(" ")[0] == "name:":
         if node in match_dic1_1:
-            name = get_name(node)
-            same_names = find_same_name(get_name(match_dic1_1[node]) ,ast1)
+            if match_dic1_1[node] in match_dic12:
+                return get_name(match_dic12[match_dic1_1[node]])
+        else:
+            same_names = []
+            for key in match_dic1_1.keys():
+                if get_name(node) == get_name(key):
+                    same_names.append(match_dic1_1[key])
             #找到了相同的变量
             if len(same_names) > 1:
                 #TODO:多个候选node的处理方法，目前选择找到第一个后返回
@@ -82,15 +87,6 @@ def map(node,ast1,match_dic12,match_dic1_1):
     else:
         return None
 
-def find_same_name(name,ast):
-    result = []
-    queue = [ast]
-    while queue:
-        node = queue.pop(0)
-        if node.value != "VAL" and get_name(node.value) == name:
-            result.append(node.value)
-        queue.extend(node.children)
-    return result
 
 
 def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile):
@@ -109,7 +105,7 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
     ast2 = get_ast(cfile_name2,rm_tempfile=rm_tempfile)
     # ast1_ = get_ast(cfile_name1_,rm_tempfile=rm_tempfile)
     print("生成ast及diff耗时：{}s".format(time()-start_time))
-    file1String =  read_file(cfile_name1)
+    # file1String =  read_file(cfile_name1)
     file2String = read_file(cfile_name2)
     file1_String = read_file(cfile_name1_)
     file2_ = open(cfile_name2_,"w")
@@ -180,8 +176,8 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
             if start == -1:
                 print("Genaration Failed")
                 exit(300)
-                start,_ = get_start_end(des2.value)
-                child_rank = 0
+                # start,_ = get_start_end(des2.value)
+                # child_rank = 0
             des1.children.insert(child_rank,TreeNode("VAL"));
     
             #使用映射解决问题
@@ -194,7 +190,7 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
             
             #内容 需要找到存在于原代码片段的位置
             #进行简单的映射:先找到1_所有同名变量，进行 1_->1 的映射，再进行 1->2 的映射
-            content = mapping(diffOp,ast1,match_dic12,match_dic1_1,file1_String)
+            content = map(diffOp,match_dic12,match_dic1_1,file1_String)
             if diffOp.op == "insert-tree" or diffOp.source.value.split(":")[0]=="comment":
                 content =  content + "\n"           
             
@@ -241,16 +237,16 @@ if __name__ == "__main__":
     if not os.path.exists("./test"):
         os.mkdir("./test")
     
-    generate_diff("./test/test1.cc",
-                  "./test/test2.cc",
-                  "./test/test1_.cc",
-                  "./test/test2_.cc",
-                  rm_tempfile,
-                  )
-    # generate_diff(sys.argv[1],
-    #               sys.argv[2],
-    #               sys.argv[3],
-    #               sys.argv[4],
+    # generate_diff("./test/test1.cc",
+    #               "./test/test2.cc",
+    #               "./test/test1_.cc",
+    #               "./test/test2_.cc",
     #               rm_tempfile,
     #               )
+    generate_diff(sys.argv[1],
+                  sys.argv[2],
+                  sys.argv[3],
+                  sys.argv[4],
+                  rm_tempfile,
+                  )
     
