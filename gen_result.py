@@ -37,18 +37,12 @@ def replace(text,operations):
         offset += len(op.content) - op.end + op.start
     return text
 
-def remove(lst,item):
-    while item in lst:
-        lst.remove(item)
-    return lst
-
 def map(diffOp,match_dic12,match_dic1_1,fileString):
     #截取产生修改部分的补丁代码
     start,end = get_start_end(diffOp.source.value)
     temp_string = fileString[start:end]
     #获取产生修改部分的补丁代码中需要进行映射的操作
     operations = []
-
     queue = [diffOp.source]
     while queue:
         node = queue.pop(0)
@@ -95,6 +89,7 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
     取cfile1和cfile2的match部分，取cfile1与cfile1_的diff部分
     '''
     start_time = time()
+    
     gumtreefile_name1 = "gumtree_12.txt"
     gumtreefile_name2 = "gumtree_11_.txt"
     os.system("docker run -v {}:/left.cc -v {}:/right.cc gumtreediff/gumtree textdiff /left.cc /right.cc -m gumtree-simple-id  > {}".format(
@@ -116,7 +111,6 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
     match_dic12 = {}
     match_dic1_1 = {}
     match_dic11_ = {}
-
     for match in matches12:
         if match[1]!="---":
             exit(201)
@@ -126,12 +120,11 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
             exit(201)
         match_dic1_1[match[3]] = match[2]
         match_dic11_[match[2]] = match[3]
+
     #位置，内容
     operations = []
     #先对diff操作进行parse
     diffOps = diff_parser(diffs11_,match_dic11_)
-
-
     for diffOp in diffOps:
         if diffOp.op == "insert-node" or diffOp.op == "insert-tree":
             #位置

@@ -1,6 +1,5 @@
 import os 
 import shutil
-import sys
 
 def get_cfile(commit_id,src_file1,src_file2,src_file1_):
     dst_file1 = "test/test1.cc"
@@ -10,7 +9,6 @@ def get_cfile(commit_id,src_file1,src_file2,src_file1_):
     os.chdir(dir)
     os.system("git -c advice.detachedHead=false  checkout {}^".format(commit_id))
     print()
-    s = os.listdir()
     shutil.copy(src_file1,"../"+dst_file1)
     shutil.copy(src_file2,"../"+dst_file2)
     os.system("git -c advice.detachedHead=false  checkout {}".format(commit_id))
