@@ -1,0 +1,403 @@
+From 6b766f3b88a0ddb433d6b7e82fbb8855d29dad42 Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Fri, 5 May 2023 12:18:19 +0800
+Subject: [PATCH] [riscv][builtins] Remake Api callback thunk wrappers calling
+ convention
+
+Port commit c56004231528c09baff88993aa9be093648bca1e
+Port commit cf1c64fa9ad9d62029a8e22f52aaed76cb3fe29d
+Port commit f6ebe8af6d9b8bae98ca74add29b18e28a6f6d20
+
+Bug: v8:7515, v8:13825,v8:12868
+
+Change-Id: I92856fd4cfd0d619f2bd156e084460df97f2b854
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4505078
+Reviewed-by: Ji Qiu <qiuji@iscas.ac.cn>
+Commit-Queue: Ji Qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#87461}
+---
+ src/builtins/riscv/builtins-riscv.cc          | 72 ++++++++++---------
+ src/codegen/riscv/macro-assembler-riscv.cc    | 18 ++---
+ src/codegen/riscv/macro-assembler-riscv.h     |  5 +-
+ src/codegen/riscv/register-riscv.h            |  8 +++
+ .../backend/riscv/code-generator-riscv.cc     |  6 +-
+ src/execution/riscv/simulator-riscv.cc        | 51 +++++++------
+ 6 files changed, 91 insertions(+), 69 deletions(-)
+
+diff --git a/src/builtins/riscv/builtins-riscv.cc b/src/builtins/riscv/builtins-riscv.cc
+index 9ad9bc8bdde..6b8c4db0a9b 100644
+--- a/src/builtins/riscv/builtins-riscv.cc
++++ b/src/builtins/riscv/builtins-riscv.cc
+@@ -1692,7 +1692,7 @@ void Generate_ContinueToBuiltinHelper(MacroAssembler* masm,
+   __ AddWord(sp, sp,
+              Operand(BuiltinContinuationFrameConstants::kFixedFrameSizeFromFp));
+   __ Pop(ra);
+-  __ LoadEntryFromBuiltinIndex(t6);
++  __ LoadEntryFromBuiltinIndex(t6, t6);
+   __ Jump(t6);
+ }
+ }  // namespace
+@@ -3099,9 +3099,8 @@ namespace {
+ // (GCed, includes the call JS arguments space and the additional space
+ // allocated for the fast call).
+ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+-                              ExternalReference thunk_ref,
+-                              Register thunk_last_arg, int stack_space,
+-                              MemOperand* stack_space_operand,
++                              ExternalReference thunk_ref, Register thunk_arg,
++                              int stack_space, MemOperand* stack_space_operand,
+                               MemOperand return_value_operand) {
+   ASM_CODE_COMMENT(masm);
+   using ER = ExternalReference;
+@@ -3115,25 +3114,28 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+       ER::handle_scope_level_address(isolate), no_reg);
+ 
+   Register return_value = a0;
+-  Register scratch = arg_reg_4;
+-  Register scratch2 = kScratchReg2;
++  Register scratch = kScratchReg2;
++  Register scratch2 = s11;
+ 
+   // Allocate HandleScope in callee-saved registers.
+   // We will need to restore the HandleScope after the call to the API function,
+   // by allocating it in callee-saved registers it'll be preserved by C code.
+-  Register prev_next_address_reg = s3;
++  Register prev_next_address_reg = kScratchReg;
+   Register prev_limit_reg = s1;
+   Register prev_level_reg = s2;
+ 
+   // C arguments (arg_reg_1/2) are expected to be initialized outside, so this
+   // function must not corrupt them (return_value overlaps with arg_reg_1 but
+   // that's ok because we start using it only after the C call).
+-  DCHECK(!AreAliased(arg_reg_1, arg_reg_2, arg_reg_3,  // C args
++  DCHECK(!AreAliased(arg_reg_1, arg_reg_2,  // C args
++                     scratch, scratch2, prev_next_address_reg, prev_limit_reg));
++  // function_address and thunk_arg might overlap but this function must not
++  // corrupted them until the call is made (i.e. overlap with return_value is
++  // fine).
++  DCHECK(!AreAliased(function_address,  // incoming parameters
++                     scratch, scratch2, prev_next_address_reg, prev_limit_reg));
++  DCHECK(!AreAliased(thunk_arg,  // incoming parameters
+                      scratch, scratch2, prev_next_address_reg, prev_limit_reg));
+-  // Ensure the additional argument for thunk_ref is already in the right
+-  // register.
+-  DCHECK(thunk_last_arg == arg_reg_2 || thunk_last_arg == arg_reg_3);
+-  DCHECK_EQ(function_address, thunk_last_arg);
+ 
+   Label profiler_or_side_effects_check_enabled, done_api_call;
+   {
+@@ -3207,10 +3209,10 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+   {
+     ASM_CODE_COMMENT_STRING(masm,
+                             "Check if the function scheduled an exception.");
+-    __ LoadRoot(a4, RootIndex::kTheHoleValue);
+-    __ LoadWord(a5, __ ExternalReferenceAsOperand(
+-                        ER::scheduled_exception_address(isolate), no_reg));
+-    __ Branch(&promote_scheduled_exception, ne, a4, Operand(a5),
++    __ LoadRoot(scratch2, RootIndex::kTheHoleValue);
++    __ LoadWord(scratch, __ ExternalReferenceAsOperand(
++                             ER::scheduled_exception_address(isolate), no_reg));
++    __ Branch(&promote_scheduled_exception, ne, scratch2, Operand(scratch),
+               Label::Distance::kNear);
+   }
+   {
+@@ -3230,7 +3232,9 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+     ASM_CODE_COMMENT_STRING(masm, "Call the api function via thunk wrapper.");
+     __ bind(&profiler_or_side_effects_check_enabled);
+     // Additional parameter is the address of the actual callback function.
+-    __ Move(thunk_last_arg, function_address);
++    MemOperand thunk_arg_mem_op = __ ExternalReferenceAsOperand(
++        ER::api_callback_thunk_argument_address(isolate), no_reg);
++    __ StoreWord(thunk_arg, thunk_arg_mem_op);
+     __ li(scratch, thunk_ref);
+     __ StoreReturnAddressAndCall(scratch);
+     __ Branch(&done_api_call);
+@@ -3281,7 +3285,6 @@ void Builtins::Generate_CallApiCallback(MacroAssembler* masm) {
+   //  -- sp[(argc) * 8]      : last argument
+   // -----------------------------------
+   Register function_callback_info_arg = arg_reg_1;
+-  Register thunk_callback_arg = arg_reg_2;
+ 
+   Register api_function_address = a1;
+   Register argc = a2;
+@@ -3389,8 +3392,6 @@ void Builtins::Generate_CallApiCallback(MacroAssembler* masm) {
+   // function_callback_info_arg = v8::FunctionCallbackInfo&
+   __ AddWord(function_callback_info_arg, sp, Operand(1 * kSystemPointerSize));
+ 
+-  // It's okay if api_function_address == thunk_callback_arg, but not
+-  // function_callback_info_arg.
+   DCHECK(!AreAliased(api_function_address, function_callback_info_arg));
+ 
+   ExternalReference thunk_ref = ExternalReference::invoke_function_callback();
+@@ -3398,12 +3399,15 @@ void Builtins::Generate_CallApiCallback(MacroAssembler* masm) {
+   MemOperand return_value_operand =
+       ExitFrameCallerStackSlotOperand(FCA::kReturnValueIndex);
+ 
++  // Pass api function address to thunk wrapper in case profiler or side-effect
++  // checking is enabled.
++  Register thunk_arg = api_function_address;
++
+   static constexpr int kUseStackSpaceOperand = 0;
+ 
+-  AllowExternalCallThatCantCauseGC scope(masm);
+-  CallApiFunctionAndReturn(masm, api_function_address, thunk_ref,
+-                           thunk_callback_arg, kUseStackSpaceOperand,
+-                           &stack_space_operand, return_value_operand);
++  CallApiFunctionAndReturn(masm, api_function_address, thunk_ref, thunk_arg,
++                           kUseStackSpaceOperand, &stack_space_operand,
++                           return_value_operand);
+ }
+ 
+ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+@@ -3416,6 +3420,7 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+ 
+   // Build v8::PropertyCallbackInfo::args_ array on the stack and push property
+   // name below the exit frame to make GC aware of them.
++  using PCI = PropertyCallbackInfo<v8::Value>;
+   using PCA = PropertyCallbackArguments;
+   static_assert(PCA::kShouldThrowOnErrorIndex == 0);
+   static_assert(PCA::kHolderIndex == 1);
+@@ -3439,9 +3444,9 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+ 
+   Register name_arg = arg_reg_1;
+   Register property_callback_info_arg = arg_reg_2;
+-  Register thunk_getter_arg = arg_reg_3;
+ 
+-  Register api_function_address = thunk_getter_arg;
++  Register api_function_address = arg_reg_3;
++
+   Register receiver = ApiGetterDescriptor::ReceiverRegister();
+   Register holder = ApiGetterDescriptor::HolderRegister();
+   Register callback = ApiGetterDescriptor::CallbackRegister();
+@@ -3494,11 +3499,12 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+              Operand(1 * kSystemPointerSize));
+ 
+   const int kApiStackSpace = 1;
++  static_assert(kApiStackSpace * kSystemPointerSize == sizeof(PCI));
+   FrameScope frame_scope(masm, StackFrame::MANUAL);
+   __ EnterExitFrame(kApiStackSpace);
+ 
+   __ RecordComment("Create v8::PropertyCallbackInfo object on the stack.");
+-  // Initialize its args_ field.
++  // Initialize v8::PropertyCallbackInfo::args_ field.
+   __ StoreWord(property_callback_info_arg,
+                MemOperand(sp, 1 * kSystemPointerSize));
+   // property_callback_info_arg = v8::PropertyCallbackInfo&
+@@ -3508,20 +3514,22 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+       api_function_address,
+       FieldMemOperand(callback, AccessorInfo::kMaybeRedirectedGetterOffset));
+ 
+-  // It's okay if api_function_address == thunk_getter_arg, but not
+-  // property_callback_info_arg or name_arg.
+   DCHECK(
+       !AreAliased(api_function_address, property_callback_info_arg, name_arg));
+ 
+   ExternalReference thunk_ref =
+       ExternalReference::invoke_accessor_getter_callback();
++  // Pass AccessorInfo to thunk wrapper in case profiler or side-effect
++  // checking is enabled.
++  Register thunk_arg = callback;
++
+   MemOperand return_value_operand =
+       ExitFrameCallerStackSlotOperand(kPCAStackIndex + PCA::kReturnValueIndex);
+   MemOperand* const kUseStackSpaceConstant = nullptr;
+ 
+-  CallApiFunctionAndReturn(masm, api_function_address, thunk_ref,
+-                           thunk_getter_arg, kStackUnwindSpace,
+-                           kUseStackSpaceConstant, return_value_operand);
++  CallApiFunctionAndReturn(masm, api_function_address, thunk_ref, thunk_arg,
++                           kStackUnwindSpace, kUseStackSpaceConstant,
++                           return_value_operand);
+ }
+ 
+ void Builtins::Generate_DirectCEntry(MacroAssembler* masm) {
+diff --git a/src/codegen/riscv/macro-assembler-riscv.cc b/src/codegen/riscv/macro-assembler-riscv.cc
+index f37695e1be4..eb3f98c4097 100644
+--- a/src/codegen/riscv/macro-assembler-riscv.cc
++++ b/src/codegen/riscv/macro-assembler-riscv.cc
+@@ -4417,7 +4417,8 @@ void MacroAssembler::Call(Handle<Code> code, RelocInfo::Mode rmode,
+   }
+ }
+ 
+-void MacroAssembler::LoadEntryFromBuiltinIndex(Register builtin) {
++void MacroAssembler::LoadEntryFromBuiltinIndex(Register builtin_index,
++                                               Register target) {
+ #if V8_TARGET_ARCH_RISCV64
+   static_assert(kSystemPointerSize == 8);
+ #elif V8_TARGET_ARCH_RISCV32
+@@ -4427,15 +4428,16 @@ void MacroAssembler::LoadEntryFromBuiltinIndex(Register builtin) {
+   static_assert(kSmiTag == 0);
+ 
+   // The builtin register contains the builtin index as a Smi.
+-  SmiUntag(builtin, builtin);
+-  CalcScaledAddress(builtin, kRootRegister, builtin, kSystemPointerSizeLog2);
+-  LoadWord(builtin,
+-           MemOperand(builtin, IsolateData::builtin_entry_table_offset()));
++  SmiUntag(target, builtin_index);
++  CalcScaledAddress(target, kRootRegister, target, kSystemPointerSizeLog2);
++  LoadWord(target,
++           MemOperand(target, IsolateData::builtin_entry_table_offset()));
+ }
+ 
+-void MacroAssembler::CallBuiltinByIndex(Register builtin) {
+-  LoadEntryFromBuiltinIndex(builtin);
+-  Call(builtin);
++void MacroAssembler::CallBuiltinByIndex(Register builtin_index,
++                                        Register target) {
++  LoadEntryFromBuiltinIndex(builtin_index, target);
++  Call(target);
+ }
+ 
+ void MacroAssembler::CallBuiltin(Builtin builtin) {
+diff --git a/src/codegen/riscv/macro-assembler-riscv.h b/src/codegen/riscv/macro-assembler-riscv.h
+index ab15a5c120a..f39cd0092b9 100644
+--- a/src/codegen/riscv/macro-assembler-riscv.h
++++ b/src/codegen/riscv/macro-assembler-riscv.h
+@@ -309,10 +309,11 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
+ 
+   // Load the builtin given by the Smi in |builtin| into the same
+   // register.
+-  void LoadEntryFromBuiltinIndex(Register builtin);
++  // Load the builtin given by the Smi in |builtin_index| into |target|.
++  void LoadEntryFromBuiltinIndex(Register builtin_index, Register target);
+   void LoadEntryFromBuiltin(Builtin builtin, Register destination);
+   MemOperand EntryFromBuiltinAsOperand(Builtin builtin);
+-  void CallBuiltinByIndex(Register builtin);
++  void CallBuiltinByIndex(Register builtin_index, Register target);
+   void CallBuiltin(Builtin builtin);
+   void TailCallBuiltin(Builtin builtin);
+ 
+diff --git a/src/codegen/riscv/register-riscv.h b/src/codegen/riscv/register-riscv.h
+index f1d803e319b..85c1c5b75dd 100644
+--- a/src/codegen/riscv/register-riscv.h
++++ b/src/codegen/riscv/register-riscv.h
+@@ -65,6 +65,7 @@ namespace internal {
+   V(ft9)  V(ft10) V(ft11) V(fa0) V(fa1) V(fa2) V(fa3) V(fa4) V(fa5)  \
+   V(fa6)  V(fa7)
+ 
++
+ // Returns the number of padding slots needed for stack pointer alignment.
+ constexpr int ArgumentPaddingSlots(int argument_count) {
+   // No argument padding required.
+@@ -253,6 +254,13 @@ VECTOR_REGISTERS(DECLARE_VECTOR_REGISTER)
+ 
+ const VRegister no_msareg = VRegister::no_reg();
+ 
++// Assign |source| value to |no_reg| and return the |source|'s previous value.
++inline Register ReassignRegister(Register& source) {
++  Register result = source;
++  source = Register::no_reg();
++  return result;
++}
++
+ // Register aliases.
+ // cp is assumed to be a callee saved register.
+ constexpr Register kRootRegister = s6;
+diff --git a/src/compiler/backend/riscv/code-generator-riscv.cc b/src/compiler/backend/riscv/code-generator-riscv.cc
+index 6e07d855b31..0c5d5289e46 100644
+--- a/src/compiler/backend/riscv/code-generator-riscv.cc
++++ b/src/compiler/backend/riscv/code-generator-riscv.cc
+@@ -660,7 +660,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+     case kArchCallBuiltinPointer: {
+       DCHECK(!instr->InputAt(0)->IsImmediate());
+       Register builtin_index = i.InputRegister(0);
+-      __ CallBuiltinByIndex(builtin_index);
++      Register target =
++          instr->HasCallDescriptorFlag(CallDescriptor::kFixedTargetRegister)
++              ? kJavaScriptCallCodeStartRegister
++              : builtin_index;
++      __ CallBuiltinByIndex(builtin_index, target);
+       RecordCallPosition(instr);
+       frame_access_state()->ClearSPDelta();
+       break;
+diff --git a/src/execution/riscv/simulator-riscv.cc b/src/execution/riscv/simulator-riscv.cc
+index 3d42acd9518..9da1321a18d 100644
+--- a/src/execution/riscv/simulator-riscv.cc
++++ b/src/execution/riscv/simulator-riscv.cc
+@@ -3048,12 +3048,14 @@ using SimulatorRuntimeFPIntCall = double (*)(double darg0, int32_t arg0);
+ // This signature supports direct call in to API function native callback
+ // (refer to InvocationCallback in v8.h).
+ using SimulatorRuntimeDirectApiCall = void (*)(sreg_t arg0);
+-using SimulatorRuntimeProfilingApiCall = void (*)(sreg_t arg0, void* arg1);
+ 
+ // This signature supports direct call to accessor getter callback.
+ using SimulatorRuntimeDirectGetterCall = void (*)(sreg_t arg0, sreg_t arg1);
+-using SimulatorRuntimeProfilingGetterCall = void (*)(sreg_t arg0, sreg_t arg1,
+-                                                     void* arg2);
++
++// Define four args for future flexibility; at the time of this writing only
++// one is ever used.
++using SimulatorRuntimeFPTaggedCall = double (*)(int64_t arg0, int64_t arg1,
++                                                int64_t arg2, int64_t arg3);
+ 
+ // Software interrupt instructions are used by the simulator to call into the
+ // C-based V8 runtime. They are also used for debugging with simulator.
+@@ -3185,7 +3187,23 @@ void Simulator::SoftwareInterrupt() {
+             UNREACHABLE();
+         }
+       }
++    } else if (redirection->type() ==
++               ExternalReference::BUILTIN_FP_POINTER_CALL) {
++      if (v8_flags.trace_sim) {
++        PrintF("Call to host function at %p args %08" REGIx_FORMAT " \n",
++               reinterpret_cast<void*>(external), arg0);
++      }
++      SimulatorRuntimeFPTaggedCall target =
++          reinterpret_cast<SimulatorRuntimeFPTaggedCall>(external);
++      double dresult = target(arg0, arg1, arg2, arg3);
++      SetFpResult(dresult);
++      if (v8_flags.trace_sim) {
++        PrintF("Returned %f\n", dresult);
++      }
+     } else if (redirection->type() == ExternalReference::DIRECT_API_CALL) {
++      // See callers of MacroAssembler::CallApiFunctionAndReturn for
++      // explanation of register usage.
++      // void f(v8::FunctionCallbackInfo&)
+       if (v8_flags.trace_sim) {
+         PrintF("Call to host function %s at %p args %08" REGIx_FORMAT " \n",
+                ExternalReferenceTable::NameOfIsolateIndependentAddress(pc),
+@@ -3194,37 +3212,18 @@ void Simulator::SoftwareInterrupt() {
+       SimulatorRuntimeDirectApiCall target =
+           reinterpret_cast<SimulatorRuntimeDirectApiCall>(external);
+       target(arg0);
+-    } else if (redirection->type() == ExternalReference::PROFILING_API_CALL) {
+-      if (v8_flags.trace_sim) {
+-        PrintF("Call to host function %s at %p args %08" REGIx_FORMAT
+-               "  %08" REGIx_FORMAT " \n",
+-               ExternalReferenceTable::NameOfIsolateIndependentAddress(pc),
+-               reinterpret_cast<void*>(external), arg0, arg1);
+-      }
+-      SimulatorRuntimeProfilingApiCall target =
+-          reinterpret_cast<SimulatorRuntimeProfilingApiCall>(external);
+-      target(arg0, Redirection::UnwrapRedirection(arg1));
+     } else if (redirection->type() == ExternalReference::DIRECT_GETTER_CALL) {
++      // See callers of MacroAssembler::CallApiFunctionAndReturn for
++      // explanation of register usage.
++      // void f(v8::Local<String> property, v8::PropertyCallbackInfo& info)
+       if (v8_flags.trace_sim) {
+-        PrintF("Call to host function %s at %p args %08" REGIx_FORMAT
++        PrintF("Call to host function at %p args %08" REGIx_FORMAT
+                "  %08" REGIx_FORMAT " \n",
+-               ExternalReferenceTable::NameOfIsolateIndependentAddress(pc),
+                reinterpret_cast<void*>(external), arg0, arg1);
+       }
+       SimulatorRuntimeDirectGetterCall target =
+           reinterpret_cast<SimulatorRuntimeDirectGetterCall>(external);
+       target(arg0, arg1);
+-    } else if (redirection->type() ==
+-               ExternalReference::PROFILING_GETTER_CALL) {
+-      if (v8_flags.trace_sim) {
+-        PrintF("Call to host function %s at %p args %08" REGIx_FORMAT
+-               "  %08" REGIx_FORMAT "  %08" REGIx_FORMAT " \n",
+-               ExternalReferenceTable::NameOfIsolateIndependentAddress(pc),
+-               reinterpret_cast<void*>(external), arg0, arg1, arg2);
+-      }
+-      SimulatorRuntimeProfilingGetterCall target =
+-          reinterpret_cast<SimulatorRuntimeProfilingGetterCall>(external);
+-      target(arg0, arg1, Redirection::UnwrapRedirection(arg2));
+     } else {
+       DCHECK(
+           redirection->type() == ExternalReference::BUILTIN_CALL ||
+-- 
+2.35.1
+

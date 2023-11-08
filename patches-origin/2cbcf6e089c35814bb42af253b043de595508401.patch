@@ -1,0 +1,258 @@
+From 2cbcf6e089c35814bb42af253b043de595508401 Mon Sep 17 00:00:00 2001
+From: Clemens Backes <clemensb@chromium.org>
+Date: Wed, 29 Sep 2021 13:53:16 +0200
+Subject: [PATCH] [wasm] Remove process-wide address space limit
+
+The address space limit puts an arbitrary cap on the total reservation
+size, thus limiting the total number of Wasm memories to around 100 on
+64-bit systems.
+Since the usable address space on 64 bit is much larger than the
+1TB+4GB limit, this makes us reject code that we could otherwise just
+execute.
+
+This CL thus removes that limit completely.
+
+See the linked issue for more discussion, including security
+considerations.
+
+R=jkummerow@chromium.org, rsesek@chromium.org
+
+Bug: v8:12076
+Change-Id: I1f61511d68efdab1f8cef4e09c0a39fc1d6fed60
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3190476
+Reviewed-by: Jakob Kummerow <jkummerow@chromium.org>
+Commit-Queue: Clemens Backes <clemensb@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#77161}
+---
+ src/objects/backing-store.cc       | 62 ++----------------------------
+ src/objects/backing-store.h        |  6 ---
+ src/wasm/wasm-code-manager.cc      |  7 +---
+ test/mjsunit/mjsunit.status        |  3 +-
+ test/mjsunit/wasm/module-memory.js | 26 -------------
+ 5 files changed, 6 insertions(+), 98 deletions(-)
+
+diff --git a/src/objects/backing-store.cc b/src/objects/backing-store.cc
+index 02d45afd0a3..cfe355c6064 100644
+--- a/src/objects/backing-store.cc
++++ b/src/objects/backing-store.cc
+@@ -39,21 +39,6 @@ constexpr uint64_t kFullGuardSize = uint64_t{10} * GB;
+ 
+ #endif  // V8_ENABLE_WEBASSEMBLY
+ 
+-#if V8_TARGET_ARCH_MIPS64 || V8_TARGET_ARCH_LOONG64
+-// MIPS64 and LOONG64 has a user space of 2^40 bytes on most processors,
+-// address space limits needs to be smaller.
+-constexpr size_t kAddressSpaceLimit = 0x8000000000L;  // 512 GiB
+-#elif V8_TARGET_ARCH_RISCV64
+-// RISC-V64 has a user space of 256GB on the Sv39 scheme.
+-constexpr size_t kAddressSpaceLimit = 0x4000000000L;  // 256 GiB
+-#elif V8_TARGET_ARCH_64_BIT
+-constexpr size_t kAddressSpaceLimit = 0x10100000000L;  // 1 TiB + 4 GiB
+-#else
+-constexpr size_t kAddressSpaceLimit = 0xC0000000;  // 3 GiB
+-#endif
+-
+-std::atomic<uint64_t> reserved_address_space_{0};
+-
+ std::atomic<uint32_t> next_backing_store_id_{1};
+ 
+ // Allocation results are reported to UMA
+@@ -258,7 +243,6 @@ BackingStore::~BackingStore() {
+         FreePages(page_allocator, reinterpret_cast<void*>(region.begin()),
+                   region.size());
+     CHECK(pages_were_freed);
+-    BackingStore::ReleaseReservation(reservation_size);
+     Clear();
+     return;
+   }
+@@ -267,8 +251,6 @@ BackingStore::~BackingStore() {
+   if (is_resizable_) {
+     DCHECK(free_on_destruct_);
+     DCHECK(!custom_deleter_);
+-    size_t reservation_size =
+-        GetReservationSize(has_guard_regions_, byte_capacity_);
+     auto region =
+         GetReservedRegion(has_guard_regions_, buffer_start_, byte_capacity_);
+ 
+@@ -277,7 +259,6 @@ BackingStore::~BackingStore() {
+         FreePages(page_allocator, reinterpret_cast<void*>(region.begin()),
+                   region.size());
+     CHECK(pages_were_freed);
+-    BackingStore::ReleaseReservation(reservation_size);
+     Clear();
+     return;
+   }
+@@ -399,25 +380,6 @@ std::unique_ptr<BackingStore> BackingStore::TryAllocateWasmMemory(
+ }
+ #endif  // V8_ENABLE_WEBASSEMBLY
+ 
+-bool BackingStore::ReserveAddressSpace(uint64_t num_bytes) {
+-  uint64_t reservation_limit = kAddressSpaceLimit;
+-  uint64_t old_count = reserved_address_space_.load(std::memory_order_relaxed);
+-  while (true) {
+-    if (old_count > reservation_limit) return false;
+-    if (reservation_limit - old_count < num_bytes) return false;
+-    if (reserved_address_space_.compare_exchange_weak(
+-            old_count, old_count + num_bytes, std::memory_order_acq_rel)) {
+-      return true;
+-    }
+-  }
+-}
+-
+-void BackingStore::ReleaseReservation(uint64_t num_bytes) {
+-  uint64_t old_reserved = reserved_address_space_.fetch_sub(num_bytes);
+-  USE(old_reserved);
+-  DCHECK_LE(num_bytes, old_reserved);
+-}
+-
+ std::unique_ptr<BackingStore> BackingStore::TryAllocateAndPartiallyCommitMemory(
+     Isolate* isolate, size_t byte_length, size_t max_byte_length,
+     size_t page_size, size_t initial_pages, size_t maximum_pages,
+@@ -460,25 +422,7 @@ std::unique_ptr<BackingStore> BackingStore::TryAllocateAndPartiallyCommitMemory(
+   size_t reservation_size = GetReservationSize(guards, byte_capacity);
+ 
+   //--------------------------------------------------------------------------
+-  // 1. Enforce maximum address space reservation per engine.
+-  //--------------------------------------------------------------------------
+-  auto reserve_memory_space = [&] {
+-    return BackingStore::ReserveAddressSpace(reservation_size);
+-  };
+-
+-  if (!gc_retry(reserve_memory_space)) {
+-    // Crash on out-of-memory if the correctness fuzzer is running.
+-    if (FLAG_correctness_fuzzer_suppressions) {
+-      FATAL("could not allocate wasm memory backing store");
+-    }
+-    RecordStatus(isolate, AllocationStatus::kAddressSpaceLimitReachedFailure);
+-    TRACE_BS("BSw:try   failed to reserve address space (size %zu)\n",
+-             reservation_size);
+-    return {};
+-  }
+-
+-  //--------------------------------------------------------------------------
+-  // 2. Allocate pages (inaccessible by default).
++  // Allocate pages (inaccessible by default).
+   //--------------------------------------------------------------------------
+   void* allocation_base = nullptr;
+   PageAllocator* page_allocator = GetPlatformPageAllocator();
+@@ -503,7 +447,6 @@ std::unique_ptr<BackingStore> BackingStore::TryAllocateAndPartiallyCommitMemory(
+   };
+   if (!gc_retry(allocate_pages)) {
+     // Page allocator could not reserve enough pages.
+-    BackingStore::ReleaseReservation(reservation_size);
+     RecordStatus(isolate, AllocationStatus::kOtherFailure);
+     RecordCagedMemoryAllocationResult(isolate, nullptr);
+     TRACE_BS("BSw:try   failed to allocate pages\n");
+@@ -521,8 +464,9 @@ std::unique_ptr<BackingStore> BackingStore::TryAllocateAndPartiallyCommitMemory(
+   DCHECK(!guards);
+   byte* buffer_start = reinterpret_cast<byte*>(allocation_base);
+ #endif
++
+   //--------------------------------------------------------------------------
+-  // 3. Commit the initial pages (allow read/write).
++  // Commit the initial pages (allow read/write).
+   //--------------------------------------------------------------------------
+   size_t committed_byte_length = initial_pages * page_size;
+   auto commit_memory = [&] {
+diff --git a/src/objects/backing-store.h b/src/objects/backing-store.h
+index 391a76735f1..5ba95a2ba82 100644
+--- a/src/objects/backing-store.h
++++ b/src/objects/backing-store.h
+@@ -138,12 +138,6 @@ class V8_EXPORT_PRIVATE BackingStore : public BackingStoreBase {
+   static void UpdateSharedWasmMemoryObjects(Isolate* isolate);
+ #endif  // V8_ENABLE_WEBASSEMBLY
+ 
+-  // TODO(wasm): address space limitations should be enforced in page alloc.
+-  // These methods enforce a limit on the total amount of address space,
+-  // which is used for both backing stores and wasm memory.
+-  static bool ReserveAddressSpace(uint64_t num_bytes);
+-  static void ReleaseReservation(uint64_t num_bytes);
+-
+   // Returns the size of the external memory owned by this backing store.
+   // It is used for triggering GCs based on the external memory pressure.
+   size_t PerIsolateAccountingLength() {
+diff --git a/src/wasm/wasm-code-manager.cc b/src/wasm/wasm-code-manager.cc
+index 3cdcc2ddc15..bd5fec6da6c 100644
+--- a/src/wasm/wasm-code-manager.cc
++++ b/src/wasm/wasm-code-manager.cc
+@@ -1984,7 +1984,6 @@ VirtualMemory WasmCodeManager::TryAllocate(size_t size, void* hint) {
+   DCHECK_GT(size, 0);
+   size_t allocate_page_size = page_allocator->AllocatePageSize();
+   size = RoundUp(size, allocate_page_size);
+-  if (!BackingStore::ReserveAddressSpace(size)) return {};
+   if (hint == nullptr) hint = page_allocator->GetRandomMmapAddr();
+ 
+   // When we start exposing Wasm in jitless mode, then the jitless flag
+@@ -1992,10 +1991,7 @@ VirtualMemory WasmCodeManager::TryAllocate(size_t size, void* hint) {
+   DCHECK(!FLAG_jitless);
+   VirtualMemory mem(page_allocator, size, hint, allocate_page_size,
+                     VirtualMemory::kMapAsJittable);
+-  if (!mem.IsReserved()) {
+-    BackingStore::ReleaseReservation(size);
+-    return {};
+-  }
++  if (!mem.IsReserved()) return {};
+   TRACE_HEAP("VMem alloc: 0x%" PRIxPTR ":0x%" PRIxPTR " (%zu)\n", mem.address(),
+              mem.end(), mem.size());
+ 
+@@ -2436,7 +2432,6 @@ void WasmCodeManager::FreeNativeModule(
+ #endif  // V8_OS_WIN64
+ 
+     lookup_map_.erase(code_space.address());
+-    BackingStore::ReleaseReservation(code_space.size());
+     code_space.Free();
+     DCHECK(!code_space.IsReserved());
+   }
+diff --git a/test/mjsunit/mjsunit.status b/test/mjsunit/mjsunit.status
+index 4b0340b5f5c..3e7afd7104e 100644
+--- a/test/mjsunit/mjsunit.status
++++ b/test/mjsunit/mjsunit.status
+@@ -77,9 +77,10 @@
+   # Enable once serializing a running isolate is fully implemented.
+   'serialize-deserialize-now': [SKIP],
+ 
+-  # BUG(v8:9506): times out.
++  # BUG(v8:9506): slow tests.
+   'wasm/shared-memory-worker-explicit-gc-stress': [PASS, SLOW],
+   'wasm/shared-memory-worker-gc-stress': [PASS, SLOW],
++  'wasm/shared-memory-gc-stress': [PASS, SLOW],
+ 
+   # https://crbug.com/1129854
+   'tools/log': ['arch == arm or arch == arm64', SKIP],
+diff --git a/test/mjsunit/wasm/module-memory.js b/test/mjsunit/wasm/module-memory.js
+index 7420a9cd2af..0db0e8bf0d0 100644
+--- a/test/mjsunit/wasm/module-memory.js
++++ b/test/mjsunit/wasm/module-memory.js
+@@ -166,29 +166,3 @@ function testOOBThrows() {
+ }
+ 
+ testOOBThrows();
+-
+-function testAddressSpaceLimit() {
+-  // 1TiB + 4 GiB, see wasm-memory.h
+-  const kMaxAddressSpace = 1 * 1024 * 1024 * 1024 * 1024
+-                         + 4 * 1024 * 1024 * 1024;
+-  const kAddressSpacePerMemory = 10 * 1024 * 1024 * 1024;
+-
+-  let last_memory;
+-  try {
+-    let memories = [];
+-    let address_space = 0;
+-    while (address_space <= kMaxAddressSpace + 1) {
+-      last_memory = new WebAssembly.Memory({initial: 1})
+-      memories.push(last_memory);
+-      address_space += kAddressSpacePerMemory;
+-    }
+-  } catch (e) {
+-    assertTrue(e instanceof RangeError);
+-    return;
+-  }
+-  assertUnreachable("should have reached the address space limit");
+-}
+-
+-if(%IsWasmTrapHandlerEnabled()) {
+-  testAddressSpaceLimit();
+-}
+-- 
+2.35.1
+

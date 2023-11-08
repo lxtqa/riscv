@@ -1,0 +1,316 @@
+From 4ae65adedd75eb75d975ece8ae7bdb2c0db91871 Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Wed, 10 Aug 2022 21:11:56 +0800
+Subject: [PATCH] [riscv][masm][cleanup] Refactor call related assembler
+ options
+
+Port commit 00746406cfbbd4e838840c20dbe5a3760e3b3f15
+
+Change-Id: I9bd985b882ca2e39b24131bd6e0609920b826398
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3823859
+Reviewed-by: ji qiu <qiuji@iscas.ac.cn>
+Auto-Submit: Yahan Lu <yahan@iscas.ac.cn>
+Commit-Queue: ji qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#82353}
+---
+ .../riscv/baseline-assembler-riscv-inl.h      |  16 --
+ .../riscv/baseline-compiler-riscv-inl.h       |   5 +
+ src/codegen/riscv/assembler-riscv-inl.h       |   2 +-
+ src/codegen/riscv/macro-assembler-riscv.cc    | 153 +++++++++++-------
+ src/codegen/riscv/macro-assembler-riscv.h     |   6 +
+ 5 files changed, 104 insertions(+), 78 deletions(-)
+
+diff --git a/src/baseline/riscv/baseline-assembler-riscv-inl.h b/src/baseline/riscv/baseline-assembler-riscv-inl.h
+index e8cc73cf1d6..dac0962567e 100644
+--- a/src/baseline/riscv/baseline-assembler-riscv-inl.h
++++ b/src/baseline/riscv/baseline-assembler-riscv-inl.h
+@@ -116,22 +116,6 @@ void BaselineAssembler::JumpIfImmediate(Condition cc, Register left, int right,
+                                         Label::Distance distance) {
+   JumpIf(cc, left, Operand(right), target, distance);
+ }
+-void BaselineAssembler::CallBuiltin(Builtin builtin) {
+-  ASM_CODE_COMMENT_STRING(masm_,
+-                          __ CommentForOffHeapTrampoline("call", builtin));
+-  Register temp = t6;
+-  __ LoadEntryFromBuiltin(builtin, temp);
+-  __ Call(temp);
+-}
+-
+-void BaselineAssembler::TailCallBuiltin(Builtin builtin) {
+-  ASM_CODE_COMMENT_STRING(masm_,
+-                          __ CommentForOffHeapTrampoline("tail call", builtin));
+-  Register temp = t6;
+-  __ LoadEntryFromBuiltin(builtin, temp);
+-  __ Jump(temp);
+-}
+-
+ void BaselineAssembler::TestAndBranch(Register value, int mask, Condition cc,
+                                       Label* target, Label::Distance) {
+   ScratchRegisterScope temps(this);
+diff --git a/src/baseline/riscv/baseline-compiler-riscv-inl.h b/src/baseline/riscv/baseline-compiler-riscv-inl.h
+index 00d1d2f3e63..684bf382aa9 100644
+--- a/src/baseline/riscv/baseline-compiler-riscv-inl.h
++++ b/src/baseline/riscv/baseline-compiler-riscv-inl.h
+@@ -11,6 +11,11 @@ namespace v8 {
+ namespace internal {
+ namespace baseline {
+ 
++// A builtin call/jump mode that is used then short builtin calls feature is
++// not enabled.
++constexpr BuiltinCallJumpMode kFallbackBuiltinCallJumpModeForBaseline =
++    BuiltinCallJumpMode::kIndirect;
++
+ #define __ basm_.
+ 
+ void BaselineCompiler::Prologue() {
+diff --git a/src/codegen/riscv/assembler-riscv-inl.h b/src/codegen/riscv/assembler-riscv-inl.h
+index 325a52b78db..b9c12ba4bbb 100644
+--- a/src/codegen/riscv/assembler-riscv-inl.h
++++ b/src/codegen/riscv/assembler-riscv-inl.h
+@@ -247,7 +247,7 @@ Handle<Code> Assembler::relative_code_target_object_handle_at(
+   DCHECK(IsAuipc(instr1));
+   DCHECK(IsJalr(instr2));
+   int32_t code_target_index = BrachlongOffset(instr1, instr2);
+-  return GetCodeTarget(code_target_index);
++  return Handle<Code>::cast(GetEmbeddedObject(code_target_index));
+ }
+ 
+ Address RelocInfo::target_runtime_entry(Assembler* origin) {
+diff --git a/src/codegen/riscv/macro-assembler-riscv.cc b/src/codegen/riscv/macro-assembler-riscv.cc
+index 753c285a3b4..3c295aea9cd 100644
+--- a/src/codegen/riscv/macro-assembler-riscv.cc
++++ b/src/codegen/riscv/macro-assembler-riscv.cc
+@@ -241,20 +241,7 @@ void TurboAssembler::CallRecordWriteStub(Register object, Register slot_address,
+     Call(wasm_target, RelocInfo::WASM_STUB_CALL);
+   } else {
+     auto builtin = Builtins::GetRecordWriteStub(fp_mode);
+-    if (options().inline_offheap_trampolines) {
+-      // Inline the trampoline. //qj
+-      RecordCommentForOffHeapTrampoline(builtin);
+-
+-      UseScratchRegisterScope temps(this);
+-      BlockTrampolinePoolScope block_trampoline_pool(this);
+-      Register scratch = temps.Acquire();
+-      li(scratch, Operand(BuiltinEntry(builtin), RelocInfo::OFF_HEAP_TARGET));
+-      Call(scratch);
+-      RecordComment("]");
+-    } else {
+-      Handle<Code> code_target = isolate()->builtins()->code_handle(builtin);
+-      Call(code_target, RelocInfo::CODE_TARGET);
+-    }
++    CallBuiltin(builtin);
+   }
+ }
+ 
+@@ -3619,11 +3606,15 @@ void TurboAssembler::TruncateDoubleToI(Isolate* isolate, Zone* zone,
+   push(ra);
+   SubWord(sp, sp, Operand(kDoubleSize));  // Put input on stack.
+   fsd(double_input, sp, 0);
+-
++#if V8_ENABLE_WEBASSEMBLY
+   if (stub_mode == StubCallMode::kCallWasmRuntimeStub) {
+     Call(wasm::WasmCode::kDoubleToI, RelocInfo::WASM_STUB_CALL);
++#else
++  // For balance.
++  if (false) {
++#endif  // V8_ENABLE_WEBASSEMBLY
+   } else {
+-    Call(BUILTIN_CODE(isolate, DoubleToI), RelocInfo::CODE_TARGET);
++    CallBuiltin(Builtin::kDoubleToI);
+   }
+   LoadWord(result, MemOperand(sp, 0));
+ 
+@@ -4076,24 +4067,26 @@ void TurboAssembler::Jump(Handle<Code> code, RelocInfo::Mode rmode,
+                  Builtins::IsIsolateIndependentBuiltin(*code));
+ 
+   Builtin builtin = Builtin::kNoBuiltinId;
+-  bool target_is_builtin =
+-      isolate()->builtins()->IsBuiltinHandle(code, &builtin);
+-
+-  if (root_array_available_ && options().isolate_independent_code) {
++  if (isolate()->builtins()->IsBuiltinHandle(code, &builtin)) {
++    // Inline the trampoline.
+     Label skip;
+-    LoadWord(t6, EntryFromBuiltinAsOperand(code->builtin_id()));
+     if (cond != al) Branch(&skip, NegateCondition(cond), rs, rt);
+-    Jump(t6);
++    TailCallBuiltin(builtin);
+     bind(&skip);
+     return;
+-  } else if (options().inline_offheap_trampolines && target_is_builtin) {
+-    // Inline the trampoline.
++  }
++  DCHECK(RelocInfo::IsCodeTarget(rmode));
++  if (CanUseNearCallOrJump(rmode)) {
++    EmbeddedObjectIndex index = AddEmbeddedObject(code);
++    DCHECK(is_int32(index));
+     Label skip;
+-    RecordCommentForOffHeapTrampoline(builtin);
+     if (cond != al) Branch(&skip, NegateCondition(cond), rs, rt);
+-    TailCallBuiltin(builtin);
++    RecordRelocInfo(RelocInfo::RELATIVE_CODE_TARGET,
++                    static_cast<int32_t>(index));
++    GenPCRelativeJump(t6, static_cast<int32_t>(index));
+     bind(&skip);
+-    return;
++  } else {
++    Jump(code.address(), rmode, cond);
+   }
+ 
+   int32_t target_index = AddCodeTarget(code);
+@@ -4147,18 +4140,7 @@ void TurboAssembler::Call(Handle<Code> code, RelocInfo::Mode rmode,
+                  Builtins::IsIsolateIndependentBuiltin(*code));
+ 
+   Builtin builtin = Builtin::kNoBuiltinId;
+-  bool target_is_builtin =
+-      isolate()->builtins()->IsBuiltinHandle(code, &builtin);
+-
+-  if ((target_is_builtin && options().builtin_calls_as_table_load) ||
+-      (root_array_available_ && options().isolate_independent_code)) {
+-    Label skip;
+-    LoadWord(t6, EntryFromBuiltinAsOperand(builtin));
+-    if (cond != al) Branch(&skip, NegateCondition(cond), rs, rt);
+-    Call(t6);
+-    bind(&skip);
+-    return;
+-  } else if (options().inline_offheap_trampolines && target_is_builtin) {
++  if (isolate()->builtins()->IsBuiltinHandle(code, &builtin)) {
+     // Inline the trampoline.
+     CHECK_EQ(cond, Condition::al);  // Implement if necessary.
+     CallBuiltin(builtin);
+@@ -4167,8 +4149,22 @@ void TurboAssembler::Call(Handle<Code> code, RelocInfo::Mode rmode,
+ 
+   DCHECK(RelocInfo::IsCodeTarget(rmode));
+   DCHECK(code->IsExecutable());
+-  int32_t target_index = AddCodeTarget(code);
+-  Call(static_cast<Address>(target_index), rmode, cond, rs, rt);
++
++  if (CanUseNearCallOrJump(rmode)) {
++    EmbeddedObjectIndex index = AddEmbeddedObject(code);
++    DCHECK(is_int32(index));
++    Label skip;
++    if (cond != al) Branch(&skip, NegateCondition(cond), rs, rt);
++    RecordRelocInfo(RelocInfo::RELATIVE_CODE_TARGET,
++                    static_cast<int32_t>(index));
++    GenPCRelativeJumpAndLink(t6, static_cast<int32_t>(index));
++    bind(&skip);
++  } else {
++    Call(code.address(), rmode);
++  }
++
++  // int32_t target_index = AddCodeTarget(code);
++  // Call(static_cast<Address>(target_index), rmode, cond, rs, rt);
+ }
+ 
+ void TurboAssembler::LoadEntryFromBuiltinIndex(Register builtin) {
+@@ -4193,35 +4189,70 @@ void TurboAssembler::CallBuiltinByIndex(Register builtin) {
+ }
+ 
+ void TurboAssembler::CallBuiltin(Builtin builtin) {
+-  ASM_CODE_COMMENT(this);
+-  RecordCommentForOffHeapTrampoline(builtin);
+-  if (options().short_builtin_calls) {
+-    Call(BuiltinEntry(builtin), RelocInfo::RUNTIME_ENTRY);
+-  } else {
+-    if (options().builtin_calls_as_table_load) {
+-      LoadEntryFromBuiltin(builtin, t6);
+-    } else {
++  ASM_CODE_COMMENT_STRING(this, CommentForOffHeapTrampoline("call", builtin));
++  switch (options().builtin_call_jump_mode) {
++    case BuiltinCallJumpMode::kAbsolute: {
+       li(t6, Operand(BuiltinEntry(builtin), RelocInfo::OFF_HEAP_TARGET));
++      Call(t6);
++      break;
++    }
++    case BuiltinCallJumpMode::kPCRelative:
++      Call(BuiltinEntry(builtin), RelocInfo::RUNTIME_ENTRY);
++      break;
++    case BuiltinCallJumpMode::kIndirect: {
++      LoadEntryFromBuiltin(builtin, t6);
++      Call(t6);
++      break;
++    }
++    case BuiltinCallJumpMode::kForMksnapshot: {
++      if (options().use_pc_relative_calls_and_jumps_for_mksnapshot) {
++        Handle<Code> code = isolate()->builtins()->code_handle(builtin);
++        EmbeddedObjectIndex index = AddEmbeddedObject(code);
++        DCHECK(is_int32(index));
++        RecordRelocInfo(RelocInfo::RELATIVE_CODE_TARGET,
++                        static_cast<int32_t>(index));
++        GenPCRelativeJumpAndLink(t6, static_cast<int32_t>(index));
++      } else {
++        LoadEntryFromBuiltin(builtin, t6);
++        Call(t6);
++      }
++      break;
+     }
+-    Call(t6);
+   }
+-  RecordComment("]");
+ }
+ 
+ void TurboAssembler::TailCallBuiltin(Builtin builtin) {
+-  ASM_CODE_COMMENT(this);
+-  RecordCommentForOffHeapTrampoline(builtin);
+-  if (options().short_builtin_calls) {
+-    Jump(BuiltinEntry(builtin), RelocInfo::RUNTIME_ENTRY);
+-  } else {
+-    if (options().builtin_calls_as_table_load) {
+-      LoadEntryFromBuiltin(builtin, t6);
+-    } else {
++  ASM_CODE_COMMENT_STRING(this,
++                          CommentForOffHeapTrampoline("tail call", builtin));
++  switch (options().builtin_call_jump_mode) {
++    case BuiltinCallJumpMode::kAbsolute: {
+       li(t6, Operand(BuiltinEntry(builtin), RelocInfo::OFF_HEAP_TARGET));
++      Jump(t6);
++      break;
++    }
++    case BuiltinCallJumpMode::kPCRelative:
++      Jump(BuiltinEntry(builtin), RelocInfo::RUNTIME_ENTRY);
++      break;
++    case BuiltinCallJumpMode::kIndirect: {
++      LoadEntryFromBuiltin(builtin, t6);
++      Jump(t6);
++      break;
++    }
++    case BuiltinCallJumpMode::kForMksnapshot: {
++      if (options().use_pc_relative_calls_and_jumps_for_mksnapshot) {
++        Handle<CodeT> code = isolate()->builtins()->code_handle(builtin);
++        EmbeddedObjectIndex index = AddEmbeddedObject(code);
++        DCHECK(is_int32(index));
++        RecordRelocInfo(RelocInfo::RELATIVE_CODE_TARGET,
++                        static_cast<int32_t>(index));
++        GenPCRelativeJump(t6, static_cast<int32_t>(index));
++      } else {
++        LoadEntryFromBuiltin(builtin, t6);
++        Jump(t6);
++      }
++      break;
+     }
+-    Jump(t6);
+   }
+-  RecordComment("]");
+ }
+ 
+ void TurboAssembler::LoadEntryFromBuiltin(Builtin builtin,
+diff --git a/src/codegen/riscv/macro-assembler-riscv.h b/src/codegen/riscv/macro-assembler-riscv.h
+index 31bb2f404c5..796e5affe35 100644
+--- a/src/codegen/riscv/macro-assembler-riscv.h
++++ b/src/codegen/riscv/macro-assembler-riscv.h
+@@ -239,6 +239,12 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   // Deffer from li, this method save target to the memory, and then load
+   // it to register use ld, it can be used in wasm jump table for concurrent
+   // patching.
++
++  // We should not use near calls or jumps for calls to external references,
++  // since the code spaces are not guaranteed to be close to each other.
++  bool CanUseNearCallOrJump(RelocInfo::Mode rmode) {
++    return rmode != RelocInfo::EXTERNAL_REFERENCE;
++  }
+   void PatchAndJump(Address target);
+   void Jump(Handle<Code> code, RelocInfo::Mode rmode, COND_ARGS);
+   void Jump(const ExternalReference& reference);
+-- 
+2.35.1
+

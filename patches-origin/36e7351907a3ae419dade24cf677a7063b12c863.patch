@@ -1,0 +1,105 @@
+From 36e7351907a3ae419dade24cf677a7063b12c863 Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Fri, 17 Sep 2021 13:52:47 +0800
+Subject: [PATCH] [riscv64] Operand only have int64_t constructor
+
+Fix node.js build failed
+
+Change-Id: I3769a2f7a71b26b7d0d84bfc0e76c359e50191ad
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3167434
+Commit-Queue: Ji Qiu <qiuji@iscas.ac.cn>
+Reviewed-by: Ji Qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#76894}
+---
+ src/builtins/riscv64/builtins-riscv64.cc       | 14 +++++++-------
+ src/codegen/riscv64/macro-assembler-riscv64.cc |  4 ++--
+ 2 files changed, 9 insertions(+), 9 deletions(-)
+
+diff --git a/src/builtins/riscv64/builtins-riscv64.cc b/src/builtins/riscv64/builtins-riscv64.cc
+index c90352bea17..3676ae34419 100644
+--- a/src/builtins/riscv64/builtins-riscv64.cc
++++ b/src/builtins/riscv64/builtins-riscv64.cc
+@@ -327,7 +327,7 @@ static void AssertCodeIsBaseline(MacroAssembler* masm, Register code,
+   __ Ld(scratch, FieldMemOperand(code, Code::kFlagsOffset));
+   __ DecodeField<Code::KindField>(scratch);
+   __ Assert(eq, AbortReason::kExpectedBaselineData, scratch,
+-            Operand(static_cast<int>(CodeKind::BASELINE)));
++            Operand(static_cast<int64_t>(CodeKind::BASELINE)));
+ }
+ // TODO(v8:11429): Add a path for "not_compiled" and unify the two uses under
+ // the more general dispatch.
+@@ -1023,7 +1023,7 @@ static void AdvanceBytecodeOffsetOrReturn(MacroAssembler* masm,
+ // Bailout to the return label if this is a return bytecode.
+ #define JUMP_IF_EQUAL(NAME)          \
+   __ Branch(if_return, eq, bytecode, \
+-            Operand(static_cast<int>(interpreter::Bytecode::k##NAME)));
++            Operand(static_cast<int64_t>(interpreter::Bytecode::k##NAME)));
+   RETURN_BYTECODE_LIST(JUMP_IF_EQUAL)
+ #undef JUMP_IF_EQUAL
+ 
+@@ -1031,7 +1031,7 @@ static void AdvanceBytecodeOffsetOrReturn(MacroAssembler* masm,
+   // of the loop.
+   Label end, not_jump_loop;
+   __ Branch(&not_jump_loop, ne, bytecode,
+-            Operand(static_cast<int>(interpreter::Bytecode::kJumpLoop)),
++            Operand(static_cast<int64_t>(interpreter::Bytecode::kJumpLoop)),
+             Label::Distance::kNear);
+   // We need to restore the original bytecode_offset since we might have
+   // increased it to skip the wide / extra-wide prefix bytecode.
+@@ -3479,7 +3479,7 @@ void Generate_DeoptimizationEntry(MacroAssembler* masm,
+   __ JumpIfSmi(a1, &context_check);
+   __ Ld(a0, MemOperand(fp, StandardFrameConstants::kFunctionOffset));
+   __ bind(&context_check);
+-  __ li(a1, Operand(static_cast<int>(deopt_kind)));
++  __ li(a1, Operand(static_cast<int64_t>(deopt_kind)));
+   // a2: bailout id already loaded.
+   // a3: code address or 0 already loaded.
+   // a4: already has fp-to-sp delta.
+@@ -3851,7 +3851,7 @@ void Builtins::Generate_DynamicCheckMapsTrampoline(
+ 
+   Label deopt, bailout;
+   __ Branch(&deopt, ne, a0,
+-            Operand(static_cast<int>(DynamicCheckMapsStatus::kSuccess)),
++            Operand(static_cast<int64_t>(DynamicCheckMapsStatus::kSuccess)),
+             Label::Distance::kNear);
+ 
+   __ MaybeRestoreRegisters(registers);
+@@ -3860,11 +3860,11 @@ void Builtins::Generate_DynamicCheckMapsTrampoline(
+ 
+   __ bind(&deopt);
+   __ Branch(&bailout, eq, a0,
+-            Operand(static_cast<int>(DynamicCheckMapsStatus::kBailout)));
++            Operand(static_cast<int64_t>(DynamicCheckMapsStatus::kBailout)));
+ 
+   if (FLAG_debug_code) {
+     __ Assert(eq, AbortReason::kUnexpectedDynamicCheckMapsStatus, a0,
+-              Operand(static_cast<int>(DynamicCheckMapsStatus::kDeopt)));
++              Operand(static_cast<int64_t>(DynamicCheckMapsStatus::kDeopt)));
+   }
+   __ MaybeRestoreRegisters(registers);
+   __ LeaveFrame(StackFrame::INTERNAL);
+diff --git a/src/codegen/riscv64/macro-assembler-riscv64.cc b/src/codegen/riscv64/macro-assembler-riscv64.cc
+index 3945d3884e6..8e9aa4b6941 100644
+--- a/src/codegen/riscv64/macro-assembler-riscv64.cc
++++ b/src/codegen/riscv64/macro-assembler-riscv64.cc
+@@ -1600,7 +1600,7 @@ void TurboAssembler::li(Register dst, Handle<HeapObject> value,
+   } else if (RelocInfo::IsCompressedEmbeddedObject(rmode)) {
+     EmbeddedObjectIndex index = AddEmbeddedObject(value);
+     DCHECK(is_uint32(index));
+-    li(dst, Operand(static_cast<int>(index), rmode));
++    li(dst, Operand(index, rmode));
+   } else {
+     DCHECK(RelocInfo::IsFullEmbeddedObject(rmode));
+     li(dst, Operand(value.address(), rmode));
+@@ -4214,7 +4214,7 @@ void TurboAssembler::Abort(AbortReason reason) {
+     // We don't care if we constructed a frame. Just pretend we did.
+     FrameScope assume_frame(this, StackFrame::NONE);
+     PrepareCallCFunction(0, a0);
+-    li(a0, Operand(static_cast<int>(reason)));
++    li(a0, Operand(static_cast<int64_t>(reason)));
+     CallCFunction(ExternalReference::abort_with_reason(), 1);
+     return;
+   }
+-- 
+2.35.1
+

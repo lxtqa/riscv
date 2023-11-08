@@ -1,0 +1,2598 @@
+From d7718dd86e1b6758b7fe81559b1bb1ee585b42d8 Mon Sep 17 00:00:00 2001
+From: Clemens Backes <clemensb@chromium.org>
+Date: Mon, 9 Oct 2023 14:43:11 +0200
+Subject: [PATCH] [liftoff] Rename StackTransferRecipe to ParallelMove
+
+The StackTransferRecipe is used for multiple things now, not only to
+transfer one value stack to another one (in MergeStackWith and friends;
+this is where the original name came from).
+
+It's also 340 lines of implementation by now, so move it to a separate
+header file.
+
+This creates the situation that we now have headers (parallel-move.h and
+liftoff-assembler-<arch>.h) that want to include either other.
+We thus apply V8's default solution and split off an "inl header" for
+the two where we define some of the inlined functions that are declared
+in the actual header.
+To that end, we also rename the existing liftoff-assembler-<arch>.h
+header to liftoff-assembler-<arch>-inl.h, because those headers also
+just define functions that have been declared in the actual header. This
+also make us obey the rule that non-inl-headers cannot include
+inl-headers.
+
+R=dlehmann@chromium.org
+
+Bug: v8:14101
+Change-Id: Ie5f6d3a21f4986143855a83826d00d706faa4b7e
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4905773
+Commit-Queue: Clemens Backes <clemensb@chromium.org>
+Reviewed-by: Daniel Lehmann <dlehmann@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#90303}
+---
+ BUILD.bazel                                   |  18 +-
+ BUILD.gn                                      |  26 +-
+ ...bler-arm.h => liftoff-assembler-arm-inl.h} |  15 +-
+ ...-arm64.h => liftoff-assembler-arm64-inl.h} |  16 +-
+ ...er-ia32.h => liftoff-assembler-ia32-inl.h} |  15 +-
+ src/wasm/baseline/liftoff-assembler-inl.h     | 302 ++++++++++++
+ src/wasm/baseline/liftoff-assembler.cc        | 447 ++----------------
+ src/wasm/baseline/liftoff-assembler.h         | 299 ++----------
+ src/wasm/baseline/liftoff-compiler.cc         |   2 +-
+ ...ng64.h => liftoff-assembler-loong64-inl.h} |  14 +-
+ ...ips64.h => liftoff-assembler-mips64-inl.h} |  17 +-
+ src/wasm/baseline/parallel-move-inl.h         |  18 +
+ src/wasm/baseline/parallel-move.cc            |  85 ++++
+ src/wasm/baseline/parallel-move.h             | 305 ++++++++++++
+ ...bler-ppc.h => liftoff-assembler-ppc-inl.h} |  17 +-
+ ...-riscv.h => liftoff-assembler-riscv-inl.h} |  17 +-
+ ...cv32.h => liftoff-assembler-riscv32-inl.h} |  16 +-
+ ...cv64.h => liftoff-assembler-riscv64-inl.h} |  16 +-
+ ...er-s390.h => liftoff-assembler-s390-inl.h} |  15 +-
+ ...bler-x64.h => liftoff-assembler-x64-inl.h} |  19 +-
+ 20 files changed, 882 insertions(+), 797 deletions(-)
+ rename src/wasm/baseline/arm/{liftoff-assembler-arm.h => liftoff-assembler-arm-inl.h} (99%)
+ rename src/wasm/baseline/arm64/{liftoff-assembler-arm64.h => liftoff-assembler-arm64-inl.h} (99%)
+ rename src/wasm/baseline/ia32/{liftoff-assembler-ia32.h => liftoff-assembler-ia32-inl.h} (99%)
+ create mode 100644 src/wasm/baseline/liftoff-assembler-inl.h
+ rename src/wasm/baseline/loong64/{liftoff-assembler-loong64.h => liftoff-assembler-loong64-inl.h} (99%)
+ rename src/wasm/baseline/mips64/{liftoff-assembler-mips64.h => liftoff-assembler-mips64-inl.h} (99%)
+ create mode 100644 src/wasm/baseline/parallel-move-inl.h
+ create mode 100644 src/wasm/baseline/parallel-move.cc
+ create mode 100644 src/wasm/baseline/parallel-move.h
+ rename src/wasm/baseline/ppc/{liftoff-assembler-ppc.h => liftoff-assembler-ppc-inl.h} (99%)
+ rename src/wasm/baseline/riscv/{liftoff-assembler-riscv.h => liftoff-assembler-riscv-inl.h} (99%)
+ rename src/wasm/baseline/riscv/{liftoff-assembler-riscv32.h => liftoff-assembler-riscv32-inl.h} (99%)
+ rename src/wasm/baseline/riscv/{liftoff-assembler-riscv64.h => liftoff-assembler-riscv64-inl.h} (99%)
+ rename src/wasm/baseline/s390/{liftoff-assembler-s390.h => liftoff-assembler-s390-inl.h} (99%)
+ rename src/wasm/baseline/x64/{liftoff-assembler-x64.h => liftoff-assembler-x64-inl.h} (99%)
+
+diff --git a/BUILD.bazel b/BUILD.bazel
+index 1b8fe8189e0..38eb7293d4d 100644
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -2382,7 +2382,7 @@ filegroup(
+             "src/execution/ia32/frame-constants-ia32.h",
+             "src/regexp/ia32/regexp-macro-assembler-ia32.cc",
+             "src/regexp/ia32/regexp-macro-assembler-ia32.h",
+-            "src/wasm/baseline/ia32/liftoff-assembler-ia32.h",
++            "src/wasm/baseline/ia32/liftoff-assembler-ia32-inl.h",
+         ],
+         "@v8//bazel/config:v8_target_x64": [
+             "src/baseline/x64/baseline-assembler-x64-inl.h",
+@@ -2409,7 +2409,7 @@ filegroup(
+             "src/execution/x64/frame-constants-x64.h",
+             "src/regexp/x64/regexp-macro-assembler-x64.cc",
+             "src/regexp/x64/regexp-macro-assembler-x64.h",
+-            "src/wasm/baseline/x64/liftoff-assembler-x64.h",
++            "src/wasm/baseline/x64/liftoff-assembler-x64-inl.h",
+         ],
+         "@v8//bazel/config:v8_target_arm": [
+             "src/baseline/arm/baseline-assembler-arm-inl.h",
+@@ -2435,7 +2435,7 @@ filegroup(
+             "src/execution/arm/simulator-arm.h",
+             "src/regexp/arm/regexp-macro-assembler-arm.cc",
+             "src/regexp/arm/regexp-macro-assembler-arm.h",
+-            "src/wasm/baseline/arm/liftoff-assembler-arm.h",
++            "src/wasm/baseline/arm/liftoff-assembler-arm-inl.h",
+         ],
+         "@v8//bazel/config:v8_target_arm64": [
+             "src/baseline/arm64/baseline-assembler-arm64-inl.h",
+@@ -2473,7 +2473,7 @@ filegroup(
+             "src/execution/arm64/simulator-logic-arm64.cc",
+             "src/regexp/arm64/regexp-macro-assembler-arm64.cc",
+             "src/regexp/arm64/regexp-macro-assembler-arm64.h",
+-            "src/wasm/baseline/arm64/liftoff-assembler-arm64.h",
++            "src/wasm/baseline/arm64/liftoff-assembler-arm64-inl.h",
+         ],
+         "@v8//bazel/config:v8_target_s390x": [
+             "src/baseline/s390/baseline-assembler-s390-inl.h",
+@@ -2499,7 +2499,7 @@ filegroup(
+             "src/execution/s390/simulator-s390.h",
+             "src/regexp/s390/regexp-macro-assembler-s390.cc",
+             "src/regexp/s390/regexp-macro-assembler-s390.h",
+-            "src/wasm/baseline/s390/liftoff-assembler-s390.h",
++            "src/wasm/baseline/s390/liftoff-assembler-s390-inl.h",
+         ],
+         "@v8//bazel/config:v8_target_riscv64": [
+             "src/baseline/riscv64/baseline-assembler-riscv64-inl.h",
+@@ -2524,7 +2524,7 @@ filegroup(
+             "src/execution/riscv64/simulator-riscv64.h",
+             "src/regexp/riscv64/regexp-macro-assembler-riscv64.cc",
+             "src/regexp/riscv64/regexp-macro-assembler-riscv64.h",
+-            "src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h",
++            "src/wasm/baseline/riscv64/liftoff-assembler-riscv64-inl.h",
+         ],
+         "@v8//bazel/config:v8_target_ppc64le": [
+             "src/baseline/ppc/baseline-assembler-ppc-inl.h",
+@@ -2550,7 +2550,7 @@ filegroup(
+             "src/execution/ppc/simulator-ppc.h",
+             "src/regexp/ppc/regexp-macro-assembler-ppc.cc",
+             "src/regexp/ppc/regexp-macro-assembler-ppc.h",
+-            "src/wasm/baseline/ppc/liftoff-assembler-ppc.h",
++            "src/wasm/baseline/ppc/liftoff-assembler-ppc-inl.h",
+         ],
+     }) + select({
+         # Only for x64 builds and for arm64 with x64 host simulator.
+@@ -2609,9 +2609,13 @@ filegroup(
+             "src/wasm/baseline/liftoff-assembler.cc",
+             "src/wasm/baseline/liftoff-assembler.h",
+             "src/wasm/baseline/liftoff-assembler-defs.h",
++            "src/wasm/baseline/liftoff-assembler-inl.h",
+             "src/wasm/baseline/liftoff-compiler.cc",
+             "src/wasm/baseline/liftoff-compiler.h",
+             "src/wasm/baseline/liftoff-register.h",
++            "src/wasm/baseline/parallel-move.cc",
++            "src/wasm/baseline/parallel-move.h",
++            "src/wasm/baseline/parallel-move-inl.h",
+             "src/wasm/branch-hint-map.h",
+             "src/wasm/canonical-types.cc",
+             "src/wasm/canonical-types.h",
+diff --git a/BUILD.gn b/BUILD.gn
+index e6f0cd0499b..064c22cadab 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -4104,9 +4104,12 @@ v8_header_set("v8_internal_headers") {
+       "src/trap-handler/trap-handler-internal.h",
+       "src/trap-handler/trap-handler.h",
+       "src/wasm/baseline/liftoff-assembler-defs.h",
++      "src/wasm/baseline/liftoff-assembler-inl.h",
+       "src/wasm/baseline/liftoff-assembler.h",
+       "src/wasm/baseline/liftoff-compiler.h",
+       "src/wasm/baseline/liftoff-register.h",
++      "src/wasm/baseline/parallel-move-inl.h",
++      "src/wasm/baseline/parallel-move.h",
+       "src/wasm/canonical-types.h",
+       "src/wasm/code-space-access.h",
+       "src/wasm/compilation-environment.h",
+@@ -4253,7 +4256,7 @@ v8_header_set("v8_internal_headers") {
+       "src/compiler/backend/ia32/instruction-codes-ia32.h",
+       "src/execution/ia32/frame-constants-ia32.h",
+       "src/regexp/ia32/regexp-macro-assembler-ia32.h",
+-      "src/wasm/baseline/ia32/liftoff-assembler-ia32.h",
++      "src/wasm/baseline/ia32/liftoff-assembler-ia32-inl.h",
+     ]
+   } else if (v8_current_cpu == "x64") {
+     sources += [
+@@ -4275,7 +4278,7 @@ v8_header_set("v8_internal_headers") {
+       "src/execution/x64/frame-constants-x64.h",
+       "src/regexp/x64/regexp-macro-assembler-x64.h",
+       "src/third_party/valgrind/valgrind.h",
+-      "src/wasm/baseline/x64/liftoff-assembler-x64.h",
++      "src/wasm/baseline/x64/liftoff-assembler-x64-inl.h",
+     ]
+ 
+     if (is_win) {
+@@ -4309,7 +4312,7 @@ v8_header_set("v8_internal_headers") {
+       "src/execution/arm/frame-constants-arm.h",
+       "src/execution/arm/simulator-arm.h",
+       "src/regexp/arm/regexp-macro-assembler-arm.h",
+-      "src/wasm/baseline/arm/liftoff-assembler-arm.h",
++      "src/wasm/baseline/arm/liftoff-assembler-arm-inl.h",
+     ]
+   } else if (v8_current_cpu == "arm64") {
+     sources += [
+@@ -4334,7 +4337,7 @@ v8_header_set("v8_internal_headers") {
+       "src/execution/arm64/frame-constants-arm64.h",
+       "src/execution/arm64/simulator-arm64.h",
+       "src/regexp/arm64/regexp-macro-assembler-arm64.h",
+-      "src/wasm/baseline/arm64/liftoff-assembler-arm64.h",
++      "src/wasm/baseline/arm64/liftoff-assembler-arm64-inl.h",
+     ]
+     if (v8_control_flow_integrity) {
+       sources += [ "src/execution/arm64/pointer-authentication-arm64.h" ]
+@@ -4370,7 +4373,7 @@ v8_header_set("v8_internal_headers") {
+       "src/execution/mips64/frame-constants-mips64.h",
+       "src/execution/mips64/simulator-mips64.h",
+       "src/regexp/mips64/regexp-macro-assembler-mips64.h",
+-      "src/wasm/baseline/mips64/liftoff-assembler-mips64.h",
++      "src/wasm/baseline/mips64/liftoff-assembler-mips64-inl.h",
+     ]
+   } else if (v8_current_cpu == "loong64") {
+     sources += [
+@@ -4387,7 +4390,7 @@ v8_header_set("v8_internal_headers") {
+       "src/execution/loong64/frame-constants-loong64.h",
+       "src/execution/loong64/simulator-loong64.h",
+       "src/regexp/loong64/regexp-macro-assembler-loong64.h",
+-      "src/wasm/baseline/loong64/liftoff-assembler-loong64.h",
++      "src/wasm/baseline/loong64/liftoff-assembler-loong64-inl.h",
+     ]
+     if (v8_enable_webassembly) {
+       # Trap handling is enabled on loong64 Linux and in simulators on
+@@ -4415,7 +4418,7 @@ v8_header_set("v8_internal_headers") {
+       "src/execution/ppc/frame-constants-ppc.h",
+       "src/execution/ppc/simulator-ppc.h",
+       "src/regexp/ppc/regexp-macro-assembler-ppc.h",
+-      "src/wasm/baseline/ppc/liftoff-assembler-ppc.h",
++      "src/wasm/baseline/ppc/liftoff-assembler-ppc-inl.h",
+     ]
+   } else if (v8_current_cpu == "ppc64") {
+     sources += [
+@@ -4434,7 +4437,7 @@ v8_header_set("v8_internal_headers") {
+       "src/execution/ppc/frame-constants-ppc.h",
+       "src/execution/ppc/simulator-ppc.h",
+       "src/regexp/ppc/regexp-macro-assembler-ppc.h",
+-      "src/wasm/baseline/ppc/liftoff-assembler-ppc.h",
++      "src/wasm/baseline/ppc/liftoff-assembler-ppc-inl.h",
+     ]
+   } else if (v8_current_cpu == "s390" || v8_current_cpu == "s390x") {
+     sources += [
+@@ -4453,7 +4456,7 @@ v8_header_set("v8_internal_headers") {
+       "src/execution/s390/frame-constants-s390.h",
+       "src/execution/s390/simulator-s390.h",
+       "src/regexp/s390/regexp-macro-assembler-s390.h",
+-      "src/wasm/baseline/s390/liftoff-assembler-s390.h",
++      "src/wasm/baseline/s390/liftoff-assembler-s390-inl.h",
+     ]
+   } else if (v8_current_cpu == "riscv64") {
+     sources += [
+@@ -4491,7 +4494,7 @@ v8_header_set("v8_internal_headers") {
+       "src/execution/riscv/frame-constants-riscv.h",
+       "src/execution/riscv/simulator-riscv.h",
+       "src/regexp/riscv/regexp-macro-assembler-riscv.h",
+-      "src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h",
++      "src/wasm/baseline/riscv64/liftoff-assembler-riscv64-inl.h",
+     ]
+   } else if (v8_current_cpu == "riscv32") {
+     sources += [
+@@ -4530,7 +4533,7 @@ v8_header_set("v8_internal_headers") {
+       "src/execution/riscv/frame-constants-riscv.h",
+       "src/execution/riscv/simulator-riscv.h",
+       "src/regexp/riscv/regexp-macro-assembler-riscv.h",
+-      "src/wasm/baseline/riscv32/liftoff-assembler-riscv32.h",
++      "src/wasm/baseline/riscv32/liftoff-assembler-riscv32-inl.h",
+     ]
+   }
+ 
+@@ -5468,6 +5471,7 @@ v8_source_set("v8_base_without_compiler") {
+       "src/trap-handler/handler-shared.cc",
+       "src/wasm/baseline/liftoff-assembler.cc",
+       "src/wasm/baseline/liftoff-compiler.cc",
++      "src/wasm/baseline/parallel-move.cc",
+       "src/wasm/canonical-types.cc",
+       "src/wasm/code-space-access.cc",
+       "src/wasm/constant-expression-interface.cc",
+diff --git a/src/wasm/baseline/arm/liftoff-assembler-arm.h b/src/wasm/baseline/arm/liftoff-assembler-arm-inl.h
+similarity index 99%
+rename from src/wasm/baseline/arm/liftoff-assembler-arm.h
+rename to src/wasm/baseline/arm/liftoff-assembler-arm-inl.h
+index 5f3a6400290..f2de4b748a3 100644
+--- a/src/wasm/baseline/arm/liftoff-assembler-arm.h
++++ b/src/wasm/baseline/arm/liftoff-assembler-arm-inl.h
+@@ -2,10 +2,11 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
+-#ifndef V8_WASM_BASELINE_ARM_LIFTOFF_ASSEMBLER_ARM_H_
+-#define V8_WASM_BASELINE_ARM_LIFTOFF_ASSEMBLER_ARM_H_
++#ifndef V8_WASM_BASELINE_ARM_LIFTOFF_ASSEMBLER_ARM_INL_H_
++#define V8_WASM_BASELINE_ARM_LIFTOFF_ASSEMBLER_ARM_INL_H_
+ 
+ #include "src/base/v8-fallthrough.h"
++#include "src/codegen/arm/assembler-arm-inl.h"
+ #include "src/codegen/arm/register-arm.h"
+ #include "src/common/globals.h"
+ #include "src/heap/memory-chunk.h"
+@@ -14,9 +15,7 @@
+ #include "src/wasm/object-access.h"
+ #include "src/wasm/wasm-objects.h"
+ 
+-namespace v8 {
+-namespace internal {
+-namespace wasm {
++namespace v8::internal::wasm {
+ 
+ namespace liftoff {
+ 
+@@ -4636,8 +4635,6 @@ void LiftoffStackSlots::Construct(int param_slots) {
+   }
+ }
+ 
+-}  // namespace wasm
+-}  // namespace internal
+-}  // namespace v8
++}  // namespace v8::internal::wasm
+ 
+-#endif  // V8_WASM_BASELINE_ARM_LIFTOFF_ASSEMBLER_ARM_H_
++#endif  // V8_WASM_BASELINE_ARM_LIFTOFF_ASSEMBLER_ARM_INL_H_
+diff --git a/src/wasm/baseline/arm64/liftoff-assembler-arm64.h b/src/wasm/baseline/arm64/liftoff-assembler-arm64-inl.h
+similarity index 99%
+rename from src/wasm/baseline/arm64/liftoff-assembler-arm64.h
+rename to src/wasm/baseline/arm64/liftoff-assembler-arm64-inl.h
+index 67d8b1419f8..34fa43b6176 100644
+--- a/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
++++ b/src/wasm/baseline/arm64/liftoff-assembler-arm64-inl.h
+@@ -2,18 +2,18 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
+-#ifndef V8_WASM_BASELINE_ARM64_LIFTOFF_ASSEMBLER_ARM64_H_
+-#define V8_WASM_BASELINE_ARM64_LIFTOFF_ASSEMBLER_ARM64_H_
++#ifndef V8_WASM_BASELINE_ARM64_LIFTOFF_ASSEMBLER_ARM64_INL_H_
++#define V8_WASM_BASELINE_ARM64_LIFTOFF_ASSEMBLER_ARM64_INL_H_
+ 
+ #include "src/base/v8-fallthrough.h"
++#include "src/codegen/arm64/macro-assembler-arm64-inl.h"
+ #include "src/heap/memory-chunk.h"
+ #include "src/wasm/baseline/liftoff-assembler.h"
++#include "src/wasm/baseline/parallel-move.h"
+ #include "src/wasm/object-access.h"
+ #include "src/wasm/wasm-objects.h"
+ 
+-namespace v8 {
+-namespace internal {
+-namespace wasm {
++namespace v8::internal::wasm {
+ 
+ namespace liftoff {
+ 
+@@ -3659,8 +3659,6 @@ void LiftoffStackSlots::Construct(int param_slots) {
+   }
+ }
+ 
+-}  // namespace wasm
+-}  // namespace internal
+-}  // namespace v8
++}  // namespace v8::internal::wasm
+ 
+-#endif  // V8_WASM_BASELINE_ARM64_LIFTOFF_ASSEMBLER_ARM64_H_
++#endif  // V8_WASM_BASELINE_ARM64_LIFTOFF_ASSEMBLER_ARM64_INL_H_
+diff --git a/src/wasm/baseline/ia32/liftoff-assembler-ia32.h b/src/wasm/baseline/ia32/liftoff-assembler-ia32-inl.h
+similarity index 99%
+rename from src/wasm/baseline/ia32/liftoff-assembler-ia32.h
+rename to src/wasm/baseline/ia32/liftoff-assembler-ia32-inl.h
+index 8e2516bdedd..b2f75a3aab7 100644
+--- a/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
++++ b/src/wasm/baseline/ia32/liftoff-assembler-ia32-inl.h
+@@ -2,8 +2,8 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
+-#ifndef V8_WASM_BASELINE_IA32_LIFTOFF_ASSEMBLER_IA32_H_
+-#define V8_WASM_BASELINE_IA32_LIFTOFF_ASSEMBLER_IA32_H_
++#ifndef V8_WASM_BASELINE_IA32_LIFTOFF_ASSEMBLER_IA32_INL_H_
++#define V8_WASM_BASELINE_IA32_LIFTOFF_ASSEMBLER_IA32_INL_H_
+ 
+ #include "src/base/v8-fallthrough.h"
+ #include "src/codegen/assembler.h"
+@@ -15,9 +15,7 @@
+ #include "src/wasm/value-type.h"
+ #include "src/wasm/wasm-objects.h"
+ 
+-namespace v8 {
+-namespace internal {
+-namespace wasm {
++namespace v8::internal::wasm {
+ 
+ #define RETURN_FALSE_IF_MISSING_CPU_FEATURE(name)    \
+   if (!CpuFeatures::IsSupported(name)) return false; \
+@@ -1136,7 +1134,6 @@ void LiftoffAssembler::AtomicCompareExchange(
+       pinned.clear(LiftoffRegister(value_reg));
+     }
+ 
+-
+     Operand dst_op = Operand(dst_addr, offset_imm);
+ 
+     lock();
+@@ -4914,8 +4911,6 @@ void LiftoffStackSlots::Construct(int param_slots) {
+ 
+ #undef RETURN_FALSE_IF_MISSING_CPU_FEATURE
+ 
+-}  // namespace wasm
+-}  // namespace internal
+-}  // namespace v8
++}  // namespace v8::internal::wasm
+ 
+-#endif  // V8_WASM_BASELINE_IA32_LIFTOFF_ASSEMBLER_IA32_H_
++#endif  // V8_WASM_BASELINE_IA32_LIFTOFF_ASSEMBLER_IA32_INL_H_
+diff --git a/src/wasm/baseline/liftoff-assembler-inl.h b/src/wasm/baseline/liftoff-assembler-inl.h
+new file mode 100644
+index 00000000000..dd9bbe5ce97
+--- /dev/null
++++ b/src/wasm/baseline/liftoff-assembler-inl.h
+@@ -0,0 +1,302 @@
++// Copyright 2023 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef V8_WASM_BASELINE_LIFTOFF_ASSEMBLER_INL_H_
++#define V8_WASM_BASELINE_LIFTOFF_ASSEMBLER_INL_H_
++
++#include "src/wasm/baseline/liftoff-assembler.h"
++
++// Include platform specific implementation.
++#if V8_TARGET_ARCH_IA32
++#include "src/wasm/baseline/ia32/liftoff-assembler-ia32-inl.h"
++#elif V8_TARGET_ARCH_X64
++#include "src/wasm/baseline/x64/liftoff-assembler-x64-inl.h"
++#elif V8_TARGET_ARCH_ARM64
++#include "src/wasm/baseline/arm64/liftoff-assembler-arm64-inl.h"
++#elif V8_TARGET_ARCH_ARM
++#include "src/wasm/baseline/arm/liftoff-assembler-arm-inl.h"
++#elif V8_TARGET_ARCH_PPC || V8_TARGET_ARCH_PPC64
++#include "src/wasm/baseline/ppc/liftoff-assembler-ppc-inl.h"
++#elif V8_TARGET_ARCH_MIPS64
++#include "src/wasm/baseline/mips64/liftoff-assembler-mips64-inl.h"
++#elif V8_TARGET_ARCH_LOONG64
++#include "src/wasm/baseline/loong64/liftoff-assembler-loong64-inl.h"
++#elif V8_TARGET_ARCH_S390
++#include "src/wasm/baseline/s390/liftoff-assembler-s390-inl.h"
++#elif V8_TARGET_ARCH_RISCV64
++#include "src/wasm/baseline/riscv/liftoff-assembler-riscv64-inl.h"
++#elif V8_TARGET_ARCH_RISCV32
++#include "src/wasm/baseline/riscv/liftoff-assembler-riscv32-inl.h"
++#else
++#error Unsupported architecture.
++#endif
++
++namespace v8::internal::wasm {
++
++// static
++int LiftoffAssembler::NextSpillOffset(ValueKind kind, int top_spill_offset) {
++  int offset = top_spill_offset + SlotSizeForType(kind);
++  if (NeedsAlignment(kind)) {
++    offset = RoundUp(offset, SlotSizeForType(kind));
++  }
++  return offset;
++}
++
++int LiftoffAssembler::NextSpillOffset(ValueKind kind) {
++  return NextSpillOffset(kind, TopSpillOffset());
++}
++
++int LiftoffAssembler::TopSpillOffset() const {
++  return cache_state_.stack_state.empty()
++             ? StaticStackFrameSize()
++             : cache_state_.stack_state.back().offset();
++}
++
++void LiftoffAssembler::PushRegister(ValueKind kind, LiftoffRegister reg) {
++  DCHECK_EQ(reg_class_for(kind), reg.reg_class());
++  cache_state_.inc_used(reg);
++  cache_state_.stack_state.emplace_back(kind, reg, NextSpillOffset(kind));
++}
++
++// Assumes that the exception is in {kReturnRegister0}. This is where the
++// exception is stored by the unwinder after a throwing call.
++void LiftoffAssembler::PushException() {
++  LiftoffRegister reg{kReturnRegister0};
++  // This is used after a call, so {kReturnRegister0} is not used yet.
++  DCHECK(cache_state_.is_free(reg));
++  cache_state_.inc_used(reg);
++  cache_state_.stack_state.emplace_back(kRef, reg, NextSpillOffset(kRef));
++}
++
++void LiftoffAssembler::PushConstant(ValueKind kind, int32_t i32_const) {
++  V8_ASSUME(kind == kI32 || kind == kI64);
++  cache_state_.stack_state.emplace_back(kind, i32_const, NextSpillOffset(kind));
++}
++
++void LiftoffAssembler::PushStack(ValueKind kind) {
++  cache_state_.stack_state.emplace_back(kind, NextSpillOffset(kind));
++}
++
++void LiftoffAssembler::LoadToFixedRegister(VarState slot, LiftoffRegister reg) {
++  DCHECK(slot.is_const() || slot.is_stack());
++  if (slot.is_const()) {
++    LoadConstant(reg, slot.constant());
++  } else {
++    Fill(reg, slot.offset(), slot.kind());
++  }
++}
++
++void LiftoffAssembler::PopToFixedRegister(LiftoffRegister reg) {
++  DCHECK(!cache_state_.stack_state.empty());
++  VarState slot = cache_state_.stack_state.back();
++  cache_state_.stack_state.pop_back();
++  if (V8_LIKELY(slot.is_reg())) {
++    cache_state_.dec_used(slot.reg());
++    if (slot.reg() == reg) return;
++    if (cache_state_.is_used(reg)) SpillRegister(reg);
++    Move(reg, slot.reg(), slot.kind());
++    return;
++  }
++  if (cache_state_.is_used(reg)) SpillRegister(reg);
++  LoadToFixedRegister(slot, reg);
++}
++
++void LiftoffAssembler::LoadFixedArrayLengthAsInt32(LiftoffRegister dst,
++                                                   Register array,
++                                                   LiftoffRegList pinned) {
++  int offset = FixedArray::kLengthOffset - kHeapObjectTag;
++  LoadSmiAsInt32(dst, array, offset);
++}
++
++void LiftoffAssembler::LoadSmiAsInt32(LiftoffRegister dst, Register src_addr,
++                                      int32_t offset) {
++  if (SmiValuesAre32Bits()) {
++#if V8_TARGET_LITTLE_ENDIAN
++    DCHECK_EQ(kSmiShiftSize + kSmiTagSize, 4 * kBitsPerByte);
++    offset += 4;
++#endif
++    Load(dst, src_addr, no_reg, offset, LoadType::kI32Load);
++  } else {
++    DCHECK(SmiValuesAre31Bits());
++    Load(dst, src_addr, no_reg, offset, LoadType::kI32Load);
++    emit_i32_sari(dst.gp(), dst.gp(), kSmiTagSize);
++  }
++}
++
++void LiftoffAssembler::emit_ptrsize_add(Register dst, Register lhs,
++                                        Register rhs) {
++  if (kSystemPointerSize == 8) {
++    emit_i64_add(LiftoffRegister(dst), LiftoffRegister(lhs),
++                 LiftoffRegister(rhs));
++  } else {
++    emit_i32_add(dst, lhs, rhs);
++  }
++}
++
++void LiftoffAssembler::emit_ptrsize_sub(Register dst, Register lhs,
++                                        Register rhs) {
++  if (kSystemPointerSize == 8) {
++    emit_i64_sub(LiftoffRegister(dst), LiftoffRegister(lhs),
++                 LiftoffRegister(rhs));
++  } else {
++    emit_i32_sub(dst, lhs, rhs);
++  }
++}
++
++void LiftoffAssembler::emit_ptrsize_and(Register dst, Register lhs,
++                                        Register rhs) {
++  if (kSystemPointerSize == 8) {
++    emit_i64_and(LiftoffRegister(dst), LiftoffRegister(lhs),
++                 LiftoffRegister(rhs));
++  } else {
++    emit_i32_and(dst, lhs, rhs);
++  }
++}
++
++void LiftoffAssembler::emit_ptrsize_shri(Register dst, Register src,
++                                         int amount) {
++  if (kSystemPointerSize == 8) {
++    emit_i64_shri(LiftoffRegister(dst), LiftoffRegister(src), amount);
++  } else {
++    emit_i32_shri(dst, src, amount);
++  }
++}
++
++void LiftoffAssembler::emit_ptrsize_addi(Register dst, Register lhs,
++                                         intptr_t imm) {
++  if (kSystemPointerSize == 8) {
++    emit_i64_addi(LiftoffRegister(dst), LiftoffRegister(lhs), imm);
++  } else {
++    emit_i32_addi(dst, lhs, static_cast<int32_t>(imm));
++  }
++}
++
++void LiftoffAssembler::emit_ptrsize_set_cond(Condition condition, Register dst,
++                                             LiftoffRegister lhs,
++                                             LiftoffRegister rhs) {
++  if (kSystemPointerSize == 8) {
++    emit_i64_set_cond(condition, dst, lhs, rhs);
++  } else {
++    emit_i32_set_cond(condition, dst, lhs.gp(), rhs.gp());
++  }
++}
++
++void LiftoffAssembler::bailout(LiftoffBailoutReason reason,
++                               const char* detail) {
++  DCHECK_NE(kSuccess, reason);
++  if (bailout_reason_ != kSuccess) return;
++  AbortCompilation();
++  bailout_reason_ = reason;
++  bailout_detail_ = detail;
++}
++
++// =======================================================================
++// Partially platform-independent implementations of the platform-dependent
++// part.
++
++#ifdef V8_TARGET_ARCH_32_BIT
++
++namespace liftoff {
++template <void (LiftoffAssembler::*op)(Register, Register, Register)>
++void EmitI64IndependentHalfOperation(LiftoffAssembler* assm,
++                                     LiftoffRegister dst, LiftoffRegister lhs,
++                                     LiftoffRegister rhs) {
++  // If {dst.low_gp()} does not overlap with {lhs.high_gp()} or {rhs.high_gp()},
++  // just first compute the lower half, then the upper half.
++  if (dst.low() != lhs.high() && dst.low() != rhs.high()) {
++    (assm->*op)(dst.low_gp(), lhs.low_gp(), rhs.low_gp());
++    (assm->*op)(dst.high_gp(), lhs.high_gp(), rhs.high_gp());
++    return;
++  }
++  // If {dst.high_gp()} does not overlap with {lhs.low_gp()} or {rhs.low_gp()},
++  // we can compute this the other way around.
++  if (dst.high() != lhs.low() && dst.high() != rhs.low()) {
++    (assm->*op)(dst.high_gp(), lhs.high_gp(), rhs.high_gp());
++    (assm->*op)(dst.low_gp(), lhs.low_gp(), rhs.low_gp());
++    return;
++  }
++  // Otherwise, we need a temporary register.
++  Register tmp = assm->GetUnusedRegister(kGpReg, LiftoffRegList{lhs, rhs}).gp();
++  (assm->*op)(tmp, lhs.low_gp(), rhs.low_gp());
++  (assm->*op)(dst.high_gp(), lhs.high_gp(), rhs.high_gp());
++  assm->Move(dst.low_gp(), tmp, kI32);
++}
++
++template <void (LiftoffAssembler::*op)(Register, Register, int32_t)>
++void EmitI64IndependentHalfOperationImm(LiftoffAssembler* assm,
++                                        LiftoffRegister dst,
++                                        LiftoffRegister lhs, int64_t imm) {
++  int32_t low_word = static_cast<int32_t>(imm);
++  int32_t high_word = static_cast<int32_t>(imm >> 32);
++  // If {dst.low_gp()} does not overlap with {lhs.high_gp()},
++  // just first compute the lower half, then the upper half.
++  if (dst.low() != lhs.high()) {
++    (assm->*op)(dst.low_gp(), lhs.low_gp(), low_word);
++    (assm->*op)(dst.high_gp(), lhs.high_gp(), high_word);
++    return;
++  }
++  // If {dst.high_gp()} does not overlap with {lhs.low_gp()},
++  // we can compute this the other way around.
++  if (dst.high() != lhs.low()) {
++    (assm->*op)(dst.high_gp(), lhs.high_gp(), high_word);
++    (assm->*op)(dst.low_gp(), lhs.low_gp(), low_word);
++    return;
++  }
++  // Otherwise, we need a temporary register.
++  Register tmp = assm->GetUnusedRegister(kGpReg, LiftoffRegList{lhs}).gp();
++  (assm->*op)(tmp, lhs.low_gp(), low_word);
++  (assm->*op)(dst.high_gp(), lhs.high_gp(), high_word);
++  assm->Move(dst.low_gp(), tmp, kI32);
++}
++}  // namespace liftoff
++
++void LiftoffAssembler::emit_i64_and(LiftoffRegister dst, LiftoffRegister lhs,
++                                    LiftoffRegister rhs) {
++  liftoff::EmitI64IndependentHalfOperation<&LiftoffAssembler::emit_i32_and>(
++      this, dst, lhs, rhs);
++}
++
++void LiftoffAssembler::emit_i64_andi(LiftoffRegister dst, LiftoffRegister lhs,
++                                     int32_t imm) {
++  liftoff::EmitI64IndependentHalfOperationImm<&LiftoffAssembler::emit_i32_andi>(
++      this, dst, lhs, imm);
++}
++
++void LiftoffAssembler::emit_i64_or(LiftoffRegister dst, LiftoffRegister lhs,
++                                   LiftoffRegister rhs) {
++  liftoff::EmitI64IndependentHalfOperation<&LiftoffAssembler::emit_i32_or>(
++      this, dst, lhs, rhs);
++}
++
++void LiftoffAssembler::emit_i64_ori(LiftoffRegister dst, LiftoffRegister lhs,
++                                    int32_t imm) {
++  liftoff::EmitI64IndependentHalfOperationImm<&LiftoffAssembler::emit_i32_ori>(
++      this, dst, lhs, imm);
++}
++
++void LiftoffAssembler::emit_i64_xor(LiftoffRegister dst, LiftoffRegister lhs,
++                                    LiftoffRegister rhs) {
++  liftoff::EmitI64IndependentHalfOperation<&LiftoffAssembler::emit_i32_xor>(
++      this, dst, lhs, rhs);
++}
++
++void LiftoffAssembler::emit_i64_xori(LiftoffRegister dst, LiftoffRegister lhs,
++                                     int32_t imm) {
++  liftoff::EmitI64IndependentHalfOperationImm<&LiftoffAssembler::emit_i32_xori>(
++      this, dst, lhs, imm);
++}
++
++void LiftoffAssembler::emit_u32_to_uintptr(Register dst, Register src) {
++  // This is a no-op on 32-bit systems.
++}
++
++#endif  // V8_TARGET_ARCH_32_BIT
++
++// End of the partially platform-independent implementations of the
++// platform-dependent part.
++// =======================================================================
++
++}  // namespace v8::internal::wasm
++
++#endif  // V8_WASM_BASELINE_LIFTOFF_ASSEMBLER_INL_H_
+diff --git a/src/wasm/baseline/liftoff-assembler.cc b/src/wasm/baseline/liftoff-assembler.cc
+index 4b1346bd787..a31d9d6b27c 100644
+--- a/src/wasm/baseline/liftoff-assembler.cc
++++ b/src/wasm/baseline/liftoff-assembler.cc
+@@ -12,14 +12,14 @@
+ #include "src/codegen/macro-assembler-inl.h"
+ #include "src/compiler/wasm-compiler.h"
+ #include "src/utils/ostreams.h"
++#include "src/wasm/baseline/liftoff-assembler-inl.h"
+ #include "src/wasm/baseline/liftoff-register.h"
++#include "src/wasm/baseline/parallel-move-inl.h"
+ #include "src/wasm/object-access.h"
+ #include "src/wasm/wasm-linkage.h"
+ #include "src/wasm/wasm-opcodes.h"
+ 
+-namespace v8 {
+-namespace internal {
+-namespace wasm {
++namespace v8::internal::wasm {
+ 
+ using VarState = LiftoffAssembler::VarState;
+ using ValueKindSig = LiftoffAssembler::ValueKindSig;
+@@ -29,349 +29,6 @@ constexpr ValueKind LiftoffAssembler::kSmiKind;
+ 
+ namespace {
+ 
+-class StackTransferRecipe {
+-  struct RegisterMove {
+-    LiftoffRegister src;
+-    ValueKind kind;
+-    constexpr RegisterMove(LiftoffRegister src, ValueKind kind)
+-        : src(src), kind(kind) {}
+-  };
+-
+-  struct RegisterLoad {
+-    enum LoadKind : uint8_t {
+-      kNop,           // no-op, used for high fp of a fp pair.
+-      kConstant,      // load a constant value into a register.
+-      kStack,         // fill a register from a stack slot.
+-      kLowHalfStack,  // fill a register from the low half of a stack slot.
+-      kHighHalfStack  // fill a register from the high half of a stack slot.
+-    };
+-
+-    LoadKind load_kind;
+-    ValueKind kind;
+-    int32_t value;  // i32 constant value or stack offset, depending on kind.
+-
+-    // Named constructors.
+-    static RegisterLoad Const(WasmValue constant) {
+-      if (constant.type().kind() == kI32) {
+-        return {kConstant, kI32, constant.to_i32()};
+-      }
+-      DCHECK_EQ(kI64, constant.type().kind());
+-      int32_t i32_const = static_cast<int32_t>(constant.to_i64());
+-      DCHECK_EQ(constant.to_i64(), i32_const);
+-      return {kConstant, kI64, i32_const};
+-    }
+-    static RegisterLoad Stack(int32_t offset, ValueKind kind) {
+-      return {kStack, kind, offset};
+-    }
+-    static RegisterLoad HalfStack(int32_t offset, RegPairHalf half) {
+-      return {half == kLowWord ? kLowHalfStack : kHighHalfStack, kI32, offset};
+-    }
+-    static RegisterLoad Nop() {
+-      // ValueKind does not matter.
+-      return {kNop, kI32, 0};
+-    }
+-
+-   private:
+-    RegisterLoad(LoadKind load_kind, ValueKind kind, int32_t value)
+-        : load_kind(load_kind), kind(kind), value(value) {}
+-  };
+-
+- public:
+-  explicit StackTransferRecipe(LiftoffAssembler* wasm_asm) : asm_(wasm_asm) {}
+-  StackTransferRecipe(const StackTransferRecipe&) = delete;
+-  StackTransferRecipe& operator=(const StackTransferRecipe&) = delete;
+-  V8_INLINE ~StackTransferRecipe() { Execute(); }
+-
+-  V8_INLINE void Execute() {
+-    // First, execute register moves. Then load constants and stack values into
+-    // registers.
+-    if (!move_dst_regs_.is_empty()) ExecuteMoves();
+-    DCHECK(move_dst_regs_.is_empty());
+-    if (!load_dst_regs_.is_empty()) ExecuteLoads();
+-    DCHECK(load_dst_regs_.is_empty());
+-    // Tell the compiler that the StackTransferRecipe is empty after this, so it
+-    // can eliminate a second {Execute} in the destructor.
+-    bool all_done = move_dst_regs_.is_empty() && load_dst_regs_.is_empty();
+-    V8_ASSUME(all_done);
+-  }
+-
+-  V8_INLINE void Transfer(const VarState& dst, const VarState& src) {
+-    DCHECK(CompatibleStackSlotTypes(dst.kind(), src.kind()));
+-    if (dst.is_stack()) {
+-      if (V8_UNLIKELY(!(src.is_stack() && src.offset() == dst.offset()))) {
+-        TransferToStack(dst.offset(), src);
+-      }
+-    } else if (dst.is_reg()) {
+-      LoadIntoRegister(dst.reg(), src);
+-    } else {
+-      DCHECK(dst.is_const());
+-      DCHECK_EQ(dst.i32_const(), src.i32_const());
+-    }
+-  }
+-
+-  void TransferToStack(int dst_offset, const VarState& src) {
+-    switch (src.loc()) {
+-      case VarState::kStack:
+-        if (src.offset() != dst_offset) {
+-          asm_->MoveStackValue(dst_offset, src.offset(), src.kind());
+-        }
+-        break;
+-      case VarState::kRegister:
+-        asm_->Spill(dst_offset, src.reg(), src.kind());
+-        break;
+-      case VarState::kIntConst:
+-        asm_->Spill(dst_offset, src.constant());
+-        break;
+-    }
+-  }
+-
+-  V8_INLINE void LoadIntoRegister(LiftoffRegister dst, const VarState& src) {
+-    if (src.is_reg()) {
+-      DCHECK_EQ(dst.reg_class(), src.reg_class());
+-      if (dst != src.reg()) MoveRegister(dst, src.reg(), src.kind());
+-    } else if (src.is_stack()) {
+-      LoadStackSlot(dst, src.offset(), src.kind());
+-    } else {
+-      DCHECK(src.is_const());
+-      LoadConstant(dst, src.constant());
+-    }
+-  }
+-
+-  void LoadI64HalfIntoRegister(LiftoffRegister dst, const VarState& src,
+-                               RegPairHalf half) {
+-    // Use CHECK such that the remaining code is statically dead if
+-    // {kNeedI64RegPair} is false.
+-    CHECK(kNeedI64RegPair);
+-    DCHECK_EQ(kI64, src.kind());
+-    switch (src.loc()) {
+-      case VarState::kStack:
+-        LoadI64HalfStackSlot(dst, src.offset(), half);
+-        break;
+-      case VarState::kRegister: {
+-        LiftoffRegister src_half =
+-            half == kLowWord ? src.reg().low() : src.reg().high();
+-        if (dst != src_half) MoveRegister(dst, src_half, kI32);
+-        break;
+-      }
+-      case VarState::kIntConst:
+-        int32_t value = src.i32_const();
+-        // The high word is the sign extension of the low word.
+-        if (half == kHighWord) value = value >> 31;
+-        LoadConstant(dst, WasmValue(value));
+-        break;
+-    }
+-  }
+-
+-  void MoveRegister(LiftoffRegister dst, LiftoffRegister src, ValueKind kind) {
+-    DCHECK_NE(dst, src);
+-    DCHECK_EQ(dst.reg_class(), src.reg_class());
+-    DCHECK_EQ(reg_class_for(kind), src.reg_class());
+-    if (src.is_gp_pair()) {
+-      DCHECK_EQ(kI64, kind);
+-      if (dst.low() != src.low()) MoveRegister(dst.low(), src.low(), kI32);
+-      if (dst.high() != src.high()) MoveRegister(dst.high(), src.high(), kI32);
+-      return;
+-    }
+-    if (src.is_fp_pair()) {
+-      DCHECK_EQ(kS128, kind);
+-      if (dst.low() != src.low()) {
+-        MoveRegister(dst.low(), src.low(), kF64);
+-        MoveRegister(dst.high(), src.high(), kF64);
+-      }
+-      return;
+-    }
+-    if (move_dst_regs_.has(dst)) {
+-      DCHECK_EQ(register_move(dst)->src, src);
+-      // Check for compatible value kinds.
+-      // - references can occur with mixed kRef / kRefNull kinds.
+-      // - FP registers can only occur with mixed f32 / f64 kinds (if they hold
+-      //   the initial zero value).
+-      // - others must match exactly.
+-      DCHECK_EQ(is_object_reference(register_move(dst)->kind),
+-                is_object_reference(kind));
+-      DCHECK_EQ(dst.is_fp(), register_move(dst)->kind == kF32 ||
+-                                 register_move(dst)->kind == kF64);
+-      if (!is_object_reference(kind) && !dst.is_fp()) {
+-        DCHECK_EQ(register_move(dst)->kind, kind);
+-      }
+-      // Potentially upgrade an existing `kF32` move to a `kF64` move.
+-      if (kind == kF64) register_move(dst)->kind = kF64;
+-      return;
+-    }
+-    move_dst_regs_.set(dst);
+-    ++*src_reg_use_count(src);
+-    *register_move(dst) = {src, kind};
+-  }
+-
+-  void LoadConstant(LiftoffRegister dst, WasmValue value) {
+-    DCHECK(!load_dst_regs_.has(dst));
+-    load_dst_regs_.set(dst);
+-    if (dst.is_gp_pair()) {
+-      DCHECK_EQ(kI64, value.type().kind());
+-      int64_t i64 = value.to_i64();
+-      *register_load(dst.low()) =
+-          RegisterLoad::Const(WasmValue(static_cast<int32_t>(i64)));
+-      *register_load(dst.high()) =
+-          RegisterLoad::Const(WasmValue(static_cast<int32_t>(i64 >> 32)));
+-    } else {
+-      *register_load(dst) = RegisterLoad::Const(value);
+-    }
+-  }
+-
+-  void LoadStackSlot(LiftoffRegister dst, int stack_offset, ValueKind kind) {
+-    V8_ASSUME(stack_offset > 0);
+-    if (load_dst_regs_.has(dst)) {
+-      // It can happen that we spilled the same register to different stack
+-      // slots, and then we reload them later into the same dst register.
+-      // In that case, it is enough to load one of the stack slots.
+-      return;
+-    }
+-    load_dst_regs_.set(dst);
+-    // Make sure that we only spill to positions after this stack offset to
+-    // avoid overwriting the content.
+-    if (stack_offset > last_spill_offset_) {
+-      last_spill_offset_ = stack_offset;
+-    }
+-    if (dst.is_gp_pair()) {
+-      DCHECK_EQ(kI64, kind);
+-      *register_load(dst.low()) =
+-          RegisterLoad::HalfStack(stack_offset, kLowWord);
+-      *register_load(dst.high()) =
+-          RegisterLoad::HalfStack(stack_offset, kHighWord);
+-    } else if (dst.is_fp_pair()) {
+-      DCHECK_EQ(kS128, kind);
+-      // Only need register_load for low_gp since we load 128 bits at one go.
+-      // Both low and high need to be set in load_dst_regs_ but when iterating
+-      // over it, both low and high will be cleared, so we won't load twice.
+-      *register_load(dst.low()) = RegisterLoad::Stack(stack_offset, kind);
+-      *register_load(dst.high()) = RegisterLoad::Nop();
+-    } else {
+-      *register_load(dst) = RegisterLoad::Stack(stack_offset, kind);
+-    }
+-  }
+-
+-  void LoadI64HalfStackSlot(LiftoffRegister dst, int offset, RegPairHalf half) {
+-    if (load_dst_regs_.has(dst)) {
+-      // It can happen that we spilled the same register to different stack
+-      // slots, and then we reload them later into the same dst register.
+-      // In that case, it is enough to load one of the stack slots.
+-      return;
+-    }
+-    load_dst_regs_.set(dst);
+-    *register_load(dst) = RegisterLoad::HalfStack(offset, half);
+-  }
+-
+- private:
+-  using MovesStorage =
+-      std::aligned_storage<kAfterMaxLiftoffRegCode * sizeof(RegisterMove),
+-                           alignof(RegisterMove)>::type;
+-  using LoadsStorage =
+-      std::aligned_storage<kAfterMaxLiftoffRegCode * sizeof(RegisterLoad),
+-                           alignof(RegisterLoad)>::type;
+-
+-  ASSERT_TRIVIALLY_COPYABLE(RegisterMove);
+-  ASSERT_TRIVIALLY_COPYABLE(RegisterLoad);
+-
+-  MovesStorage register_moves_;  // uninitialized
+-  LoadsStorage register_loads_;  // uninitialized
+-  int src_reg_use_count_[kAfterMaxLiftoffRegCode] = {0};
+-  LiftoffRegList move_dst_regs_;
+-  LiftoffRegList load_dst_regs_;
+-  LiftoffAssembler* const asm_;
+-  // Cache the last spill offset in case we need to spill for resolving move
+-  // cycles.
+-  int last_spill_offset_ = asm_->TopSpillOffset();
+-
+-  RegisterMove* register_move(LiftoffRegister reg) {
+-    return reinterpret_cast<RegisterMove*>(&register_moves_) +
+-           reg.liftoff_code();
+-  }
+-  RegisterLoad* register_load(LiftoffRegister reg) {
+-    return reinterpret_cast<RegisterLoad*>(&register_loads_) +
+-           reg.liftoff_code();
+-  }
+-  int* src_reg_use_count(LiftoffRegister reg) {
+-    return src_reg_use_count_ + reg.liftoff_code();
+-  }
+-
+-  void ExecuteMove(LiftoffRegister dst) {
+-    RegisterMove* move = register_move(dst);
+-    DCHECK_EQ(0, *src_reg_use_count(dst));
+-    asm_->Move(dst, move->src, move->kind);
+-    ClearExecutedMove(dst);
+-  }
+-
+-  void ClearExecutedMove(LiftoffRegister dst) {
+-    DCHECK(move_dst_regs_.has(dst));
+-    move_dst_regs_.clear(dst);
+-    RegisterMove* move = register_move(dst);
+-    DCHECK_LT(0, *src_reg_use_count(move->src));
+-    if (--*src_reg_use_count(move->src)) return;
+-    // src count dropped to zero. If this is a destination register, execute
+-    // that move now.
+-    if (!move_dst_regs_.has(move->src)) return;
+-    ExecuteMove(move->src);
+-  }
+-
+-  V8_NOINLINE V8_PRESERVE_MOST void ExecuteMoves() {
+-    // Execute all moves whose {dst} is not being used as src in another move.
+-    // If any src count drops to zero, also (transitively) execute the
+-    // corresponding move to that register.
+-    for (LiftoffRegister dst : move_dst_regs_) {
+-      // Check if already handled via transitivity in {ClearExecutedMove}.
+-      if (!move_dst_regs_.has(dst)) continue;
+-      if (*src_reg_use_count(dst)) continue;
+-      ExecuteMove(dst);
+-    }
+-
+-    // All remaining moves are parts of a cycle. Just spill the first one, then
+-    // process all remaining moves in that cycle. Repeat for all cycles.
+-    while (!move_dst_regs_.is_empty()) {
+-      // TODO(clemensb): Use an unused register if available.
+-      LiftoffRegister dst = move_dst_regs_.GetFirstRegSet();
+-      RegisterMove* move = register_move(dst);
+-      last_spill_offset_ += LiftoffAssembler::SlotSizeForType(move->kind);
+-      LiftoffRegister spill_reg = move->src;
+-      asm_->Spill(last_spill_offset_, spill_reg, move->kind);
+-      // Remember to reload into the destination register later.
+-      LoadStackSlot(dst, last_spill_offset_, move->kind);
+-      ClearExecutedMove(dst);
+-    }
+-  }
+-
+-  V8_NOINLINE V8_PRESERVE_MOST void ExecuteLoads() {
+-    for (LiftoffRegister dst : load_dst_regs_) {
+-      RegisterLoad* load = register_load(dst);
+-      switch (load->load_kind) {
+-        case RegisterLoad::kNop:
+-          break;
+-        case RegisterLoad::kConstant:
+-          asm_->LoadConstant(dst, load->kind == kI64
+-                                      ? WasmValue(int64_t{load->value})
+-                                      : WasmValue(int32_t{load->value}));
+-          break;
+-        case RegisterLoad::kStack:
+-          if (kNeedS128RegPair && load->kind == kS128) {
+-            asm_->Fill(LiftoffRegister::ForFpPair(dst.fp()), load->value,
+-                       load->kind);
+-          } else {
+-            asm_->Fill(dst, load->value, load->kind);
+-          }
+-          break;
+-        case RegisterLoad::kLowHalfStack:
+-          // Half of a register pair, {dst} must be a gp register.
+-          asm_->FillI64Half(dst.gp(), load->value, kLowWord);
+-          break;
+-        case RegisterLoad::kHighHalfStack:
+-          // Half of a register pair, {dst} must be a gp register.
+-          asm_->FillI64Half(dst.gp(), load->value, kHighWord);
+-          break;
+-      }
+-    }
+-    load_dst_regs_ = {};
+-  }
+-};
+-
+ class RegisterReuseMap {
+  public:
+   void Add(LiftoffRegister src, LiftoffRegister dst) {
+@@ -425,7 +82,7 @@ void InitMergeRegion(LiftoffAssembler::CacheState* target_state,
+                      MergeAllowConstants allow_constants,
+                      MergeAllowRegisters allow_registers,
+                      ReuseRegisters reuse_registers, LiftoffRegList used_regs,
+-                     int new_stack_offset, StackTransferRecipe& transfers) {
++                     int new_stack_offset, ParallelMove& parallel_move) {
+   RegisterReuseMap register_reuse_map;
+   for (const VarState* source_end = source + count; source < source_end;
+        ++source, ++target) {
+@@ -440,7 +97,7 @@ void InitMergeRegion(LiftoffAssembler::CacheState* target_state,
+             LiftoffAssembler::NextSpillOffset(source->kind(), new_stack_offset);
+         if (new_stack_offset != source->offset()) {
+           target->set_offset(new_stack_offset);
+-          transfers.TransferToStack(new_stack_offset, *source);
++          parallel_move.TransferToStack(new_stack_offset, *source);
+         }
+       }
+       continue;
+@@ -477,14 +134,14 @@ void InitMergeRegion(LiftoffAssembler::CacheState* target_state,
+       target_offset = new_stack_offset;
+     }
+     if (reg) {
+-      if (needs_reg_transfer) transfers.LoadIntoRegister(*reg, *source);
++      if (needs_reg_transfer) parallel_move.LoadIntoRegister(*reg, *source);
+       if (reuse_registers) register_reuse_map.Add(source->reg(), *reg);
+       target_state->inc_used(*reg);
+       *target = VarState(source->kind(), *reg, target_offset);
+     } else {
+       // No free register; make this a stack slot.
+       *target = VarState(source->kind(), target_offset);
+-      transfers.TransferToStack(target_offset, *source);
++      parallel_move.TransferToStack(target_offset, *source);
+     }
+   }
+ }
+@@ -547,7 +204,7 @@ LiftoffAssembler::CacheState LiftoffAssembler::MergeIntoNewState(
+   }
+   // If there is more than one operand in the merge region, a stack-to-stack
+   // move can interfere with a register reload, which would not be handled
+-  // correctly by the StackTransferRecipe. To avoid this, spill all registers in
++  // correctly by the ParallelMove. To avoid this, spill all registers in
+   // this region.
+   MergeAllowRegisters allow_registers =
+       arity <= 1 ? kRegistersAllowed : kRegistersNotAllowed;
+@@ -557,7 +214,7 @@ LiftoffAssembler::CacheState LiftoffAssembler::MergeIntoNewState(
+     }
+   }
+ 
+-  StackTransferRecipe transfers(this);
++  ParallelMove parallel_move{this};
+ 
+   // The merge region is often empty, hence check for this before doing any
+   // work (even though not needed for correctness).
+@@ -576,7 +233,7 @@ LiftoffAssembler::CacheState LiftoffAssembler::MergeIntoNewState(
+     InitMergeRegion(&target, merge_source, merge_target, arity,
+                     keep_merge_stack_slots, kConstantsNotAllowed,
+                     allow_registers, kNoReuseRegisters, used_regs,
+-                    merge_region_stack_offset, transfers);
++                    merge_region_stack_offset, parallel_move);
+   }
+ 
+   // Initialize the locals region. Here, stack slots stay stack slots (because
+@@ -584,7 +241,7 @@ LiftoffAssembler::CacheState LiftoffAssembler::MergeIntoNewState(
+   if (num_locals) {
+     InitMergeRegion(&target, locals_source, locals_target, num_locals,
+                     kKeepStackSlots, kConstantsNotAllowed, kRegistersAllowed,
+-                    kNoReuseRegisters, used_regs, 0, transfers);
++                    kNoReuseRegisters, used_regs, 0, parallel_move);
+   }
+   // Consistency check: All the {used_regs} are really in use now.
+   DCHECK_EQ(used_regs, target.used_registers & used_regs);
+@@ -597,7 +254,7 @@ LiftoffAssembler::CacheState LiftoffAssembler::MergeIntoNewState(
+     InitMergeRegion(&target, stack_prefix_source, stack_prefix_target,
+                     stack_depth, kKeepStackSlots, kConstantsAllowed,
+                     kRegistersAllowed, kReuseRegisters, used_regs, 0,
+-                    transfers);
++                    parallel_move);
+   }
+ 
+   return target;
+@@ -865,11 +522,11 @@ bool SlotInterference(const VarState& a, base::Vector<const VarState> v) {
+ 
+ void LiftoffAssembler::MergeFullStackWith(CacheState& target) {
+   DCHECK_EQ(cache_state_.stack_height(), target.stack_height());
+-  // TODO(clemensb): Reuse the same StackTransferRecipe object to save some
++  // TODO(clemensb): Reuse the same ParallelMove object to save some
+   // allocations.
+-  StackTransferRecipe transfers(this);
++  ParallelMove parallel_move{this};
+   for (uint32_t i = 0, e = cache_state_.stack_height(); i < e; ++i) {
+-    transfers.Transfer(target.stack_state[i], cache_state_.stack_state[i]);
++    parallel_move.Transfer(target.stack_state[i], cache_state_.stack_state[i]);
+     DCHECK(!SlotInterference(target.stack_state[i],
+                              base::VectorOf(cache_state_.stack_state) + i + 1));
+   }
+@@ -898,9 +555,9 @@ void LiftoffAssembler::MergeStackWith(CacheState& target, uint32_t arity,
+   DCHECK_LE(arity, target_stack_height);
+   uint32_t stack_base = stack_height - arity;
+   uint32_t target_stack_base = target_stack_height - arity;
+-  StackTransferRecipe transfers(this);
++  ParallelMove parallel_move{this};
+   for (uint32_t i = 0; i < target_stack_base; ++i) {
+-    transfers.Transfer(target.stack_state[i], cache_state_.stack_state[i]);
++    parallel_move.Transfer(target.stack_state[i], cache_state_.stack_state[i]);
+     DCHECK(!SlotInterference(
+         target.stack_state[i],
+         base::VectorOf(cache_state_.stack_state.data() + i + 1,
+@@ -910,8 +567,8 @@ void LiftoffAssembler::MergeStackWith(CacheState& target, uint32_t arity,
+         base::VectorOf(cache_state_.stack_state.data() + stack_base, arity)));
+   }
+   for (uint32_t i = 0; i < arity; ++i) {
+-    transfers.Transfer(target.stack_state[target_stack_base + i],
+-                       cache_state_.stack_state[stack_base + i]);
++    parallel_move.Transfer(target.stack_state[target_stack_base + i],
++                           cache_state_.stack_state[stack_base + i]);
+     DCHECK(!SlotInterference(
+         target.stack_state[target_stack_base + i],
+         base::VectorOf(cache_state_.stack_state.data() + stack_base + i + 1,
+@@ -920,8 +577,8 @@ void LiftoffAssembler::MergeStackWith(CacheState& target, uint32_t arity,
+ 
+   // Check whether the cached instance and/or memory start need to be moved to
+   // another register. Register moves are executed as part of the
+-  // {StackTransferRecipe}. Remember whether the register content has to be
+-  // reloaded after executing the stack transfers.
++  // {ParallelMove}. Remember whether the register content has to be
++  // reloaded after executing the stack parallel_move.
+   bool reload_instance = false;
+   // If the instance cache registers match, or the destination has no instance
+   // cache register, nothing needs to be done.
+@@ -933,9 +590,9 @@ void LiftoffAssembler::MergeStackWith(CacheState& target, uint32_t arity,
+     } else if (cache_state_.cached_instance != no_reg) {
+       // If the source has the instance cached but in the wrong register,
+       // execute a register move as part of the stack transfer.
+-      transfers.MoveRegister(LiftoffRegister{target.cached_instance},
+-                             LiftoffRegister{cache_state_.cached_instance},
+-                             kIntPtrKind);
++      parallel_move.MoveRegister(LiftoffRegister{target.cached_instance},
++                                 LiftoffRegister{cache_state_.cached_instance},
++                                 kIntPtrKind);
+     } else {
+       // Otherwise (the source state has no cached instance), we reload later.
+       reload_instance = true;
+@@ -957,9 +614,9 @@ void LiftoffAssembler::MergeStackWith(CacheState& target, uint32_t arity,
+       DCHECK_NE(no_reg, cache_state_.cached_mem_start);
+       // If the source has the content but in the wrong register, execute a
+       // register move as part of the stack transfer.
+-      transfers.MoveRegister(LiftoffRegister{target.cached_mem_start},
+-                             LiftoffRegister{cache_state_.cached_mem_start},
+-                             kIntPtrKind);
++      parallel_move.MoveRegister(LiftoffRegister{target.cached_mem_start},
++                                 LiftoffRegister{cache_state_.cached_mem_start},
++                                 kIntPtrKind);
+     } else {
+       // Otherwise (the source state has no cached content), we reload later.
+       reload_mem_start = true;
+@@ -967,7 +624,7 @@ void LiftoffAssembler::MergeStackWith(CacheState& target, uint32_t arity,
+   }
+ 
+   // Now execute stack transfers and register moves/loads.
+-  transfers.Execute();
++  parallel_move.Execute();
+ 
+   if (reload_instance) {
+     LoadInstanceFromFrame(target.cached_instance);
+@@ -1074,7 +731,7 @@ void PrepareStackTransfers(const ValueKindSig* sig,
+                            compiler::CallDescriptor* call_descriptor,
+                            const VarState* slots,
+                            LiftoffStackSlots* stack_slots,
+-                           StackTransferRecipe* stack_transfers,
++                           ParallelMove* parallel_move,
+                            LiftoffRegList* param_regs) {
+   // Process parameters backwards, to reduce the amount of Slot sorting for
+   // the most common case - a normal Wasm Call. Slots will be mostly unsorted
+@@ -1105,9 +762,9 @@ void PrepareStackTransfers(const ValueKindSig* sig,
+             LiftoffRegister::from_external_code(rc, kind, reg_code);
+         param_regs->set(reg);
+         if (is_gp_pair) {
+-          stack_transfers->LoadI64HalfIntoRegister(reg, slot, half);
++          parallel_move->LoadI64HalfIntoRegister(reg, slot, half);
+         } else {
+-          stack_transfers->LoadIntoRegister(reg, slot);
++          parallel_move->LoadIntoRegister(reg, slot);
+         }
+       } else {
+         DCHECK(loc.IsCallerFrameSlot());
+@@ -1123,18 +780,18 @@ void PrepareStackTransfers(const ValueKindSig* sig,
+ void LiftoffAssembler::PrepareBuiltinCall(
+     const ValueKindSig* sig, compiler::CallDescriptor* call_descriptor,
+     std::initializer_list<VarState> params) {
+-  LiftoffStackSlots stack_slots(this);
+-  StackTransferRecipe stack_transfers(this);
++  LiftoffStackSlots stack_slots{this};
++  ParallelMove parallel_move{this};
+   LiftoffRegList param_regs;
+   PrepareStackTransfers(sig, call_descriptor, params.begin(), &stack_slots,
+-                        &stack_transfers, &param_regs);
++                        &parallel_move, &param_regs);
+   SpillAllRegisters();
+   int param_slots = static_cast<int>(call_descriptor->ParameterSlotCount());
+   if (param_slots > 0) {
+     stack_slots.Construct(param_slots);
+   }
+   // Execute the stack transfers before filling the instance register.
+-  stack_transfers.Execute();
++  parallel_move.Execute();
+ 
+   // Reset register use counters.
+   cache_state_.reset_used_registers();
+@@ -1145,8 +802,8 @@ void LiftoffAssembler::PrepareCall(const ValueKindSig* sig,
+                                    Register* target, Register target_instance) {
+   uint32_t num_params = static_cast<uint32_t>(sig->parameter_count());
+ 
+-  LiftoffStackSlots stack_slots(this);
+-  StackTransferRecipe stack_transfers(this);
++  LiftoffStackSlots stack_slots{this};
++  ParallelMove parallel_move{this};
+   LiftoffRegList param_regs;
+ 
+   // Move the target instance (if supplied) into the correct instance register.
+@@ -1159,8 +816,8 @@ void LiftoffAssembler::PrepareCall(const ValueKindSig* sig,
+   param_regs.set(instance_reg);
+   if (target_instance == no_reg) target_instance = cache_state_.cached_instance;
+   if (target_instance != no_reg && target_instance != instance_reg) {
+-    stack_transfers.MoveRegister(LiftoffRegister(instance_reg),
+-                                 LiftoffRegister(target_instance), kIntPtrKind);
++    parallel_move.MoveRegister(LiftoffRegister(instance_reg),
++                               LiftoffRegister(target_instance), kIntPtrKind);
+   }
+ 
+   int param_slots = static_cast<int>(call_descriptor->ParameterSlotCount());
+@@ -1168,7 +825,7 @@ void LiftoffAssembler::PrepareCall(const ValueKindSig* sig,
+     uint32_t param_base = cache_state_.stack_height() - num_params;
+     PrepareStackTransfers(sig, call_descriptor,
+                           &cache_state_.stack_state[param_base], &stack_slots,
+-                          &stack_transfers, &param_regs);
++                          &parallel_move, &param_regs);
+   }
+ 
+   // If the target register overlaps with a parameter register, then move the
+@@ -1178,8 +835,8 @@ void LiftoffAssembler::PrepareCall(const ValueKindSig* sig,
+     LiftoffRegList free_regs = kGpCacheRegList.MaskOut(param_regs);
+     if (!free_regs.is_empty()) {
+       LiftoffRegister new_target = free_regs.GetFirstRegSet();
+-      stack_transfers.MoveRegister(new_target, LiftoffRegister(*target),
+-                                   kIntPtrKind);
++      parallel_move.MoveRegister(new_target, LiftoffRegister(*target),
++                                 kIntPtrKind);
+       *target = new_target.gp();
+     } else {
+       stack_slots.Add(VarState(kIntPtrKind, LiftoffRegister(*target), 0),
+@@ -1215,7 +872,7 @@ void LiftoffAssembler::PrepareCall(const ValueKindSig* sig,
+     stack_slots.Construct(param_slots);
+   }
+   // Execute the stack transfers before filling the instance register.
+-  stack_transfers.Execute();
++  parallel_move.Execute();
+ 
+   // Reload the instance from the stack if we do not have it in a register.
+   if (target_instance == no_reg) {
+@@ -1272,9 +929,9 @@ void LiftoffAssembler::Move(LiftoffRegister dst, LiftoffRegister src,
+   DCHECK_EQ(dst.reg_class(), src.reg_class());
+   DCHECK_NE(dst, src);
+   if (kNeedI64RegPair && dst.is_gp_pair()) {
+-    // Use the {StackTransferRecipe} to move pairs, as the registers in the
++    // Use the {ParallelMove} to move pairs, as the registers in the
+     // pairs might overlap.
+-    StackTransferRecipe(this).MoveRegister(dst, src, kind);
++    ParallelMove{this}.MoveRegister(dst, src, kind);
+   } else if (kNeedS128RegPair && dst.is_fp_pair()) {
+     // Calling low_fp is fine, Move will automatically check the kind and
+     // convert this FP to its SIMD register, and use a SIMD move.
+@@ -1288,10 +945,10 @@ void LiftoffAssembler::Move(LiftoffRegister dst, LiftoffRegister src,
+ 
+ void LiftoffAssembler::ParallelRegisterMove(
+     base::Vector<const ParallelRegisterMoveTuple> tuples) {
+-  StackTransferRecipe stack_transfers(this);
++  ParallelMove parallel_move{this};
+   for (auto tuple : tuples) {
+     if (tuple.dst == tuple.src) continue;
+-    stack_transfers.MoveRegister(tuple.dst, tuple.src, tuple.kind);
++    parallel_move.MoveRegister(tuple.dst, tuple.src, tuple.kind);
+   }
+ }
+ 
+@@ -1330,7 +987,7 @@ void LiftoffAssembler::MoveToReturnLocations(
+ void LiftoffAssembler::MoveToReturnLocationsMultiReturn(
+     const FunctionSig* sig, compiler::CallDescriptor* descriptor) {
+   DCHECK_LT(1, sig->return_count());
+-  StackTransferRecipe stack_transfers(this);
++  ParallelMove parallel_move{this};
+ 
+   // We sometimes allocate a register to perform stack-to-stack moves, which can
+   // cause a spill in the cache state. Conservatively save and restore the
+@@ -1384,9 +1041,9 @@ void LiftoffAssembler::MoveToReturnLocationsMultiReturn(
+             LiftoffRegister::from_external_code(rc, return_kind, reg_code);
+         VarState& slot = slots[i];
+         if (needs_gp_pair) {
+-          stack_transfers.LoadI64HalfIntoRegister(reg, slot, half);
++          parallel_move.LoadI64HalfIntoRegister(reg, slot, half);
+         } else {
+-          stack_transfers.LoadIntoRegister(reg, slot);
++          parallel_move.LoadIntoRegister(reg, slot);
+         }
+       }
+     }
+@@ -1568,6 +1225,4 @@ bool CompatibleStackSlotTypes(ValueKind a, ValueKind b) {
+ }
+ #endif
+ 
+-}  // namespace wasm
+-}  // namespace internal
+-}  // namespace v8
++}  // namespace v8::internal::wasm
+diff --git a/src/wasm/baseline/liftoff-assembler.h b/src/wasm/baseline/liftoff-assembler.h
+index 4c157c63776..c754cbf2fd3 100644
+--- a/src/wasm/baseline/liftoff-assembler.h
++++ b/src/wasm/baseline/liftoff-assembler.h
+@@ -18,15 +18,12 @@
+ #include "src/wasm/wasm-opcodes.h"
+ #include "src/wasm/wasm-value.h"
+ 
+-namespace v8 {
+-namespace internal {
+-
+ // Forward declarations.
+-namespace compiler {
++namespace v8::internal::compiler {
+ class CallDescriptor;
+-}  // namespace compiler
++}  // namespace v8::internal::compiler
+ 
+-namespace wasm {
++namespace v8::internal::wasm {
+ 
+ inline constexpr Condition Negate(Condition cond) {
+   switch (cond) {
+@@ -491,14 +488,7 @@ class LiftoffAssembler : public MacroAssembler {
+   LoadToRegister_Slow(VarState slot, LiftoffRegList pinned);
+ 
+   // Load a non-register cache slot to a given (fixed) register.
+-  void LoadToFixedRegister(VarState slot, LiftoffRegister reg) {
+-    DCHECK(slot.is_const() || slot.is_stack());
+-    if (slot.is_const()) {
+-      LoadConstant(reg, slot.constant());
+-    } else {
+-      Fill(reg, slot.offset(), slot.kind());
+-    }
+-  }
++  inline void LoadToFixedRegister(VarState slot, LiftoffRegister reg);
+ 
+   // Pop a VarState from the stack, updating the register use count accordingly.
+   V8_INLINE VarState PopVarState() {
+@@ -514,20 +504,7 @@ class LiftoffAssembler : public MacroAssembler {
+     return LoadToRegister(slot, pinned);
+   }
+ 
+-  void PopToFixedRegister(LiftoffRegister reg) {
+-    DCHECK(!cache_state_.stack_state.empty());
+-    VarState slot = cache_state_.stack_state.back();
+-    cache_state_.stack_state.pop_back();
+-    if (V8_LIKELY(slot.is_reg())) {
+-      cache_state_.dec_used(slot.reg());
+-      if (slot.reg() == reg) return;
+-      if (cache_state_.is_used(reg)) SpillRegister(reg);
+-      Move(reg, slot.reg(), slot.kind());
+-      return;
+-    }
+-    if (cache_state_.is_used(reg)) SpillRegister(reg);
+-    LoadToFixedRegister(slot, reg);
+-  }
++  inline void PopToFixedRegister(LiftoffRegister reg);
+ 
+   // Use this to pop a value into a register that has no other uses, so it
+   // can be modified.
+@@ -564,49 +541,19 @@ class LiftoffAssembler : public MacroAssembler {
+   // stack, so that we can merge different values on the back-edge.
+   void PrepareLoopArgs(int num);
+ 
+-  V8_INLINE static int NextSpillOffset(ValueKind kind, int top_spill_offset) {
+-    int offset = top_spill_offset + SlotSizeForType(kind);
+-    if (NeedsAlignment(kind)) {
+-      offset = RoundUp(offset, SlotSizeForType(kind));
+-    }
+-    return offset;
+-  }
+-
+-  int NextSpillOffset(ValueKind kind) {
+-    return NextSpillOffset(kind, TopSpillOffset());
+-  }
+-
+-  int TopSpillOffset() const {
+-    return cache_state_.stack_state.empty()
+-               ? StaticStackFrameSize()
+-               : cache_state_.stack_state.back().offset();
+-  }
++  V8_INLINE static int NextSpillOffset(ValueKind kind, int top_spill_offset);
++  V8_INLINE int NextSpillOffset(ValueKind kind);
++  inline int TopSpillOffset() const;
+ 
+-  void PushRegister(ValueKind kind, LiftoffRegister reg) {
+-    DCHECK_EQ(reg_class_for(kind), reg.reg_class());
+-    cache_state_.inc_used(reg);
+-    cache_state_.stack_state.emplace_back(kind, reg, NextSpillOffset(kind));
+-  }
++  inline void PushRegister(ValueKind kind, LiftoffRegister reg);
+ 
+   // Assumes that the exception is in {kReturnRegister0}. This is where the
+   // exception is stored by the unwinder after a throwing call.
+-  void PushException() {
+-    LiftoffRegister reg{kReturnRegister0};
+-    // This is used after a call, so {kReturnRegister0} is not used yet.
+-    DCHECK(cache_state_.is_free(reg));
+-    cache_state_.inc_used(reg);
+-    cache_state_.stack_state.emplace_back(kRef, reg, NextSpillOffset(kRef));
+-  }
++  inline void PushException();
+ 
+-  void PushConstant(ValueKind kind, int32_t i32_const) {
+-    V8_ASSUME(kind == kI32 || kind == kI64);
+-    cache_state_.stack_state.emplace_back(kind, i32_const,
+-                                          NextSpillOffset(kind));
+-  }
++  inline void PushConstant(ValueKind kind, int32_t i32_const);
+ 
+-  void PushStack(ValueKind kind) {
+-    cache_state_.stack_state.emplace_back(kind, NextSpillOffset(kind));
+-  }
++  inline void PushStack(ValueKind kind);
+ 
+   V8_NOINLINE V8_PRESERVE_MOST void SpillRegister(LiftoffRegister);
+ 
+@@ -768,6 +715,12 @@ class LiftoffAssembler : public MacroAssembler {
+   bool ValidateCacheState() const;
+ #endif
+ 
++  inline void LoadFixedArrayLengthAsInt32(LiftoffRegister dst, Register array,
++                                          LiftoffRegList pinned);
++
++  inline void LoadSmiAsInt32(LiftoffRegister dst, Register src_addr,
++                             int32_t offset);
++
+   ////////////////////////////////////
+   // Platform-specific part.        //
+   ////////////////////////////////////
+@@ -817,24 +770,6 @@ class LiftoffAssembler : public MacroAssembler {
+                                  int32_t offset_imm, Register src,
+                                  LiftoffRegList pinned,
+                                  SkipWriteBarrier = kNoSkipWriteBarrier);
+-  void LoadFixedArrayLengthAsInt32(LiftoffRegister dst, Register array,
+-                                   LiftoffRegList pinned) {
+-    int offset = FixedArray::kLengthOffset - kHeapObjectTag;
+-    LoadSmiAsInt32(dst, array, offset);
+-  }
+-  void LoadSmiAsInt32(LiftoffRegister dst, Register src_addr, int32_t offset) {
+-    if (SmiValuesAre32Bits()) {
+-#if V8_TARGET_LITTLE_ENDIAN
+-      DCHECK_EQ(kSmiShiftSize + kSmiTagSize, 4 * kBitsPerByte);
+-      offset += 4;
+-#endif
+-      Load(dst, src_addr, no_reg, offset, LoadType::kI32Load);
+-    } else {
+-      DCHECK(SmiValuesAre31Bits());
+-      Load(dst, src_addr, no_reg, offset, LoadType::kI32Load);
+-      emit_i32_sari(dst.gp(), dst.gp(), kSmiTagSize);
+-    }
+-  }
+   // Warning: may clobber {dst} on some architectures!
+   inline void IncrementSmi(LiftoffRegister dst, int offset);
+   inline void Load(LiftoffRegister dst, Register src_addr, Register offset_reg,
+@@ -997,54 +932,13 @@ class LiftoffAssembler : public MacroAssembler {
+ 
+   inline void emit_u32_to_uintptr(Register dst, Register src);
+ 
+-  void emit_ptrsize_add(Register dst, Register lhs, Register rhs) {
+-    if (kSystemPointerSize == 8) {
+-      emit_i64_add(LiftoffRegister(dst), LiftoffRegister(lhs),
+-                   LiftoffRegister(rhs));
+-    } else {
+-      emit_i32_add(dst, lhs, rhs);
+-    }
+-  }
+-  void emit_ptrsize_sub(Register dst, Register lhs, Register rhs) {
+-    if (kSystemPointerSize == 8) {
+-      emit_i64_sub(LiftoffRegister(dst), LiftoffRegister(lhs),
+-                   LiftoffRegister(rhs));
+-    } else {
+-      emit_i32_sub(dst, lhs, rhs);
+-    }
+-  }
+-  void emit_ptrsize_and(Register dst, Register lhs, Register rhs) {
+-    if (kSystemPointerSize == 8) {
+-      emit_i64_and(LiftoffRegister(dst), LiftoffRegister(lhs),
+-                   LiftoffRegister(rhs));
+-    } else {
+-      emit_i32_and(dst, lhs, rhs);
+-    }
+-  }
+-  void emit_ptrsize_shri(Register dst, Register src, int amount) {
+-    if (kSystemPointerSize == 8) {
+-      emit_i64_shri(LiftoffRegister(dst), LiftoffRegister(src), amount);
+-    } else {
+-      emit_i32_shri(dst, src, amount);
+-    }
+-  }
+-
+-  void emit_ptrsize_addi(Register dst, Register lhs, intptr_t imm) {
+-    if (kSystemPointerSize == 8) {
+-      emit_i64_addi(LiftoffRegister(dst), LiftoffRegister(lhs), imm);
+-    } else {
+-      emit_i32_addi(dst, lhs, static_cast<int32_t>(imm));
+-    }
+-  }
+-
+-  void emit_ptrsize_set_cond(Condition condition, Register dst,
+-                             LiftoffRegister lhs, LiftoffRegister rhs) {
+-    if (kSystemPointerSize == 8) {
+-      emit_i64_set_cond(condition, dst, lhs, rhs);
+-    } else {
+-      emit_i32_set_cond(condition, dst, lhs.gp(), rhs.gp());
+-    }
+-  }
++  inline void emit_ptrsize_add(Register dst, Register lhs, Register rhs);
++  inline void emit_ptrsize_sub(Register dst, Register lhs, Register rhs);
++  inline void emit_ptrsize_and(Register dst, Register lhs, Register rhs);
++  inline void emit_ptrsize_shri(Register dst, Register src, int amount);
++  inline void emit_ptrsize_addi(Register dst, Register lhs, intptr_t imm);
++  inline void emit_ptrsize_set_cond(Condition condition, Register dst,
++                                    LiftoffRegister lhs, LiftoffRegister rhs);
+ 
+   // f32 binops.
+   inline void emit_f32_add(DoubleRegister dst, DoubleRegister lhs,
+@@ -1671,13 +1565,7 @@ class LiftoffAssembler : public MacroAssembler {
+   LiftoffBailoutReason bailout_reason() const { return bailout_reason_; }
+   const char* bailout_detail() const { return bailout_detail_; }
+ 
+-  void bailout(LiftoffBailoutReason reason, const char* detail) {
+-    DCHECK_NE(kSuccess, reason);
+-    if (bailout_reason_ != kSuccess) return;
+-    AbortCompilation();
+-    bailout_reason_ = reason;
+-    bailout_detail_ = detail;
+-  }
++  inline void bailout(LiftoffBailoutReason reason, const char* detail);
+ 
+  private:
+   LiftoffRegister LoadI64HalfIntoRegister(VarState slot, RegPairHalf half);
+@@ -1715,112 +1603,6 @@ inline FreezeCacheState::FreezeCacheState(LiftoffAssembler& assm)
+ inline FreezeCacheState::~FreezeCacheState() { assm_.UnfreezeCacheState(); }
+ #endif
+ 
+-// =======================================================================
+-// Partially platform-independent implementations of the platform-dependent
+-// part.
+-
+-#ifdef V8_TARGET_ARCH_32_BIT
+-
+-namespace liftoff {
+-template <void (LiftoffAssembler::*op)(Register, Register, Register)>
+-void EmitI64IndependentHalfOperation(LiftoffAssembler* assm,
+-                                     LiftoffRegister dst, LiftoffRegister lhs,
+-                                     LiftoffRegister rhs) {
+-  // If {dst.low_gp()} does not overlap with {lhs.high_gp()} or {rhs.high_gp()},
+-  // just first compute the lower half, then the upper half.
+-  if (dst.low() != lhs.high() && dst.low() != rhs.high()) {
+-    (assm->*op)(dst.low_gp(), lhs.low_gp(), rhs.low_gp());
+-    (assm->*op)(dst.high_gp(), lhs.high_gp(), rhs.high_gp());
+-    return;
+-  }
+-  // If {dst.high_gp()} does not overlap with {lhs.low_gp()} or {rhs.low_gp()},
+-  // we can compute this the other way around.
+-  if (dst.high() != lhs.low() && dst.high() != rhs.low()) {
+-    (assm->*op)(dst.high_gp(), lhs.high_gp(), rhs.high_gp());
+-    (assm->*op)(dst.low_gp(), lhs.low_gp(), rhs.low_gp());
+-    return;
+-  }
+-  // Otherwise, we need a temporary register.
+-  Register tmp = assm->GetUnusedRegister(kGpReg, LiftoffRegList{lhs, rhs}).gp();
+-  (assm->*op)(tmp, lhs.low_gp(), rhs.low_gp());
+-  (assm->*op)(dst.high_gp(), lhs.high_gp(), rhs.high_gp());
+-  assm->Move(dst.low_gp(), tmp, kI32);
+-}
+-
+-template <void (LiftoffAssembler::*op)(Register, Register, int32_t)>
+-void EmitI64IndependentHalfOperationImm(LiftoffAssembler* assm,
+-                                        LiftoffRegister dst,
+-                                        LiftoffRegister lhs, int64_t imm) {
+-  int32_t low_word = static_cast<int32_t>(imm);
+-  int32_t high_word = static_cast<int32_t>(imm >> 32);
+-  // If {dst.low_gp()} does not overlap with {lhs.high_gp()},
+-  // just first compute the lower half, then the upper half.
+-  if (dst.low() != lhs.high()) {
+-    (assm->*op)(dst.low_gp(), lhs.low_gp(), low_word);
+-    (assm->*op)(dst.high_gp(), lhs.high_gp(), high_word);
+-    return;
+-  }
+-  // If {dst.high_gp()} does not overlap with {lhs.low_gp()},
+-  // we can compute this the other way around.
+-  if (dst.high() != lhs.low()) {
+-    (assm->*op)(dst.high_gp(), lhs.high_gp(), high_word);
+-    (assm->*op)(dst.low_gp(), lhs.low_gp(), low_word);
+-    return;
+-  }
+-  // Otherwise, we need a temporary register.
+-  Register tmp = assm->GetUnusedRegister(kGpReg, LiftoffRegList{lhs}).gp();
+-  (assm->*op)(tmp, lhs.low_gp(), low_word);
+-  (assm->*op)(dst.high_gp(), lhs.high_gp(), high_word);
+-  assm->Move(dst.low_gp(), tmp, kI32);
+-}
+-}  // namespace liftoff
+-
+-void LiftoffAssembler::emit_i64_and(LiftoffRegister dst, LiftoffRegister lhs,
+-                                    LiftoffRegister rhs) {
+-  liftoff::EmitI64IndependentHalfOperation<&LiftoffAssembler::emit_i32_and>(
+-      this, dst, lhs, rhs);
+-}
+-
+-void LiftoffAssembler::emit_i64_andi(LiftoffRegister dst, LiftoffRegister lhs,
+-                                     int32_t imm) {
+-  liftoff::EmitI64IndependentHalfOperationImm<&LiftoffAssembler::emit_i32_andi>(
+-      this, dst, lhs, imm);
+-}
+-
+-void LiftoffAssembler::emit_i64_or(LiftoffRegister dst, LiftoffRegister lhs,
+-                                   LiftoffRegister rhs) {
+-  liftoff::EmitI64IndependentHalfOperation<&LiftoffAssembler::emit_i32_or>(
+-      this, dst, lhs, rhs);
+-}
+-
+-void LiftoffAssembler::emit_i64_ori(LiftoffRegister dst, LiftoffRegister lhs,
+-                                    int32_t imm) {
+-  liftoff::EmitI64IndependentHalfOperationImm<&LiftoffAssembler::emit_i32_ori>(
+-      this, dst, lhs, imm);
+-}
+-
+-void LiftoffAssembler::emit_i64_xor(LiftoffRegister dst, LiftoffRegister lhs,
+-                                    LiftoffRegister rhs) {
+-  liftoff::EmitI64IndependentHalfOperation<&LiftoffAssembler::emit_i32_xor>(
+-      this, dst, lhs, rhs);
+-}
+-
+-void LiftoffAssembler::emit_i64_xori(LiftoffRegister dst, LiftoffRegister lhs,
+-                                     int32_t imm) {
+-  liftoff::EmitI64IndependentHalfOperationImm<&LiftoffAssembler::emit_i32_xori>(
+-      this, dst, lhs, imm);
+-}
+-
+-void LiftoffAssembler::emit_u32_to_uintptr(Register dst, Register src) {
+-  // This is a no-op on 32-bit systems.
+-}
+-
+-#endif  // V8_TARGET_ARCH_32_BIT
+-
+-// End of the partially platform-independent implementations of the
+-// platform-dependent part.
+-// =======================================================================
+-
+ class LiftoffStackSlots {
+  public:
+   explicit LiftoffStackSlots(LiftoffAssembler* wasm_asm) : asm_(wasm_asm) {}
+@@ -1880,33 +1662,6 @@ class LiftoffStackSlots {
+ bool CompatibleStackSlotTypes(ValueKind a, ValueKind b);
+ #endif
+ 
+-}  // namespace wasm
+-}  // namespace internal
+-}  // namespace v8
+-
+-// Include platform specific implementation.
+-#if V8_TARGET_ARCH_IA32
+-#include "src/wasm/baseline/ia32/liftoff-assembler-ia32.h"
+-#elif V8_TARGET_ARCH_X64
+-#include "src/wasm/baseline/x64/liftoff-assembler-x64.h"
+-#elif V8_TARGET_ARCH_ARM64
+-#include "src/wasm/baseline/arm64/liftoff-assembler-arm64.h"
+-#elif V8_TARGET_ARCH_ARM
+-#include "src/wasm/baseline/arm/liftoff-assembler-arm.h"
+-#elif V8_TARGET_ARCH_PPC || V8_TARGET_ARCH_PPC64
+-#include "src/wasm/baseline/ppc/liftoff-assembler-ppc.h"
+-#elif V8_TARGET_ARCH_MIPS64
+-#include "src/wasm/baseline/mips64/liftoff-assembler-mips64.h"
+-#elif V8_TARGET_ARCH_LOONG64
+-#include "src/wasm/baseline/loong64/liftoff-assembler-loong64.h"
+-#elif V8_TARGET_ARCH_S390
+-#include "src/wasm/baseline/s390/liftoff-assembler-s390.h"
+-#elif V8_TARGET_ARCH_RISCV64
+-#include "src/wasm/baseline/riscv/liftoff-assembler-riscv64.h"
+-#elif V8_TARGET_ARCH_RISCV32
+-#include "src/wasm/baseline/riscv/liftoff-assembler-riscv32.h"
+-#else
+-#error Unsupported architecture.
+-#endif
++}  // namespace v8::internal::wasm
+ 
+ #endif  // V8_WASM_BASELINE_LIFTOFF_ASSEMBLER_H_
+diff --git a/src/wasm/baseline/liftoff-compiler.cc b/src/wasm/baseline/liftoff-compiler.cc
+index ac08c36f93e..8f75bf975b1 100644
+--- a/src/wasm/baseline/liftoff-compiler.cc
++++ b/src/wasm/baseline/liftoff-compiler.cc
+@@ -21,7 +21,7 @@
+ #include "src/tracing/trace-event.h"
+ #include "src/utils/ostreams.h"
+ #include "src/utils/utils.h"
+-#include "src/wasm/baseline/liftoff-assembler.h"
++#include "src/wasm/baseline/liftoff-assembler-inl.h"
+ #include "src/wasm/baseline/liftoff-register.h"
+ #include "src/wasm/function-body-decoder-impl.h"
+ #include "src/wasm/function-compiler.h"
+diff --git a/src/wasm/baseline/loong64/liftoff-assembler-loong64.h b/src/wasm/baseline/loong64/liftoff-assembler-loong64-inl.h
+similarity index 99%
+rename from src/wasm/baseline/loong64/liftoff-assembler-loong64.h
+rename to src/wasm/baseline/loong64/liftoff-assembler-loong64-inl.h
+index d94a60f7abe..e4b4a407131 100644
+--- a/src/wasm/baseline/loong64/liftoff-assembler-loong64.h
++++ b/src/wasm/baseline/loong64/liftoff-assembler-loong64-inl.h
+@@ -2,8 +2,8 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
+-#ifndef V8_WASM_BASELINE_LOONG64_LIFTOFF_ASSEMBLER_LOONG64_H_
+-#define V8_WASM_BASELINE_LOONG64_LIFTOFF_ASSEMBLER_LOONG64_H_
++#ifndef V8_WASM_BASELINE_LOONG64_LIFTOFF_ASSEMBLER_LOONG64_INL_H_
++#define V8_WASM_BASELINE_LOONG64_LIFTOFF_ASSEMBLER_LOONG64_INL_H_
+ 
+ #include "src/codegen/machine-type.h"
+ #include "src/heap/memory-chunk.h"
+@@ -11,9 +11,7 @@
+ #include "src/wasm/object-access.h"
+ #include "src/wasm/wasm-objects.h"
+ 
+-namespace v8 {
+-namespace internal {
+-namespace wasm {
++namespace v8::internal::wasm {
+ 
+ namespace liftoff {
+ 
+@@ -3322,8 +3320,6 @@ void LiftoffStackSlots::Construct(int param_slots) {
+   }
+ }
+ 
+-}  // namespace wasm
+-}  // namespace internal
+-}  // namespace v8
++}  // namespace v8::internal::wasm
+ 
+-#endif  // V8_WASM_BASELINE_LOONG64_LIFTOFF_ASSEMBLER_LOONG64_H_
++#endif  // V8_WASM_BASELINE_LOONG64_LIFTOFF_ASSEMBLER_LOONG64_INL_H_
+diff --git a/src/wasm/baseline/mips64/liftoff-assembler-mips64.h b/src/wasm/baseline/mips64/liftoff-assembler-mips64-inl.h
+similarity index 99%
+rename from src/wasm/baseline/mips64/liftoff-assembler-mips64.h
+rename to src/wasm/baseline/mips64/liftoff-assembler-mips64-inl.h
+index aebd90debf3..9df43c84b67 100644
+--- a/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
++++ b/src/wasm/baseline/mips64/liftoff-assembler-mips64-inl.h
+@@ -2,8 +2,8 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
+-#ifndef V8_WASM_BASELINE_MIPS64_LIFTOFF_ASSEMBLER_MIPS64_H_
+-#define V8_WASM_BASELINE_MIPS64_LIFTOFF_ASSEMBLER_MIPS64_H_
++#ifndef V8_WASM_BASELINE_MIPS64_LIFTOFF_ASSEMBLER_MIPS64_INL_H_
++#define V8_WASM_BASELINE_MIPS64_LIFTOFF_ASSEMBLER_MIPS64_INL_H_
+ 
+ #include "src/codegen/machine-type.h"
+ #include "src/heap/memory-chunk.h"
+@@ -11,9 +11,7 @@
+ #include "src/wasm/object-access.h"
+ #include "src/wasm/wasm-objects.h"
+ 
+-namespace v8 {
+-namespace internal {
+-namespace wasm {
++namespace v8::internal::wasm {
+ 
+ namespace liftoff {
+ 
+@@ -2045,8 +2043,7 @@ void LiftoffAssembler::LoadTransform(LiftoffRegister dst, Register src_addr,
+                                      uint32_t* protected_load_pc) {
+   UseScratchRegisterScope temps(this);
+   Register scratch = temps.Acquire();
+-  MemOperand src_op =
+-      liftoff::GetMemOp(this, src_addr, offset_reg, offset_imm);
++  MemOperand src_op = liftoff::GetMemOp(this, src_addr, offset_reg, offset_imm);
+   MSARegister dst_msa = dst.fp().toW();
+   *protected_load_pc = pc_offset();
+   MachineType memtype = type.mem_type();
+@@ -3861,8 +3858,6 @@ void LiftoffStackSlots::Construct(int param_slots) {
+   }
+ }
+ 
+-}  // namespace wasm
+-}  // namespace internal
+-}  // namespace v8
++}  // namespace v8::internal::wasm
+ 
+-#endif  // V8_WASM_BASELINE_MIPS64_LIFTOFF_ASSEMBLER_MIPS64_H_
++#endif  // V8_WASM_BASELINE_MIPS64_LIFTOFF_ASSEMBLER_MIPS64_INL_H_
+diff --git a/src/wasm/baseline/parallel-move-inl.h b/src/wasm/baseline/parallel-move-inl.h
+new file mode 100644
+index 00000000000..4560d1df92d
+--- /dev/null
++++ b/src/wasm/baseline/parallel-move-inl.h
+@@ -0,0 +1,18 @@
++// Copyright 2023 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef V8_WASM_BASELINE_PARALLEL_MOVE_INL_H_
++#define V8_WASM_BASELINE_PARALLEL_MOVE_INL_H_
++
++#include "src/wasm/baseline/liftoff-assembler-inl.h"
++#include "src/wasm/baseline/parallel-move.h"
++
++namespace v8::internal::wasm {
++
++ParallelMove::ParallelMove(LiftoffAssembler* wasm_asm)
++    : asm_(wasm_asm), last_spill_offset_(asm_->TopSpillOffset()) {}
++
++}  // namespace v8::internal::wasm
++
++#endif  // V8_WASM_BASELINE_PARALLEL_MOVE_INL_H_
+diff --git a/src/wasm/baseline/parallel-move.cc b/src/wasm/baseline/parallel-move.cc
+new file mode 100644
+index 00000000000..d7abf24e0ef
+--- /dev/null
++++ b/src/wasm/baseline/parallel-move.cc
+@@ -0,0 +1,85 @@
++// Copyright 2023 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "src/wasm/baseline/parallel-move.h"
++
++#include "src/wasm/baseline/liftoff-assembler-inl.h"
++
++namespace v8::internal::wasm {
++
++void ParallelMove::TransferToStack(int dst_offset, const VarState& src) {
++  switch (src.loc()) {
++    case VarState::kStack:
++      if (src.offset() != dst_offset) {
++        asm_->MoveStackValue(dst_offset, src.offset(), src.kind());
++      }
++      break;
++    case VarState::kRegister:
++      asm_->Spill(dst_offset, src.reg(), src.kind());
++      break;
++    case VarState::kIntConst:
++      asm_->Spill(dst_offset, src.constant());
++      break;
++  }
++}
++
++void ParallelMove::ExecuteMoves() {
++  // Execute all moves whose {dst} is not being used as src in another move.
++  // If any src count drops to zero, also (transitively) execute the
++  // corresponding move to that register.
++  for (LiftoffRegister dst : move_dst_regs_) {
++    // Check if already handled via transitivity in {ClearExecutedMove}.
++    if (!move_dst_regs_.has(dst)) continue;
++    if (*src_reg_use_count(dst)) continue;
++    ExecuteMove(dst);
++  }
++
++  // All remaining moves are parts of a cycle. Just spill the first one, then
++  // process all remaining moves in that cycle. Repeat for all cycles.
++  while (!move_dst_regs_.is_empty()) {
++    // TODO(clemensb): Use an unused register if available.
++    LiftoffRegister dst = move_dst_regs_.GetFirstRegSet();
++    RegisterMove* move = register_move(dst);
++    last_spill_offset_ += LiftoffAssembler::SlotSizeForType(move->kind);
++    LiftoffRegister spill_reg = move->src;
++    asm_->Spill(last_spill_offset_, spill_reg, move->kind);
++    // Remember to reload into the destination register later.
++    LoadStackSlot(dst, last_spill_offset_, move->kind);
++    ClearExecutedMove(dst);
++  }
++}
++
++void ParallelMove::ExecuteLoads() {
++  for (LiftoffRegister dst : load_dst_regs_) {
++    RegisterLoad* load = register_load(dst);
++    switch (load->load_kind) {
++      case RegisterLoad::kNop:
++        break;
++      case RegisterLoad::kConstant:
++        asm_->LoadConstant(dst, load->kind == kI64
++                                    ? WasmValue(int64_t{load->value})
++                                    : WasmValue(int32_t{load->value}));
++        break;
++      case RegisterLoad::kStack:
++        if (kNeedS128RegPair && load->kind == kS128) {
++          asm_->Fill(LiftoffRegister::ForFpPair(dst.fp()), load->value,
++                     load->kind);
++        } else {
++          asm_->Fill(dst, load->value, load->kind);
++        }
++        break;
++      case RegisterLoad::kLowHalfStack:
++        // Half of a register pair, {dst} must be a gp register.
++        asm_->FillI64Half(dst.gp(), load->value, kLowWord);
++        break;
++      case RegisterLoad::kHighHalfStack:
++        // Half of a register pair, {dst} must be a gp register.
++        asm_->FillI64Half(dst.gp(), load->value, kHighWord);
++        break;
++    }
++  }
++  load_dst_regs_ = {};
++}
++
++}  // namespace v8::internal::wasm
+diff --git a/src/wasm/baseline/parallel-move.h b/src/wasm/baseline/parallel-move.h
+new file mode 100644
+index 00000000000..a8b560fe1f8
+--- /dev/null
++++ b/src/wasm/baseline/parallel-move.h
+@@ -0,0 +1,305 @@
++// Copyright 2023 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef V8_WASM_BASELINE_PARALLEL_MOVE_H_
++#define V8_WASM_BASELINE_PARALLEL_MOVE_H_
++
++#include "src/wasm/baseline/liftoff-assembler.h"
++#include "src/wasm/baseline/liftoff-register.h"
++#include "src/wasm/wasm-value.h"
++
++namespace v8::internal::wasm {
++
++// ParallelMove is a utility class that encodes multiple moves from registers to
++// registers (`RegisterMove`), constants to registers (`RegisterLoad` with
++// `LoadKind::kConstant`), or stack slots to registers (other
++// `RegisterLoad`s).
++// It can handle cyclic moves, e.g., swaps between registers.
++// The moves are typically prepared/encoded into an instance via the high-level
++// entry point `Transfer`, which takes two Wasm value stack configurations
++// (`VarState`) as input.
++// Code is actually emitted to the underlying `LiftoffAssembler` only at the
++// end via `Execute` or implicitly in the destructor.
++class ParallelMove {
++  using VarState = LiftoffAssembler::VarState;
++
++  struct RegisterMove {
++    LiftoffRegister src;
++    ValueKind kind;
++    constexpr RegisterMove(LiftoffRegister src, ValueKind kind)
++        : src(src), kind(kind) {}
++  };
++
++  struct RegisterLoad {
++    enum LoadKind : uint8_t {
++      kNop,           // no-op, used for high fp of a fp pair.
++      kConstant,      // load a constant value into a register.
++      kStack,         // fill a register from a stack slot.
++      kLowHalfStack,  // fill a register from the low half of a stack slot.
++      kHighHalfStack  // fill a register from the high half of a stack slot.
++    };
++
++    LoadKind load_kind;
++    ValueKind kind;
++    int32_t value;  // i32 constant value or stack offset, depending on kind.
++
++    // Named constructors.
++    static RegisterLoad Const(WasmValue constant) {
++      if (constant.type().kind() == kI32) {
++        return {kConstant, kI32, constant.to_i32()};
++      }
++      DCHECK_EQ(kI64, constant.type().kind());
++      // We will only encounter 32-bit constants here (even for i64 values)
++      // since `LiftoffAssembler::VarState` can only store 32-bit constants.
++      int32_t i32_const = static_cast<int32_t>(constant.to_i64());
++      DCHECK_EQ(constant.to_i64(), i32_const);
++      return {kConstant, kI64, i32_const};
++    }
++    static RegisterLoad Stack(int32_t offset, ValueKind kind) {
++      return {kStack, kind, offset};
++    }
++    static RegisterLoad HalfStack(int32_t offset, RegPairHalf half) {
++      return {half == kLowWord ? kLowHalfStack : kHighHalfStack, kI32, offset};
++    }
++    static RegisterLoad Nop() {
++      // ValueKind does not matter.
++      return {kNop, kI32, 0};
++    }
++
++   private:
++    RegisterLoad(LoadKind load_kind, ValueKind kind, int32_t value)
++        : load_kind(load_kind), kind(kind), value(value) {}
++  };
++
++ public:
++  explicit inline ParallelMove(LiftoffAssembler* wasm_asm);
++  ParallelMove(const ParallelMove&) = delete;
++  ParallelMove& operator=(const ParallelMove&) = delete;
++  V8_INLINE ~ParallelMove() { Execute(); }
++
++  V8_INLINE void Execute() {
++    // First, execute register moves. Then load constants and stack values into
++    // registers.
++    if (!move_dst_regs_.is_empty()) ExecuteMoves();
++    DCHECK(move_dst_regs_.is_empty());
++    if (!load_dst_regs_.is_empty()) ExecuteLoads();
++    DCHECK(load_dst_regs_.is_empty());
++    // Tell the compiler that the ParallelMove is empty after this, so it
++    // can eliminate a second {Execute} in the destructor.
++    bool all_done = move_dst_regs_.is_empty() && load_dst_regs_.is_empty();
++    V8_ASSUME(all_done);
++  }
++
++  V8_INLINE void Transfer(const VarState& dst, const VarState& src) {
++    DCHECK(CompatibleStackSlotTypes(dst.kind(), src.kind()));
++    if (dst.is_stack()) {
++      if (V8_UNLIKELY(!(src.is_stack() && src.offset() == dst.offset()))) {
++        TransferToStack(dst.offset(), src);
++      }
++    } else if (dst.is_reg()) {
++      LoadIntoRegister(dst.reg(), src);
++    } else {
++      DCHECK(dst.is_const());
++      DCHECK_EQ(dst.i32_const(), src.i32_const());
++    }
++  }
++
++  void TransferToStack(int dst_offset, const VarState& src);
++
++  V8_INLINE void LoadIntoRegister(LiftoffRegister dst, const VarState& src) {
++    if (src.is_reg()) {
++      DCHECK_EQ(dst.reg_class(), src.reg_class());
++      if (dst != src.reg()) MoveRegister(dst, src.reg(), src.kind());
++    } else if (src.is_stack()) {
++      LoadStackSlot(dst, src.offset(), src.kind());
++    } else {
++      DCHECK(src.is_const());
++      LoadConstant(dst, src.constant());
++    }
++  }
++
++  void LoadI64HalfIntoRegister(LiftoffRegister dst, const VarState& src,
++                               RegPairHalf half) {
++    // Use CHECK such that the remaining code is statically dead if
++    // {kNeedI64RegPair} is false.
++    CHECK(kNeedI64RegPair);
++    DCHECK_EQ(kI64, src.kind());
++    switch (src.loc()) {
++      case VarState::kStack:
++        LoadI64HalfStackSlot(dst, src.offset(), half);
++        break;
++      case VarState::kRegister: {
++        LiftoffRegister src_half =
++            half == kLowWord ? src.reg().low() : src.reg().high();
++        if (dst != src_half) MoveRegister(dst, src_half, kI32);
++        break;
++      }
++      case VarState::kIntConst:
++        int32_t value = src.i32_const();
++        // The high word is the sign extension of the low word.
++        if (half == kHighWord) value = value >> 31;
++        LoadConstant(dst, WasmValue(value));
++        break;
++    }
++  }
++
++  void MoveRegister(LiftoffRegister dst, LiftoffRegister src, ValueKind kind) {
++    DCHECK_NE(dst, src);
++    DCHECK_EQ(dst.reg_class(), src.reg_class());
++    DCHECK_EQ(reg_class_for(kind), src.reg_class());
++    if (src.is_gp_pair()) {
++      DCHECK_EQ(kI64, kind);
++      if (dst.low() != src.low()) MoveRegister(dst.low(), src.low(), kI32);
++      if (dst.high() != src.high()) MoveRegister(dst.high(), src.high(), kI32);
++      return;
++    }
++    if (src.is_fp_pair()) {
++      DCHECK_EQ(kS128, kind);
++      if (dst.low() != src.low()) {
++        MoveRegister(dst.low(), src.low(), kF64);
++        MoveRegister(dst.high(), src.high(), kF64);
++      }
++      return;
++    }
++    if (move_dst_regs_.has(dst)) {
++      DCHECK_EQ(register_move(dst)->src, src);
++      // Check for compatible value kinds.
++      // - references can occur with mixed kRef / kRefNull kinds.
++      // - FP registers can only occur with mixed f32 / f64 kinds (if they hold
++      //   the initial zero value).
++      // - others must match exactly.
++      DCHECK_EQ(is_object_reference(register_move(dst)->kind),
++                is_object_reference(kind));
++      DCHECK_EQ(dst.is_fp(), register_move(dst)->kind == kF32 ||
++                                 register_move(dst)->kind == kF64);
++      if (!is_object_reference(kind) && !dst.is_fp()) {
++        DCHECK_EQ(register_move(dst)->kind, kind);
++      }
++      // Potentially upgrade an existing `kF32` move to a `kF64` move.
++      if (kind == kF64) register_move(dst)->kind = kF64;
++      return;
++    }
++    move_dst_regs_.set(dst);
++    ++*src_reg_use_count(src);
++    *register_move(dst) = {src, kind};
++  }
++
++  void LoadConstant(LiftoffRegister dst, WasmValue value) {
++    DCHECK(!load_dst_regs_.has(dst));
++    load_dst_regs_.set(dst);
++    if (dst.is_gp_pair()) {
++      DCHECK_EQ(kI64, value.type().kind());
++      int64_t i64 = value.to_i64();
++      *register_load(dst.low()) =
++          RegisterLoad::Const(WasmValue(static_cast<int32_t>(i64)));
++      *register_load(dst.high()) =
++          RegisterLoad::Const(WasmValue(static_cast<int32_t>(i64 >> 32)));
++    } else {
++      *register_load(dst) = RegisterLoad::Const(value);
++    }
++  }
++
++  void LoadStackSlot(LiftoffRegister dst, int stack_offset, ValueKind kind) {
++    V8_ASSUME(stack_offset > 0);
++    if (load_dst_regs_.has(dst)) {
++      // It can happen that we spilled the same register to different stack
++      // slots, and then we reload them later into the same dst register.
++      // In that case, it is enough to load one of the stack slots.
++      return;
++    }
++    load_dst_regs_.set(dst);
++    // Make sure that we only spill to positions after this stack offset to
++    // avoid overwriting the content.
++    if (stack_offset > last_spill_offset_) {
++      last_spill_offset_ = stack_offset;
++    }
++    if (dst.is_gp_pair()) {
++      DCHECK_EQ(kI64, kind);
++      *register_load(dst.low()) =
++          RegisterLoad::HalfStack(stack_offset, kLowWord);
++      *register_load(dst.high()) =
++          RegisterLoad::HalfStack(stack_offset, kHighWord);
++    } else if (dst.is_fp_pair()) {
++      DCHECK_EQ(kS128, kind);
++      // Only need register_load for low_gp since we load 128 bits at one go.
++      // Both low and high need to be set in load_dst_regs_ but when iterating
++      // over it, both low and high will be cleared, so we won't load twice.
++      *register_load(dst.low()) = RegisterLoad::Stack(stack_offset, kind);
++      *register_load(dst.high()) = RegisterLoad::Nop();
++    } else {
++      *register_load(dst) = RegisterLoad::Stack(stack_offset, kind);
++    }
++  }
++
++  void LoadI64HalfStackSlot(LiftoffRegister dst, int offset, RegPairHalf half) {
++    if (load_dst_regs_.has(dst)) {
++      // It can happen that we spilled the same register to different stack
++      // slots, and then we reload them later into the same dst register.
++      // In that case, it is enough to load one of the stack slots.
++      return;
++    }
++    load_dst_regs_.set(dst);
++    *register_load(dst) = RegisterLoad::HalfStack(offset, half);
++  }
++
++ private:
++  using MovesStorage =
++      std::aligned_storage<kAfterMaxLiftoffRegCode * sizeof(RegisterMove),
++                           alignof(RegisterMove)>::type;
++  using LoadsStorage =
++      std::aligned_storage<kAfterMaxLiftoffRegCode * sizeof(RegisterLoad),
++                           alignof(RegisterLoad)>::type;
++
++  ASSERT_TRIVIALLY_COPYABLE(RegisterMove);
++  ASSERT_TRIVIALLY_COPYABLE(RegisterLoad);
++
++  MovesStorage register_moves_;  // uninitialized
++  LoadsStorage register_loads_;  // uninitialized
++  int src_reg_use_count_[kAfterMaxLiftoffRegCode] = {0};
++  LiftoffRegList move_dst_regs_;
++  LiftoffRegList load_dst_regs_;
++  LiftoffAssembler* const asm_;
++  // Cache the last spill offset in case we need to spill for resolving move
++  // cycles.
++  int last_spill_offset_;
++
++  RegisterMove* register_move(LiftoffRegister reg) {
++    return reinterpret_cast<RegisterMove*>(&register_moves_) +
++           reg.liftoff_code();
++  }
++  RegisterLoad* register_load(LiftoffRegister reg) {
++    return reinterpret_cast<RegisterLoad*>(&register_loads_) +
++           reg.liftoff_code();
++  }
++  int* src_reg_use_count(LiftoffRegister reg) {
++    return src_reg_use_count_ + reg.liftoff_code();
++  }
++
++  void ExecuteMove(LiftoffRegister dst) {
++    RegisterMove* move = register_move(dst);
++    DCHECK_EQ(0, *src_reg_use_count(dst));
++    asm_->Move(dst, move->src, move->kind);
++    ClearExecutedMove(dst);
++  }
++
++  void ClearExecutedMove(LiftoffRegister dst) {
++    DCHECK(move_dst_regs_.has(dst));
++    move_dst_regs_.clear(dst);
++    RegisterMove* move = register_move(dst);
++    DCHECK_LT(0, *src_reg_use_count(move->src));
++    if (--*src_reg_use_count(move->src)) return;
++    // src count dropped to zero. If this is a destination register, execute
++    // that move now.
++    if (!move_dst_regs_.has(move->src)) return;
++    ExecuteMove(move->src);
++  }
++
++  V8_NOINLINE V8_PRESERVE_MOST void ExecuteMoves();
++
++  V8_NOINLINE V8_PRESERVE_MOST void ExecuteLoads();
++};
++
++}  // namespace v8::internal::wasm
++
++#endif  // V8_WASM_BASELINE_PARALLEL_MOVE_H_
+diff --git a/src/wasm/baseline/ppc/liftoff-assembler-ppc.h b/src/wasm/baseline/ppc/liftoff-assembler-ppc-inl.h
+similarity index 99%
+rename from src/wasm/baseline/ppc/liftoff-assembler-ppc.h
+rename to src/wasm/baseline/ppc/liftoff-assembler-ppc-inl.h
+index fc7e1076637..113cb99443f 100644
+--- a/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
++++ b/src/wasm/baseline/ppc/liftoff-assembler-ppc-inl.h
+@@ -2,8 +2,8 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
+-#ifndef V8_WASM_BASELINE_PPC_LIFTOFF_ASSEMBLER_PPC_H_
+-#define V8_WASM_BASELINE_PPC_LIFTOFF_ASSEMBLER_PPC_H_
++#ifndef V8_WASM_BASELINE_PPC_LIFTOFF_ASSEMBLER_PPC_INL_H_
++#define V8_WASM_BASELINE_PPC_LIFTOFF_ASSEMBLER_PPC_INL_H_
+ 
+ #include "src/base/v8-fallthrough.h"
+ #include "src/codegen/assembler.h"
+@@ -13,9 +13,7 @@
+ #include "src/wasm/simd-shuffle.h"
+ #include "src/wasm/wasm-objects.h"
+ 
+-namespace v8 {
+-namespace internal {
+-namespace wasm {
++namespace v8::internal::wasm {
+ 
+ namespace liftoff {
+ 
+@@ -478,8 +476,7 @@ void LiftoffAssembler::Store(Register dst_addr, Register offset_reg,
+     ZeroExtWord32(ip, offset_reg);
+     offset_reg = ip;
+   }
+-  MemOperand dst_op =
+-      MemOperand(dst_addr, offset_reg, offset_imm);
++  MemOperand dst_op = MemOperand(dst_addr, offset_reg, offset_imm);
+   if (protected_store_pc) *protected_store_pc = pc_offset();
+   switch (type.value()) {
+     case StoreType::kI32Store8:
+@@ -2842,10 +2839,8 @@ void LiftoffStackSlots::Construct(int param_slots) {
+   }
+ }
+ 
+-}  // namespace wasm
+-}  // namespace internal
+-}  // namespace v8
++}  // namespace v8::internal::wasm
+ 
+ #undef BAILOUT
+ 
+-#endif  // V8_WASM_BASELINE_PPC_LIFTOFF_ASSEMBLER_PPC_H_
++#endif  // V8_WASM_BASELINE_PPC_LIFTOFF_ASSEMBLER_PPC_INL_H_
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv-inl.h
+similarity index 99%
+rename from src/wasm/baseline/riscv/liftoff-assembler-riscv.h
+rename to src/wasm/baseline/riscv/liftoff-assembler-riscv-inl.h
+index 8cf97c40808..068b1b91dd7 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv-inl.h
+@@ -2,17 +2,15 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
+-#ifndef V8_WASM_BASELINE_RISCV_LIFTOFF_ASSEMBLER_RISCV_H_
+-#define V8_WASM_BASELINE_RISCV_LIFTOFF_ASSEMBLER_RISCV_H_
++#ifndef V8_WASM_BASELINE_RISCV_LIFTOFF_ASSEMBLER_RISCV_INL_H_
++#define V8_WASM_BASELINE_RISCV_LIFTOFF_ASSEMBLER_RISCV_INL_H_
+ 
+ #include "src/heap/memory-chunk.h"
+ #include "src/wasm/baseline/liftoff-assembler.h"
+-#include "src/wasm/wasm-objects.h"
+ #include "src/wasm/object-access.h"
++#include "src/wasm/wasm-objects.h"
+ 
+-namespace v8 {
+-namespace internal {
+-namespace wasm {
++namespace v8::internal::wasm {
+ 
+ namespace liftoff {
+ 
+@@ -2365,7 +2363,6 @@ void LiftoffAssembler::CallFrameSetupStub(int declared_function_index) {
+   CallBuiltin(Builtin::kWasmLiftoffFrameSetup);
+ }
+ 
+-}  // namespace wasm
+-}  // namespace internal
+-}  // namespace v8
+-#endif  // V8_WASM_BASELINE_RISCV_LIFTOFF_ASSEMBLER_RISCV_H_
++}  // namespace v8::internal::wasm
++
++#endif  // V8_WASM_BASELINE_RISCV_LIFTOFF_ASSEMBLER_RISCV_INL_H_
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv32-inl.h
+similarity index 99%
+rename from src/wasm/baseline/riscv/liftoff-assembler-riscv32.h
+rename to src/wasm/baseline/riscv/liftoff-assembler-riscv32-inl.h
+index 95f846186b0..113ab39370a 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv32-inl.h
+@@ -2,17 +2,15 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
+-#ifndef V8_WASM_BASELINE_RISCV_LIFTOFF_ASSEMBLER_RISCV32_H_
+-#define V8_WASM_BASELINE_RISCV_LIFTOFF_ASSEMBLER_RISCV32_H_
++#ifndef V8_WASM_BASELINE_RISCV_LIFTOFF_ASSEMBLER_RISCV32_INL_H_
++#define V8_WASM_BASELINE_RISCV_LIFTOFF_ASSEMBLER_RISCV32_INL_H_
+ 
+ #include "src/heap/memory-chunk.h"
+ #include "src/wasm/baseline/liftoff-assembler.h"
+-#include "src/wasm/baseline/riscv/liftoff-assembler-riscv.h"
++#include "src/wasm/baseline/riscv/liftoff-assembler-riscv-inl.h"
+ #include "src/wasm/wasm-objects.h"
+ 
+-namespace v8 {
+-namespace internal {
+-namespace wasm {
++namespace v8::internal::wasm {
+ 
+ namespace liftoff {
+ 
+@@ -2209,8 +2207,6 @@ void LiftoffStackSlots::Construct(int param_slots) {
+   }
+ }
+ 
+-}  // namespace wasm
+-}  // namespace internal
+-}  // namespace v8
++}  // namespace v8::internal::wasm
+ 
+-#endif  // V8_WASM_BASELINE_RISCV_LIFTOFF_ASSEMBLER_RISCV32_H_
++#endif  // V8_WASM_BASELINE_RISCV_LIFTOFF_ASSEMBLER_RISCV32_INL_H_
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv64-inl.h
+similarity index 99%
+rename from src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
+rename to src/wasm/baseline/riscv/liftoff-assembler-riscv64-inl.h
+index 406c0928ffe..235f6b59be2 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv64-inl.h
+@@ -2,17 +2,15 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
+-#ifndef V8_WASM_BASELINE_RISCV_LIFTOFF_ASSEMBLER_RISCV64_H_
+-#define V8_WASM_BASELINE_RISCV_LIFTOFF_ASSEMBLER_RISCV64_H_
++#ifndef V8_WASM_BASELINE_RISCV_LIFTOFF_ASSEMBLER_RISCV64_INL_H_
++#define V8_WASM_BASELINE_RISCV_LIFTOFF_ASSEMBLER_RISCV64_INL_H_
+ 
+ #include "src/heap/memory-chunk.h"
+ #include "src/wasm/baseline/liftoff-assembler.h"
+-#include "src/wasm/baseline/riscv/liftoff-assembler-riscv.h"
++#include "src/wasm/baseline/riscv/liftoff-assembler-riscv-inl.h"
+ #include "src/wasm/wasm-objects.h"
+ 
+-namespace v8 {
+-namespace internal {
+-namespace wasm {
++namespace v8::internal::wasm {
+ 
+ namespace liftoff {
+ 
+@@ -1775,8 +1773,6 @@ void LiftoffStackSlots::Construct(int param_slots) {
+   }
+ }
+ 
+-}  // namespace wasm
+-}  // namespace internal
+-}  // namespace v8
++}  // namespace v8::internal::wasm
+ 
+-#endif  // V8_WASM_BASELINE_RISCV_LIFTOFF_ASSEMBLER_RISCV64_H_
++#endif  // V8_WASM_BASELINE_RISCV_LIFTOFF_ASSEMBLER_RISCV64_INL_H_
+diff --git a/src/wasm/baseline/s390/liftoff-assembler-s390.h b/src/wasm/baseline/s390/liftoff-assembler-s390-inl.h
+similarity index 99%
+rename from src/wasm/baseline/s390/liftoff-assembler-s390.h
+rename to src/wasm/baseline/s390/liftoff-assembler-s390-inl.h
+index 6917ee3ece0..74bed1536b5 100644
+--- a/src/wasm/baseline/s390/liftoff-assembler-s390.h
++++ b/src/wasm/baseline/s390/liftoff-assembler-s390-inl.h
+@@ -2,8 +2,8 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
+-#ifndef V8_WASM_BASELINE_S390_LIFTOFF_ASSEMBLER_S390_H_
+-#define V8_WASM_BASELINE_S390_LIFTOFF_ASSEMBLER_S390_H_
++#ifndef V8_WASM_BASELINE_S390_LIFTOFF_ASSEMBLER_S390_INL_H_
++#define V8_WASM_BASELINE_S390_LIFTOFF_ASSEMBLER_S390_INL_H_
+ 
+ #include "src/base/v8-fallthrough.h"
+ #include "src/codegen/assembler.h"
+@@ -13,9 +13,7 @@
+ #include "src/wasm/simd-shuffle.h"
+ #include "src/wasm/wasm-objects.h"
+ 
+-namespace v8 {
+-namespace internal {
+-namespace wasm {
++namespace v8::internal::wasm {
+ 
+ namespace liftoff {
+ 
+@@ -51,7 +49,6 @@ inline MemOperand GetStackSlot(uint32_t offset) {
+ 
+ inline MemOperand GetInstanceOperand() { return GetStackSlot(kInstanceOffset); }
+ 
+-
+ }  // namespace liftoff
+ 
+ int LiftoffAssembler::PrepareStackFrame() {
+@@ -3274,10 +3271,8 @@ void LiftoffStackSlots::Construct(int param_slots) {
+   }
+ }
+ 
+-}  // namespace wasm
+-}  // namespace internal
+-}  // namespace v8
++}  // namespace v8::internal::wasm
+ 
+ #undef BAILOUT
+ 
+-#endif  // V8_WASM_BASELINE_S390_LIFTOFF_ASSEMBLER_S390_H_
++#endif  // V8_WASM_BASELINE_S390_LIFTOFF_ASSEMBLER_S390_INL_H_
+diff --git a/src/wasm/baseline/x64/liftoff-assembler-x64.h b/src/wasm/baseline/x64/liftoff-assembler-x64-inl.h
+similarity index 99%
+rename from src/wasm/baseline/x64/liftoff-assembler-x64.h
+rename to src/wasm/baseline/x64/liftoff-assembler-x64-inl.h
+index 91bfd45fc98..a86449ca8ce 100644
+--- a/src/wasm/baseline/x64/liftoff-assembler-x64.h
++++ b/src/wasm/baseline/x64/liftoff-assembler-x64-inl.h
+@@ -2,8 +2,8 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
+-#ifndef V8_WASM_BASELINE_X64_LIFTOFF_ASSEMBLER_X64_H_
+-#define V8_WASM_BASELINE_X64_LIFTOFF_ASSEMBLER_X64_H_
++#ifndef V8_WASM_BASELINE_X64_LIFTOFF_ASSEMBLER_X64_INL_H_
++#define V8_WASM_BASELINE_X64_LIFTOFF_ASSEMBLER_X64_INL_H_
+ 
+ #include "src/base/v8-fallthrough.h"
+ #include "src/codegen/assembler.h"
+@@ -14,13 +14,12 @@
+ #include "src/flags/flags.h"
+ #include "src/heap/memory-chunk.h"
+ #include "src/wasm/baseline/liftoff-assembler.h"
++#include "src/wasm/baseline/parallel-move.h"
+ #include "src/wasm/object-access.h"
+ #include "src/wasm/simd-shuffle.h"
+ #include "src/wasm/wasm-objects.h"
+ 
+-namespace v8 {
+-namespace internal {
+-namespace wasm {
++namespace v8::internal::wasm {
+ 
+ #define RETURN_FALSE_IF_MISSING_CPU_FEATURE(name)    \
+   if (!CpuFeatures::IsSupported(name)) return false; \
+@@ -1852,7 +1851,7 @@ template <typename dst_type, typename src_type>
+ inline void ConvertFloatToIntAndBack(LiftoffAssembler* assm, Register dst,
+                                      DoubleRegister src,
+                                      DoubleRegister converted_back) {
+-  if (std::is_same<double, src_type>::value) {  // f64
++  if (std::is_same<double, src_type>::value) {     // f64
+     if (std::is_same<int32_t, dst_type>::value) {  // f64 -> i32
+       __ Cvttsd2si(dst, src);
+       __ Cvtlsi2sd(converted_back, dst);
+@@ -1866,7 +1865,7 @@ inline void ConvertFloatToIntAndBack(LiftoffAssembler* assm, Register dst,
+     } else {
+       UNREACHABLE();
+     }
+-  } else {                                  // f32
++  } else {                                         // f32
+     if (std::is_same<int32_t, dst_type>::value) {  // f32 -> i32
+       __ Cvttss2si(dst, src);
+       __ Cvtlsi2ss(converted_back, dst);
+@@ -4427,8 +4426,6 @@ void LiftoffStackSlots::Construct(int param_slots) {
+ 
+ #undef RETURN_FALSE_IF_MISSING_CPU_FEATURE
+ 
+-}  // namespace wasm
+-}  // namespace internal
+-}  // namespace v8
++}  // namespace v8::internal::wasm
+ 
+-#endif  // V8_WASM_BASELINE_X64_LIFTOFF_ASSEMBLER_X64_H_
++#endif  // V8_WASM_BASELINE_X64_LIFTOFF_ASSEMBLER_X64_INL_H_
+-- 
+2.35.1
+

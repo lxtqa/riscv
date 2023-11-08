@@ -1,0 +1,962 @@
+From 783f5ffdfd1dab204291777a8e27f584add2c181 Mon Sep 17 00:00:00 2001
+From: Mythri A <mythria@chromium.org>
+Date: Mon, 19 Jul 2021 11:18:34 +0100
+Subject: [PATCH] [sparkplug] On deopts, defer decision to execute baseline /
+ bytecode
+
+This is in preparation for baseline code flushing. After a deopt we
+choose to execute baseline or bytecode based on whether
+SharedFunctionInfo has any baseline code. With baseline code flushing,
+it is possible that baseline code is flushed after this point and before
+we start executing the unoptimized code (for ex: materializing objects).
+To handle such situations this CL updates the BaselineEnterAt* builtins
+to check for baseline code and restart either at baseline / bytecode.
+
+Bug: v8:11947
+Change-Id: I2084e38196c882f802d1186ff8c9ab881a35b16b
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3030711
+Commit-Queue: Mythri Alle <mythria@chromium.org>
+Reviewed-by: Patrick Thier <pthier@chromium.org>
+Reviewed-by: Jakob Gruber <jgruber@chromium.org>
+Cr-Commit-Position: refs/heads/master@{#75783}
+---
+ src/builtins/arm/builtins-arm.cc            | 66 ++++++++++++-----
+ src/builtins/arm64/builtins-arm64.cc        | 76 +++++++++++++-------
+ src/builtins/builtins-definitions.h         |  4 +-
+ src/builtins/ia32/builtins-ia32.cc          | 65 ++++++++++++-----
+ src/builtins/mips/builtins-mips.cc          | 65 ++++++++++++-----
+ src/builtins/mips64/builtins-mips64.cc      | 65 ++++++++++++-----
+ src/builtins/ppc/builtins-ppc.cc            |  6 +-
+ src/builtins/riscv64/builtins-riscv64.cc    | 75 ++++++++++++++------
+ src/builtins/s390/builtins-s390.cc          |  6 +-
+ src/builtins/x64/builtins-x64.cc            | 78 ++++++++++++++-------
+ src/codegen/bailout-reason.h                |  1 +
+ src/debug/debug.cc                          | 11 +--
+ src/deoptimizer/deoptimizer-cfi-builtins.cc |  8 +--
+ src/deoptimizer/deoptimizer.cc              |  4 +-
+ src/execution/frames.cc                     |  4 +-
+ src/objects/code-inl.h                      |  4 +-
+ 16 files changed, 373 insertions(+), 165 deletions(-)
+
+diff --git a/src/builtins/arm/builtins-arm.cc b/src/builtins/arm/builtins-arm.cc
+index 20312d83366..1e2677cb846 100644
+--- a/src/builtins/arm/builtins-arm.cc
++++ b/src/builtins/arm/builtins-arm.cc
+@@ -3479,11 +3479,13 @@ void Builtins::Generate_DeoptimizationEntry_Lazy(MacroAssembler* masm) {
+ 
+ namespace {
+ 
+-// Converts an interpreter frame into a baseline frame and continues execution
+-// in baseline code (baseline code has to exist on the shared function info),
+-// either at the current or next (in execution order) bytecode.
+-void Generate_BaselineEntry(MacroAssembler* masm, bool next_bytecode,
+-                            bool is_osr = false) {
++// Restarts execution either at the current or next (in execution order)
++// bytecode. If there is baseline code on the shared function info, converts an
++// interpreter frame into a baseline frame and continues execution in baseline
++// code. Otherwise execution continues with bytecode.
++void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
++                                         bool next_bytecode,
++                                         bool is_osr = false) {
+   __ Push(kInterpreterAccumulatorRegister);
+   Label start;
+   __ bind(&start);
+@@ -3492,6 +3494,39 @@ void Generate_BaselineEntry(MacroAssembler* masm, bool next_bytecode,
+   Register closure = r1;
+   __ ldr(closure, MemOperand(fp, StandardFrameConstants::kFunctionOffset));
+ 
++  // Get the Code object from the shared function info.
++  Register code_obj = r4;
++  __ ldr(code_obj,
++         FieldMemOperand(closure, JSFunction::kSharedFunctionInfoOffset));
++  __ ldr(code_obj,
++         FieldMemOperand(code_obj, SharedFunctionInfo::kFunctionDataOffset));
++
++  // Check if we have baseline code. For OSR entry it is safe to assume we
++  // always have baseline code.
++  if (!is_osr) {
++    Label start_with_baseline;
++    __ CompareObjectType(code_obj, r3, r3, BASELINE_DATA_TYPE);
++    __ b(eq, &start_with_baseline);
++
++    // Start with bytecode as there is no baseline code.
++    __ Pop(kInterpreterAccumulatorRegister);
++    Builtin builtin_id = next_bytecode
++                             ? Builtin::kInterpreterEnterAtNextBytecode
++                             : Builtin::kInterpreterEnterAtBytecode;
++    __ Jump(masm->isolate()->builtins()->code_handle(builtin_id),
++            RelocInfo::CODE_TARGET);
++
++    // Start with baseline code.
++    __ bind(&start_with_baseline);
++  } else if (FLAG_debug_code) {
++    __ CompareObjectType(code_obj, r3, r3, BASELINE_DATA_TYPE);
++    __ Assert(eq, AbortReason::kExpectedBaselineData);
++  }
++
++  // Load baseline code from baseline data.
++  __ ldr(code_obj,
++         FieldMemOperand(code_obj, BaselineData::kBaselineCodeOffset));
++
+   // Load the feedback vector.
+   Register feedback_vector = r2;
+   __ ldr(feedback_vector,
+@@ -3513,15 +3548,6 @@ void Generate_BaselineEntry(MacroAssembler* masm, bool next_bytecode,
+          MemOperand(fp, InterpreterFrameConstants::kBytecodeOffsetFromFp));
+   feedback_vector = no_reg;
+ 
+-  // Get the Code object from the shared function info.
+-  Register code_obj = r4;
+-  __ ldr(code_obj,
+-         FieldMemOperand(closure, JSFunction::kSharedFunctionInfoOffset));
+-  __ ldr(code_obj,
+-         FieldMemOperand(code_obj, SharedFunctionInfo::kFunctionDataOffset));
+-  __ ldr(code_obj,
+-         FieldMemOperand(code_obj, BaselineData::kBaselineCodeOffset));
+-
+   // Compute baseline pc for bytecode offset.
+   ExternalReference get_baseline_pc_extref;
+   if (next_bytecode || is_osr) {
+@@ -3609,17 +3635,19 @@ void Generate_BaselineEntry(MacroAssembler* masm, bool next_bytecode,
+ 
+ }  // namespace
+ 
+-void Builtins::Generate_BaselineEnterAtBytecode(MacroAssembler* masm) {
+-  Generate_BaselineEntry(masm, false);
++void Builtins::Generate_BaselineOrInterpreterEnterAtBytecode(
++    MacroAssembler* masm) {
++  Generate_BaselineOrInterpreterEntry(masm, false);
+ }
+ 
+-void Builtins::Generate_BaselineEnterAtNextBytecode(MacroAssembler* masm) {
+-  Generate_BaselineEntry(masm, true);
++void Builtins::Generate_BaselineOrInterpreterEnterAtNextBytecode(
++    MacroAssembler* masm) {
++  Generate_BaselineOrInterpreterEntry(masm, true);
+ }
+ 
+ void Builtins::Generate_InterpreterOnStackReplacement_ToBaseline(
+     MacroAssembler* masm) {
+-  Generate_BaselineEntry(masm, false, true);
++  Generate_BaselineOrInterpreterEntry(masm, false, true);
+ }
+ 
+ void Builtins::Generate_DynamicCheckMapsTrampoline(MacroAssembler* masm) {
+diff --git a/src/builtins/arm64/builtins-arm64.cc b/src/builtins/arm64/builtins-arm64.cc
+index 06245ea51ff..a2b998d5058 100644
+--- a/src/builtins/arm64/builtins-arm64.cc
++++ b/src/builtins/arm64/builtins-arm64.cc
+@@ -4005,11 +4005,13 @@ void Builtins::Generate_DeoptimizationEntry_Lazy(MacroAssembler* masm) {
+ 
+ namespace {
+ 
+-// Converts an interpreter frame into a baseline frame and continues execution
+-// in baseline code (baseline code has to exist on the shared function info),
+-// either at the current or next (in execution order) bytecode.
+-void Generate_BaselineEntry(MacroAssembler* masm, bool next_bytecode,
+-                            bool is_osr = false) {
++// Restarts execution either at the current or next (in execution order)
++// bytecode. If there is baseline code on the shared function info, converts an
++// interpreter frame into a baseline frame and continues execution in baseline
++// code. Otherwise execution continues with bytecode.
++void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
++                                         bool next_bytecode,
++                                         bool is_osr = false) {
+   __ Push(padreg, kInterpreterAccumulatorRegister);
+   Label start;
+   __ bind(&start);
+@@ -4018,6 +4020,44 @@ void Generate_BaselineEntry(MacroAssembler* masm, bool next_bytecode,
+   Register closure = x1;
+   __ Ldr(closure, MemOperand(fp, StandardFrameConstants::kFunctionOffset));
+ 
++  // Get the Code object from the shared function info.
++  Register code_obj = x22;
++  __ LoadTaggedPointerField(
++      code_obj,
++      FieldMemOperand(closure, JSFunction::kSharedFunctionInfoOffset));
++  __ LoadTaggedPointerField(
++      code_obj,
++      FieldMemOperand(code_obj, SharedFunctionInfo::kFunctionDataOffset));
++
++  // Check if we have baseline code. For OSR entry it is safe to assume we
++  // always have baseline code.
++  if (!is_osr) {
++    Label start_with_baseline;
++    __ CompareObjectType(code_obj, x3, x3, BASELINE_DATA_TYPE);
++    __ B(eq, &start_with_baseline);
++
++    // Start with bytecode as there is no baseline code.
++    __ Pop(kInterpreterAccumulatorRegister, padreg);
++    Builtin builtin_id = next_bytecode
++                             ? Builtin::kInterpreterEnterAtNextBytecode
++                             : Builtin::kInterpreterEnterAtBytecode;
++    __ Jump(masm->isolate()->builtins()->code_handle(builtin_id),
++            RelocInfo::CODE_TARGET);
++
++    // Start with baseline code.
++    __ bind(&start_with_baseline);
++  } else if (FLAG_debug_code) {
++    __ CompareObjectType(code_obj, x3, x3, BASELINE_DATA_TYPE);
++    __ Assert(eq, AbortReason::kExpectedBaselineData);
++  }
++
++  // Load baseline code from baseline data.
++  __ LoadTaggedPointerField(
++      code_obj, FieldMemOperand(code_obj, BaselineData::kBaselineCodeOffset));
++  if (V8_EXTERNAL_CODE_SPACE_BOOL) {
++    __ LoadCodeDataContainerCodeNonBuiltin(code_obj, code_obj);
++  }
++
+   // Load the feedback vector.
+   Register feedback_vector = x2;
+   __ LoadTaggedPointerField(
+@@ -4040,20 +4080,6 @@ void Generate_BaselineEntry(MacroAssembler* masm, bool next_bytecode,
+          MemOperand(fp, InterpreterFrameConstants::kBytecodeOffsetFromFp));
+   feedback_vector = no_reg;
+ 
+-  // Get the Code object from the shared function info.
+-  Register code_obj = x22;
+-  __ LoadTaggedPointerField(
+-      code_obj,
+-      FieldMemOperand(closure, JSFunction::kSharedFunctionInfoOffset));
+-  __ LoadTaggedPointerField(
+-      code_obj,
+-      FieldMemOperand(code_obj, SharedFunctionInfo::kFunctionDataOffset));
+-  __ LoadTaggedPointerField(
+-      code_obj, FieldMemOperand(code_obj, BaselineData::kBaselineCodeOffset));
+-  if (V8_EXTERNAL_CODE_SPACE_BOOL) {
+-    __ LoadCodeDataContainerCodeNonBuiltin(code_obj, code_obj);
+-  }
+-
+   // Compute baseline pc for bytecode offset.
+   ExternalReference get_baseline_pc_extref;
+   if (next_bytecode || is_osr) {
+@@ -4136,17 +4162,19 @@ void Generate_BaselineEntry(MacroAssembler* masm, bool next_bytecode,
+ 
+ }  // namespace
+ 
+-void Builtins::Generate_BaselineEnterAtBytecode(MacroAssembler* masm) {
+-  Generate_BaselineEntry(masm, false);
++void Builtins::Generate_BaselineOrInterpreterEnterAtBytecode(
++    MacroAssembler* masm) {
++  Generate_BaselineOrInterpreterEntry(masm, false);
+ }
+ 
+-void Builtins::Generate_BaselineEnterAtNextBytecode(MacroAssembler* masm) {
+-  Generate_BaselineEntry(masm, true);
++void Builtins::Generate_BaselineOrInterpreterEnterAtNextBytecode(
++    MacroAssembler* masm) {
++  Generate_BaselineOrInterpreterEntry(masm, true);
+ }
+ 
+ void Builtins::Generate_InterpreterOnStackReplacement_ToBaseline(
+     MacroAssembler* masm) {
+-  Generate_BaselineEntry(masm, false, true);
++  Generate_BaselineOrInterpreterEntry(masm, false, true);
+ }
+ 
+ void Builtins::Generate_DynamicCheckMapsTrampoline(MacroAssembler* masm) {
+diff --git a/src/builtins/builtins-definitions.h b/src/builtins/builtins-definitions.h
+index b5caebd7c41..cd438d8b51e 100644
+--- a/src/builtins/builtins-definitions.h
++++ b/src/builtins/builtins-definitions.h
+@@ -170,8 +170,8 @@ namespace internal {
+   ASM(BaselineOutOfLinePrologue, BaselineOutOfLinePrologue)                    \
+   ASM(BaselineOnStackReplacement, Void)                                        \
+   ASM(BaselineLeaveFrame, BaselineLeaveFrame)                                  \
+-  ASM(BaselineEnterAtBytecode, Void)                                           \
+-  ASM(BaselineEnterAtNextBytecode, Void)                                       \
++  ASM(BaselineOrInterpreterEnterAtBytecode, Void)                              \
++  ASM(BaselineOrInterpreterEnterAtNextBytecode, Void)                          \
+   ASM(InterpreterOnStackReplacement_ToBaseline, Void)                          \
+                                                                                \
+   /* Code life-cycle */                                                        \
+diff --git a/src/builtins/ia32/builtins-ia32.cc b/src/builtins/ia32/builtins-ia32.cc
+index 54013e76984..539d43dbeea 100644
+--- a/src/builtins/ia32/builtins-ia32.cc
++++ b/src/builtins/ia32/builtins-ia32.cc
+@@ -4115,11 +4115,13 @@ void Builtins::Generate_DeoptimizationEntry_Lazy(MacroAssembler* masm) {
+ 
+ namespace {
+ 
+-// Converts an interpreter frame into a baseline frame and continues execution
+-// in baseline code (baseline code has to exist on the shared function info),
+-// either at the current or next (in execution order) bytecode.
+-void Generate_BaselineEntry(MacroAssembler* masm, bool next_bytecode,
+-                            bool is_osr = false) {
++// Restarts execution either at the current or next (in execution order)
++// bytecode. If there is baseline code on the shared function info, converts an
++// interpreter frame into a baseline frame and continues execution in baseline
++// code. Otherwise execution continues with bytecode.
++void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
++                                         bool next_bytecode,
++                                         bool is_osr = false) {
+   __ push(kInterpreterAccumulatorRegister);
+   Label start;
+   __ bind(&start);
+@@ -4128,6 +4130,39 @@ void Generate_BaselineEntry(MacroAssembler* masm, bool next_bytecode,
+   Register closure = eax;
+   __ mov(closure, MemOperand(ebp, StandardFrameConstants::kFunctionOffset));
+ 
++  // Get the Code object from the shared function info.
++  Register code_obj = esi;
++  __ mov(code_obj,
++         FieldOperand(closure, JSFunction::kSharedFunctionInfoOffset));
++  __ mov(code_obj,
++         FieldOperand(code_obj, SharedFunctionInfo::kFunctionDataOffset));
++
++  // Check if we have baseline code. For OSR entry it is safe to assume we
++  // always have baseline code.
++  if (!is_osr) {
++    Label start_with_baseline;
++    __ CmpObjectType(code_obj, BASELINE_DATA_TYPE,
++                     kInterpreterBytecodeOffsetRegister);
++    __ j(equal, &start_with_baseline);
++
++    // Start with bytecode as there is no baseline code.
++    __ pop(kInterpreterAccumulatorRegister);
++    Builtin builtin_id = next_bytecode
++                             ? Builtin::kInterpreterEnterAtNextBytecode
++                             : Builtin::kInterpreterEnterAtBytecode;
++    __ Jump(masm->isolate()->builtins()->code_handle(builtin_id),
++            RelocInfo::CODE_TARGET);
++
++    __ bind(&start_with_baseline);
++  } else if (FLAG_debug_code) {
++    __ CmpObjectType(code_obj, BASELINE_DATA_TYPE,
++                     kInterpreterBytecodeOffsetRegister);
++    __ Assert(equal, AbortReason::kExpectedBaselineData);
++  }
++
++  // Load baseline code from baseline data.
++  __ mov(code_obj, FieldOperand(code_obj, BaselineData::kBaselineCodeOffset));
++
+   // Load the feedback vector.
+   Register feedback_vector = ecx;
+   __ mov(feedback_vector,
+@@ -4150,14 +4185,6 @@ void Generate_BaselineEntry(MacroAssembler* masm, bool next_bytecode,
+          feedback_vector);
+   feedback_vector = no_reg;
+ 
+-  // Get the Code object from the shared function info.
+-  Register code_obj = esi;
+-  __ mov(code_obj,
+-         FieldOperand(closure, JSFunction::kSharedFunctionInfoOffset));
+-  __ mov(code_obj,
+-         FieldOperand(code_obj, SharedFunctionInfo::kFunctionDataOffset));
+-  __ mov(code_obj, FieldOperand(code_obj, BaselineData::kBaselineCodeOffset));
+-
+   // Compute baseline pc for bytecode offset.
+   ExternalReference get_baseline_pc_extref;
+   if (next_bytecode || is_osr) {
+@@ -4241,17 +4268,19 @@ void Generate_BaselineEntry(MacroAssembler* masm, bool next_bytecode,
+ 
+ }  // namespace
+ 
+-void Builtins::Generate_BaselineEnterAtBytecode(MacroAssembler* masm) {
+-  Generate_BaselineEntry(masm, false);
++void Builtins::Generate_BaselineOrInterpreterEnterAtBytecode(
++    MacroAssembler* masm) {
++  Generate_BaselineOrInterpreterEntry(masm, false);
+ }
+ 
+-void Builtins::Generate_BaselineEnterAtNextBytecode(MacroAssembler* masm) {
+-  Generate_BaselineEntry(masm, true);
++void Builtins::Generate_BaselineOrInterpreterEnterAtNextBytecode(
++    MacroAssembler* masm) {
++  Generate_BaselineOrInterpreterEntry(masm, true);
+ }
+ 
+ void Builtins::Generate_InterpreterOnStackReplacement_ToBaseline(
+     MacroAssembler* masm) {
+-  Generate_BaselineEntry(masm, false, true);
++  Generate_BaselineOrInterpreterEntry(masm, false, true);
+ }
+ 
+ void Builtins::Generate_DynamicCheckMapsTrampoline(MacroAssembler* masm) {
+diff --git a/src/builtins/mips/builtins-mips.cc b/src/builtins/mips/builtins-mips.cc
+index 0f19f68c11a..40bc743a606 100644
+--- a/src/builtins/mips/builtins-mips.cc
++++ b/src/builtins/mips/builtins-mips.cc
+@@ -3938,11 +3938,13 @@ void Builtins::Generate_DeoptimizationEntry_Lazy(MacroAssembler* masm) {
+ 
+ namespace {
+ 
+-// Converts an interpreter frame into a baseline frame and continues execution
+-// in baseline code (baseline code has to exist on the shared function info),
+-// either at the start or the end of the current bytecode.
+-void Generate_BaselineEntry(MacroAssembler* masm, bool next_bytecode,
+-                            bool is_osr = false) {
++// Restarts execution either at the current or next (in execution order)
++// bytecode. If there is baseline code on the shared function info, converts an
++// interpreter frame into a baseline frame and continues execution in baseline
++// code. Otherwise execution continues with bytecode.
++void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
++                                         bool next_bytecode,
++                                         bool is_osr = false) {
+   __ Push(kInterpreterAccumulatorRegister);
+   Label start;
+   __ bind(&start);
+@@ -3951,6 +3953,39 @@ void Generate_BaselineEntry(MacroAssembler* masm, bool next_bytecode,
+   Register closure = a1;
+   __ Lw(closure, MemOperand(fp, StandardFrameConstants::kFunctionOffset));
+ 
++  // Get the Code object from the shared function info.
++  Register code_obj = s1;
++  __ Lw(code_obj,
++        FieldMemOperand(closure, JSFunction::kSharedFunctionInfoOffset));
++  __ Lw(code_obj,
++        FieldMemOperand(code_obj, SharedFunctionInfo::kFunctionDataOffset));
++
++  // Check if we have baseline code. For OSR entry it is safe to assume we
++  // always have baseline code.
++  if (!is_osr) {
++    Label start_with_baseline;
++    __ GetObjectType(code_obj, t6, t6);
++    __ Branch(&start_with_baseline, eq, t6, Operand(BASELINE_DATA_TYPE));
++
++    // Start with bytecode as there is no baseline code.
++    __ Pop(kInterpreterAccumulatorRegister);
++    Builtin builtin_id = next_bytecode
++                             ? Builtin::kInterpreterEnterAtNextBytecode
++                             : Builtin::kInterpreterEnterAtBytecode;
++    __ Jump(masm->isolate()->builtins()->code_handle(builtin_id),
++            RelocInfo::CODE_TARGET);
++
++    // Start with baseline code.
++    __ bind(&start_with_baseline);
++  } else if (FLAG_debug_code) {
++    __ GetObjectType(code_obj, t6, t6);
++    __ Assert(eq, AbortReason::kExpectedBaselineData, t6,
++              Operand(BASELINE_DATA_TYPE));
++  }
++
++  // Load baseline code from baseline data.
++  __ Lw(code_obj, FieldMemOperand(code_obj, BaselineData::kBaselineCodeOffset));
++
+   // Replace BytecodeOffset with the feedback vector.
+   Register feedback_vector = a2;
+   __ Lw(feedback_vector,
+@@ -3972,14 +4007,6 @@ void Generate_BaselineEntry(MacroAssembler* masm, bool next_bytecode,
+         MemOperand(fp, InterpreterFrameConstants::kBytecodeOffsetFromFp));
+   feedback_vector = no_reg;
+ 
+-  // Get the Code object from the shared function info.
+-  Register code_obj = s1;
+-  __ Lw(code_obj,
+-        FieldMemOperand(closure, JSFunction::kSharedFunctionInfoOffset));
+-  __ Lw(code_obj,
+-        FieldMemOperand(code_obj, SharedFunctionInfo::kFunctionDataOffset));
+-  __ Lw(code_obj, FieldMemOperand(code_obj, BaselineData::kBaselineCodeOffset));
+-
+   // Compute baseline pc for bytecode offset.
+   ExternalReference get_baseline_pc_extref;
+   if (next_bytecode || is_osr) {
+@@ -4066,17 +4093,19 @@ void Generate_BaselineEntry(MacroAssembler* masm, bool next_bytecode,
+ }
+ }  // namespace
+ 
+-void Builtins::Generate_BaselineEnterAtBytecode(MacroAssembler* masm) {
+-  Generate_BaselineEntry(masm, false);
++void Builtins::Generate_BaselineOrInterpreterEnterAtBytecode(
++    MacroAssembler* masm) {
++  Generate_BaselineOrInterpreterEntry(masm, false);
+ }
+ 
+-void Builtins::Generate_BaselineEnterAtNextBytecode(MacroAssembler* masm) {
+-  Generate_BaselineEntry(masm, true);
++void Builtins::Generate_BaselineOrInterpreterEnterAtNextBytecode(
++    MacroAssembler* masm) {
++  Generate_BaselineOrInterpreterEntry(masm, true);
+ }
+ 
+ void Builtins::Generate_InterpreterOnStackReplacement_ToBaseline(
+     MacroAssembler* masm) {
+-  Generate_BaselineEntry(masm, false, true);
++  Generate_BaselineOrInterpreterEntry(masm, false, true);
+ }
+ 
+ void Builtins::Generate_DynamicCheckMapsTrampoline(MacroAssembler* masm) {
+diff --git a/src/builtins/mips64/builtins-mips64.cc b/src/builtins/mips64/builtins-mips64.cc
+index ce1df3bd6a9..c271400e60c 100644
+--- a/src/builtins/mips64/builtins-mips64.cc
++++ b/src/builtins/mips64/builtins-mips64.cc
+@@ -3523,11 +3523,13 @@ void Builtins::Generate_DeoptimizationEntry_Lazy(MacroAssembler* masm) {
+ 
+ namespace {
+ 
+-// Converts an interpreter frame into a baseline frame and continues execution
+-// in baseline code (baseline code has to exist on the shared function info),
+-// either at the start or the end of the current bytecode.
+-void Generate_BaselineEntry(MacroAssembler* masm, bool next_bytecode,
+-                            bool is_osr = false) {
++// Restarts execution either at the current or next (in execution order)
++// bytecode. If there is baseline code on the shared function info, converts an
++// interpreter frame into a baseline frame and continues execution in baseline
++// code. Otherwise execution continues with bytecode.
++void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
++                                         bool next_bytecode,
++                                         bool is_osr = false) {
+   __ Push(kInterpreterAccumulatorRegister);
+   Label start;
+   __ bind(&start);
+@@ -3536,6 +3538,39 @@ void Generate_BaselineEntry(MacroAssembler* masm, bool next_bytecode,
+   Register closure = a1;
+   __ Ld(closure, MemOperand(fp, StandardFrameConstants::kFunctionOffset));
+ 
++  // Get the Code object from the shared function info.
++  Register code_obj = s1;
++  __ Ld(code_obj,
++        FieldMemOperand(closure, JSFunction::kSharedFunctionInfoOffset));
++  __ Ld(code_obj,
++        FieldMemOperand(code_obj, SharedFunctionInfo::kFunctionDataOffset));
++
++  // Check if we have baseline code. For OSR entry it is safe to assume we
++  // always have baseline code.
++  if (!is_osr) {
++    Label start_with_baseline;
++    __ GetObjectType(code_obj, t2, t2);
++    __ Branch(&start_with_baseline, eq, t2, Operand(BASELINE_DATA_TYPE));
++
++    // Start with bytecode as there is no baseline code.
++    __ Pop(kInterpreterAccumulatorRegister);
++    Builtin builtin_id = next_bytecode
++                             ? Builtin::kInterpreterEnterAtNextBytecode
++                             : Builtin::kInterpreterEnterAtBytecode;
++    __ Jump(masm->isolate()->builtins()->code_handle(builtin_id),
++            RelocInfo::CODE_TARGET);
++
++    // Start with baseline code.
++    __ bind(&start_with_baseline);
++  } else if (FLAG_debug_code) {
++    __ GetObjectType(code_obj, t2, t2);
++    __ Assert(eq, AbortReason::kExpectedBaselineData, t2,
++              Operand(BASELINE_DATA_TYPE));
++  }
++
++  // Load baseline code from baseline data.
++  __ Ld(code_obj, FieldMemOperand(code_obj, BaselineData::kBaselineCodeOffset));
++
+   // Replace BytecodeOffset with the feedback vector.
+   Register feedback_vector = a2;
+   __ Ld(feedback_vector,
+@@ -3556,14 +3591,6 @@ void Generate_BaselineEntry(MacroAssembler* masm, bool next_bytecode,
+         MemOperand(fp, InterpreterFrameConstants::kBytecodeOffsetFromFp));
+   feedback_vector = no_reg;
+ 
+-  // Get the Code object from the shared function info.
+-  Register code_obj = s1;
+-  __ Ld(code_obj,
+-        FieldMemOperand(closure, JSFunction::kSharedFunctionInfoOffset));
+-  __ Ld(code_obj,
+-        FieldMemOperand(code_obj, SharedFunctionInfo::kFunctionDataOffset));
+-  __ Ld(code_obj, FieldMemOperand(code_obj, BaselineData::kBaselineCodeOffset));
+-
+   // Compute baseline pc for bytecode offset.
+   ExternalReference get_baseline_pc_extref;
+   if (next_bytecode || is_osr) {
+@@ -3651,17 +3678,19 @@ void Generate_BaselineEntry(MacroAssembler* masm, bool next_bytecode,
+ 
+ }  // namespace
+ 
+-void Builtins::Generate_BaselineEnterAtBytecode(MacroAssembler* masm) {
+-  Generate_BaselineEntry(masm, false);
++void Builtins::Generate_BaselineOrInterpreterEnterAtBytecode(
++    MacroAssembler* masm) {
++  Generate_BaselineOrInterpreterEntry(masm, false);
+ }
+ 
+-void Builtins::Generate_BaselineEnterAtNextBytecode(MacroAssembler* masm) {
+-  Generate_BaselineEntry(masm, true);
++void Builtins::Generate_BaselineOrInterpreterEnterAtNextBytecode(
++    MacroAssembler* masm) {
++  Generate_BaselineOrInterpreterEntry(masm, true);
+ }
+ 
+ void Builtins::Generate_InterpreterOnStackReplacement_ToBaseline(
+     MacroAssembler* masm) {
+-  Generate_BaselineEntry(masm, false, true);
++  Generate_BaselineOrInterpreterEntry(masm, false, true);
+ }
+ 
+ void Builtins::Generate_DynamicCheckMapsTrampoline(MacroAssembler* masm) {
+diff --git a/src/builtins/ppc/builtins-ppc.cc b/src/builtins/ppc/builtins-ppc.cc
+index c0b7212aacc..9695b8a7675 100644
+--- a/src/builtins/ppc/builtins-ppc.cc
++++ b/src/builtins/ppc/builtins-ppc.cc
+@@ -3420,12 +3420,14 @@ void Builtins::Generate_DeoptimizationEntry_Lazy(MacroAssembler* masm) {
+   Generate_DeoptimizationEntry(masm, DeoptimizeKind::kLazy);
+ }
+ 
+-void Builtins::Generate_BaselineEnterAtBytecode(MacroAssembler* masm) {
++void Builtins::Generate_BaselineOrInterpreterEnterAtBytecode(
++    MacroAssembler* masm) {
+   // Implement on this platform, https://crrev.com/c/2695591.
+   __ bkpt(0);
+ }
+ 
+-void Builtins::Generate_BaselineEnterAtNextBytecode(MacroAssembler* masm) {
++void Builtins::Generate_BaselineOrInterpreterEnterAtNextBytecode(
++    MacroAssembler* masm) {
+   // Implement on this platform, https://crrev.com/c/2695591.
+   __ bkpt(0);
+ }
+diff --git a/src/builtins/riscv64/builtins-riscv64.cc b/src/builtins/riscv64/builtins-riscv64.cc
+index 03f20057e6e..88a6868f459 100644
+--- a/src/builtins/riscv64/builtins-riscv64.cc
++++ b/src/builtins/riscv64/builtins-riscv64.cc
+@@ -3633,11 +3633,13 @@ void Builtins::Generate_DeoptimizationEntry_Lazy(MacroAssembler* masm) {
+ 
+ namespace {
+ 
+-// Converts an interpreter frame into a baseline frame and continues execution
+-// in baseline code (baseline code has to exist on the shared function info),
+-// either at the start or the end of the current bytecode.
+-void Generate_BaselineEntry(MacroAssembler* masm, bool next_bytecode,
+-                            bool is_osr = false) {
++// Restarts execution either at the current or next (in execution order)
++// bytecode. If there is baseline code on the shared function info, converts an
++// interpreter frame into a baseline frame and continues execution in baseline
++// code. Otherwise execution continues with bytecode.
++void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
++                                         bool next_bytecode,
++                                         bool is_osr = false) {
+   __ Push(zero_reg, kInterpreterAccumulatorRegister);
+   Label start;
+   __ bind(&start);
+@@ -3646,6 +3648,46 @@ void Generate_BaselineEntry(MacroAssembler* masm, bool next_bytecode,
+   Register closure = a1;
+   __ Ld(closure, MemOperand(fp, StandardFrameConstants::kFunctionOffset));
+ 
++  // Get the Code object from the shared function info.
++  Register code_obj = a4;
++  __ LoadTaggedPointerField(
++      code_obj,
++      FieldMemOperand(closure, JSFunction::kSharedFunctionInfoOffset));
++  __ LoadTaggedPointerField(
++      code_obj,
++      FieldMemOperand(code_obj, SharedFunctionInfo::kFunctionDataOffset));
++
++  // Check if we have baseline code. For OSR entry it is safe to assume we
++  // always have baseline code.
++  if (!is_osr) {
++    Label start_with_baseline;
++    UseScratchRegisterScope temps(masm);
++    Register scratch = temps.Acquire();
++    __ GetObjectType(code_obj, scratch, scratch);
++    __ Branch(&start_with_baseline, eq, scratch, Operand(BASELINE_DATA_TYPE));
++
++    // Start with bytecode as there is no baseline code.
++    __ Pop(zero_reg, kInterpreterAccumulatorRegister);
++    Builtin builtin_id = next_bytecode
++                             ? Builtin::kInterpreterEnterAtNextBytecode
++                             : Builtin::kInterpreterEnterAtBytecode;
++    __ Jump(masm->isolate()->builtins()->code_handle(builtin_id),
++            RelocInfo::CODE_TARGET);
++
++    // Start with baseline code.
++    __ bind(&start_with_baseline);
++  } else if (FLAG_debug_code) {
++    UseScratchRegisterScope temps(masm);
++    Register scratch = temps.Acquire();
++    __ GetObjectType(code_obj, scratch, scratch);
++    __ Assert(eq, AbortReason::kExpectedBaselineData, scratch,
++              Operand(BASELINE_DATA_TYPE));
++  }
++
++  // Load baseline code from baseline data.
++  __ LoadTaggedPointerField(
++      code_obj, FieldMemOperand(code_obj, BaselineData::kBaselineCodeOffset));
++
+   // Replace BytecodeOffset with the feedback vector.
+   Register feedback_vector = a2;
+   __ LoadTaggedPointerField(
+@@ -3668,17 +3710,6 @@ void Generate_BaselineEntry(MacroAssembler* masm, bool next_bytecode,
+         MemOperand(fp, InterpreterFrameConstants::kBytecodeOffsetFromFp));
+   feedback_vector = no_reg;
+ 
+-  // Get the Code object from the shared function info.
+-  Register code_obj = type;
+-  __ LoadTaggedPointerField(
+-      code_obj,
+-      FieldMemOperand(closure, JSFunction::kSharedFunctionInfoOffset));
+-  __ LoadTaggedPointerField(
+-      code_obj,
+-      FieldMemOperand(code_obj, SharedFunctionInfo::kFunctionDataOffset));
+-  __ LoadTaggedPointerField(
+-      code_obj, FieldMemOperand(code_obj, BaselineData::kBaselineCodeOffset));
+-
+   // Compute baseline pc for bytecode offset.
+   __ Push(zero_reg, kInterpreterAccumulatorRegister);
+   ExternalReference get_baseline_pc_extref;
+@@ -3764,17 +3795,19 @@ void Generate_BaselineEntry(MacroAssembler* masm, bool next_bytecode,
+ 
+ }  // namespace
+ 
+-void Builtins::Generate_BaselineEnterAtBytecode(MacroAssembler* masm) {
+-  Generate_BaselineEntry(masm, false);
++void Builtins::Generate_BaselineOrInterpreterEnterAtBytecode(
++    MacroAssembler* masm) {
++  Generate_BaselineOrInterpreterEntry(masm, false);
+ }
+ 
+-void Builtins::Generate_BaselineEnterAtNextBytecode(MacroAssembler* masm) {
+-  Generate_BaselineEntry(masm, true);
++void Builtins::Generate_BaselineOrInterpreterEnterAtNextBytecode(
++    MacroAssembler* masm) {
++  Generate_BaselineOrInterpreterEntry(masm, true);
+ }
+ 
+ void Builtins::Generate_InterpreterOnStackReplacement_ToBaseline(
+     MacroAssembler* masm) {
+-  Generate_BaselineEntry(masm, false, true);
++  Generate_BaselineOrInterpreterEntry(masm, false, true);
+ }
+ 
+ void Builtins::Generate_DynamicCheckMapsTrampoline(MacroAssembler* masm) {
+diff --git a/src/builtins/s390/builtins-s390.cc b/src/builtins/s390/builtins-s390.cc
+index 2370f5ed578..311bff49dec 100644
+--- a/src/builtins/s390/builtins-s390.cc
++++ b/src/builtins/s390/builtins-s390.cc
+@@ -3411,12 +3411,14 @@ void Builtins::Generate_DeoptimizationEntry_Lazy(MacroAssembler* masm) {
+   Generate_DeoptimizationEntry(masm, DeoptimizeKind::kLazy);
+ }
+ 
+-void Builtins::Generate_BaselineEnterAtBytecode(MacroAssembler* masm) {
++void Builtins::Generate_BaselineOrInterpreterEnterAtBytecode(
++    MacroAssembler* masm) {
+   // Implement on this platform, https://crrev.com/c/2695591.
+   __ bkpt(0);
+ }
+ 
+-void Builtins::Generate_BaselineEnterAtNextBytecode(MacroAssembler* masm) {
++void Builtins::Generate_BaselineOrInterpreterEnterAtNextBytecode(
++    MacroAssembler* masm) {
+   // Implement on this platform, https://crrev.com/c/2695591.
+   __ bkpt(0);
+ }
+diff --git a/src/builtins/x64/builtins-x64.cc b/src/builtins/x64/builtins-x64.cc
+index 993f8234af1..1d27ac17f2d 100644
+--- a/src/builtins/x64/builtins-x64.cc
++++ b/src/builtins/x64/builtins-x64.cc
+@@ -4377,21 +4377,58 @@ void Builtins::Generate_DeoptimizationEntry_Lazy(MacroAssembler* masm) {
+ 
+ namespace {
+ 
+-// Converts an interpreter frame into a baseline frame and continues execution
+-// in baseline code (baseline code has to exist on the shared function info),
+-// either at the current or next (in execution order) bytecode.
+-void Generate_BaselineEntry(MacroAssembler* masm, bool next_bytecode,
+-                            bool is_osr = false) {
++// Restarts execution either at the current or next (in execution order)
++// bytecode. If there is baseline code on the shared function info, converts an
++// interpreter frame into a baseline frame and continues execution in baseline
++// code. Otherwise execution continues with bytecode.
++void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
++                                         bool next_bytecode,
++                                         bool is_osr = false) {
+   __ pushq(kInterpreterAccumulatorRegister);
+   Label start;
+   __ bind(&start);
+-
+-  // Get function from the frame.
+   Register closure = rdi;
+   __ movq(closure, MemOperand(rbp, StandardFrameConstants::kFunctionOffset));
+ 
++  // Get the Code object from the shared function info.
++  Register code_obj = rbx;
++  __ LoadTaggedPointerField(
++      code_obj, FieldOperand(closure, JSFunction::kSharedFunctionInfoOffset));
++  __ LoadTaggedPointerField(
++      code_obj,
++      FieldOperand(code_obj, SharedFunctionInfo::kFunctionDataOffset));
++
++  // Check if we have baseline code. For OSR entry it is safe to assume we
++  // always have baseline code.
++  if (!is_osr) {
++    Label start_with_baseline;
++    __ CmpObjectType(code_obj, BASELINE_DATA_TYPE, kScratchRegister);
++    __ j(equal, &start_with_baseline);
++
++    // Start with bytecode as there is no baseline code.
++    __ popq(kInterpreterAccumulatorRegister);
++    Builtin builtin_id = next_bytecode
++                             ? Builtin::kInterpreterEnterAtNextBytecode
++                             : Builtin::kInterpreterEnterAtBytecode;
++    __ Jump(masm->isolate()->builtins()->code_handle(builtin_id),
++            RelocInfo::CODE_TARGET);
++
++    // Start with baseline code.
++    __ bind(&start_with_baseline);
++  } else if (FLAG_debug_code) {
++    __ CmpObjectType(code_obj, BASELINE_DATA_TYPE, kScratchRegister);
++    __ Assert(equal, AbortReason::kExpectedBaselineData);
++  }
++
++  // Load baseline code from baseline data.
++  __ LoadTaggedPointerField(
++      code_obj, FieldOperand(code_obj, BaselineData::kBaselineCodeOffset));
++  if (V8_EXTERNAL_CODE_SPACE_BOOL) {
++    __ LoadCodeDataContainerCodeNonBuiltin(code_obj, code_obj);
++  }
++
+   // Load the feedback vector.
+-  Register feedback_vector = rbx;
++  Register feedback_vector = rax;
+   __ LoadTaggedPointerField(
+       feedback_vector, FieldOperand(closure, JSFunction::kFeedbackCellOffset));
+   __ LoadTaggedPointerField(feedback_vector,
+@@ -4412,19 +4449,6 @@ void Generate_BaselineEntry(MacroAssembler* masm, bool next_bytecode,
+           feedback_vector);
+   feedback_vector = no_reg;
+ 
+-  // Get the Code object from the shared function info.
+-  Register code_obj = rbx;
+-  __ LoadTaggedPointerField(
+-      code_obj, FieldOperand(closure, JSFunction::kSharedFunctionInfoOffset));
+-  __ LoadTaggedPointerField(
+-      code_obj,
+-      FieldOperand(code_obj, SharedFunctionInfo::kFunctionDataOffset));
+-  __ LoadTaggedPointerField(
+-      code_obj, FieldOperand(code_obj, BaselineData::kBaselineCodeOffset));
+-  if (V8_EXTERNAL_CODE_SPACE_BOOL) {
+-    __ LoadCodeDataContainerCodeNonBuiltin(code_obj, code_obj);
+-  }
+-
+   // Compute baseline pc for bytecode offset.
+   ExternalReference get_baseline_pc_extref;
+   if (next_bytecode || is_osr) {
+@@ -4506,17 +4530,19 @@ void Generate_BaselineEntry(MacroAssembler* masm, bool next_bytecode,
+ 
+ }  // namespace
+ 
+-void Builtins::Generate_BaselineEnterAtBytecode(MacroAssembler* masm) {
+-  Generate_BaselineEntry(masm, false);
++void Builtins::Generate_BaselineOrInterpreterEnterAtBytecode(
++    MacroAssembler* masm) {
++  Generate_BaselineOrInterpreterEntry(masm, false);
+ }
+ 
+-void Builtins::Generate_BaselineEnterAtNextBytecode(MacroAssembler* masm) {
+-  Generate_BaselineEntry(masm, true);
++void Builtins::Generate_BaselineOrInterpreterEnterAtNextBytecode(
++    MacroAssembler* masm) {
++  Generate_BaselineOrInterpreterEntry(masm, true);
+ }
+ 
+ void Builtins::Generate_InterpreterOnStackReplacement_ToBaseline(
+     MacroAssembler* masm) {
+-  Generate_BaselineEntry(masm, false, true);
++  Generate_BaselineOrInterpreterEntry(masm, false, true);
+ }
+ 
+ void Builtins::Generate_DynamicCheckMapsTrampoline(MacroAssembler* masm) {
+diff --git a/src/codegen/bailout-reason.h b/src/codegen/bailout-reason.h
+index 2a5893974f0..36f018320f8 100644
+--- a/src/codegen/bailout-reason.h
++++ b/src/codegen/bailout-reason.h
+@@ -22,6 +22,7 @@ namespace internal {
+     "Expected optimized code cell or optimization sentinel")                   \
+   V(kExpectedUndefinedOrCell, "Expected undefined or cell in register")        \
+   V(kExpectedFeedbackVector, "Expected feedback vector")                       \
++  V(kExpectedBaselineData, "Expected baseline data")                           \
+   V(kFunctionDataShouldBeBytecodeArrayOnInterpreterEntry,                      \
+     "The function_data field should be a BytecodeArray on interpreter entry")  \
+   V(kFpuTopIsNotZeroInDeoptimizer, "FPU TOP is not zero in deoptimizer")       \
+diff --git a/src/debug/debug.cc b/src/debug/debug.cc
+index 31321f88fcc..432cc65a512 100644
+--- a/src/debug/debug.cc
++++ b/src/debug/debug.cc
+@@ -1301,12 +1301,13 @@ class DiscardBaselineCodeVisitor : public ThreadVisitor {
+         JavaScriptFrame* frame = it.frame();
+         Address pc = frame->pc();
+         Builtin builtin = InstructionStream::TryLookupCode(isolate, pc);
+-        if (builtin == Builtin::kBaselineEnterAtBytecode ||
+-            builtin == Builtin::kBaselineEnterAtNextBytecode) {
++        if (builtin == Builtin::kBaselineOrInterpreterEnterAtBytecode ||
++            builtin == Builtin::kBaselineOrInterpreterEnterAtNextBytecode) {
+           Address* pc_addr = frame->pc_address();
+-          Builtin advance = builtin == Builtin::kBaselineEnterAtBytecode
+-                                ? Builtin::kInterpreterEnterAtBytecode
+-                                : Builtin::kInterpreterEnterAtNextBytecode;
++          Builtin advance =
++              builtin == Builtin::kBaselineOrInterpreterEnterAtBytecode
++                  ? Builtin::kInterpreterEnterAtBytecode
++                  : Builtin::kInterpreterEnterAtNextBytecode;
+           Address advance_pc =
+               isolate->builtins()->code(advance).InstructionStart();
+           PointerAuthentication::ReplacePC(pc_addr, advance_pc,
+diff --git a/src/deoptimizer/deoptimizer-cfi-builtins.cc b/src/deoptimizer/deoptimizer-cfi-builtins.cc
+index bbeacc561dc..92bce90095d 100644
+--- a/src/deoptimizer/deoptimizer-cfi-builtins.cc
++++ b/src/deoptimizer/deoptimizer-cfi-builtins.cc
+@@ -14,8 +14,8 @@ void Builtins_ContinueToJavaScriptBuiltinWithResult();
+ void Builtins_ContinueToJavaScriptBuiltin();
+ void construct_stub_create_deopt_addr();
+ void construct_stub_invoke_deopt_addr();
+-void Builtins_BaselineEnterAtBytecode();
+-void Builtins_BaselineEnterAtNextBytecode();
++void Builtins_BaselineOrInterpreterEnterAtBytecode();
++void Builtins_BaselineOrInterpreterEnterAtNextBytecode();
+ typedef void (*function_ptr)();
+ }
+ 
+@@ -32,8 +32,8 @@ constexpr function_ptr builtins[] = {
+     &Builtins_ContinueToJavaScriptBuiltin,
+     &construct_stub_create_deopt_addr,
+     &construct_stub_invoke_deopt_addr,
+-    &Builtins_BaselineEnterAtBytecode,
+-    &Builtins_BaselineEnterAtNextBytecode,
++    &Builtins_BaselineOrInterpreterEnterAtBytecode,
++    &Builtins_BaselineOrInterpreterEnterAtNextBytecode,
+ };
+ 
+ bool Deoptimizer::IsValidReturnAddress(Address address) {
+diff --git a/src/deoptimizer/deoptimizer.cc b/src/deoptimizer/deoptimizer.cc
+index 72ca85f41ea..966613cef73 100644
+--- a/src/deoptimizer/deoptimizer.cc
++++ b/src/deoptimizer/deoptimizer.cc
+@@ -996,8 +996,8 @@ namespace {
+ // Get the dispatch builtin for unoptimized frames.
+ Builtin DispatchBuiltinFor(bool is_baseline, bool advance_bc) {
+   if (is_baseline) {
+-    return advance_bc ? Builtin::kBaselineEnterAtNextBytecode
+-                      : Builtin::kBaselineEnterAtBytecode;
++    return advance_bc ? Builtin::kBaselineOrInterpreterEnterAtNextBytecode
++                      : Builtin::kBaselineOrInterpreterEnterAtBytecode;
+   } else {
+     return advance_bc ? Builtin::kInterpreterEnterAtNextBytecode
+                       : Builtin::kInterpreterEnterAtBytecode;
+diff --git a/src/execution/frames.cc b/src/execution/frames.cc
+index c4503957521..f24f1837068 100644
+--- a/src/execution/frames.cc
++++ b/src/execution/frames.cc
+@@ -230,8 +230,8 @@ bool IsInterpreterFramePc(Isolate* isolate, Address pc,
+       (builtin == Builtin::kInterpreterEntryTrampoline ||
+        builtin == Builtin::kInterpreterEnterAtBytecode ||
+        builtin == Builtin::kInterpreterEnterAtNextBytecode ||
+-       builtin == Builtin::kBaselineEnterAtBytecode ||
+-       builtin == Builtin::kBaselineEnterAtNextBytecode)) {
++       builtin == Builtin::kBaselineOrInterpreterEnterAtBytecode ||
++       builtin == Builtin::kBaselineOrInterpreterEnterAtNextBytecode)) {
+     return true;
+   } else if (FLAG_interpreted_frames_native_stack) {
+     intptr_t marker = Memory<intptr_t>(
+diff --git a/src/objects/code-inl.h b/src/objects/code-inl.h
+index 7436f3982de..cd3885c497b 100644
+--- a/src/objects/code-inl.h
++++ b/src/objects/code-inl.h
+@@ -524,8 +524,8 @@ inline bool Code::is_interpreter_trampoline_builtin() const {
+ inline bool Code::is_baseline_trampoline_builtin() const {
+   return builtin_id() != Builtin::kNoBuiltinId &&
+          (builtin_id() == Builtin::kBaselineOutOfLinePrologue ||
+-          builtin_id() == Builtin::kBaselineEnterAtBytecode ||
+-          builtin_id() == Builtin::kBaselineEnterAtNextBytecode);
++          builtin_id() == Builtin::kBaselineOrInterpreterEnterAtBytecode ||
++          builtin_id() == Builtin::kBaselineOrInterpreterEnterAtNextBytecode);
+ }
+ 
+ inline bool Code::is_baseline_leave_frame_builtin() const {
+-- 
+2.35.1
+

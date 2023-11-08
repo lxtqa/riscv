@@ -1,0 +1,106 @@
+From bdd1e640b93de850a7efdf338f2020978c713b28 Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Mon, 26 Sep 2022 17:06:47 +0800
+Subject: [PATCH] [riscv] Fix not calling vsetvli to set vtype correctly after
+ branch
+
+Add VectorUnit clear in branch link and block start.
+
+Bug: v8:13305
+Change-Id: Ibe6fa03183d7fc21cde78c87db9f2550e8e88562
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3917324
+Reviewed-by: ji qiu <qiuji@iscas.ac.cn>
+Reviewed-by: Jakob Linke <jgruber@chromium.org>
+Commit-Queue: ji qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#83448}
+---
+ src/codegen/riscv/assembler-riscv.cc     | 2 ++
+ src/codegen/riscv/assembler-riscv.h      | 9 +++++++--
+ src/codegen/riscv/base-constants-riscv.h | 2 ++
+ src/compiler/backend/code-generator.cc   | 9 ++++++++-
+ 4 files changed, 19 insertions(+), 3 deletions(-)
+
+diff --git a/src/codegen/riscv/assembler-riscv.cc b/src/codegen/riscv/assembler-riscv.cc
+index 178303d31c2..4e2ffdaa6cf 100644
+--- a/src/codegen/riscv/assembler-riscv.cc
++++ b/src/codegen/riscv/assembler-riscv.cc
+@@ -796,6 +796,7 @@ int32_t Assembler::branch_long_offset(Label* L) {
+   else
+     DCHECK_EQ(offset & 3, 0);
+   DCHECK(is_int32(offset));
++  VU.clear();
+   return static_cast<int32_t>(offset);
+ }
+ 
+@@ -828,6 +829,7 @@ int32_t Assembler::branch_offset_helper(Label* L, OffsetSize bits) {
+   DCHECK(is_intn(offset, bits));
+   DCHECK_EQ(offset & 1, 0);
+   DEBUG_PRINTF("\toffset = %d\n", offset);
++  VU.clear();
+   return offset;
+ }
+ 
+diff --git a/src/codegen/riscv/assembler-riscv.h b/src/codegen/riscv/assembler-riscv.h
+index f383cbf9212..c08f82bc779 100644
+--- a/src/codegen/riscv/assembler-riscv.h
++++ b/src/codegen/riscv/assembler-riscv.h
+@@ -580,9 +580,14 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase,
+       }
+     }
+ 
++    void clear() {
++      sew_ = kVsInvalid;
++      lmul_ = kVlInvalid;
++    }
++
+    private:
+-    VSew sew_ = E8;
+-    Vlmul lmul_ = m1;
++    VSew sew_ = kVsInvalid;
++    Vlmul lmul_ = kVlInvalid;
+     int32_t vl = 0;
+     Assembler* assm_;
+     FPURoundingMode mode_ = RNE;
+diff --git a/src/codegen/riscv/base-constants-riscv.h b/src/codegen/riscv/base-constants-riscv.h
+index 077ae9110c3..bc38bfabc9f 100644
+--- a/src/codegen/riscv/base-constants-riscv.h
++++ b/src/codegen/riscv/base-constants-riscv.h
+@@ -73,6 +73,7 @@ enum Vlmul {
+ #define DEFINE_FLAG(name) name,
+   RVV_LMUL(DEFINE_FLAG)
+ #undef DEFINE_FLAG
++      kVlInvalid
+ };
+ 
+ #define RVV_SEW(V) \
+@@ -85,6 +86,7 @@ enum Vlmul {
+ enum VSew {
+   RVV_SEW(DEFINE_FLAG)
+ #undef DEFINE_FLAG
++      kVsInvalid
+ };
+ 
+ constexpr size_t kMaxPCRelativeCodeRangeInMB = 4094;
+diff --git a/src/compiler/backend/code-generator.cc b/src/compiler/backend/code-generator.cc
+index 1be6d523580..a5dcbdbe273 100644
+--- a/src/compiler/backend/code-generator.cc
++++ b/src/compiler/backend/code-generator.cc
+@@ -306,7 +306,14 @@ void CodeGenerator::AssembleCode() {
+         tasm()->InitializeRootRegister();
+       }
+     }
+-
++#ifdef V8_TARGET_ARCH_RISCV64
++    // RVV uses VectorUnit to emit vset{i}vl{i}, reducing the static and dynamic
++    // overhead of the vset{i}vl{i} instruction. However there are some jumps
++    // back between blocks. the Rvv instruction may get an incorrect vtype. so
++    // here VectorUnit needs to be cleared to ensure that the vtype is correct
++    // within the block.
++    tasm()->VU.clear();
++#endif
+     if (v8_flags.enable_embedded_constant_pool && !block->needs_frame()) {
+       ConstantPoolUnavailableScope constant_pool_unavailable(tasm());
+       result_ = AssembleBlock(block);
+-- 
+2.35.1
+

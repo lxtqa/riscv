@@ -1,0 +1,269 @@
+From 901633f3cabedeee8301575ba890fe959a98a750 Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Mon, 12 Jul 2021 16:54:10 +0800
+Subject: [PATCH] [riscv64][wasm] Implement wasm function
+
+- Implement f32/f64 fcopysign
+- Implement f32/f64 type conversion
+- enable some test cases that now pass.
+
+Change-Id: Ia36299484adac885349df25d7c233dd7e43dded4
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/2992914
+Auto-Submit: Yahan Lu <yahan@iscas.ac.cn>
+Commit-Queue: Yahan Lu <yahan@iscas.ac.cn>
+Reviewed-by: Jakob Gruber <jgruber@chromium.org>
+Reviewed-by: Ji Qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/master@{#75690}
+---
+ .../riscv64/macro-assembler-riscv64.cc        | 18 +++++-
+ src/codegen/riscv64/macro-assembler-riscv64.h |  2 +
+ .../riscv64/liftoff-assembler-riscv64.h       | 57 ++++++++++++-------
+ test/cctest/cctest.status                     | 20 +++----
+ test/wasm-spec-tests/wasm-spec-tests.status   | 29 ----------
+ 5 files changed, 64 insertions(+), 62 deletions(-)
+
+diff --git a/src/codegen/riscv64/macro-assembler-riscv64.cc b/src/codegen/riscv64/macro-assembler-riscv64.cc
+index d694bbe40b7..d94352951d2 100644
+--- a/src/codegen/riscv64/macro-assembler-riscv64.cc
++++ b/src/codegen/riscv64/macro-assembler-riscv64.cc
+@@ -1727,6 +1727,22 @@ void TurboAssembler::RoundFloatingPointToInteger(Register rd, FPURegister fs,
+   }
+ }
+ 
++void TurboAssembler::Clear_if_nan_d(Register rd, FPURegister fs) {
++  Label no_nan;
++  feq_d(kScratchReg, fs, fs);
++  bnez(kScratchReg, &no_nan);
++  Move(rd, zero_reg);
++  bind(&no_nan);
++}
++
++void TurboAssembler::Clear_if_nan_s(Register rd, FPURegister fs) {
++  Label no_nan;
++  feq_s(kScratchReg, fs, fs);
++  bnez(kScratchReg, &no_nan);
++  Move(rd, zero_reg);
++  bind(&no_nan);
++}
++
+ void TurboAssembler::Trunc_uw_d(Register rd, FPURegister fs, Register result) {
+   RoundFloatingPointToInteger(
+       rd, fs, result, [](TurboAssembler* tasm, Register dst, FPURegister src) {
+@@ -2597,7 +2613,7 @@ void TurboAssembler::Branch(Label* L, Condition cond, Register rs,
+       }
+     }
+   } else {
+-    if (is_trampoline_emitted() && near_jump == Label::Distance::kFar) {
++    if (is_trampoline_emitted()) {
+       if (cond != cc_always) {
+         Label skip;
+         Condition neg_cond = NegateCondition(cond);
+diff --git a/src/codegen/riscv64/macro-assembler-riscv64.h b/src/codegen/riscv64/macro-assembler-riscv64.h
+index 29fab94c629..d06b4ce1769 100644
+--- a/src/codegen/riscv64/macro-assembler-riscv64.h
++++ b/src/codegen/riscv64/macro-assembler-riscv64.h
+@@ -582,6 +582,8 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   // Change endianness
+   void ByteSwap(Register dest, Register src, int operand_size);
+ 
++  void Clear_if_nan_d(Register rd, FPURegister fs);
++  void Clear_if_nan_s(Register rd, FPURegister fs);
+   // Convert single to unsigned word.
+   void Trunc_uw_s(Register rd, FPURegister fs, Register result = no_reg);
+ 
+diff --git a/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h b/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
+index 91b154ca08f..8b7b0b83e12 100644
+--- a/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
++++ b/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
+@@ -1250,7 +1250,7 @@ void LiftoffAssembler::emit_f32_max(DoubleRegister dst, DoubleRegister lhs,
+ 
+ void LiftoffAssembler::emit_f32_copysign(DoubleRegister dst, DoubleRegister lhs,
+                                          DoubleRegister rhs) {
+-  bailout(kComplexOperation, "f32_copysign");
++  fsgnj_s(dst, lhs, rhs);
+ }
+ 
+ void LiftoffAssembler::emit_f64_min(DoubleRegister dst, DoubleRegister lhs,
+@@ -1265,7 +1265,7 @@ void LiftoffAssembler::emit_f64_max(DoubleRegister dst, DoubleRegister lhs,
+ 
+ void LiftoffAssembler::emit_f64_copysign(DoubleRegister dst, DoubleRegister lhs,
+                                          DoubleRegister rhs) {
+-  bailout(kComplexOperation, "f64_copysign");
++  fsgnj_d(dst, lhs, rhs);
+ }
+ 
+ #define FP_BINOP(name, instruction)                                          \
+@@ -1362,7 +1362,9 @@ bool LiftoffAssembler::emit_type_conversion(WasmOpcode opcode,
+       }
+ 
+       // Checking if trap.
+-      TurboAssembler::Branch(trap, eq, kScratchReg, Operand(zero_reg));
++      if (trap != nullptr) {
++        TurboAssembler::Branch(trap, eq, kScratchReg, Operand(zero_reg));
++      }
+ 
+       return true;
+     }
+@@ -1401,30 +1403,46 @@ bool LiftoffAssembler::emit_type_conversion(WasmOpcode opcode,
+     case kExprF64ReinterpretI64:
+       fmv_d_x(dst.fp(), src.gp());
+       return true;
+-    case kExprI32SConvertSatF32:
+-      bailout(kNonTrappingFloatToInt, "kExprI32SConvertSatF32");
++    case kExprI32SConvertSatF32: {
++      fcvt_w_s(dst.gp(), src.fp(), RTZ);
++      Clear_if_nan_s(dst.gp(), src.fp());
+       return true;
+-    case kExprI32UConvertSatF32:
+-      bailout(kNonTrappingFloatToInt, "kExprI32UConvertSatF32");
++    }
++    case kExprI32UConvertSatF32: {
++      fcvt_wu_s(dst.gp(), src.fp(), RTZ);
++      Clear_if_nan_s(dst.gp(), src.fp());
+       return true;
+-    case kExprI32SConvertSatF64:
+-      bailout(kNonTrappingFloatToInt, "kExprI32SConvertSatF64");
++    }
++    case kExprI32SConvertSatF64: {
++      fcvt_w_d(dst.gp(), src.fp(), RTZ);
++      Clear_if_nan_d(dst.gp(), src.fp());
+       return true;
+-    case kExprI32UConvertSatF64:
+-      bailout(kNonTrappingFloatToInt, "kExprI32UConvertSatF64");
++    }
++    case kExprI32UConvertSatF64: {
++      fcvt_wu_d(dst.gp(), src.fp(), RTZ);
++      Clear_if_nan_d(dst.gp(), src.fp());
+       return true;
+-    case kExprI64SConvertSatF32:
+-      bailout(kNonTrappingFloatToInt, "kExprI64SConvertSatF32");
++    }
++    case kExprI64SConvertSatF32: {
++      fcvt_l_s(dst.gp(), src.fp(), RTZ);
++      Clear_if_nan_s(dst.gp(), src.fp());
+       return true;
+-    case kExprI64UConvertSatF32:
+-      bailout(kNonTrappingFloatToInt, "kExprI64UConvertSatF32");
++    }
++    case kExprI64UConvertSatF32: {
++      fcvt_lu_s(dst.gp(), src.fp(), RTZ);
++      Clear_if_nan_s(dst.gp(), src.fp());
+       return true;
+-    case kExprI64SConvertSatF64:
+-      bailout(kNonTrappingFloatToInt, "kExprI64SConvertSatF64");
++    }
++    case kExprI64SConvertSatF64: {
++      fcvt_l_d(dst.gp(), src.fp(), RTZ);
++      Clear_if_nan_d(dst.gp(), src.fp());
+       return true;
+-    case kExprI64UConvertSatF64:
+-      bailout(kNonTrappingFloatToInt, "kExprI64UConvertSatF64");
++    }
++    case kExprI64UConvertSatF64: {
++      fcvt_lu_d(dst.gp(), src.fp(), RTZ);
++      Clear_if_nan_d(dst.gp(), src.fp());
+       return true;
++    }
+     default:
+       return false;
+   }
+@@ -2850,7 +2868,6 @@ void LiftoffAssembler::emit_set_if_nan(Register dst, FPURegister src,
+   Sd(scratch, MemOperand(dst));
+ }
+ 
+-
+ void LiftoffStackSlots::Construct(int param_slots) {
+   DCHECK_LT(0, slots_.size());
+   SortInPushOrder();
+diff --git a/test/cctest/cctest.status b/test/cctest/cctest.status
+index 88cd7400687..f7a7726b30f 100644
+--- a/test/cctest/cctest.status
++++ b/test/cctest/cctest.status
+@@ -429,30 +429,26 @@
+ 
+ ##############################################################################
+ ['arch == riscv64', {
+-  # this test is unstable, sometimes fail when running w/ other tests
++  # this test is unstable, sometimes fail when running w/ other tests.
+   'test-cpu-profiler/CrossScriptInliningCallerLineNumbers2': [SKIP],
+ 
+-  # https://github.com/v8-riscv/v8/issues/297
++  # SIMD not fully implemented yet.
+   'test-run-wasm-simd/RunWasm_F64x2ExtractLaneWithI64x2_liftoff': [SKIP],
+   'test-run-wasm-simd/RunWasm_I64x2ExtractWithF64x2_liftoff': [SKIP],
+-
+-  # https://github.com/v8-riscv/v8/issues/290
+-  'test-orderedhashtable/SmallOrderedNameDictionaryInsertionMax': [SKIP],
+-  'test-orderedhashtable/SmallOrderedNameDictionarySetAndMigrateHash': [SKIP],
+-
+-  # SIMD not fully implemented yet
+   'test-run-wasm-simd-liftoff/*': [SKIP],
+   'test-run-wasm-simd/*':[SKIP],
+   'test-gc/RunWasmLiftoff_RefTrivialCasts': [SKIP],
+   'test-gc/RunWasmTurbofan_RefTrivialCasts': [SKIP],
+ 
+-  # Some wasm functionality is not implemented yet
++  # Some wasm functionality is not implemented yet.
+   'test-run-wasm-atomics64/*': [SKIP],
+   'test-run-wasm-atomics/*': [SKIP],
+   'test-run-wasm-64/*': [SKIP],
+-  'test-run-wasm/*': [SKIP],
+-
+-
++  'test-run-wasm/RunWasmTurbofan_Select_s128_parameters': [SKIP],
++  'test-run-wasm/RunWasmLiftoff_Select_s128_parameters': [SKIP],
++  'test-liftoff-for-fuzzing/NondeterminismUnopF64x2': [SKIP],
++  'test-liftoff-for-fuzzing/NondeterminismUnopF32x2': [SKIP],
++  'test-liftoff-for-fuzzing/NondeterminismUnopF32x4': [SKIP],
+ }],  # 'arch == riscv64'
+ 
+ ##############################################################################
+diff --git a/test/wasm-spec-tests/wasm-spec-tests.status b/test/wasm-spec-tests/wasm-spec-tests.status
+index 4dfd8d1bc8e..6ce1d113c6d 100644
+--- a/test/wasm-spec-tests/wasm-spec-tests.status
++++ b/test/wasm-spec-tests/wasm-spec-tests.status
+@@ -96,41 +96,12 @@
+ }],  # '(arch == mipsel or arch == mips64el) and simulator_run'
+ 
+ ['arch == riscv64', {
+-  'conversions': [SKIP],
+-  'proposals/JS-BigInt-integration/conversions': [SKIP],
+-  'proposals/bulk-memory-operations/conversions': [SKIP],
+-  'proposals/js-types/conversions': [SKIP],
+-  'proposals/multi-value/conversions': [SKIP],
+-  'proposals/reference-types/conversions': [SKIP],
+-
+-   # the following all fail w/ symptons captured in issue #166
+-   'float_exprs': [SKIP],
+-   'proposals/tail-call/conversions': [SKIP],
+-   'proposals/tail-call/float_exprs': [SKIP],
+-   'proposals/tail-call/f64': [SKIP],
+-   'proposals/tail-call/f32': [SKIP],
+-
+    # These tests need larger stack size on simulator.
+    'skip-stack-guard-page': '--sim-stack-size=8192',
+    'proposals/tail-call/skip-stack-guard-page': '--sim-stack-size=8192',
+ 
+    # SIMD is not fully implemented yet.
+    'proposals/simd/*': [SKIP],
+-
+-   # See issue #403
+-   'proposals/js-types/exports': [SKIP],
+-   'proposals/js-types/imports': [SKIP],
+-
+-   # riscv64 don't implemented some wasm atomic func
+-   'left-to-right': [SKIP],
+-   'float_misc': [SKIP],
+-   'f64_bitwise': [SKIP],
+-   'f32_bitwise': [SKIP],
+-   'proposals/tail-call/f32_bitwise': [SKIP],
+-   'proposals/tail-call/f64_bitwise': [SKIP],
+-   'proposals/tail-call/float_misc': [SKIP],
+-   'proposals/tail-call/left-to-right': [SKIP],
+-
+ }],  # 'arch == riscv64
+ 
+ ['arch == ppc or arch == ppc64', {
+-- 
+2.35.1
+

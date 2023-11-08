@@ -9,9 +9,11 @@ def main():
     #res = r"[^ ]+(/[^ ]+)* +\| +\d+ [\+\-]+"
     #riscv,RISCV or rv32,rv64
     res = r".*(RISC|Risc|risc|RV64|RV32|rv64|rv32|Rv64|Rv32).*"
+    total_commit_num = 0
     for log_line in tqdm(log_lines) :
         line_info = log_line.split(" ")
         if line_info[0] == "commit" :
+            total_commit_num += 1
             hash = line_info[1]
             hash = hash.split("\n")[0]
             os.system("git show " + hash +" > ../InfoFile-origin.txt")

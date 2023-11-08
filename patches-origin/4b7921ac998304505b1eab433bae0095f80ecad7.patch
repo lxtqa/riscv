@@ -1,0 +1,290 @@
+From 4b7921ac998304505b1eab433bae0095f80ecad7 Mon Sep 17 00:00:00 2001
+From: Yujie Wang <hex6770@gmail.com>
+Date: Mon, 27 Dec 2021 07:13:47 +0000
+Subject: [PATCH] [riscv64] Add I8x16_Popcnt for WASM SIMD
+
+- Add I8x16_Popcnt for WASM SIMD
+
+- Add vcpop_m and vfirst_m for riscv64 simulator
+
+Bug: v8:11976
+Change-Id: I2b945bb947da0998663cac86f867f09d386b81a4
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3356201
+Reviewed-by: Yahan Lu <yahan@iscas.ac.cn>
+Commit-Queue: Yahan Lu <yahan@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#78444}
+---
+ src/codegen/riscv64/assembler-riscv64.cc      | 20 ++++++-
+ src/codegen/riscv64/assembler-riscv64.h       |  8 ++-
+ .../backend/riscv64/code-generator-riscv64.cc | 19 +++++++
+ src/diagnostics/riscv64/disasm-riscv64.cc     |  4 ++
+ src/execution/riscv64/simulator-riscv64.cc    | 27 +++++++++-
+ .../riscv64/liftoff-assembler-riscv64.h       | 17 +++++-
+ test/cctest/test-assembler-riscv64.cc         | 53 +++++++++++++++++++
+ test/cctest/test-disasm-riscv64.cc            |  4 ++
+ 8 files changed, 148 insertions(+), 4 deletions(-)
+
+diff --git a/src/codegen/riscv64/assembler-riscv64.cc b/src/codegen/riscv64/assembler-riscv64.cc
+index c55d646cd04..198e4f65ba8 100644
+--- a/src/codegen/riscv64/assembler-riscv64.cc
++++ b/src/codegen/riscv64/assembler-riscv64.cc
+@@ -1270,6 +1270,16 @@ void Assembler::GenInstrV(Opcode opcode, uint8_t width, VRegister vd,
+                 ((Nf << kRvvNfShift) & kRvvNfMask);
+   emit(instr);
+ }
++// vmv_xs vcpop_m vfirst_m
++void Assembler::GenInstrV(uint8_t funct6, Opcode opcode, Register rd,
++                          uint8_t vs1, VRegister vs2, MaskType mask) {
++  DCHECK(opcode == OP_MVV);
++  Instr instr = (funct6 << kRvvFunct6Shift) | opcode | (mask << kRvvVmShift) |
++                ((rd.code() & 0x1F) << kRvvVdShift) |
++                ((vs1 & 0x1F) << kRvvVs1Shift) |
++                ((vs2.code() & 0x1F) << kRvvVs2Shift);
++  emit(instr);
++}
+ // ----- Instruction class templates match those in the compiler
+ 
+ void Assembler::GenInstrBranchCC_rri(uint8_t funct3, Register rs1, Register rs2,
+@@ -2496,7 +2506,7 @@ void Assembler::vmv_vi(VRegister vd, uint8_t simm5) {
+ }
+ 
+ void Assembler::vmv_xs(Register rd, VRegister vs2) {
+-  GenInstrV(VWXUNARY0_FUNCT6, OP_MVV, rd, v0, vs2, NoMask);
++  GenInstrV(VWXUNARY0_FUNCT6, OP_MVV, rd, 0b00000, vs2, NoMask);
+ }
+ 
+ void Assembler::vmv_sx(VRegister vd, Register rs1) {
+@@ -3116,6 +3126,14 @@ void Assembler::vsxseg8(VRegister vd, Register rs1, VRegister rs2, VSew vsew,
+   GenInstrV(STORE_FP, width, vd, rs1, rs2, mask, 0b11, 0, 0b111);
+ }
+ 
++void Assembler::vfirst_m(Register rd, VRegister vs2, MaskType mask) {
++  GenInstrV(VWXUNARY0_FUNCT6, OP_MVV, rd, 0b10001, vs2, mask);
++}
++
++void Assembler::vcpop_m(Register rd, VRegister vs2, MaskType mask) {
++  GenInstrV(VWXUNARY0_FUNCT6, OP_MVV, rd, 0b10000, vs2, mask);
++}
++
+ // Privileged
+ void Assembler::uret() {
+   GenInstrPriv(0b0000000, ToRegister(0), ToRegister(0b00010));
+diff --git a/src/codegen/riscv64/assembler-riscv64.h b/src/codegen/riscv64/assembler-riscv64.h
+index f764e6b0dab..83b5fdc2ded 100644
+--- a/src/codegen/riscv64/assembler-riscv64.h
++++ b/src/codegen/riscv64/assembler-riscv64.h
+@@ -998,6 +998,10 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   void vfabs_vv(VRegister dst, VRegister src, MaskType mask = NoMask) {
+     vfsngjx_vv(dst, src, src, mask);
+   }
++  void vfirst_m(Register rd, VRegister vs2, MaskType mask = NoMask);
++
++  void vcpop_m(Register rd, VRegister vs2, MaskType mask = NoMask);
++
+   // Privileged
+   void uret();
+   void sret();
+@@ -1645,7 +1649,9 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   void GenInstrV(Opcode opcode, uint8_t width, VRegister vd, Register rs1,
+                  VRegister vs2, MaskType mask, uint8_t IsMop, bool IsMew,
+                  uint8_t Nf);
+-
++  // vmv_xs vcpop_m vfirst_m
++  void GenInstrV(uint8_t funct6, Opcode opcode, Register rd, uint8_t vs1,
++                 VRegister vs2, MaskType mask);
+   // Labels.
+   void print(const Label* L);
+   void bind_to(Label* L, int pos);
+diff --git a/src/compiler/backend/riscv64/code-generator-riscv64.cc b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+index e834c830ae6..54eb4fb1071 100644
+--- a/src/compiler/backend/riscv64/code-generator-riscv64.cc
++++ b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+@@ -2771,6 +2771,25 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       __ vor_vv(dst, dst, kSimd128ScratchReg3);
+       break;
+     }
++    case kRiscvI8x16Popcnt: {
++      VRegister dst = i.OutputSimd128Register(),
++                src = i.InputSimd128Register(0);
++      Label t;
++
++      __ VU.set(kScratchReg, E8, m1);
++      __ vmv_vv(kSimd128ScratchReg, src);
++      __ vmv_vv(dst, kSimd128RegZero);
++
++      __ bind(&t);
++      __ vmsne_vv(v0, kSimd128ScratchReg, kSimd128RegZero);
++      __ vadd_vi(dst, dst, 1, Mask);
++      __ vadd_vi(kSimd128ScratchReg2, kSimd128ScratchReg, -1, Mask);
++      __ vand_vv(kSimd128ScratchReg, kSimd128ScratchReg, kSimd128ScratchReg2);
++      // kScratchReg = -1 if kSimd128ScratchReg == 0 i.e. no active element
++      __ vfirst_m(kScratchReg, kSimd128ScratchReg);
++      __ bgez(kScratchReg, &t);
++      break;
++    }
+     case kRiscvF64x2NearestInt: {
+       __ Round_d(i.OutputSimd128Register(), i.InputSimd128Register(0),
+                  kScratchReg, kSimd128ScratchReg);
+diff --git a/src/diagnostics/riscv64/disasm-riscv64.cc b/src/diagnostics/riscv64/disasm-riscv64.cc
+index b40e6d2b671..26b917aeec3 100644
+--- a/src/diagnostics/riscv64/disasm-riscv64.cc
++++ b/src/diagnostics/riscv64/disasm-riscv64.cc
+@@ -2237,6 +2237,10 @@ void Decoder::DecodeRvvMVV(Instruction* instr) {
+     case RO_V_VWXUNARY0:
+       if (instr->Vs1Value() == 0x0) {
+         Format(instr, "vmv.x.s   'rd, 'vs2");
++      } else if (instr->Vs1Value() == 0b10001) {
++        Format(instr, "vfirst.m  'rd, 'vs2");
++      } else if (instr->Vs1Value() == 0b10000) {
++        Format(instr, "vcpop.m   'rd, 'vs2");
+       } else {
+         UNSUPPORTED_RISCV();
+       }
+diff --git a/src/execution/riscv64/simulator-riscv64.cc b/src/execution/riscv64/simulator-riscv64.cc
+index 82c721ddd5e..4bb4a43f349 100644
+--- a/src/execution/riscv64/simulator-riscv64.cc
++++ b/src/execution/riscv64/simulator-riscv64.cc
+@@ -5568,7 +5568,32 @@ void Simulator::DecodeRvvMVV() {
+             UNREACHABLE();
+         }
+         set_rvv_vstart(0);
+-        SNPrintF(trace_buf_, "%lx", get_register(rd_reg()));
++        rvv_trace_vd();
++      } else if (rvv_vs1_reg() == 0b10000) {
++        uint64_t cnt = 0;
++        RVV_VI_GENERAL_LOOP_BASE
++        RVV_VI_LOOP_MASK_SKIP()
++        const uint8_t idx = i / 64;
++        const uint8_t pos = i % 64;
++        bool mask = (Rvvelt<uint64_t>(rvv_vs2_reg(), idx) >> pos) & 0x1;
++        if (mask) cnt++;
++        RVV_VI_LOOP_END
++        set_register(rd_reg(), cnt);
++        rvv_trace_vd();
++      } else if (rvv_vs1_reg() == 0b10001) {
++        int64_t index = -1;
++        RVV_VI_GENERAL_LOOP_BASE
++        RVV_VI_LOOP_MASK_SKIP()
++        const uint8_t idx = i / 64;
++        const uint8_t pos = i % 64;
++        bool mask = (Rvvelt<uint64_t>(rvv_vs2_reg(), idx) >> pos) & 0x1;
++        if (mask) {
++          index = i;
++          break;
++        }
++        RVV_VI_LOOP_END
++        set_register(rd_reg(), index);
++        rvv_trace_vd();
+       } else {
+         v8::base::EmbeddedVector<char, 256> buffer;
+         disasm::NameConverter converter;
+diff --git a/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h b/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
+index 1ba0d4148a5..2c68897e1bf 100644
+--- a/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
++++ b/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
+@@ -1871,7 +1871,22 @@ void LiftoffAssembler::emit_i8x16_shuffle(LiftoffRegister dst,
+ 
+ void LiftoffAssembler::emit_i8x16_popcnt(LiftoffRegister dst,
+                                          LiftoffRegister src) {
+-  bailout(kSimd, "emit_i8x16_popcnt");
++  VRegister src_v = src.fp().toV();
++  VRegister dst_v = dst.fp().toV();
++  Label t;
++
++  VU.set(kScratchReg, E8, m1);
++  vmv_vv(kSimd128ScratchReg, src_v);
++  vmv_vv(dst_v, kSimd128RegZero);
++
++  bind(&t);
++  vmsne_vv(v0, kSimd128ScratchReg, kSimd128RegZero);
++  vadd_vi(dst_v, dst_v, 1, Mask);
++  vadd_vi(kSimd128ScratchReg2, kSimd128ScratchReg, -1, Mask);
++  vand_vv(kSimd128ScratchReg, kSimd128ScratchReg, kSimd128ScratchReg2);
++  // kScratchReg = -1 if kSimd128ScratchReg == 0 i.e. no active element
++  vfirst_m(kScratchReg, kSimd128ScratchReg);
++  bgez(kScratchReg, &t);
+ }
+ 
+ void LiftoffAssembler::emit_i8x16_swizzle(LiftoffRegister dst,
+diff --git a/test/cctest/test-assembler-riscv64.cc b/test/cctest/test-assembler-riscv64.cc
+index 885b6ae7182..7d695a865d9 100644
+--- a/test/cctest/test-assembler-riscv64.cc
++++ b/test/cctest/test-assembler-riscv64.cc
+@@ -2545,6 +2545,59 @@ UTEST_RVV_VP_VS_VI_FORM_WITH_RES(vslideup_vi, uint8_t, 8, ARRAY(uint8_t),
+ 
+ #undef UTEST_RVV_VP_VS_VI_FORM_WITH_RES
+ #undef ARRAY
++
++#define UTEST_VFIRST_M_WITH_WIDTH(width)                            \
++  TEST(RISCV_UTEST_vfirst_m_##width) {                              \
++    if (!CpuFeatures::IsSupported(RISCV_SIMD)) return;              \
++    constexpr uint32_t vlen = 128;                                  \
++    constexpr uint32_t n = vlen / width;                            \
++    CcTest::InitializeVM();                                         \
++    for (uint32_t i = 0; i <= n; i++) {                             \
++      uint64_t src[2] = {0};                                        \
++      src[0] = 1 << i;                                              \
++      auto fn = [](MacroAssembler& assm) {                          \
++        __ VU.set(t0, VSew::E##width, Vlmul::m1);                   \
++        __ vl(v2, a0, 0, VSew::E##width);                           \
++        __ vfirst_m(a0, v2);                                        \
++      };                                                            \
++      auto res = GenAndRunTest<int64_t, int64_t>((int64_t)src, fn); \
++      CHECK_EQ(i < n ? i : (int64_t)-1, res);                       \
++    }                                                               \
++  }
++
++UTEST_VFIRST_M_WITH_WIDTH(64)
++UTEST_VFIRST_M_WITH_WIDTH(32)
++UTEST_VFIRST_M_WITH_WIDTH(16)
++UTEST_VFIRST_M_WITH_WIDTH(8)
++
++#undef UTEST_VFIRST_M_WITH_WIDTH
++
++#define UTEST_VCPOP_M_WITH_WIDTH(width)                               \
++  TEST(RISCV_UTEST_vcpop_m_##width) {                                 \
++    if (!CpuFeatures::IsSupported(RISCV_SIMD)) return;                \
++    uint32_t vlen = 128;                                              \
++    uint32_t n = vlen / width;                                        \
++    CcTest::InitializeVM();                                           \
++    for (uint16_t x : compiler::ValueHelper::GetVector<uint16_t>()) { \
++      uint64_t src[2] = {0};                                          \
++      src[0] = x >> (16 - n);                                         \
++      auto fn = [](MacroAssembler& assm) {                            \
++        __ VU.set(t0, VSew::E##width, Vlmul::m1);                     \
++        __ vl(v2, a0, 0, VSew::E##width);                             \
++        __ vcpop_m(a0, v2);                                           \
++      };                                                              \
++      auto res = GenAndRunTest<int64_t, int64_t>((int64_t)src, fn);   \
++      CHECK_EQ(std::__popcount(src[0]), res);                         \
++    }                                                                 \
++  }
++
++UTEST_VCPOP_M_WITH_WIDTH(64)
++UTEST_VCPOP_M_WITH_WIDTH(32)
++UTEST_VCPOP_M_WITH_WIDTH(16)
++UTEST_VCPOP_M_WITH_WIDTH(8)
++
++#undef UTEST_VCPOP_M_WITH_WIDTH
++
+ #undef __
+ 
+ }  // namespace internal
+diff --git a/test/cctest/test-disasm-riscv64.cc b/test/cctest/test-disasm-riscv64.cc
+index 75cedfeee31..377ed79268f 100644
+--- a/test/cctest/test-disasm-riscv64.cc
++++ b/test/cctest/test-disasm-riscv64.cc
+@@ -623,6 +623,10 @@ TEST(RVV) {
+   COMPARE(vzext_vf2(v17, v14), "4ae328d7       vzext.vf2 v17, v14");
+   COMPARE(vsext_vf2(v17, v14), "4ae3a8d7       vsext.vf2 v17, v14");
+ 
++  // Vector Mask Instructions
++  COMPARE(vfirst_m(a5, v17), "4318a7d7       vfirst.m  a5, v17");
++  COMPARE(vcpop_m(a5, v17), "431827d7       vcpop.m   a5, v17");
++
+   VERIFY_RUN();
+ }
+ 
+-- 
+2.35.1
+

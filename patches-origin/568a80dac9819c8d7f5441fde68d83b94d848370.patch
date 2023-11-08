@@ -1,0 +1,97 @@
+From 568a80dac9819c8d7f5441fde68d83b94d848370 Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Wed, 11 Oct 2023 20:37:17 +0800
+Subject: [PATCH] [riscv] Reland^2 "[liftoff] Add support for direct C calls"
+
+Port commit 846b5bfe32b98bfc7750f502d3b00dc0cb98ce25
+
+Change-Id: I871859d7af906b7d34b98ddf19ea1b69e0afdf4c
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4923322
+Reviewed-by: Ji Qiu <qiuji@iscas.ac.cn>
+Commit-Queue: Ji Qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#90399}
+---
+ .../riscv/liftoff-assembler-riscv-inl.h       |  1 +
+ .../riscv/liftoff-assembler-riscv32-inl.h     | 25 +++++++++++++++++++
+ .../riscv/liftoff-assembler-riscv64-inl.h     | 17 +++++++++++++
+ 3 files changed, 43 insertions(+)
+
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv-inl.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv-inl.h
+index 068b1b91dd7..59481e75ccd 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv-inl.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv-inl.h
+@@ -7,6 +7,7 @@
+ 
+ #include "src/heap/memory-chunk.h"
+ #include "src/wasm/baseline/liftoff-assembler.h"
++#include "src/wasm/baseline/parallel-move-inl.h"
+ #include "src/wasm/object-access.h"
+ #include "src/wasm/wasm-objects.h"
+ 
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv32-inl.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv32-inl.h
+index 895d2c82a1f..8f1dc808938 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv32-inl.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv32-inl.h
+@@ -2135,6 +2135,31 @@ void LiftoffAssembler::CallCWithStackBuffer(
+   AddWord(sp, sp, Operand(stack_bytes));
+ }
+ 
++void LiftoffAssembler::CallC(const std::initializer_list<VarState> args,
++                             ExternalReference ext_ref) {
++  constexpr Register kArgRegs[] = {arg_reg_1, arg_reg_2, arg_reg_3, arg_reg_4};
++  const Register* next_arg_reg = kArgRegs;
++  ParallelMove parallel_move{this};
++  for (const VarState& arg : args) {
++    DCHECK_GT(std::end(kArgRegs), next_arg_reg);
++    Register dst_lo = *next_arg_reg++;
++    if (arg.kind() == kI64) {
++      DCHECK_GT(std::end(kArgRegs), next_arg_reg);
++      Register dst_hi = *next_arg_reg++;
++      parallel_move.LoadIntoRegister(LiftoffRegister::ForPair(dst_lo, dst_hi),
++                                     arg);
++    } else {
++      parallel_move.LoadIntoRegister(LiftoffRegister{dst_lo}, arg);
++    }
++  }
++  parallel_move.Execute();
++
++  // Now call the C function.
++  int num_args = static_cast<int>(args.size());
++  PrepareCallCFunction(num_args, kScratchReg);
++  CallCFunction(ext_ref, num_args);
++}
++
+ void LiftoffStackSlots::Construct(int param_slots) {
+   ASM_CODE_COMMENT(asm_);
+   DCHECK_LT(0, slots_.size());
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv64-inl.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv64-inl.h
+index ff3d59c433b..bf76d652879 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv64-inl.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv64-inl.h
+@@ -1733,6 +1733,23 @@ void LiftoffAssembler::CallCWithStackBuffer(
+   AddWord(sp, sp, Operand(stack_bytes));
+ }
+ 
++void LiftoffAssembler::CallC(const std::initializer_list<VarState> args,
++                             ExternalReference ext_ref) {
++  constexpr Register kArgRegs[] = {arg_reg_1, arg_reg_2, arg_reg_3, arg_reg_4};
++  DCHECK_LE(args.size(), arraysize(kArgRegs));
++  const Register* next_arg_reg = kArgRegs;
++  ParallelMove parallel_move{this};
++  for (const VarState& arg : args) {
++    parallel_move.LoadIntoRegister(LiftoffRegister{*next_arg_reg}, arg);
++    ++next_arg_reg;
++  }
++  parallel_move.Execute();
++
++  // Now call the C function.
++  int num_args = static_cast<int>(args.size());
++  CallCFunction(ext_ref, num_args);
++}
++
+ void LiftoffStackSlots::Construct(int param_slots) {
+   DCHECK_LT(0, slots_.size());
+   SortInPushOrder();
+-- 
+2.35.1
+

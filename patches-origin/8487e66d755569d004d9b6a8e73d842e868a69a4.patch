@@ -1,0 +1,1480 @@
+From 8487e66d755569d004d9b6a8e73d842e868a69a4 Mon Sep 17 00:00:00 2001
+From: Igor Sheludko <ishell@chromium.org>
+Date: Wed, 15 Jun 2022 18:11:08 +0200
+Subject: [PATCH] [runtime] Inline Foreign fields into AccessorInfo
+
+... to avoid additional indirection on every access.
+
+Drive-by: given that AccessorInfo class now has a custom body visitor
+it's no longer necessary to encode flags field as Smi.
+
+Bug: v8:12949
+Change-Id: I30eabee3cbc5ded2bf3f050dfe22208713a764bf
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3701590
+Reviewed-by: Toon Verwaest <verwaest@chromium.org>
+Commit-Queue: Igor Sheludko <ishell@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#81237}
+---
+ include/v8-internal.h                      |   3 +
+ src/api/api-arguments-inl.h                |   4 +-
+ src/api/api.cc                             |   6 +-
+ src/builtins/accessors.cc                  |   9 +-
+ src/builtins/arm/builtins-arm.cc           |   3 +-
+ src/builtins/arm64/builtins-arm64.cc       |   8 +-
+ src/builtins/ia32/builtins-ia32.cc         |   3 +-
+ src/builtins/loong64/builtins-loong64.cc   |   3 +-
+ src/builtins/mips/builtins-mips.cc         |   3 +-
+ src/builtins/mips64/builtins-mips64.cc     |   3 +-
+ src/builtins/ppc/builtins-ppc.cc           |   4 +-
+ src/builtins/riscv64/builtins-riscv64.cc   |   4 +-
+ src/builtins/s390/builtins-s390.cc         |   4 +-
+ src/builtins/x64/builtins-x64.cc           |   6 +-
+ src/debug/debug-property-iterator.cc       |   4 +-
+ src/diagnostics/objects-printer.cc         |   5 +-
+ src/heap/factory.cc                        |  16 +-
+ src/heap/objects-visiting.h                |   1 +
+ src/heap/setup-heap-internal.cc            |   2 +
+ src/ic/ic.cc                               |   5 +-
+ src/ic/keyed-store-generic.cc              |   2 +-
+ src/logging/log.cc                         |   8 +-
+ src/objects/api-callbacks-inl.h            |  38 +-
+ src/objects/api-callbacks.h                |  18 +-
+ src/objects/api-callbacks.tq               |  16 +-
+ src/objects/map.cc                         |   4 +
+ src/objects/map.h                          |   1 +
+ src/objects/object-list-macros.h           |   1 +
+ src/objects/objects-body-descriptors-inl.h |  35 ++
+ src/objects/objects-definitions.h          |   1 -
+ src/objects/objects.cc                     |  10 +-
+ src/profiler/heap-snapshot-generator.cc    |   4 -
+ src/roots/roots.h                          |   1 +
+ src/snapshot/serializer-deserializer.cc    |   3 +-
+ src/snapshot/serializer.cc                 |   3 +
+ src/snapshot/startup-serializer.cc         |   6 +-
+ test/cctest/test-heap-profiler.cc          |   8 -
+ tools/v8heapconst.py                       | 550 ++++++++++-----------
+ 38 files changed, 420 insertions(+), 385 deletions(-)
+
+diff --git a/include/v8-internal.h b/include/v8-internal.h
+index 3cf69119a93..c7f26276ed5 100644
+--- a/include/v8-internal.h
++++ b/include/v8-internal.h
+@@ -318,6 +318,9 @@ enum ExternalPointerTag : uint64_t {
+   kExternalObjectValueTag =         MAKE_TAG(0b1000001111111011),
+   kCallHandlerInfoCallbackTag =     MAKE_TAG(0b1000001111111101),
+   kCallHandlerInfoJsCallbackTag =   MAKE_TAG(0b1000001111111110),
++  kAccessorInfoGetterTag =          MAKE_TAG(0b1000010011111111),
++  kAccessorInfoJsGetterTag =        MAKE_TAG(0b1000010101111111),
++  kAccessorInfoSetterTag =          MAKE_TAG(0b1000010110111111),
+ };
+ // clang-format on
+ #undef MAKE_TAG
+diff --git a/src/api/api-arguments-inl.h b/src/api/api-arguments-inl.h
+index 47ddf441d0b..14107e86d5d 100644
+--- a/src/api/api-arguments-inl.h
++++ b/src/api/api-arguments-inl.h
+@@ -312,7 +312,7 @@ Handle<Object> PropertyCallbackArguments::CallAccessorGetter(
+   AcceptSideEffects();
+ 
+   AccessorNameGetterCallback f =
+-      ToCData<AccessorNameGetterCallback>(info->getter());
++      reinterpret_cast<AccessorNameGetterCallback>(info->getter());
+   return BasicCallNamedGetterCallback(f, name, info,
+                                       handle(receiver(), isolate));
+ }
+@@ -327,7 +327,7 @@ Handle<Object> PropertyCallbackArguments::CallAccessorSetter(
+   AcceptSideEffects();
+ 
+   AccessorNameSetterCallback f =
+-      ToCData<AccessorNameSetterCallback>(accessor_info->setter());
++      reinterpret_cast<AccessorNameSetterCallback>(accessor_info->setter());
+   PREPARE_CALLBACK_INFO(isolate, f, Handle<Object>, void, accessor_info,
+                         handle(receiver(), isolate), Setter);
+   f(v8::Utils::ToLocal(name), v8::Utils::ToLocal(value), callback_info);
+diff --git a/src/api/api.cc b/src/api/api.cc
+index 8cb7a34b1a4..9293fb4faf4 100644
+--- a/src/api/api.cc
++++ b/src/api/api.cc
+@@ -1499,16 +1499,16 @@ i::Handle<i::AccessorInfo> MakeAccessorInfo(
+     v8::Local<Value> data, v8::AccessControl settings,
+     bool is_special_data_property, bool replace_on_access) {
+   i::Handle<i::AccessorInfo> obj = i_isolate->factory()->NewAccessorInfo();
+-  SET_FIELD_WRAPPED(i_isolate, obj, set_getter, getter);
++  obj->set_getter(i_isolate, reinterpret_cast<i::Address>(getter));
+   DCHECK_IMPLIES(replace_on_access,
+                  is_special_data_property && setter == nullptr);
+   if (is_special_data_property && setter == nullptr) {
+     setter = reinterpret_cast<Setter>(&i::Accessors::ReconfigureToDataProperty);
+   }
+-  SET_FIELD_WRAPPED(i_isolate, obj, set_setter, setter);
++  obj->set_setter(i_isolate, reinterpret_cast<i::Address>(setter));
+   i::Address redirected = obj->redirected_getter();
+   if (redirected != i::kNullAddress) {
+-    SET_FIELD_WRAPPED(i_isolate, obj, set_js_getter, redirected);
++    obj->set_js_getter(i_isolate, redirected);
+   }
+ 
+   i::Handle<i::Name> accessor_name = Utils::OpenHandle(*name);
+diff --git a/src/builtins/accessors.cc b/src/builtins/accessors.cc
+index 3077cf21311..2dd7d571f38 100644
+--- a/src/builtins/accessors.cc
++++ b/src/builtins/accessors.cc
+@@ -38,15 +38,12 @@ Handle<AccessorInfo> Accessors::MakeAccessor(
+   info->set_setter_side_effect_type(SideEffectType::kHasSideEffect);
+   name = factory->InternalizeName(name);
+   info->set_name(*name);
+-  Handle<Object> get = v8::FromCData(isolate, getter);
+   if (setter == nullptr) setter = &ReconfigureToDataProperty;
+-  Handle<Object> set = v8::FromCData(isolate, setter);
+-  info->set_getter(*get);
+-  info->set_setter(*set);
++  info->set_setter(isolate, reinterpret_cast<Address>(setter));
++  info->set_getter(isolate, reinterpret_cast<Address>(getter));
+   Address redirected = info->redirected_getter();
+   if (redirected != kNullAddress) {
+-    Handle<Object> js_get = v8::FromCData(isolate, redirected);
+-    info->set_js_getter(*js_get);
++    info->set_js_getter(isolate, redirected);
+   }
+   return info;
+ }
+diff --git a/src/builtins/arm/builtins-arm.cc b/src/builtins/arm/builtins-arm.cc
+index eac8912a3ea..64775d54312 100644
+--- a/src/builtins/arm/builtins-arm.cc
++++ b/src/builtins/arm/builtins-arm.cc
+@@ -3311,9 +3311,8 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+   ExternalReference thunk_ref =
+       ExternalReference::invoke_accessor_getter_callback();
+ 
+-  __ ldr(scratch, FieldMemOperand(callback, AccessorInfo::kJsGetterOffset));
+   __ ldr(api_function_address,
+-         FieldMemOperand(scratch, Foreign::kForeignAddressOffset));
++         FieldMemOperand(callback, AccessorInfo::kJsGetterOffset));
+ 
+   // +3 is to skip prolog, return address and name handle.
+   MemOperand return_value_operand(
+diff --git a/src/builtins/arm64/builtins-arm64.cc b/src/builtins/arm64/builtins-arm64.cc
+index ed5193f6405..2337e99f00b 100644
+--- a/src/builtins/arm64/builtins-arm64.cc
++++ b/src/builtins/arm64/builtins-arm64.cc
+@@ -3791,14 +3791,10 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+       ExternalReference::invoke_accessor_getter_callback();
+ 
+   Register api_function_address = x2;
+-  Register js_getter = x4;
+-  __ LoadTaggedPointerField(
+-      js_getter, FieldMemOperand(callback, AccessorInfo::kJsGetterOffset));
+-
+   __ LoadExternalPointerField(
+       api_function_address,
+-      FieldMemOperand(js_getter, Foreign::kForeignAddressOffset),
+-      kForeignForeignAddressTag);
++      FieldMemOperand(callback, AccessorInfo::kJsGetterOffset),
++      kAccessorInfoJsGetterTag);
+ 
+   const int spill_offset = 1 + kApiStackSpace;
+   // +3 is to skip prolog, return address and name handle.
+diff --git a/src/builtins/ia32/builtins-ia32.cc b/src/builtins/ia32/builtins-ia32.cc
+index 79513be0144..5502657e8cd 100644
+--- a/src/builtins/ia32/builtins-ia32.cc
++++ b/src/builtins/ia32/builtins-ia32.cc
+@@ -3621,10 +3621,9 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+   ExternalReference thunk_ref =
+       ExternalReference::invoke_accessor_getter_callback();
+ 
+-  __ mov(scratch, FieldOperand(callback, AccessorInfo::kJsGetterOffset));
+   Register function_address = edx;
+   __ mov(function_address,
+-         FieldOperand(scratch, Foreign::kForeignAddressOffset));
++         FieldOperand(callback, AccessorInfo::kJsGetterOffset));
+   // +3 is to skip prolog, return address and name handle.
+   Operand return_value_operand(
+       ebp,
+diff --git a/src/builtins/loong64/builtins-loong64.cc b/src/builtins/loong64/builtins-loong64.cc
+index 1a825e5f393..f957f21e153 100644
+--- a/src/builtins/loong64/builtins-loong64.cc
++++ b/src/builtins/loong64/builtins-loong64.cc
+@@ -3388,9 +3388,8 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+   ExternalReference thunk_ref =
+       ExternalReference::invoke_accessor_getter_callback();
+ 
+-  __ Ld_d(scratch, FieldMemOperand(callback, AccessorInfo::kJsGetterOffset));
+   __ Ld_d(api_function_address,
+-          FieldMemOperand(scratch, Foreign::kForeignAddressOffset));
++          FieldMemOperand(callback, AccessorInfo::kJsGetterOffset));
+ 
+   // +3 is to skip prolog, return address and name handle.
+   MemOperand return_value_operand(
+diff --git a/src/builtins/mips/builtins-mips.cc b/src/builtins/mips/builtins-mips.cc
+index 23e6b7be332..b504f27695b 100644
+--- a/src/builtins/mips/builtins-mips.cc
++++ b/src/builtins/mips/builtins-mips.cc
+@@ -3302,9 +3302,8 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+   ExternalReference thunk_ref =
+       ExternalReference::invoke_accessor_getter_callback();
+ 
+-  __ lw(scratch, FieldMemOperand(callback, AccessorInfo::kJsGetterOffset));
+   __ lw(api_function_address,
+-        FieldMemOperand(scratch, Foreign::kForeignAddressOffset));
++        FieldMemOperand(callback, AccessorInfo::kJsGetterOffset));
+ 
+   // +3 is to skip prolog, return address and name handle.
+   MemOperand return_value_operand(
+diff --git a/src/builtins/mips64/builtins-mips64.cc b/src/builtins/mips64/builtins-mips64.cc
+index 87a54cac16d..fa05f0a2607 100644
+--- a/src/builtins/mips64/builtins-mips64.cc
++++ b/src/builtins/mips64/builtins-mips64.cc
+@@ -3410,9 +3410,8 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+   ExternalReference thunk_ref =
+       ExternalReference::invoke_accessor_getter_callback();
+ 
+-  __ Ld(scratch, FieldMemOperand(callback, AccessorInfo::kJsGetterOffset));
+   __ Ld(api_function_address,
+-        FieldMemOperand(scratch, Foreign::kForeignAddressOffset));
++        FieldMemOperand(callback, AccessorInfo::kJsGetterOffset));
+ 
+   // +3 is to skip prolog, return address and name handle.
+   MemOperand return_value_operand(
+diff --git a/src/builtins/ppc/builtins-ppc.cc b/src/builtins/ppc/builtins-ppc.cc
+index 970da582f3d..c5ac647df91 100644
+--- a/src/builtins/ppc/builtins-ppc.cc
++++ b/src/builtins/ppc/builtins-ppc.cc
+@@ -3655,10 +3655,8 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+   ExternalReference thunk_ref =
+       ExternalReference::invoke_accessor_getter_callback();
+ 
+-  __ LoadTaggedPointerField(
+-      scratch, FieldMemOperand(callback, AccessorInfo::kJsGetterOffset), r0);
+   __ LoadU64(api_function_address,
+-             FieldMemOperand(scratch, Foreign::kForeignAddressOffset), r0);
++             FieldMemOperand(callback, AccessorInfo::kJsGetterOffset), r0);
+ 
+   // +3 is to skip prolog, return address and name handle.
+   MemOperand return_value_operand(
+diff --git a/src/builtins/riscv64/builtins-riscv64.cc b/src/builtins/riscv64/builtins-riscv64.cc
+index acb9cb69000..baf4f32445d 100644
+--- a/src/builtins/riscv64/builtins-riscv64.cc
++++ b/src/builtins/riscv64/builtins-riscv64.cc
+@@ -3452,10 +3452,8 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+   ExternalReference thunk_ref =
+       ExternalReference::invoke_accessor_getter_callback();
+ 
+-  __ LoadTaggedPointerField(
+-      scratch, FieldMemOperand(callback, AccessorInfo::kJsGetterOffset));
+   __ Ld(api_function_address,
+-        FieldMemOperand(scratch, Foreign::kForeignAddressOffset));
++        FieldMemOperand(callback, AccessorInfo::kJsGetterOffset));
+ 
+   // +3 is to skip prolog, return address and name handle.
+   MemOperand return_value_operand(
+diff --git a/src/builtins/s390/builtins-s390.cc b/src/builtins/s390/builtins-s390.cc
+index 1bb4bacf1f0..7473f44d136 100644
+--- a/src/builtins/s390/builtins-s390.cc
++++ b/src/builtins/s390/builtins-s390.cc
+@@ -3634,10 +3634,8 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+   ExternalReference thunk_ref =
+       ExternalReference::invoke_accessor_getter_callback();
+ 
+-  __ LoadTaggedPointerField(
+-      scratch, FieldMemOperand(callback, AccessorInfo::kJsGetterOffset));
+   __ LoadU64(api_function_address,
+-             FieldMemOperand(scratch, Foreign::kForeignAddressOffset));
++             FieldMemOperand(callback, AccessorInfo::kJsGetterOffset));
+ 
+   // +3 is to skip prolog, return address and name handle.
+   MemOperand return_value_operand(
+diff --git a/src/builtins/x64/builtins-x64.cc b/src/builtins/x64/builtins-x64.cc
+index 5f71a5bfddc..1678b74bea6 100644
+--- a/src/builtins/x64/builtins-x64.cc
++++ b/src/builtins/x64/builtins-x64.cc
+@@ -4840,12 +4840,10 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+   // but not accessor_info_arg or name_arg
+   DCHECK(api_function_address != accessor_info_arg);
+   DCHECK(api_function_address != name_arg);
+-  __ LoadTaggedPointerField(
+-      scratch, FieldOperand(callback, AccessorInfo::kJsGetterOffset));
+   __ LoadExternalPointerField(
+       api_function_address,
+-      FieldOperand(scratch, Foreign::kForeignAddressOffset),
+-      kForeignForeignAddressTag, kScratchRegister);
++      FieldOperand(callback, AccessorInfo::kJsGetterOffset),
++      kAccessorInfoJsGetterTag, kScratchRegister);
+ 
+   // +3 is to skip prolog, return address and name handle.
+   Operand return_value_operand(
+diff --git a/src/debug/debug-property-iterator.cc b/src/debug/debug-property-iterator.cc
+index ccf01cfdc8f..54800e46c66 100644
+--- a/src/debug/debug-property-iterator.cc
++++ b/src/debug/debug-property-iterator.cc
+@@ -219,10 +219,10 @@ base::Flags<debug::NativeAccessorType, int> GetNativeAccessorDescriptorInternal(
+   ACCESSOR_INFO_LIST_GENERATOR(IS_BUILTIN_ACCESSOR, /* not used */)
+ #undef IS_BUILTIN_ACCESSOR
+   Handle<AccessorInfo> accessor_info = Handle<AccessorInfo>::cast(structure);
+-  if (accessor_info->getter() != Object()) {
++  if (accessor_info->has_getter()) {
+     result |= debug::NativeAccessorType::HasGetter;
+   }
+-  if (accessor_info->setter() != Object()) {
++  if (accessor_info->has_setter()) {
+     result |= debug::NativeAccessorType::HasSetter;
+   }
+   return result;
+diff --git a/src/diagnostics/objects-printer.cc b/src/diagnostics/objects-printer.cc
+index 08eaf999f3c..80b31948424 100644
+--- a/src/diagnostics/objects-printer.cc
++++ b/src/diagnostics/objects-printer.cc
+@@ -834,7 +834,7 @@ const char* SideEffectType2String(SideEffectType type) {
+ }  // namespace
+ 
+ void AccessorInfo::AccessorInfoPrint(std::ostream& os) {
+-  TorqueGeneratedAccessorInfo<AccessorInfo, Struct>::AccessorInfoPrint(os);
++  TorqueGeneratedAccessorInfo<AccessorInfo, HeapObject>::AccessorInfoPrint(os);
+   os << " - all_can_read: " << all_can_read();
+   os << "\n - all_can_write: " << all_can_write();
+   os << "\n - is_special_data_property: " << is_special_data_property();
+@@ -845,6 +845,9 @@ void AccessorInfo::AccessorInfoPrint(std::ostream& os) {
+   os << "\n - setter_side_effect_type: "
+      << SideEffectType2String(setter_side_effect_type());
+   os << "\n - initial_attributes: " << initial_property_attributes();
++  os << "\n - getter: " << reinterpret_cast<void*>(getter());
++  os << "\n - js_getter: " << reinterpret_cast<void*>(js_getter());
++  os << "\n - setter: " << reinterpret_cast<void*>(setter());
+   os << '\n';
+ }
+ 
+diff --git a/src/heap/factory.cc b/src/heap/factory.cc
+index 52375c96278..3afe8032c01 100644
+--- a/src/heap/factory.cc
++++ b/src/heap/factory.cc
+@@ -1415,18 +1415,19 @@ Handle<AliasedArgumentsEntry> Factory::NewAliasedArgumentsEntry(
+ }
+ 
+ Handle<AccessorInfo> Factory::NewAccessorInfo() {
+-  auto info =
+-      NewStructInternal<AccessorInfo>(ACCESSOR_INFO_TYPE, AllocationType::kOld);
++  AccessorInfo info =
++      AccessorInfo::cast(New(accessor_info_map(), AllocationType::kOld));
+   DisallowGarbageCollection no_gc;
+   info.set_name(*empty_string(), SKIP_WRITE_BARRIER);
++  info.set_data(*undefined_value(), SKIP_WRITE_BARRIER);
+   info.set_flags(0);  // Must clear the flags, it was initialized as undefined.
+   info.set_is_sloppy(true);
+   info.set_initial_property_attributes(NONE);
+ 
+-  // Clear some other fields that should not be undefined.
+-  info.set_getter(Smi::zero(), SKIP_WRITE_BARRIER);
+-  info.set_setter(Smi::zero(), SKIP_WRITE_BARRIER);
+-  info.set_js_getter(Smi::zero(), SKIP_WRITE_BARRIER);
++  // Initializes setter, getter and js_getter fields.
++  info.AllocateExternalPointerEntries(isolate());
++  info.clear_padding();
++
+   return handle(info, isolate());
+ }
+ 
+@@ -3973,10 +3974,9 @@ Handle<CallHandlerInfo> Factory::NewCallHandlerInfo(bool has_no_side_effect) {
+                         : side_effect_call_handler_info_map();
+   CallHandlerInfo info = CallHandlerInfo::cast(New(map, AllocationType::kOld));
+   DisallowGarbageCollection no_gc;
+-  Object undefined_value = read_only_roots().undefined_value();
++  info.set_data(*undefined_value(), SKIP_WRITE_BARRIER);
+   // Initializes both callback and js_callback fields.
+   info.AllocateExternalPointerEntries(isolate());
+-  info.set_data(undefined_value, SKIP_WRITE_BARRIER);
+   return handle(info, isolate());
+ }
+ 
+diff --git a/src/heap/objects-visiting.h b/src/heap/objects-visiting.h
+index 268b0c40944..223c5c3224f 100644
+--- a/src/heap/objects-visiting.h
++++ b/src/heap/objects-visiting.h
+@@ -14,6 +14,7 @@ namespace v8 {
+ namespace internal {
+ 
+ #define TYPED_VISITOR_ID_LIST(V)        \
++  V(AccessorInfo)                       \
+   V(AllocationSite)                     \
+   V(BigInt)                             \
+   V(ByteArray)                          \
+diff --git a/src/heap/setup-heap-internal.cc b/src/heap/setup-heap-internal.cc
+index 65ccd5f75e7..9b58746fedc 100644
+--- a/src/heap/setup-heap-internal.cc
++++ b/src/heap/setup-heap-internal.cc
+@@ -488,6 +488,8 @@ bool Heap::CreateInitialMaps() {
+ 
+     ALLOCATE_VARSIZE_MAP(COVERAGE_INFO_TYPE, coverage_info);
+ 
++    ALLOCATE_MAP(ACCESSOR_INFO_TYPE, AccessorInfo::kSize, accessor_info)
++
+     ALLOCATE_MAP(CALL_HANDLER_INFO_TYPE, CallHandlerInfo::kSize,
+                  side_effect_call_handler_info)
+     ALLOCATE_MAP(CALL_HANDLER_INFO_TYPE, CallHandlerInfo::kSize,
+diff --git a/src/ic/ic.cc b/src/ic/ic.cc
+index 5de3f00acae..9a9293d2830 100644
+--- a/src/ic/ic.cc
++++ b/src/ic/ic.cc
+@@ -1110,8 +1110,7 @@ Handle<Object> LoadIC::ComputeHandler(LookupIterator* lookup) {
+         return LoadHandler::LoadSlow(isolate());
+       }
+ 
+-      if (v8::ToCData<Address>(info->getter()) == kNullAddress ||
+-          !holder->HasFastProperties() ||
++      if (!info->has_getter() || !holder->HasFastProperties() ||
+           (info->is_sloppy() && !receiver->IsJSReceiver())) {
+         TRACE_HANDLER_STATS(isolate(), LoadIC_SlowStub);
+         return LoadHandler::LoadSlow(isolate());
+@@ -2024,7 +2023,7 @@ MaybeObjectHandle StoreIC::ComputeHandler(LookupIterator* lookup) {
+       Handle<Object> accessors = lookup->GetAccessors();
+       if (accessors->IsAccessorInfo()) {
+         Handle<AccessorInfo> info = Handle<AccessorInfo>::cast(accessors);
+-        if (v8::ToCData<Address>(info->setter()) == kNullAddress) {
++        if (!info->has_setter()) {
+           set_slow_stub_reason("setter == kNullAddress");
+           TRACE_HANDLER_STATS(isolate(), StoreIC_SlowStub);
+           return MaybeObjectHandle(StoreHandler::StoreSlow(isolate()));
+diff --git a/src/ic/keyed-store-generic.cc b/src/ic/keyed-store-generic.cc
+index e9e90f138cd..f720b7e278c 100644
+--- a/src/ic/keyed-store-generic.cc
++++ b/src/ic/keyed-store-generic.cc
+@@ -1012,7 +1012,7 @@ void KeyedStoreGenericAssembler::EmitGenericPropertyStore(
+     BIND(&accessor);
+     {
+       Label not_callable(this);
+-      TNode<Struct> accessor_pair = CAST(var_accessor_pair.value());
++      TNode<HeapObject> accessor_pair = CAST(var_accessor_pair.value());
+       GotoIf(IsAccessorInfo(accessor_pair), slow);
+       CSA_DCHECK(this, IsAccessorPair(accessor_pair));
+       TNode<HeapObject> setter =
+diff --git a/src/logging/log.cc b/src/logging/log.cc
+index 7a8a2649e31..be48734a8f6 100644
+--- a/src/logging/log.cc
++++ b/src/logging/log.cc
+@@ -1968,17 +1968,17 @@ void V8FileLogger::LogAccessorCallbacks() {
+     if (!obj.IsAccessorInfo()) continue;
+     AccessorInfo ai = AccessorInfo::cast(obj);
+     if (!ai.name().IsName()) continue;
+-    Address getter_entry = v8::ToCData<Address>(ai.getter());
++    Address getter_entry = ai.getter();
+     HandleScope scope(isolate_);
+     Handle<Name> name(Name::cast(ai.name()), isolate_);
+-    if (getter_entry != 0) {
++    if (getter_entry != kNullAddress) {
+ #if USES_FUNCTION_DESCRIPTORS
+       getter_entry = *FUNCTION_ENTRYPOINT_ADDRESS(getter_entry);
+ #endif
+       PROFILE(isolate_, GetterCallbackEvent(name, getter_entry));
+     }
+-    Address setter_entry = v8::ToCData<Address>(ai.setter());
+-    if (setter_entry != 0) {
++    Address setter_entry = ai.setter();
++    if (setter_entry != kNullAddress) {
+ #if USES_FUNCTION_DESCRIPTORS
+       setter_entry = *FUNCTION_ENTRYPOINT_ADDRESS(setter_entry);
+ #endif
+diff --git a/src/objects/api-callbacks-inl.h b/src/objects/api-callbacks-inl.h
+index 54091f5774c..287f8673bd5 100644
+--- a/src/objects/api-callbacks-inl.h
++++ b/src/objects/api-callbacks-inl.h
+@@ -28,25 +28,21 @@ TQ_OBJECT_CONSTRUCTORS_IMPL(InterceptorInfo)
+ 
+ TQ_OBJECT_CONSTRUCTORS_IMPL(CallHandlerInfo)
+ 
+-ACCESSORS_CHECKED2(AccessorInfo, getter, Object, kGetterOffset, true,
+-                   Foreign::IsNormalized(value))
+-ACCESSORS_CHECKED2(AccessorInfo, setter, Object, kSetterOffset, true,
+-                   Foreign::IsNormalized(value))
+-
+-bool AccessorInfo::has_getter() {
+-  bool result = getter() != Smi::zero();
+-  DCHECK_EQ(result,
+-            getter() != Smi::zero() &&
+-                Foreign::cast(getter()).foreign_address() != kNullAddress);
+-  return result;
+-}
++EXTERNAL_POINTER_ACCESSORS(AccessorInfo, getter, Address, kGetterOffset,
++                           kAccessorInfoGetterTag)
++EXTERNAL_POINTER_ACCESSORS(AccessorInfo, js_getter, Address, kJsGetterOffset,
++                           kAccessorInfoJsGetterTag)
++EXTERNAL_POINTER_ACCESSORS(AccessorInfo, setter, Address, kSetterOffset,
++                           kAccessorInfoSetterTag)
++
++bool AccessorInfo::has_getter() { return getter() != kNullAddress; }
++
++bool AccessorInfo::has_setter() { return setter() != kNullAddress; }
+ 
+-bool AccessorInfo::has_setter() {
+-  bool result = setter() != Smi::zero();
+-  DCHECK_EQ(result,
+-            setter() != Smi::zero() &&
+-                Foreign::cast(setter()).foreign_address() != kNullAddress);
+-  return result;
++void AccessorInfo::AllocateExternalPointerEntries(Isolate* isolate) {
++  InitExternalPointerField(kSetterOffset, isolate, kAccessorInfoSetterTag);
++  InitExternalPointerField(kGetterOffset, isolate, kAccessorInfoGetterTag);
++  InitExternalPointerField(kJsGetterOffset, isolate, kAccessorInfoJsGetterTag);
+ }
+ 
+ BIT_FIELD_ACCESSORS(AccessorInfo, flags, all_can_read,
+@@ -77,6 +73,12 @@ void AccessorInfo::set_setter_side_effect_type(SideEffectType value) {
+ BIT_FIELD_ACCESSORS(AccessorInfo, flags, initial_property_attributes,
+                     AccessorInfo::InitialAttributesBits)
+ 
++void AccessorInfo::clear_padding() {
++  if (FIELD_SIZE(kOptionalPaddingOffset) == 0) return;
++  memset(reinterpret_cast<void*>(address() + kOptionalPaddingOffset), 0,
++         FIELD_SIZE(kOptionalPaddingOffset));
++}
++
+ BOOL_ACCESSORS(InterceptorInfo, flags, can_intercept_symbols,
+                CanInterceptSymbolsBit::kShift)
+ BOOL_ACCESSORS(InterceptorInfo, flags, all_can_read, AllCanReadBit::kShift)
+diff --git a/src/objects/api-callbacks.h b/src/objects/api-callbacks.h
+index 7e031b4e239..7ca4c48dc74 100644
+--- a/src/objects/api-callbacks.h
++++ b/src/objects/api-callbacks.h
+@@ -27,13 +27,15 @@ class StructBodyDescriptor;
+ // If the accessor in the prototype has the READ_ONLY property attribute, then
+ // a new value is added to the derived object when the property is set.
+ // This shadows the accessor in the prototype.
+-class AccessorInfo : public TorqueGeneratedAccessorInfo<AccessorInfo, Struct> {
++class AccessorInfo
++    : public TorqueGeneratedAccessorInfo<AccessorInfo, HeapObject> {
+  public:
+   // This directly points at a foreign C function to be used from the runtime.
+-  DECL_ACCESSORS(getter, Object)
++  DECL_EXTERNAL_POINTER_ACCESSORS(getter, Address)
+   inline bool has_getter();
+-  DECL_ACCESSORS(setter, Object)
++  DECL_EXTERNAL_POINTER_ACCESSORS(setter, Address)
+   inline bool has_setter();
++  DECL_EXTERNAL_POINTER_ACCESSORS(js_getter, Address)
+ 
+   static Address redirect(Address address, AccessorComponent component);
+   Address redirected_getter() const;
+@@ -68,9 +70,15 @@ class AccessorInfo : public TorqueGeneratedAccessorInfo<AccessorInfo, Struct> {
+ 
+   DECL_PRINTER(AccessorInfo)
+ 
+-  using BodyDescriptor = StructBodyDescriptor;
++  inline void clear_padding();
++
++  class BodyDescriptor;
+ 
+  private:
++  friend class Factory;
++
++  inline void AllocateExternalPointerEntries(Isolate* isolate);
++
+   // Bit positions in |flags|.
+   DEFINE_TORQUE_GENERATED_ACCESSOR_INFO_FLAGS()
+ 
+@@ -131,8 +139,6 @@ class CallHandlerInfo
+ 
+  private:
+   friend class Factory;
+-  friend class SerializerDeserializer;
+-  friend class StartupSerializer;
+ 
+   inline void AllocateExternalPointerEntries(Isolate* isolate);
+ 
+diff --git a/src/objects/api-callbacks.tq b/src/objects/api-callbacks.tq
+index dd007bc291d..93502810d4b 100644
+--- a/src/objects/api-callbacks.tq
++++ b/src/objects/api-callbacks.tq
+@@ -39,7 +39,7 @@ extern class AccessCheckInfo extends Struct {
+ 
+ type SideEffectType extends int32 constexpr 'SideEffectType';
+ 
+-bitfield struct AccessorInfoFlags extends uint31 {
++bitfield struct AccessorInfoFlags extends uint32 {
+   all_can_read: bool: 1 bit;
+   all_can_write: bool: 1 bit;
+   is_special_data_property: bool: 1 bit;
+@@ -50,13 +50,15 @@ bitfield struct AccessorInfoFlags extends uint31 {
+   initial_attributes: PropertyAttributes: 3 bit;
+ }
+ 
+-extern class AccessorInfo extends Struct {
++extern class AccessorInfo extends HeapObject {
+   name: Name;
+-  flags: SmiTagged<AccessorInfoFlags>;
+-  setter: NonNullForeign|Zero;
+-  getter: NonNullForeign|Zero;
++  data: Object;
++  setter: ExternalPointer;
++  getter: ExternalPointer;
+   // This either points at the same as above, or a trampoline in case we are
+   // running with the simulator. Use this entry from generated code.
+-  js_getter: NonNullForeign|Zero;
+-  data: Object;
++  js_getter: ExternalPointer;
++  flags: AccessorInfoFlags;
++  @if(TAGGED_SIZE_8_BYTES) optional_padding: uint32;
++  @ifnot(TAGGED_SIZE_8_BYTES) optional_padding: void;
+ }
+diff --git a/src/objects/map.cc b/src/objects/map.cc
+index 8b4e7e7688a..a470411604f 100644
+--- a/src/objects/map.cc
++++ b/src/objects/map.cc
+@@ -16,6 +16,7 @@
+ #include "src/objects/descriptor-array.h"
+ #include "src/objects/elements-kind.h"
+ #include "src/objects/field-type.h"
++#include "src/objects/instance-type.h"
+ #include "src/objects/js-objects.h"
+ #include "src/objects/map-updater.h"
+ #include "src/objects/maybe-object.h"
+@@ -194,6 +195,9 @@ VisitorId Map::GetVisitorId(Map map) {
+     case JS_WEAK_SET_TYPE:
+       return kVisitJSWeakCollection;
+ 
++    case ACCESSOR_INFO_TYPE:
++      return kVisitAccessorInfo;
++
+     case CALL_HANDLER_INFO_TYPE:
+       return kVisitCallHandlerInfo;
+ 
+diff --git a/src/objects/map.h b/src/objects/map.h
+index aae3a5c89ef..3e19e4ae221 100644
+--- a/src/objects/map.h
++++ b/src/objects/map.h
+@@ -33,6 +33,7 @@ enum InstanceType : uint16_t;
+   V(FixedDoubleArray)
+ 
+ #define POINTER_VISITOR_ID_LIST(V)      \
++  V(AccessorInfo)                       \
+   V(AllocationSite)                     \
+   V(BytecodeArray)                      \
+   V(CallHandlerInfo)                    \
+diff --git a/src/objects/object-list-macros.h b/src/objects/object-list-macros.h
+index 208b8fe68fe..fff2bf835f9 100644
+--- a/src/objects/object-list-macros.h
++++ b/src/objects/object-list-macros.h
+@@ -77,6 +77,7 @@ class ZoneForwardList;
+ #define HEAP_OBJECT_ORDINARY_TYPE_LIST_BASE(V)  \
+   V(AbstractCode)                               \
+   V(AccessCheckNeeded)                          \
++  V(AccessorInfo)                               \
+   V(AllocationSite)                             \
+   V(ArrayList)                                  \
+   V(BigInt)                                     \
+diff --git a/src/objects/objects-body-descriptors-inl.h b/src/objects/objects-body-descriptors-inl.h
+index 9ebea258de0..72b03daee8b 100644
+--- a/src/objects/objects-body-descriptors-inl.h
++++ b/src/objects/objects-body-descriptors-inl.h
+@@ -8,6 +8,7 @@
+ #include <algorithm>
+ 
+ #include "src/codegen/reloc-info.h"
++#include "src/common/globals.h"
+ #include "src/ic/handler-configuration.h"
+ #include "src/objects/arguments-inl.h"
+ #include "src/objects/bigint.h"
+@@ -1330,6 +1331,8 @@ auto BodyDescriptorApply(InstanceType type, Args&&... args) {
+     return CALL_APPLY(Name);
+       STRUCT_LIST(MAKE_STRUCT_CASE)
+ #undef MAKE_STRUCT_CASE
++    case ACCESSOR_INFO_TYPE:
++      return CALL_APPLY(AccessorInfo);
+     case CALL_HANDLER_INFO_TYPE:
+       return CALL_APPLY(CallHandlerInfo);
+     case LOAD_HANDLER_TYPE:
+@@ -1421,6 +1424,38 @@ class EphemeronHashTable::BodyDescriptor final : public BodyDescriptorBase {
+   }
+ };
+ 
++class AccessorInfo::BodyDescriptor final : public BodyDescriptorBase {
++ public:
++  static_assert(AccessorInfo::kEndOfStrongFieldsOffset ==
++                AccessorInfo::kSetterOffset);
++  static_assert(AccessorInfo::kSetterOffset < AccessorInfo::kGetterOffset);
++  static_assert(AccessorInfo::kGetterOffset < AccessorInfo::kJsGetterOffset);
++  static_assert(AccessorInfo::kJsGetterOffset < AccessorInfo::kFlagsOffset);
++  static_assert(AccessorInfo::kFlagsOffset < AccessorInfo::kSize);
++
++  static bool IsValidSlot(Map map, HeapObject obj, int offset) {
++    return offset < AccessorInfo::kEndOfStrongFieldsOffset;
++  }
++
++  template <typename ObjectVisitor>
++  static inline void IterateBody(Map map, HeapObject obj, int object_size,
++                                 ObjectVisitor* v) {
++    IteratePointers(obj, HeapObject::kHeaderSize,
++                    AccessorInfo::kEndOfStrongFieldsOffset, v);
++    v->VisitExternalPointer(
++        obj, obj.RawExternalPointerField(AccessorInfo::kSetterOffset),
++        kAccessorInfoSetterTag);
++    v->VisitExternalPointer(
++        obj, obj.RawExternalPointerField(AccessorInfo::kGetterOffset),
++        kAccessorInfoGetterTag);
++    v->VisitExternalPointer(
++        obj, obj.RawExternalPointerField(AccessorInfo::kJsGetterOffset),
++        kAccessorInfoJsGetterTag);
++  }
++
++  static inline int SizeOf(Map map, HeapObject object) { return kSize; }
++};
++
+ class CallHandlerInfo::BodyDescriptor final : public BodyDescriptorBase {
+  public:
+   static_assert(CallHandlerInfo::kEndOfStrongFieldsOffset ==
+diff --git a/src/objects/objects-definitions.h b/src/objects/objects-definitions.h
+index 16c09d7c867..b10b8021b4a 100644
+--- a/src/objects/objects-definitions.h
++++ b/src/objects/objects-definitions.h
+@@ -126,7 +126,6 @@ namespace internal {
+     function_template_info)                                                    \
+   V(_, OBJECT_TEMPLATE_INFO_TYPE, ObjectTemplateInfo, object_template_info)    \
+   V(_, ACCESS_CHECK_INFO_TYPE, AccessCheckInfo, access_check_info)             \
+-  V(_, ACCESSOR_INFO_TYPE, AccessorInfo, accessor_info)                        \
+   V(_, ACCESSOR_PAIR_TYPE, AccessorPair, accessor_pair)                        \
+   V(_, ALIASED_ARGUMENTS_ENTRY_TYPE, AliasedArgumentsEntry,                    \
+     aliased_arguments_entry)                                                   \
+diff --git a/src/objects/objects.cc b/src/objects/objects.cc
+index 77a68b3ed70..28f715b18c6 100644
+--- a/src/objects/objects.cc
++++ b/src/objects/objects.cc
+@@ -1479,7 +1479,7 @@ Address AccessorInfo::redirect(Address address, AccessorComponent component) {
+ }
+ 
+ Address AccessorInfo::redirected_getter() const {
+-  Address accessor = v8::ToCData<Address>(getter());
++  Address accessor = getter();
+   if (accessor == kNullAddress) return kNullAddress;
+   return redirect(accessor, ACCESSOR_GETTER);
+ }
+@@ -2116,6 +2116,14 @@ void HeapObject::HeapObjectShortPrint(std::ostream& os) {
+       os << '>';
+       break;
+     }
++    case ACCESSOR_INFO_TYPE: {
++      AccessorInfo info = AccessorInfo::cast(*this);
++      os << "<AccessorInfo ";
++      os << "name= " << Brief(info.name());
++      os << ", data= " << Brief(info.data());
++      os << ">";
++      break;
++    }
+     case CALL_HANDLER_INFO_TYPE: {
+       CallHandlerInfo info = CallHandlerInfo::cast(*this);
+       os << "<CallHandlerInfo ";
+diff --git a/src/profiler/heap-snapshot-generator.cc b/src/profiler/heap-snapshot-generator.cc
+index 9d71f8df837..4b85fe51212 100644
+--- a/src/profiler/heap-snapshot-generator.cc
++++ b/src/profiler/heap-snapshot-generator.cc
+@@ -1484,10 +1484,6 @@ void V8HeapExplorer::ExtractAccessorInfoReferences(HeapEntry* entry,
+                                                    AccessorInfo accessor_info) {
+   SetInternalReference(entry, "name", accessor_info.name(),
+                        AccessorInfo::kNameOffset);
+-  SetInternalReference(entry, "getter", accessor_info.getter(),
+-                       AccessorInfo::kGetterOffset);
+-  SetInternalReference(entry, "setter", accessor_info.setter(),
+-                       AccessorInfo::kSetterOffset);
+   SetInternalReference(entry, "data", accessor_info.data(),
+                        AccessorInfo::kDataOffset);
+ }
+diff --git a/src/roots/roots.h b/src/roots/roots.h
+index 08318008d3d..a3d82b8c8ca 100644
+--- a/src/roots/roots.h
++++ b/src/roots/roots.h
+@@ -101,6 +101,7 @@ class Symbol;
+   V(Map, ordered_name_dictionary_map, OrderedNameDictionaryMap)                \
+   V(Map, preparse_data_map, PreparseDataMap)                                   \
+   V(Map, property_array_map, PropertyArrayMap)                                 \
++  V(Map, accessor_info_map, AccessorInfoMap)                                   \
+   V(Map, side_effect_call_handler_info_map, SideEffectCallHandlerInfoMap)      \
+   V(Map, side_effect_free_call_handler_info_map,                               \
+     SideEffectFreeCallHandlerInfoMap)                                          \
+diff --git a/src/snapshot/serializer-deserializer.cc b/src/snapshot/serializer-deserializer.cc
+index d7108ee062f..0683844ba32 100644
+--- a/src/snapshot/serializer-deserializer.cc
++++ b/src/snapshot/serializer-deserializer.cc
+@@ -61,8 +61,7 @@ void SerializerDeserializer::RestoreExternalReferenceRedirector(
+     Isolate* isolate, AccessorInfo accessor_info) {
+   DisallowGarbageCollection no_gc;
+   // Restore wiped accessor infos.
+-  Foreign::cast(accessor_info.js_getter())
+-      .set_foreign_address(isolate, accessor_info.redirected_getter());
++  accessor_info.set_js_getter(isolate, accessor_info.redirected_getter());
+ }
+ 
+ void SerializerDeserializer::RestoreExternalReferenceRedirector(
+diff --git a/src/snapshot/serializer.cc b/src/snapshot/serializer.cc
+index 3f235081214..963fed0f488 100644
+--- a/src/snapshot/serializer.cc
++++ b/src/snapshot/serializer.cc
+@@ -1080,7 +1080,10 @@ void Serializer::ObjectSerializer::VisitExternalPointer(
+   InstanceType instance_type = object_->map(cage_base).instance_type();
+   if (InstanceTypeChecker::IsForeign(instance_type) ||
+       InstanceTypeChecker::IsJSExternalObject(instance_type) ||
++      InstanceTypeChecker::IsAccessorInfo(instance_type) ||
+       InstanceTypeChecker::IsCallHandlerInfo(instance_type)) {
++    // Output raw data payload, if any.
++    OutputRawData(slot.address());
+     Address value = slot.load(isolate(), tag);
+     OutputExternalReference(value, kSystemPointerSize, true, tag);
+     bytes_processed_so_far_ += kExternalPointerSize;
+diff --git a/src/snapshot/startup-serializer.cc b/src/snapshot/startup-serializer.cc
+index a1f576d7d7e..25a7a5c70a9 100644
+--- a/src/snapshot/startup-serializer.cc
++++ b/src/snapshot/startup-serializer.cc
+@@ -162,10 +162,8 @@ void StartupSerializer::SerializeObjectImpl(Handle<HeapObject> obj) {
+   if (use_simulator && obj->IsAccessorInfo(cage_base)) {
+     // Wipe external reference redirects in the accessor info.
+     Handle<AccessorInfo> info = Handle<AccessorInfo>::cast(obj);
+-    Address original_address =
+-        Foreign::cast(info->getter()).foreign_address(isolate());
+-    Foreign::cast(info->js_getter())
+-        .set_foreign_address(isolate(), original_address);
++    Address original_address = info->getter();
++    info->set_js_getter(isolate(), original_address);
+     accessor_infos_.Push(*info);
+   } else if (use_simulator && obj->IsCallHandlerInfo(cage_base)) {
+     Handle<CallHandlerInfo> info = Handle<CallHandlerInfo>::cast(obj);
+diff --git a/test/cctest/test-heap-profiler.cc b/test/cctest/test-heap-profiler.cc
+index f9d36ce8278..192808fd017 100644
+--- a/test/cctest/test-heap-profiler.cc
++++ b/test/cctest/test-heap-profiler.cc
+@@ -2445,14 +2445,6 @@ TEST(AccessorInfo) {
+   const v8::HeapGraphNode* name = GetProperty(
+       env->GetIsolate(), length_accessor, v8::HeapGraphEdge::kInternal, "name");
+   CHECK(name);
+-  const v8::HeapGraphNode* getter =
+-      GetProperty(env->GetIsolate(), length_accessor,
+-                  v8::HeapGraphEdge::kInternal, "getter");
+-  CHECK(getter);
+-  const v8::HeapGraphNode* setter =
+-      GetProperty(env->GetIsolate(), length_accessor,
+-                  v8::HeapGraphEdge::kInternal, "setter");
+-  CHECK(setter);
+ }
+ 
+ TEST(JSGeneratorObject) {
+diff --git a/tools/v8heapconst.py b/tools/v8heapconst.py
+index 22de40f191f..9badafa25d3 100644
+--- a/tools/v8heapconst.py
++++ b/tools/v8heapconst.py
+@@ -46,68 +46,68 @@ INSTANCE_TYPES = {
+   139: "FUNCTION_TEMPLATE_INFO_TYPE",
+   140: "OBJECT_TEMPLATE_INFO_TYPE",
+   141: "ACCESS_CHECK_INFO_TYPE",
+-  142: "ACCESSOR_INFO_TYPE",
+-  143: "ACCESSOR_PAIR_TYPE",
+-  144: "ALIASED_ARGUMENTS_ENTRY_TYPE",
+-  145: "ALLOCATION_MEMENTO_TYPE",
+-  146: "ALLOCATION_SITE_TYPE",
+-  147: "ARRAY_BOILERPLATE_DESCRIPTION_TYPE",
+-  148: "ASM_WASM_DATA_TYPE",
+-  149: "ASYNC_GENERATOR_REQUEST_TYPE",
+-  150: "BREAK_POINT_TYPE",
+-  151: "BREAK_POINT_INFO_TYPE",
+-  152: "CACHED_TEMPLATE_OBJECT_TYPE",
+-  153: "CALL_SITE_INFO_TYPE",
+-  154: "CLASS_POSITIONS_TYPE",
+-  155: "DEBUG_INFO_TYPE",
+-  156: "ENUM_CACHE_TYPE",
+-  157: "ERROR_STACK_DATA_TYPE",
+-  158: "FEEDBACK_CELL_TYPE",
+-  159: "FUNCTION_TEMPLATE_RARE_DATA_TYPE",
+-  160: "INTERCEPTOR_INFO_TYPE",
+-  161: "INTERPRETER_DATA_TYPE",
+-  162: "MODULE_REQUEST_TYPE",
+-  163: "PROMISE_CAPABILITY_TYPE",
+-  164: "PROMISE_ON_STACK_TYPE",
+-  165: "PROMISE_REACTION_TYPE",
+-  166: "PROPERTY_DESCRIPTOR_OBJECT_TYPE",
+-  167: "PROTOTYPE_INFO_TYPE",
+-  168: "REG_EXP_BOILERPLATE_DESCRIPTION_TYPE",
+-  169: "SCRIPT_TYPE",
+-  170: "SCRIPT_OR_MODULE_TYPE",
+-  171: "SOURCE_TEXT_MODULE_INFO_ENTRY_TYPE",
+-  172: "STACK_FRAME_INFO_TYPE",
+-  173: "TEMPLATE_OBJECT_DESCRIPTION_TYPE",
+-  174: "TUPLE2_TYPE",
+-  175: "WASM_CONTINUATION_OBJECT_TYPE",
+-  176: "WASM_EXCEPTION_TAG_TYPE",
+-  177: "WASM_INDIRECT_FUNCTION_TABLE_TYPE",
+-  178: "FIXED_ARRAY_TYPE",
+-  179: "HASH_TABLE_TYPE",
+-  180: "EPHEMERON_HASH_TABLE_TYPE",
+-  181: "GLOBAL_DICTIONARY_TYPE",
+-  182: "NAME_DICTIONARY_TYPE",
+-  183: "NAME_TO_INDEX_HASH_TABLE_TYPE",
+-  184: "NUMBER_DICTIONARY_TYPE",
+-  185: "ORDERED_HASH_MAP_TYPE",
+-  186: "ORDERED_HASH_SET_TYPE",
+-  187: "ORDERED_NAME_DICTIONARY_TYPE",
+-  188: "REGISTERED_SYMBOL_TABLE_TYPE",
+-  189: "SIMPLE_NUMBER_DICTIONARY_TYPE",
+-  190: "CLOSURE_FEEDBACK_CELL_ARRAY_TYPE",
+-  191: "OBJECT_BOILERPLATE_DESCRIPTION_TYPE",
+-  192: "SCRIPT_CONTEXT_TABLE_TYPE",
+-  193: "BYTE_ARRAY_TYPE",
+-  194: "BYTECODE_ARRAY_TYPE",
+-  195: "FIXED_DOUBLE_ARRAY_TYPE",
+-  196: "INTERNAL_CLASS_WITH_SMI_ELEMENTS_TYPE",
+-  197: "SLOPPY_ARGUMENTS_ELEMENTS_TYPE",
+-  198: "TURBOFAN_BITSET_TYPE_TYPE",
+-  199: "TURBOFAN_HEAP_CONSTANT_TYPE_TYPE",
+-  200: "TURBOFAN_OTHER_NUMBER_CONSTANT_TYPE_TYPE",
+-  201: "TURBOFAN_RANGE_TYPE_TYPE",
+-  202: "TURBOFAN_UNION_TYPE_TYPE",
+-  203: "CALL_HANDLER_INFO_TYPE",
++  142: "ACCESSOR_PAIR_TYPE",
++  143: "ALIASED_ARGUMENTS_ENTRY_TYPE",
++  144: "ALLOCATION_MEMENTO_TYPE",
++  145: "ALLOCATION_SITE_TYPE",
++  146: "ARRAY_BOILERPLATE_DESCRIPTION_TYPE",
++  147: "ASM_WASM_DATA_TYPE",
++  148: "ASYNC_GENERATOR_REQUEST_TYPE",
++  149: "BREAK_POINT_TYPE",
++  150: "BREAK_POINT_INFO_TYPE",
++  151: "CACHED_TEMPLATE_OBJECT_TYPE",
++  152: "CALL_SITE_INFO_TYPE",
++  153: "CLASS_POSITIONS_TYPE",
++  154: "DEBUG_INFO_TYPE",
++  155: "ENUM_CACHE_TYPE",
++  156: "ERROR_STACK_DATA_TYPE",
++  157: "FEEDBACK_CELL_TYPE",
++  158: "FUNCTION_TEMPLATE_RARE_DATA_TYPE",
++  159: "INTERCEPTOR_INFO_TYPE",
++  160: "INTERPRETER_DATA_TYPE",
++  161: "MODULE_REQUEST_TYPE",
++  162: "PROMISE_CAPABILITY_TYPE",
++  163: "PROMISE_ON_STACK_TYPE",
++  164: "PROMISE_REACTION_TYPE",
++  165: "PROPERTY_DESCRIPTOR_OBJECT_TYPE",
++  166: "PROTOTYPE_INFO_TYPE",
++  167: "REG_EXP_BOILERPLATE_DESCRIPTION_TYPE",
++  168: "SCRIPT_TYPE",
++  169: "SCRIPT_OR_MODULE_TYPE",
++  170: "SOURCE_TEXT_MODULE_INFO_ENTRY_TYPE",
++  171: "STACK_FRAME_INFO_TYPE",
++  172: "TEMPLATE_OBJECT_DESCRIPTION_TYPE",
++  173: "TUPLE2_TYPE",
++  174: "WASM_CONTINUATION_OBJECT_TYPE",
++  175: "WASM_EXCEPTION_TAG_TYPE",
++  176: "WASM_INDIRECT_FUNCTION_TABLE_TYPE",
++  177: "FIXED_ARRAY_TYPE",
++  178: "HASH_TABLE_TYPE",
++  179: "EPHEMERON_HASH_TABLE_TYPE",
++  180: "GLOBAL_DICTIONARY_TYPE",
++  181: "NAME_DICTIONARY_TYPE",
++  182: "NAME_TO_INDEX_HASH_TABLE_TYPE",
++  183: "NUMBER_DICTIONARY_TYPE",
++  184: "ORDERED_HASH_MAP_TYPE",
++  185: "ORDERED_HASH_SET_TYPE",
++  186: "ORDERED_NAME_DICTIONARY_TYPE",
++  187: "REGISTERED_SYMBOL_TABLE_TYPE",
++  188: "SIMPLE_NUMBER_DICTIONARY_TYPE",
++  189: "CLOSURE_FEEDBACK_CELL_ARRAY_TYPE",
++  190: "OBJECT_BOILERPLATE_DESCRIPTION_TYPE",
++  191: "SCRIPT_CONTEXT_TABLE_TYPE",
++  192: "BYTE_ARRAY_TYPE",
++  193: "BYTECODE_ARRAY_TYPE",
++  194: "FIXED_DOUBLE_ARRAY_TYPE",
++  195: "INTERNAL_CLASS_WITH_SMI_ELEMENTS_TYPE",
++  196: "SLOPPY_ARGUMENTS_ELEMENTS_TYPE",
++  197: "TURBOFAN_BITSET_TYPE_TYPE",
++  198: "TURBOFAN_HEAP_CONSTANT_TYPE_TYPE",
++  199: "TURBOFAN_OTHER_NUMBER_CONSTANT_TYPE_TYPE",
++  200: "TURBOFAN_RANGE_TYPE_TYPE",
++  201: "TURBOFAN_UNION_TYPE_TYPE",
++  202: "ABSTRACT_INTERNAL_CLASS_SUBCLASS1_TYPE",
++  203: "ABSTRACT_INTERNAL_CLASS_SUBCLASS2_TYPE",
+   204: "FOREIGN_TYPE",
+   205: "WASM_INTERNAL_FUNCTION_TYPE",
+   206: "WASM_TYPE_INFO_TYPE",
+@@ -135,14 +135,14 @@ INSTANCE_TYPES = {
+   228: "SMALL_ORDERED_HASH_MAP_TYPE",
+   229: "SMALL_ORDERED_HASH_SET_TYPE",
+   230: "SMALL_ORDERED_NAME_DICTIONARY_TYPE",
+-  231: "ABSTRACT_INTERNAL_CLASS_SUBCLASS1_TYPE",
+-  232: "ABSTRACT_INTERNAL_CLASS_SUBCLASS2_TYPE",
+-  233: "DESCRIPTOR_ARRAY_TYPE",
+-  234: "STRONG_DESCRIPTOR_ARRAY_TYPE",
+-  235: "SOURCE_TEXT_MODULE_TYPE",
+-  236: "SYNTHETIC_MODULE_TYPE",
+-  237: "WEAK_FIXED_ARRAY_TYPE",
+-  238: "TRANSITION_ARRAY_TYPE",
++  231: "DESCRIPTOR_ARRAY_TYPE",
++  232: "STRONG_DESCRIPTOR_ARRAY_TYPE",
++  233: "SOURCE_TEXT_MODULE_TYPE",
++  234: "SYNTHETIC_MODULE_TYPE",
++  235: "WEAK_FIXED_ARRAY_TYPE",
++  236: "TRANSITION_ARRAY_TYPE",
++  237: "ACCESSOR_INFO_TYPE",
++  238: "CALL_HANDLER_INFO_TYPE",
+   239: "CELL_TYPE",
+   240: "CODE_TYPE",
+   241: "CODE_DATA_CONTAINER_TYPE",
+@@ -279,10 +279,10 @@ INSTANCE_TYPES = {
+ KNOWN_MAPS = {
+     ("read_only_space", 0x02149): (250, "MetaMap"),
+     ("read_only_space", 0x02171): (131, "NullMap"),
+-    ("read_only_space", 0x02199): (234, "StrongDescriptorArrayMap"),
++    ("read_only_space", 0x02199): (232, "StrongDescriptorArrayMap"),
+     ("read_only_space", 0x021c1): (264, "WeakArrayListMap"),
+-    ("read_only_space", 0x02205): (156, "EnumCacheMap"),
+-    ("read_only_space", 0x02239): (178, "FixedArrayMap"),
++    ("read_only_space", 0x02205): (155, "EnumCacheMap"),
++    ("read_only_space", 0x02239): (177, "FixedArrayMap"),
+     ("read_only_space", 0x02285): (8, "OneByteInternalizedStringMap"),
+     ("read_only_space", 0x022d1): (247, "FreeSpaceMap"),
+     ("read_only_space", 0x022f9): (246, "OnePointerFillerMap"),
+@@ -292,9 +292,9 @@ KNOWN_MAPS = {
+     ("read_only_space", 0x02405): (130, "HeapNumberMap"),
+     ("read_only_space", 0x02439): (131, "TheHoleMap"),
+     ("read_only_space", 0x02499): (131, "BooleanMap"),
+-    ("read_only_space", 0x0253d): (193, "ByteArrayMap"),
+-    ("read_only_space", 0x02565): (178, "FixedCOWArrayMap"),
+-    ("read_only_space", 0x0258d): (179, "HashTableMap"),
++    ("read_only_space", 0x0253d): (192, "ByteArrayMap"),
++    ("read_only_space", 0x02565): (177, "FixedCOWArrayMap"),
++    ("read_only_space", 0x0258d): (178, "HashTableMap"),
+     ("read_only_space", 0x025b5): (128, "SymbolMap"),
+     ("read_only_space", 0x025dd): (40, "OneByteStringMap"),
+     ("read_only_space", 0x02605): (256, "ScopeInfoMap"),
+@@ -303,7 +303,7 @@ KNOWN_MAPS = {
+     ("read_only_space", 0x0267d): (239, "CellMap"),
+     ("read_only_space", 0x026a5): (255, "GlobalPropertyCellMap"),
+     ("read_only_space", 0x026cd): (204, "ForeignMap"),
+-    ("read_only_space", 0x026f5): (238, "TransitionArrayMap"),
++    ("read_only_space", 0x026f5): (236, "TransitionArrayMap"),
+     ("read_only_space", 0x0271d): (45, "ThinOneByteStringMap"),
+     ("read_only_space", 0x02745): (245, "FeedbackVectorMap"),
+     ("read_only_space", 0x0277d): (131, "ArgumentsMarkerMap"),
+@@ -311,139 +311,139 @@ KNOWN_MAPS = {
+     ("read_only_space", 0x02839): (131, "TerminationExceptionMap"),
+     ("read_only_space", 0x028a1): (131, "OptimizedOutMap"),
+     ("read_only_space", 0x02901): (131, "StaleRegisterMap"),
+-    ("read_only_space", 0x02961): (192, "ScriptContextTableMap"),
+-    ("read_only_space", 0x02989): (190, "ClosureFeedbackCellArrayMap"),
++    ("read_only_space", 0x02961): (191, "ScriptContextTableMap"),
++    ("read_only_space", 0x02989): (189, "ClosureFeedbackCellArrayMap"),
+     ("read_only_space", 0x029b1): (244, "FeedbackMetadataArrayMap"),
+-    ("read_only_space", 0x029d9): (178, "ArrayListMap"),
++    ("read_only_space", 0x029d9): (177, "ArrayListMap"),
+     ("read_only_space", 0x02a01): (129, "BigIntMap"),
+-    ("read_only_space", 0x02a29): (191, "ObjectBoilerplateDescriptionMap"),
+-    ("read_only_space", 0x02a51): (194, "BytecodeArrayMap"),
++    ("read_only_space", 0x02a29): (190, "ObjectBoilerplateDescriptionMap"),
++    ("read_only_space", 0x02a51): (193, "BytecodeArrayMap"),
+     ("read_only_space", 0x02a79): (241, "CodeDataContainerMap"),
+     ("read_only_space", 0x02aa1): (242, "CoverageInfoMap"),
+-    ("read_only_space", 0x02ac9): (195, "FixedDoubleArrayMap"),
+-    ("read_only_space", 0x02af1): (181, "GlobalDictionaryMap"),
+-    ("read_only_space", 0x02b19): (158, "ManyClosuresCellMap"),
++    ("read_only_space", 0x02ac9): (194, "FixedDoubleArrayMap"),
++    ("read_only_space", 0x02af1): (180, "GlobalDictionaryMap"),
++    ("read_only_space", 0x02b19): (157, "ManyClosuresCellMap"),
+     ("read_only_space", 0x02b41): (251, "MegaDomHandlerMap"),
+-    ("read_only_space", 0x02b69): (178, "ModuleInfoMap"),
+-    ("read_only_space", 0x02b91): (182, "NameDictionaryMap"),
+-    ("read_only_space", 0x02bb9): (158, "NoClosuresCellMap"),
+-    ("read_only_space", 0x02be1): (184, "NumberDictionaryMap"),
+-    ("read_only_space", 0x02c09): (158, "OneClosureCellMap"),
+-    ("read_only_space", 0x02c31): (185, "OrderedHashMapMap"),
+-    ("read_only_space", 0x02c59): (186, "OrderedHashSetMap"),
+-    ("read_only_space", 0x02c81): (183, "NameToIndexHashTableMap"),
+-    ("read_only_space", 0x02ca9): (188, "RegisteredSymbolTableMap"),
+-    ("read_only_space", 0x02cd1): (187, "OrderedNameDictionaryMap"),
++    ("read_only_space", 0x02b69): (177, "ModuleInfoMap"),
++    ("read_only_space", 0x02b91): (181, "NameDictionaryMap"),
++    ("read_only_space", 0x02bb9): (157, "NoClosuresCellMap"),
++    ("read_only_space", 0x02be1): (183, "NumberDictionaryMap"),
++    ("read_only_space", 0x02c09): (157, "OneClosureCellMap"),
++    ("read_only_space", 0x02c31): (184, "OrderedHashMapMap"),
++    ("read_only_space", 0x02c59): (185, "OrderedHashSetMap"),
++    ("read_only_space", 0x02c81): (182, "NameToIndexHashTableMap"),
++    ("read_only_space", 0x02ca9): (187, "RegisteredSymbolTableMap"),
++    ("read_only_space", 0x02cd1): (186, "OrderedNameDictionaryMap"),
+     ("read_only_space", 0x02cf9): (253, "PreparseDataMap"),
+     ("read_only_space", 0x02d21): (254, "PropertyArrayMap"),
+-    ("read_only_space", 0x02d49): (203, "SideEffectCallHandlerInfoMap"),
+-    ("read_only_space", 0x02d71): (203, "SideEffectFreeCallHandlerInfoMap"),
+-    ("read_only_space", 0x02d99): (203, "NextCallSideEffectFreeCallHandlerInfoMap"),
+-    ("read_only_space", 0x02dc1): (189, "SimpleNumberDictionaryMap"),
+-    ("read_only_space", 0x02de9): (228, "SmallOrderedHashMapMap"),
+-    ("read_only_space", 0x02e11): (229, "SmallOrderedHashSetMap"),
+-    ("read_only_space", 0x02e39): (230, "SmallOrderedNameDictionaryMap"),
+-    ("read_only_space", 0x02e61): (235, "SourceTextModuleMap"),
+-    ("read_only_space", 0x02e89): (261, "SwissNameDictionaryMap"),
+-    ("read_only_space", 0x02eb1): (236, "SyntheticModuleMap"),
+-    ("read_only_space", 0x02ed9): (262, "WasmApiFunctionRefMap"),
+-    ("read_only_space", 0x02f01): (222, "WasmCapiFunctionDataMap"),
+-    ("read_only_space", 0x02f29): (223, "WasmExportedFunctionDataMap"),
+-    ("read_only_space", 0x02f51): (205, "WasmInternalFunctionMap"),
+-    ("read_only_space", 0x02f79): (224, "WasmJSFunctionDataMap"),
+-    ("read_only_space", 0x02fa1): (263, "WasmOnFulfilledDataMap"),
+-    ("read_only_space", 0x02fc9): (206, "WasmTypeInfoMap"),
+-    ("read_only_space", 0x02ff1): (237, "WeakFixedArrayMap"),
+-    ("read_only_space", 0x03019): (180, "EphemeronHashTableMap"),
+-    ("read_only_space", 0x03041): (243, "EmbedderDataArrayMap"),
+-    ("read_only_space", 0x03069): (265, "WeakCellMap"),
+-    ("read_only_space", 0x03091): (32, "StringMap"),
+-    ("read_only_space", 0x030b9): (41, "ConsOneByteStringMap"),
+-    ("read_only_space", 0x030e1): (33, "ConsStringMap"),
+-    ("read_only_space", 0x03109): (37, "ThinStringMap"),
+-    ("read_only_space", 0x03131): (35, "SlicedStringMap"),
+-    ("read_only_space", 0x03159): (43, "SlicedOneByteStringMap"),
+-    ("read_only_space", 0x03181): (34, "ExternalStringMap"),
+-    ("read_only_space", 0x031a9): (42, "ExternalOneByteStringMap"),
+-    ("read_only_space", 0x031d1): (50, "UncachedExternalStringMap"),
+-    ("read_only_space", 0x031f9): (0, "InternalizedStringMap"),
+-    ("read_only_space", 0x03221): (2, "ExternalInternalizedStringMap"),
+-    ("read_only_space", 0x03249): (10, "ExternalOneByteInternalizedStringMap"),
+-    ("read_only_space", 0x03271): (18, "UncachedExternalInternalizedStringMap"),
+-    ("read_only_space", 0x03299): (26, "UncachedExternalOneByteInternalizedStringMap"),
+-    ("read_only_space", 0x032c1): (58, "UncachedExternalOneByteStringMap"),
+-    ("read_only_space", 0x032e9): (104, "SharedOneByteStringMap"),
+-    ("read_only_space", 0x03311): (96, "SharedStringMap"),
+-    ("read_only_space", 0x03339): (109, "SharedThinOneByteStringMap"),
+-    ("read_only_space", 0x03361): (101, "SharedThinStringMap"),
+-    ("read_only_space", 0x03389): (131, "SelfReferenceMarkerMap"),
+-    ("read_only_space", 0x033b1): (131, "BasicBlockCountersMarkerMap"),
+-    ("read_only_space", 0x033f5): (147, "ArrayBoilerplateDescriptionMap"),
+-    ("read_only_space", 0x034f5): (160, "InterceptorInfoMap"),
+-    ("read_only_space", 0x05f21): (132, "PromiseFulfillReactionJobTaskMap"),
+-    ("read_only_space", 0x05f49): (133, "PromiseRejectReactionJobTaskMap"),
+-    ("read_only_space", 0x05f71): (134, "CallableTaskMap"),
+-    ("read_only_space", 0x05f99): (135, "CallbackTaskMap"),
+-    ("read_only_space", 0x05fc1): (136, "PromiseResolveThenableJobTaskMap"),
+-    ("read_only_space", 0x05fe9): (139, "FunctionTemplateInfoMap"),
+-    ("read_only_space", 0x06011): (140, "ObjectTemplateInfoMap"),
+-    ("read_only_space", 0x06039): (141, "AccessCheckInfoMap"),
+-    ("read_only_space", 0x06061): (142, "AccessorInfoMap"),
+-    ("read_only_space", 0x06089): (143, "AccessorPairMap"),
+-    ("read_only_space", 0x060b1): (144, "AliasedArgumentsEntryMap"),
+-    ("read_only_space", 0x060d9): (145, "AllocationMementoMap"),
+-    ("read_only_space", 0x06101): (148, "AsmWasmDataMap"),
+-    ("read_only_space", 0x06129): (149, "AsyncGeneratorRequestMap"),
+-    ("read_only_space", 0x06151): (150, "BreakPointMap"),
+-    ("read_only_space", 0x06179): (151, "BreakPointInfoMap"),
+-    ("read_only_space", 0x061a1): (152, "CachedTemplateObjectMap"),
+-    ("read_only_space", 0x061c9): (153, "CallSiteInfoMap"),
+-    ("read_only_space", 0x061f1): (154, "ClassPositionsMap"),
+-    ("read_only_space", 0x06219): (155, "DebugInfoMap"),
+-    ("read_only_space", 0x06241): (157, "ErrorStackDataMap"),
+-    ("read_only_space", 0x06269): (159, "FunctionTemplateRareDataMap"),
+-    ("read_only_space", 0x06291): (161, "InterpreterDataMap"),
+-    ("read_only_space", 0x062b9): (162, "ModuleRequestMap"),
+-    ("read_only_space", 0x062e1): (163, "PromiseCapabilityMap"),
+-    ("read_only_space", 0x06309): (164, "PromiseOnStackMap"),
+-    ("read_only_space", 0x06331): (165, "PromiseReactionMap"),
+-    ("read_only_space", 0x06359): (166, "PropertyDescriptorObjectMap"),
+-    ("read_only_space", 0x06381): (167, "PrototypeInfoMap"),
+-    ("read_only_space", 0x063a9): (168, "RegExpBoilerplateDescriptionMap"),
+-    ("read_only_space", 0x063d1): (169, "ScriptMap"),
+-    ("read_only_space", 0x063f9): (170, "ScriptOrModuleMap"),
+-    ("read_only_space", 0x06421): (171, "SourceTextModuleInfoEntryMap"),
+-    ("read_only_space", 0x06449): (172, "StackFrameInfoMap"),
+-    ("read_only_space", 0x06471): (173, "TemplateObjectDescriptionMap"),
+-    ("read_only_space", 0x06499): (174, "Tuple2Map"),
+-    ("read_only_space", 0x064c1): (175, "WasmContinuationObjectMap"),
+-    ("read_only_space", 0x064e9): (176, "WasmExceptionTagMap"),
+-    ("read_only_space", 0x06511): (177, "WasmIndirectFunctionTableMap"),
+-    ("read_only_space", 0x06539): (197, "SloppyArgumentsElementsMap"),
+-    ("read_only_space", 0x06561): (233, "DescriptorArrayMap"),
++    ("read_only_space", 0x02d49): (237, "AccessorInfoMap"),
++    ("read_only_space", 0x02d71): (238, "SideEffectCallHandlerInfoMap"),
++    ("read_only_space", 0x02d99): (238, "SideEffectFreeCallHandlerInfoMap"),
++    ("read_only_space", 0x02dc1): (238, "NextCallSideEffectFreeCallHandlerInfoMap"),
++    ("read_only_space", 0x02de9): (188, "SimpleNumberDictionaryMap"),
++    ("read_only_space", 0x02e11): (228, "SmallOrderedHashMapMap"),
++    ("read_only_space", 0x02e39): (229, "SmallOrderedHashSetMap"),
++    ("read_only_space", 0x02e61): (230, "SmallOrderedNameDictionaryMap"),
++    ("read_only_space", 0x02e89): (233, "SourceTextModuleMap"),
++    ("read_only_space", 0x02eb1): (261, "SwissNameDictionaryMap"),
++    ("read_only_space", 0x02ed9): (234, "SyntheticModuleMap"),
++    ("read_only_space", 0x02f01): (262, "WasmApiFunctionRefMap"),
++    ("read_only_space", 0x02f29): (222, "WasmCapiFunctionDataMap"),
++    ("read_only_space", 0x02f51): (223, "WasmExportedFunctionDataMap"),
++    ("read_only_space", 0x02f79): (205, "WasmInternalFunctionMap"),
++    ("read_only_space", 0x02fa1): (224, "WasmJSFunctionDataMap"),
++    ("read_only_space", 0x02fc9): (263, "WasmOnFulfilledDataMap"),
++    ("read_only_space", 0x02ff1): (206, "WasmTypeInfoMap"),
++    ("read_only_space", 0x03019): (235, "WeakFixedArrayMap"),
++    ("read_only_space", 0x03041): (179, "EphemeronHashTableMap"),
++    ("read_only_space", 0x03069): (243, "EmbedderDataArrayMap"),
++    ("read_only_space", 0x03091): (265, "WeakCellMap"),
++    ("read_only_space", 0x030b9): (32, "StringMap"),
++    ("read_only_space", 0x030e1): (41, "ConsOneByteStringMap"),
++    ("read_only_space", 0x03109): (33, "ConsStringMap"),
++    ("read_only_space", 0x03131): (37, "ThinStringMap"),
++    ("read_only_space", 0x03159): (35, "SlicedStringMap"),
++    ("read_only_space", 0x03181): (43, "SlicedOneByteStringMap"),
++    ("read_only_space", 0x031a9): (34, "ExternalStringMap"),
++    ("read_only_space", 0x031d1): (42, "ExternalOneByteStringMap"),
++    ("read_only_space", 0x031f9): (50, "UncachedExternalStringMap"),
++    ("read_only_space", 0x03221): (0, "InternalizedStringMap"),
++    ("read_only_space", 0x03249): (2, "ExternalInternalizedStringMap"),
++    ("read_only_space", 0x03271): (10, "ExternalOneByteInternalizedStringMap"),
++    ("read_only_space", 0x03299): (18, "UncachedExternalInternalizedStringMap"),
++    ("read_only_space", 0x032c1): (26, "UncachedExternalOneByteInternalizedStringMap"),
++    ("read_only_space", 0x032e9): (58, "UncachedExternalOneByteStringMap"),
++    ("read_only_space", 0x03311): (104, "SharedOneByteStringMap"),
++    ("read_only_space", 0x03339): (96, "SharedStringMap"),
++    ("read_only_space", 0x03361): (109, "SharedThinOneByteStringMap"),
++    ("read_only_space", 0x03389): (101, "SharedThinStringMap"),
++    ("read_only_space", 0x033b1): (131, "SelfReferenceMarkerMap"),
++    ("read_only_space", 0x033d9): (131, "BasicBlockCountersMarkerMap"),
++    ("read_only_space", 0x0341d): (146, "ArrayBoilerplateDescriptionMap"),
++    ("read_only_space", 0x0351d): (159, "InterceptorInfoMap"),
++    ("read_only_space", 0x05f49): (132, "PromiseFulfillReactionJobTaskMap"),
++    ("read_only_space", 0x05f71): (133, "PromiseRejectReactionJobTaskMap"),
++    ("read_only_space", 0x05f99): (134, "CallableTaskMap"),
++    ("read_only_space", 0x05fc1): (135, "CallbackTaskMap"),
++    ("read_only_space", 0x05fe9): (136, "PromiseResolveThenableJobTaskMap"),
++    ("read_only_space", 0x06011): (139, "FunctionTemplateInfoMap"),
++    ("read_only_space", 0x06039): (140, "ObjectTemplateInfoMap"),
++    ("read_only_space", 0x06061): (141, "AccessCheckInfoMap"),
++    ("read_only_space", 0x06089): (142, "AccessorPairMap"),
++    ("read_only_space", 0x060b1): (143, "AliasedArgumentsEntryMap"),
++    ("read_only_space", 0x060d9): (144, "AllocationMementoMap"),
++    ("read_only_space", 0x06101): (147, "AsmWasmDataMap"),
++    ("read_only_space", 0x06129): (148, "AsyncGeneratorRequestMap"),
++    ("read_only_space", 0x06151): (149, "BreakPointMap"),
++    ("read_only_space", 0x06179): (150, "BreakPointInfoMap"),
++    ("read_only_space", 0x061a1): (151, "CachedTemplateObjectMap"),
++    ("read_only_space", 0x061c9): (152, "CallSiteInfoMap"),
++    ("read_only_space", 0x061f1): (153, "ClassPositionsMap"),
++    ("read_only_space", 0x06219): (154, "DebugInfoMap"),
++    ("read_only_space", 0x06241): (156, "ErrorStackDataMap"),
++    ("read_only_space", 0x06269): (158, "FunctionTemplateRareDataMap"),
++    ("read_only_space", 0x06291): (160, "InterpreterDataMap"),
++    ("read_only_space", 0x062b9): (161, "ModuleRequestMap"),
++    ("read_only_space", 0x062e1): (162, "PromiseCapabilityMap"),
++    ("read_only_space", 0x06309): (163, "PromiseOnStackMap"),
++    ("read_only_space", 0x06331): (164, "PromiseReactionMap"),
++    ("read_only_space", 0x06359): (165, "PropertyDescriptorObjectMap"),
++    ("read_only_space", 0x06381): (166, "PrototypeInfoMap"),
++    ("read_only_space", 0x063a9): (167, "RegExpBoilerplateDescriptionMap"),
++    ("read_only_space", 0x063d1): (168, "ScriptMap"),
++    ("read_only_space", 0x063f9): (169, "ScriptOrModuleMap"),
++    ("read_only_space", 0x06421): (170, "SourceTextModuleInfoEntryMap"),
++    ("read_only_space", 0x06449): (171, "StackFrameInfoMap"),
++    ("read_only_space", 0x06471): (172, "TemplateObjectDescriptionMap"),
++    ("read_only_space", 0x06499): (173, "Tuple2Map"),
++    ("read_only_space", 0x064c1): (174, "WasmContinuationObjectMap"),
++    ("read_only_space", 0x064e9): (175, "WasmExceptionTagMap"),
++    ("read_only_space", 0x06511): (176, "WasmIndirectFunctionTableMap"),
++    ("read_only_space", 0x06539): (196, "SloppyArgumentsElementsMap"),
++    ("read_only_space", 0x06561): (231, "DescriptorArrayMap"),
+     ("read_only_space", 0x06589): (219, "UncompiledDataWithoutPreparseDataMap"),
+     ("read_only_space", 0x065b1): (217, "UncompiledDataWithPreparseDataMap"),
+     ("read_only_space", 0x065d9): (220, "UncompiledDataWithoutPreparseDataWithJobMap"),
+     ("read_only_space", 0x06601): (218, "UncompiledDataWithPreparseDataAndJobMap"),
+     ("read_only_space", 0x06629): (252, "OnHeapBasicBlockProfilerDataMap"),
+-    ("read_only_space", 0x06651): (198, "TurbofanBitsetTypeMap"),
+-    ("read_only_space", 0x06679): (202, "TurbofanUnionTypeMap"),
+-    ("read_only_space", 0x066a1): (201, "TurbofanRangeTypeMap"),
+-    ("read_only_space", 0x066c9): (199, "TurbofanHeapConstantTypeMap"),
+-    ("read_only_space", 0x066f1): (200, "TurbofanOtherNumberConstantTypeMap"),
++    ("read_only_space", 0x06651): (197, "TurbofanBitsetTypeMap"),
++    ("read_only_space", 0x06679): (201, "TurbofanUnionTypeMap"),
++    ("read_only_space", 0x066a1): (200, "TurbofanRangeTypeMap"),
++    ("read_only_space", 0x066c9): (198, "TurbofanHeapConstantTypeMap"),
++    ("read_only_space", 0x066f1): (199, "TurbofanOtherNumberConstantTypeMap"),
+     ("read_only_space", 0x06719): (248, "InternalClassMap"),
+     ("read_only_space", 0x06741): (259, "SmiPairMap"),
+     ("read_only_space", 0x06769): (258, "SmiBoxMap"),
+     ("read_only_space", 0x06791): (225, "ExportedSubClassBaseMap"),
+     ("read_only_space", 0x067b9): (226, "ExportedSubClassMap"),
+-    ("read_only_space", 0x067e1): (231, "AbstractInternalClassSubclass1Map"),
+-    ("read_only_space", 0x06809): (232, "AbstractInternalClassSubclass2Map"),
+-    ("read_only_space", 0x06831): (196, "InternalClassWithSmiElementsMap"),
++    ("read_only_space", 0x067e1): (202, "AbstractInternalClassSubclass1Map"),
++    ("read_only_space", 0x06809): (203, "AbstractInternalClassSubclass2Map"),
++    ("read_only_space", 0x06831): (195, "InternalClassWithSmiElementsMap"),
+     ("read_only_space", 0x06859): (249, "InternalClassWithStructElementsMap"),
+     ("read_only_space", 0x06881): (227, "ExportedSubClass2Map"),
+     ("read_only_space", 0x068a9): (260, "SortStateMap"),
+-    ("read_only_space", 0x068d1): (146, "AllocationSiteWithWeakNextMap"),
+-    ("read_only_space", 0x068f9): (146, "AllocationSiteWithoutWeakNextMap"),
++    ("read_only_space", 0x068d1): (145, "AllocationSiteWithWeakNextMap"),
++    ("read_only_space", 0x068f9): (145, "AllocationSiteWithoutWeakNextMap"),
+     ("read_only_space", 0x069c5): (137, "LoadHandler1Map"),
+     ("read_only_space", 0x069ed): (137, "LoadHandler2Map"),
+     ("read_only_space", 0x06a15): (137, "LoadHandler3Map"),
+@@ -476,92 +476,92 @@ KNOWN_OBJECTS = {
+   ("read_only_space", 0x02861): "TerminationException",
+   ("read_only_space", 0x028c9): "OptimizedOut",
+   ("read_only_space", 0x02929): "StaleRegister",
+-  ("read_only_space", 0x033d9): "EmptyPropertyArray",
+-  ("read_only_space", 0x033e1): "EmptyByteArray",
+-  ("read_only_space", 0x033e9): "EmptyObjectBoilerplateDescription",
+-  ("read_only_space", 0x0341d): "EmptyArrayBoilerplateDescription",
+-  ("read_only_space", 0x03429): "EmptyClosureFeedbackCellArray",
+-  ("read_only_space", 0x03431): "EmptySlowElementDictionary",
+-  ("read_only_space", 0x03455): "EmptyOrderedHashMap",
+-  ("read_only_space", 0x03469): "EmptyOrderedHashSet",
+-  ("read_only_space", 0x0347d): "EmptyFeedbackMetadata",
+-  ("read_only_space", 0x03489): "EmptyPropertyDictionary",
+-  ("read_only_space", 0x034b1): "EmptyOrderedPropertyDictionary",
+-  ("read_only_space", 0x034c9): "EmptySwissPropertyDictionary",
+-  ("read_only_space", 0x0351d): "NoOpInterceptorInfo",
+-  ("read_only_space", 0x03545): "EmptyArrayList",
+-  ("read_only_space", 0x03551): "EmptyWeakFixedArray",
+-  ("read_only_space", 0x03559): "InfinityValue",
+-  ("read_only_space", 0x03565): "MinusZeroValue",
+-  ("read_only_space", 0x03571): "MinusInfinityValue",
+-  ("read_only_space", 0x0357d): "SelfReferenceMarker",
+-  ("read_only_space", 0x035bd): "BasicBlockCountersMarker",
+-  ("read_only_space", 0x03601): "OffHeapTrampolineRelocationInfo",
+-  ("read_only_space", 0x0360d): "GlobalThisBindingScopeInfo",
+-  ("read_only_space", 0x0363d): "EmptyFunctionScopeInfo",
+-  ("read_only_space", 0x03661): "NativeScopeInfo",
+-  ("read_only_space", 0x03679): "HashSeed",
++  ("read_only_space", 0x03401): "EmptyPropertyArray",
++  ("read_only_space", 0x03409): "EmptyByteArray",
++  ("read_only_space", 0x03411): "EmptyObjectBoilerplateDescription",
++  ("read_only_space", 0x03445): "EmptyArrayBoilerplateDescription",
++  ("read_only_space", 0x03451): "EmptyClosureFeedbackCellArray",
++  ("read_only_space", 0x03459): "EmptySlowElementDictionary",
++  ("read_only_space", 0x0347d): "EmptyOrderedHashMap",
++  ("read_only_space", 0x03491): "EmptyOrderedHashSet",
++  ("read_only_space", 0x034a5): "EmptyFeedbackMetadata",
++  ("read_only_space", 0x034b1): "EmptyPropertyDictionary",
++  ("read_only_space", 0x034d9): "EmptyOrderedPropertyDictionary",
++  ("read_only_space", 0x034f1): "EmptySwissPropertyDictionary",
++  ("read_only_space", 0x03545): "NoOpInterceptorInfo",
++  ("read_only_space", 0x0356d): "EmptyArrayList",
++  ("read_only_space", 0x03579): "EmptyWeakFixedArray",
++  ("read_only_space", 0x03581): "InfinityValue",
++  ("read_only_space", 0x0358d): "MinusZeroValue",
++  ("read_only_space", 0x03599): "MinusInfinityValue",
++  ("read_only_space", 0x035a5): "SelfReferenceMarker",
++  ("read_only_space", 0x035e5): "BasicBlockCountersMarker",
++  ("read_only_space", 0x03629): "OffHeapTrampolineRelocationInfo",
++  ("read_only_space", 0x03635): "GlobalThisBindingScopeInfo",
++  ("read_only_space", 0x03665): "EmptyFunctionScopeInfo",
++  ("read_only_space", 0x03689): "NativeScopeInfo",
++  ("read_only_space", 0x036a1): "HashSeed",
+   ("old_space", 0x04241): "ArgumentsIteratorAccessor",
+-  ("old_space", 0x04281): "ArrayLengthAccessor",
+-  ("old_space", 0x042c1): "BoundFunctionLengthAccessor",
+-  ("old_space", 0x04301): "BoundFunctionNameAccessor",
+-  ("old_space", 0x04341): "ErrorStackAccessor",
+-  ("old_space", 0x04381): "FunctionArgumentsAccessor",
+-  ("old_space", 0x043c1): "FunctionCallerAccessor",
+-  ("old_space", 0x04401): "FunctionNameAccessor",
+-  ("old_space", 0x04441): "FunctionLengthAccessor",
+-  ("old_space", 0x04481): "FunctionPrototypeAccessor",
+-  ("old_space", 0x044c1): "StringLengthAccessor",
+-  ("old_space", 0x04501): "WrappedFunctionLengthAccessor",
+-  ("old_space", 0x04541): "WrappedFunctionNameAccessor",
+-  ("old_space", 0x04581): "InvalidPrototypeValidityCell",
+-  ("old_space", 0x04589): "EmptyScript",
+-  ("old_space", 0x045cd): "ManyClosuresCell",
+-  ("old_space", 0x045d9): "ArrayConstructorProtector",
+-  ("old_space", 0x045ed): "NoElementsProtector",
+-  ("old_space", 0x04601): "MegaDOMProtector",
+-  ("old_space", 0x04615): "IsConcatSpreadableProtector",
+-  ("old_space", 0x04629): "ArraySpeciesProtector",
+-  ("old_space", 0x0463d): "TypedArraySpeciesProtector",
+-  ("old_space", 0x04651): "PromiseSpeciesProtector",
+-  ("old_space", 0x04665): "RegExpSpeciesProtector",
+-  ("old_space", 0x04679): "StringLengthProtector",
+-  ("old_space", 0x0468d): "ArrayIteratorProtector",
+-  ("old_space", 0x046a1): "ArrayBufferDetachingProtector",
+-  ("old_space", 0x046b5): "PromiseHookProtector",
+-  ("old_space", 0x046c9): "PromiseResolveProtector",
+-  ("old_space", 0x046dd): "MapIteratorProtector",
+-  ("old_space", 0x046f1): "PromiseThenProtector",
+-  ("old_space", 0x04705): "SetIteratorProtector",
+-  ("old_space", 0x04719): "StringIteratorProtector",
+-  ("old_space", 0x0472d): "SingleCharacterStringCache",
+-  ("old_space", 0x04b35): "StringSplitCache",
+-  ("old_space", 0x04f3d): "RegExpMultipleCache",
+-  ("old_space", 0x05345): "BuiltinsConstantsTable",
+-  ("old_space", 0x05781): "AsyncFunctionAwaitRejectSharedFun",
+-  ("old_space", 0x057a5): "AsyncFunctionAwaitResolveSharedFun",
+-  ("old_space", 0x057c9): "AsyncGeneratorAwaitRejectSharedFun",
+-  ("old_space", 0x057ed): "AsyncGeneratorAwaitResolveSharedFun",
+-  ("old_space", 0x05811): "AsyncGeneratorYieldResolveSharedFun",
+-  ("old_space", 0x05835): "AsyncGeneratorReturnResolveSharedFun",
+-  ("old_space", 0x05859): "AsyncGeneratorReturnClosedRejectSharedFun",
+-  ("old_space", 0x0587d): "AsyncGeneratorReturnClosedResolveSharedFun",
+-  ("old_space", 0x058a1): "AsyncIteratorValueUnwrapSharedFun",
+-  ("old_space", 0x058c5): "PromiseAllResolveElementSharedFun",
+-  ("old_space", 0x058e9): "PromiseAllSettledResolveElementSharedFun",
+-  ("old_space", 0x0590d): "PromiseAllSettledRejectElementSharedFun",
+-  ("old_space", 0x05931): "PromiseAnyRejectElementSharedFun",
+-  ("old_space", 0x05955): "PromiseCapabilityDefaultRejectSharedFun",
+-  ("old_space", 0x05979): "PromiseCapabilityDefaultResolveSharedFun",
+-  ("old_space", 0x0599d): "PromiseCatchFinallySharedFun",
+-  ("old_space", 0x059c1): "PromiseGetCapabilitiesExecutorSharedFun",
+-  ("old_space", 0x059e5): "PromiseThenFinallySharedFun",
+-  ("old_space", 0x05a09): "PromiseThrowerFinallySharedFun",
+-  ("old_space", 0x05a2d): "PromiseValueThunkFinallySharedFun",
+-  ("old_space", 0x05a51): "ProxyRevokeSharedFun",
+-  ("old_space", 0x05a75): "ShadowRealmImportValueFulfilledSFI",
+-  ("old_space", 0x05a99): "SourceTextModuleExecuteAsyncModuleFulfilledSFI",
+-  ("old_space", 0x05abd): "SourceTextModuleExecuteAsyncModuleRejectedSFI",
++  ("old_space", 0x04269): "ArrayLengthAccessor",
++  ("old_space", 0x04291): "BoundFunctionLengthAccessor",
++  ("old_space", 0x042b9): "BoundFunctionNameAccessor",
++  ("old_space", 0x042e1): "ErrorStackAccessor",
++  ("old_space", 0x04309): "FunctionArgumentsAccessor",
++  ("old_space", 0x04331): "FunctionCallerAccessor",
++  ("old_space", 0x04359): "FunctionNameAccessor",
++  ("old_space", 0x04381): "FunctionLengthAccessor",
++  ("old_space", 0x043a9): "FunctionPrototypeAccessor",
++  ("old_space", 0x043d1): "StringLengthAccessor",
++  ("old_space", 0x043f9): "WrappedFunctionLengthAccessor",
++  ("old_space", 0x04421): "WrappedFunctionNameAccessor",
++  ("old_space", 0x04449): "InvalidPrototypeValidityCell",
++  ("old_space", 0x04451): "EmptyScript",
++  ("old_space", 0x04495): "ManyClosuresCell",
++  ("old_space", 0x044a1): "ArrayConstructorProtector",
++  ("old_space", 0x044b5): "NoElementsProtector",
++  ("old_space", 0x044c9): "MegaDOMProtector",
++  ("old_space", 0x044dd): "IsConcatSpreadableProtector",
++  ("old_space", 0x044f1): "ArraySpeciesProtector",
++  ("old_space", 0x04505): "TypedArraySpeciesProtector",
++  ("old_space", 0x04519): "PromiseSpeciesProtector",
++  ("old_space", 0x0452d): "RegExpSpeciesProtector",
++  ("old_space", 0x04541): "StringLengthProtector",
++  ("old_space", 0x04555): "ArrayIteratorProtector",
++  ("old_space", 0x04569): "ArrayBufferDetachingProtector",
++  ("old_space", 0x0457d): "PromiseHookProtector",
++  ("old_space", 0x04591): "PromiseResolveProtector",
++  ("old_space", 0x045a5): "MapIteratorProtector",
++  ("old_space", 0x045b9): "PromiseThenProtector",
++  ("old_space", 0x045cd): "SetIteratorProtector",
++  ("old_space", 0x045e1): "StringIteratorProtector",
++  ("old_space", 0x045f5): "SingleCharacterStringCache",
++  ("old_space", 0x049fd): "StringSplitCache",
++  ("old_space", 0x04e05): "RegExpMultipleCache",
++  ("old_space", 0x0520d): "BuiltinsConstantsTable",
++  ("old_space", 0x05649): "AsyncFunctionAwaitRejectSharedFun",
++  ("old_space", 0x0566d): "AsyncFunctionAwaitResolveSharedFun",
++  ("old_space", 0x05691): "AsyncGeneratorAwaitRejectSharedFun",
++  ("old_space", 0x056b5): "AsyncGeneratorAwaitResolveSharedFun",
++  ("old_space", 0x056d9): "AsyncGeneratorYieldResolveSharedFun",
++  ("old_space", 0x056fd): "AsyncGeneratorReturnResolveSharedFun",
++  ("old_space", 0x05721): "AsyncGeneratorReturnClosedRejectSharedFun",
++  ("old_space", 0x05745): "AsyncGeneratorReturnClosedResolveSharedFun",
++  ("old_space", 0x05769): "AsyncIteratorValueUnwrapSharedFun",
++  ("old_space", 0x0578d): "PromiseAllResolveElementSharedFun",
++  ("old_space", 0x057b1): "PromiseAllSettledResolveElementSharedFun",
++  ("old_space", 0x057d5): "PromiseAllSettledRejectElementSharedFun",
++  ("old_space", 0x057f9): "PromiseAnyRejectElementSharedFun",
++  ("old_space", 0x0581d): "PromiseCapabilityDefaultRejectSharedFun",
++  ("old_space", 0x05841): "PromiseCapabilityDefaultResolveSharedFun",
++  ("old_space", 0x05865): "PromiseCatchFinallySharedFun",
++  ("old_space", 0x05889): "PromiseGetCapabilitiesExecutorSharedFun",
++  ("old_space", 0x058ad): "PromiseThenFinallySharedFun",
++  ("old_space", 0x058d1): "PromiseThrowerFinallySharedFun",
++  ("old_space", 0x058f5): "PromiseValueThunkFinallySharedFun",
++  ("old_space", 0x05919): "ProxyRevokeSharedFun",
++  ("old_space", 0x0593d): "ShadowRealmImportValueFulfilledSFI",
++  ("old_space", 0x05961): "SourceTextModuleExecuteAsyncModuleFulfilledSFI",
++  ("old_space", 0x05985): "SourceTextModuleExecuteAsyncModuleRejectedSFI",
+ }
+ 
+ # Lower 32 bits of first page addresses for various heap spaces.
+-- 
+2.35.1
+

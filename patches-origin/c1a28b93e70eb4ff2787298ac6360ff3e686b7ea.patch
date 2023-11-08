@@ -1,0 +1,80 @@
+From c1a28b93e70eb4ff2787298ac6360ff3e686b7ea Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=9D=A8=E6=96=87=E6=98=8E?= <yangwenming@bytedance.com>
+Date: Fri, 11 Aug 2023 18:06:33 +0800
+Subject: [PATCH] [riscv,cctest] fix i64load32u and enable cctest/wasm-atomics
+ on RISC-V.
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Necessary functionality for wasm/atomics on RISC-V is already
+implemented. This CL fixes instruction 'i64.atomic.load32_u' for
+both TurboFan & LiftOff by using zero-extending on RISC-V and
+enables relative test cases in cctest.
+
+Bug: v8:14255
+Change-Id: Ic27b9a6c8a2f0b2efea9a611ba9f01ee527760cf
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4773214
+Commit-Queue: Yahan Lu <yahan@iscas.ac.cn>
+Reviewed-by: Clemens Backes <clemensb@chromium.org>
+Auto-Submit: 杨文明 <yangwenming@bytedance.com>
+Reviewed-by: Yahan Lu <yahan@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#89510}
+---
+ src/compiler/backend/riscv/code-generator-riscv.cc  | 6 ++++++
+ src/wasm/baseline/riscv/liftoff-assembler-riscv64.h | 5 ++++-
+ test/cctest/cctest.status                           | 2 --
+ 3 files changed, 10 insertions(+), 3 deletions(-)
+
+diff --git a/src/compiler/backend/riscv/code-generator-riscv.cc b/src/compiler/backend/riscv/code-generator-riscv.cc
+index f885fc9c7a1..ffca066c227 100644
+--- a/src/compiler/backend/riscv/code-generator-riscv.cc
++++ b/src/compiler/backend/riscv/code-generator-riscv.cc
+@@ -1942,6 +1942,12 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       ASSEMBLE_ATOMIC_LOAD_INTEGER(Lhu);
+       break;
+     case kAtomicLoadWord32:
++#if V8_TARGET_ARCH_RISCV64
++      if (AtomicWidthField::decode(opcode) == AtomicWidth::kWord64) {
++        ASSEMBLE_ATOMIC_LOAD_INTEGER(Lwu);
++        break;
++      }
++#endif  // V8_TARGET_ARCH_RISCV64
+       ASSEMBLE_ATOMIC_LOAD_INTEGER(Lw);
+       break;
+ #if V8_TARGET_ARCH_RISCV64
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
+index 5fb5c48b4cd..962228393b0 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
+@@ -482,10 +482,13 @@ void LiftoffAssembler::AtomicLoad(LiftoffRegister dst, Register src_addr,
+       sync();
+       return;
+     case LoadType::kI32Load:
+-    case LoadType::kI64Load32U:
+       lw(dst.gp(), src_reg, 0);
+       sync();
+       return;
++    case LoadType::kI64Load32U:
++      lwu(dst.gp(), src_reg, 0);
++      sync();
++      return;
+     case LoadType::kI64Load:
+       ld(dst.gp(), src_reg, 0);
+       sync();
+diff --git a/test/cctest/cctest.status b/test/cctest/cctest.status
+index 7e89a47f20f..42a3fcf38af 100644
+--- a/test/cctest/cctest.status
++++ b/test/cctest/cctest.status
+@@ -371,8 +371,6 @@
+   'test-gc/RunWasmTurbofan_RefTrivialCasts': [SKIP],
+ 
+   # Some wasm functionality is not implemented yet.
+-  'test-run-wasm-atomics64/*': [SKIP],
+-  'test-run-wasm-atomics/*': [SKIP],
+   'test-run-wasm-64/*': [SKIP],
+   'test-run-wasm/RunWasmTurbofan_Select_s128_parameters': [SKIP],
+   'test-run-wasm/RunWasmLiftoff_Select_s128_parameters': [SKIP],
+-- 
+2.35.1
+

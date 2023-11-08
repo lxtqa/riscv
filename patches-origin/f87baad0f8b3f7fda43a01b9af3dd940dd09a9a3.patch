@@ -1,0 +1,106 @@
+From f87baad0f8b3f7fda43a01b9af3dd940dd09a9a3 Mon Sep 17 00:00:00 2001
+From: Yahan Lu <yahan@iscas.ac.cn>
+Date: Mon, 12 Apr 2021 15:07:05 +0800
+Subject: [PATCH] [riscv64] Add call builtin info in simulator
+
+    Skip wasm/simd test for riscv64
+    Add buitin info when call a builtin.
+    Port 064ca18ca284f7115e62501ac643ef8e6c614f76
+
+Change-Id: I1150de98a95231abf9d5def9e95ad38a8a42bbb3
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/2814128
+Reviewed-by: Brice Dobry <brice.dobry@futurewei.com>
+Commit-Queue: Brice Dobry <brice.dobry@futurewei.com>
+Cr-Commit-Position: refs/heads/master@{#73908}
+---
+ src/builtins/riscv64/builtins-riscv64.cc   |  2 --
+ src/execution/riscv64/simulator-riscv64.cc | 33 +++++++++++++++++++++-
+ src/execution/riscv64/simulator-riscv64.h  |  1 +
+ 3 files changed, 33 insertions(+), 3 deletions(-)
+
+diff --git a/src/builtins/riscv64/builtins-riscv64.cc b/src/builtins/riscv64/builtins-riscv64.cc
+index 2f75ddd79ee..15e0aab74f3 100644
+--- a/src/builtins/riscv64/builtins-riscv64.cc
++++ b/src/builtins/riscv64/builtins-riscv64.cc
+@@ -1773,8 +1773,6 @@ namespace {
+ 
+ void Generate_OSREntry(MacroAssembler* masm, Register entry_address,
+                        Operand offset = Operand(int64_t(0))) {
+-  // Pop the return address to this function's caller from the return stack
+-  // buffer, since we'll never return to it.
+   __ Add64(ra, entry_address, offset);
+   // And "return" to the OSR entry point of the function.
+   __ Ret();
+diff --git a/src/execution/riscv64/simulator-riscv64.cc b/src/execution/riscv64/simulator-riscv64.cc
+index 1d38d8c0ca0..7e26bbebe2d 100644
+--- a/src/execution/riscv64/simulator-riscv64.cc
++++ b/src/execution/riscv64/simulator-riscv64.cc
+@@ -261,6 +261,10 @@ void RiscvDebugger::Debug() {
+       disasm::Disassembler dasm(converter);
+       // Use a reasonably large buffer.
+       v8::internal::EmbeddedVector<char, 256> buffer;
++      const char* name = sim_->builtins_.Lookup((Address)sim_->get_pc());
++      if (name != nullptr) {
++        PrintF("Call builtin:  %s\n", name);
++      }
+       dasm.InstructionDecode(buffer, reinterpret_cast<byte*>(sim_->get_pc()));
+       PrintF("  0x%016" PRIx64 "   %s\n", sim_->get_pc(), buffer.begin());
+       last_pc = sim_->get_pc();
+@@ -785,7 +789,7 @@ void Simulator::CheckICache(base::CustomMatcherHashMap* i_cache,
+   }
+ }
+ 
+-Simulator::Simulator(Isolate* isolate) : isolate_(isolate) {
++Simulator::Simulator(Isolate* isolate) : isolate_(isolate), builtins_(isolate) {
+   // Set up simulator support first. Some of this information is needed to
+   // setup the architecture state.
+   stack_size_ = FLAG_sim_stack_size * KB;
+@@ -2819,6 +2823,33 @@ void Simulator::DecodeRVIType() {
+       // Note: No need to shift 2 for JALR's imm12, but set lowest bit to 0.
+       int64_t next_pc = (rs1() + imm12()) & ~reg_t(1);
+       set_pc(next_pc);
++      if (::v8::internal::FLAG_trace_sim) {
++        if ((rs1_reg() != ra || imm12() != 0)) {
++          const char* name = builtins_.Lookup((Address)next_pc);
++          if (name != nullptr) {
++            int64_t arg0 = get_register(a0);
++            int64_t arg1 = get_register(a1);
++            int64_t arg2 = get_register(a2);
++            int64_t arg3 = get_register(a3);
++            int64_t arg4 = get_register(a4);
++            int64_t arg5 = get_register(a5);
++            int64_t arg6 = get_register(a6);
++            int64_t arg7 = get_register(a7);
++            int64_t* stack_pointer =
++                reinterpret_cast<int64_t*>(get_register(sp));
++            int64_t arg8 = stack_pointer[0];
++            int64_t arg9 = stack_pointer[1];
++            PrintF(
++                "Call to Builtin at %s "
++                "a0 %08" PRIx64 " ,a1 %08" PRIx64 " ,a2 %08" PRIx64
++                " ,a3 %08" PRIx64 " ,a4 %08" PRIx64 " ,a5 %08" PRIx64
++                " ,a6 %08" PRIx64 " ,a7 %08" PRIx64 " ,0(sp) %08" PRIx64
++                " ,8(sp) %08" PRIx64 " ,sp %08" PRIx64 ",fp %08" PRIx64 " \n",
++                name, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8,
++                arg9, get_register(sp), get_register(fp));
++          }
++        }
++      }
+       break;
+     }
+     case RO_LB: {
+diff --git a/src/execution/riscv64/simulator-riscv64.h b/src/execution/riscv64/simulator-riscv64.h
+index e51ec6472c2..e5647b2c43f 100644
+--- a/src/execution/riscv64/simulator-riscv64.h
++++ b/src/execution/riscv64/simulator-riscv64.h
+@@ -706,6 +706,7 @@ class Simulator : public SimulatorBase {
+   char* last_debugger_input_;
+ 
+   v8::internal::Isolate* isolate_;
++  v8::internal::Builtins builtins_;
+ 
+   // Stop is disabled if bit 31 is set.
+   static const uint32_t kStopDisabledBit = 1 << 31;
+-- 
+2.35.1
+

@@ -1,0 +1,579 @@
+From 115db49c25559476bb23e914380c4a8de60b08e7 Mon Sep 17 00:00:00 2001
+From: Derek Tu <derek.t@rioslab.org>
+Date: Mon, 24 May 2021 00:25:34 +0000
+Subject: [PATCH] [riscv64] Add RVC Instr CB and fix some RVC Instr CA
+
+Adds the following CB type RISC-V instructions to the assembler:
+c.beqz, c.bnez, c.andi, c.srai, c.srli. Also removes sext_xlen
+from RVC instructions c.xor, c.or, c.and.
+
+Change-Id: I96ce4693019c28235ccd4f85d0a68ca89a3f4096
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/2912922
+Reviewed-by: Brice Dobry <brice.dobry@futurewei.com>
+Reviewed-by: Jakob Gruber <jgruber@chromium.org>
+Commit-Queue: Brice Dobry <brice.dobry@futurewei.com>
+Cr-Commit-Position: refs/heads/master@{#74801}
+---
+ src/codegen/riscv64/assembler-riscv64.cc   | 81 +++++++++++++++++++
+ src/codegen/riscv64/assembler-riscv64.h    | 21 ++++-
+ src/codegen/riscv64/constants-riscv64.h    | 19 +++++
+ src/diagnostics/riscv64/disasm-riscv64.cc  | 37 +++++++++
+ src/execution/riscv64/simulator-riscv64.cc | 40 ++++++++-
+ src/execution/riscv64/simulator-riscv64.h  |  2 +
+ test/cctest/test-assembler-riscv64.cc      | 94 ++++++++++++++++++++++
+ test/cctest/test-disasm-riscv64.cc         |  7 ++
+ 8 files changed, 297 insertions(+), 4 deletions(-)
+
+diff --git a/src/codegen/riscv64/assembler-riscv64.cc b/src/codegen/riscv64/assembler-riscv64.cc
+index 35c56ccdf53..9035482ed0f 100644
+--- a/src/codegen/riscv64/assembler-riscv64.cc
++++ b/src/codegen/riscv64/assembler-riscv64.cc
+@@ -302,6 +302,11 @@ bool Assembler::IsBranch(Instr instr) {
+   return (instr & kBaseOpcodeMask) == BRANCH;
+ }
+ 
++bool Assembler::IsCBranch(Instr instr) {
++  int Op = instr & kRvcOpcodeMask;
++  return Op == RO_C_BNEZ || Op == RO_C_BEQZ;
++}
++
+ bool Assembler::IsJump(Instr instr) {
+   int Op = instr & kBaseOpcodeMask;
+   return Op == JAL || Op == JALR;
+@@ -413,6 +418,12 @@ int Assembler::target_at(int pos, bool is_internal) {
+       if (offset == kEndOfJumpChain) return kEndOfChain;
+       return offset + pos;
+     } break;
++    case RO_C_BNEZ:
++    case RO_C_BEQZ: {
++      int32_t offset = instruction->RvcImm8BValue();
++      if (offset == kEndOfJumpChain) return kEndOfChain;
++      return pos + offset;
++    } break;
+     default: {
+       if (instr == kEndOfJumpChain) {
+         return kEndOfChain;
+@@ -496,6 +507,22 @@ static inline ShortInstr SetCJalOffset(int32_t pos, int32_t target_pos,
+   return instr | (imm11 & kImm11Mask);
+ }
+ 
++static inline Instr SetCBranchOffset(int32_t pos, int32_t target_pos,
++                                     Instr instr) {
++  DCHECK(Assembler::IsCBranch(instr));
++  int32_t imm = target_pos - pos;
++  DCHECK_EQ(imm & 1, 0);
++  DCHECK(is_intn(imm, Assembler::kCBranchOffsetBits));
++
++  instr &= ~kRvcBImm8Mask;
++  int32_t imm8 = ((imm & 0x20) >> 5) | ((imm & 0x6)) | ((imm & 0xc0) >> 3) |
++                 ((imm & 0x18) << 2) | ((imm & 0x100) >> 1);
++  imm8 = ((imm8 & 0x1f) << 2) | ((imm8 & 0xe0) << 5);
++  DCHECK(Assembler::IsCBranch(instr | imm8 & kRvcBImm8Mask));
++
++  return instr | (imm8 & kRvcBImm8Mask);
++}
++
+ void Assembler::target_at_put(int pos, int target_pos, bool is_internal) {
+   if (is_internal) {
+     uint64_t imm = reinterpret_cast<uint64_t>(buffer_start_) + target_pos;
+@@ -547,6 +574,11 @@ void Assembler::target_at_put(int pos, int target_pos, bool is_internal) {
+       ShortInstr short_instr = SetCJalOffset(pos, target_pos, instr);
+       instr_at_put(pos, short_instr);
+     } break;
++    case RO_C_BNEZ:
++    case RO_C_BEQZ: {
++      instr = SetCBranchOffset(pos, target_pos, instr);
++      instr_at_put(pos, instr);
++    } break;
+     default: {
+       // Emitted label constant, not part of a branch.
+       // Make label relative to Code pointer of generated Code object.
+@@ -1068,6 +1100,24 @@ void Assembler::GenInstrCS(uint8_t funct3, Opcode opcode, FPURegister rs2,
+   emit(instr);
+ }
+ 
++void Assembler::GenInstrCB(uint8_t funct3, Opcode opcode, Register rs1,
++                           uint8_t uimm8) {
++  DCHECK(is_uint3(funct3) && is_uint8(uimm8));
++  ShortInstr instr = opcode | ((uimm8 & 0x1f) << 2) | ((uimm8 & 0xe0) << 5) |
++                     ((rs1.code() & 0x7) << kRvcRs1sShift) |
++                     (funct3 << kRvcFunct3Shift);
++  emit(instr);
++}
++
++void Assembler::GenInstrCBA(uint8_t funct3, uint8_t funct2, Opcode opcode,
++                            Register rs1, uint8_t uimm6) {
++  DCHECK(is_uint3(funct3) && is_uint2(funct2) && is_uint6(uimm6));
++  ShortInstr instr = opcode | ((uimm6 & 0x1f) << 2) | ((uimm6 & 0x20) << 7) |
++                     ((rs1.code() & 0x7) << kRvcRs1sShift) |
++                     (funct3 << kRvcFunct3Shift) | (funct2 << 10);
++  emit(instr);
++}
++
+ // ----- Instruction class templates match those in the compiler
+ 
+ void Assembler::GenInstrBranchCC_rri(uint8_t funct3, Register rs1, Register rs2,
+@@ -2200,6 +2250,37 @@ void Assembler::c_j(int16_t imm12) {
+   BlockTrampolinePoolFor(1);
+ }
+ 
++// CB Instructions
++
++void Assembler::c_bnez(Register rs1, int16_t imm9) {
++  DCHECK(((rs1.code() & 0b11000) == 0b01000) && is_int9(imm9));
++  uint8_t uimm8 = ((imm9 & 0x20) >> 5) | ((imm9 & 0x6)) | ((imm9 & 0xc0) >> 3) |
++                  ((imm9 & 0x18) << 2) | ((imm9 & 0x100) >> 1);
++  GenInstrCB(0b111, C1, rs1, uimm8);
++}
++
++void Assembler::c_beqz(Register rs1, int16_t imm9) {
++  DCHECK(((rs1.code() & 0b11000) == 0b01000) && is_int9(imm9));
++  uint8_t uimm8 = ((imm9 & 0x20) >> 5) | ((imm9 & 0x6)) | ((imm9 & 0xc0) >> 3) |
++                  ((imm9 & 0x18) << 2) | ((imm9 & 0x100) >> 1);
++  GenInstrCB(0b110, C1, rs1, uimm8);
++}
++
++void Assembler::c_srli(Register rs1, uint8_t uimm6) {
++  DCHECK(((rs1.code() & 0b11000) == 0b01000) && is_uint6(uimm6));
++  GenInstrCBA(0b100, 0b00, C1, rs1, uimm6);
++}
++
++void Assembler::c_srai(Register rs1, uint8_t uimm6) {
++  DCHECK(((rs1.code() & 0b11000) == 0b01000) && is_uint6(uimm6));
++  GenInstrCBA(0b100, 0b01, C1, rs1, uimm6);
++}
++
++void Assembler::c_andi(Register rs1, uint8_t uimm6) {
++  DCHECK(((rs1.code() & 0b11000) == 0b01000) && is_uint6(uimm6));
++  GenInstrCBA(0b100, 0b10, C1, rs1, uimm6);
++}
++
+ // Privileged
+ 
+ void Assembler::uret() {
+diff --git a/src/codegen/riscv64/assembler-riscv64.h b/src/codegen/riscv64/assembler-riscv64.h
+index ff66351d6a4..19c1f7a9428 100644
+--- a/src/codegen/riscv64/assembler-riscv64.h
++++ b/src/codegen/riscv64/assembler-riscv64.h
+@@ -198,7 +198,8 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+     kOffset20 = 20,  // RISCV imm20
+     kOffset13 = 13,  // RISCV branch
+     kOffset32 = 32,  // RISCV auipc + instr_I
+-    kOffset11 = 11   // RISCV C_J
++    kOffset11 = 11,  // RISCV C_J
++    kOffset8 = 8     // RISCV compressed branch
+   };
+ 
+   // Determines if Label is bound and near enough so that branch instruction
+@@ -214,6 +215,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+                                    int32_t offset);
+   int JumpOffset(Instr instr);
+   int CJumpOffset(Instr instr);
++  int CBranchOffset(Instr instr);
+   static int LdOffset(Instr instr);
+   static int AuipcOffset(Instr instr);
+   static int JalrOffset(Instr instr);
+@@ -231,6 +233,9 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   inline int16_t cjump_offset(Label* L) {
+     return (int16_t)branch_offset_helper(L, OffsetSize::kOffset11);
+   }
++  inline int32_t cbranch_offset(Label* L) {
++    return branch_offset_helper(L, OffsetSize::kOffset8);
++  }
+ 
+   uint64_t jump_address(Label* L);
+   uint64_t branch_long_offset(Label* L);
+@@ -322,6 +327,9 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // Bits available for offset field in compresed jump
+   static constexpr int kCJalOffsetBits = 12;
+ 
++  // Bits available for offset field in compressed branch
++  static constexpr int kCBranchOffsetBits = 9;
++
+   // Max offset for b instructions with 12-bit offset field (multiple of 2)
+   static constexpr int kMaxBranchOffset = (1 << (13 - 1)) - 1;
+ 
+@@ -627,6 +635,13 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   void c_sw(Register rs2, Register rs1, uint16_t uimm7);
+   void c_sd(Register rs2, Register rs1, uint16_t uimm8);
+   void c_fsd(FPURegister rs2, Register rs1, uint16_t uimm8);
++  void c_bnez(Register rs1, int16_t imm9);
++  inline void c_bnez(Register rs1, Label* L) { c_bnez(rs1, branch_offset(L)); }
++  void c_beqz(Register rs1, int16_t imm9);
++  inline void c_beqz(Register rs1, Label* L) { c_beqz(rs1, branch_offset(L)); }
++  void c_srli(Register rs1, uint8_t uimm6);
++  void c_srai(Register rs1, uint8_t uimm6);
++  void c_andi(Register rs1, uint8_t uimm6);
+ 
+   // Privileged
+   void uret();
+@@ -855,6 +870,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+ 
+   // Check if an instruction is a branch of some kind.
+   static bool IsBranch(Instr instr);
++  static bool IsCBranch(Instr instr);
+   static bool IsJump(Instr instr);
+   static bool IsJal(Instr instr);
+   static bool IsCJal(Instr instr);
+@@ -1103,6 +1119,9 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   void GenInstrCS(uint8_t funct3, Opcode opcode, FPURegister rs2, Register rs1,
+                   uint8_t uimm5);
+   void GenInstrCJ(uint8_t funct3, Opcode opcode, uint16_t uint11);
++  void GenInstrCB(uint8_t funct3, Opcode opcode, Register rs1, uint8_t uimm8);
++  void GenInstrCBA(uint8_t funct3, uint8_t funct2, Opcode opcode, Register rs1,
++                   uint8_t uimm6);
+ 
+   // ----- Instruction class templates match those in LLVM's RISCVInstrInfo.td
+   void GenInstrBranchCC_rri(uint8_t funct3, Register rs1, Register rs2,
+diff --git a/src/codegen/riscv64/constants-riscv64.h b/src/codegen/riscv64/constants-riscv64.h
+index c8f54d8f7f9..e2e22fae3ce 100644
+--- a/src/codegen/riscv64/constants-riscv64.h
++++ b/src/codegen/riscv64/constants-riscv64.h
+@@ -210,6 +210,7 @@ const int kRvcRs1sBits = 3;
+ const int kRvcRs2sShift = 2;
+ const int kRvcRs2sBits = 3;
+ const int kRvcFunct2Shift = 5;
++const int kRvcFunct2BShift = 10;
+ const int kRvcFunct2Bits = 2;
+ const int kRvcFunct6Shift = 10;
+ const int kRvcFunct6Bits = 6;
+@@ -245,9 +246,11 @@ const int kRvcFunct3Mask = (((1 << kRvcFunct3Bits) - 1) << kRvcFunct3Shift);
+ const int kRvcFunct4Mask = (((1 << kRvcFunct4Bits) - 1) << kRvcFunct4Shift);
+ const int kRvcFunct6Mask = (((1 << kRvcFunct6Bits) - 1) << kRvcFunct6Shift);
+ const int kRvcFunct2Mask = (((1 << kRvcFunct2Bits) - 1) << kRvcFunct2Shift);
++const int kRvcFunct2BMask = (((1 << kRvcFunct2Bits) - 1) << kRvcFunct2BShift);
+ const int kCRTypeMask = kRvcOpcodeMask | kRvcFunct4Mask;
+ const int kCSTypeMask = kRvcOpcodeMask | kRvcFunct6Mask;
+ const int kCATypeMask = kRvcOpcodeMask | kRvcFunct6Mask | kRvcFunct2Mask;
++const int kRvcBImm8Mask = (((1 << 5) - 1) << 2) | (((1 << 3) - 1) << 10);
+ 
+ // RISCV CSR related bit mask and shift
+ const int kFcsrFlagsBits = 5;
+@@ -917,6 +920,11 @@ class InstructionGetters : public T {
+     return this->Bits(kRvcFunct2Shift + kRvcFunct2Bits - 1, kRvcFunct2Shift);
+   }
+ 
++  inline int RvcFunct2BValue() const {
++    DCHECK(this->IsShortInstruction());
++    return this->Bits(kRvcFunct2BShift + kRvcFunct2Bits - 1, kRvcFunct2BShift);
++  }
++
+   inline int CsrValue() const {
+     DCHECK(this->InstructionType() == InstructionBase::kIType &&
+            this->BaseOpcode() == SYSTEM);
+@@ -1125,6 +1133,17 @@ class InstructionGetters : public T {
+     return imm12 << 20 >> 20;
+   }
+ 
++  inline int RvcImm8BValue() const {
++    DCHECK(this->IsShortInstruction());
++    // | funct3 | imm[8|4:3] | rs1` | imm[7:6|2:1|5]  | opcode |
++    //  15       12        10       7                 2
++    uint32_t Bits = this->InstructionBits();
++    int32_t imm9 = ((Bits & 0x4) << 3) | ((Bits & 0x18) >> 2) |
++                   ((Bits & 0x60) << 1) | ((Bits & 0xc00) >> 7) |
++                   ((Bits & 0x1000) >> 4);
++    return imm9 << 23 >> 23;
++  }
++
+   inline bool AqValue() const { return this->Bits(kAqShift, kAqShift); }
+ 
+   inline bool RlValue() const { return this->Bits(kRlShift, kRlShift); }
+diff --git a/src/diagnostics/riscv64/disasm-riscv64.cc b/src/diagnostics/riscv64/disasm-riscv64.cc
+index 5cbd4b4857f..909ffae6905 100644
+--- a/src/diagnostics/riscv64/disasm-riscv64.cc
++++ b/src/diagnostics/riscv64/disasm-riscv64.cc
+@@ -93,6 +93,7 @@ class Decoder {
+   void PrintRvcImm5D(Instruction* instr);
+   void PrintRvcImm8Addi4spn(Instruction* instr);
+   void PrintRvcImm11CJ(Instruction* instr);
++  void PrintRvcImm8B(Instruction* instr);
+   void PrintAcquireRelease(Instruction* instr);
+   void PrintBranchOffset(Instruction* instr);
+   void PrintStoreOffset(Instruction* instr);
+@@ -118,6 +119,7 @@ class Decoder {
+   void DecodeCLType(Instruction* instr);
+   void DecodeCSType(Instruction* instr);
+   void DecodeCJType(Instruction* instr);
++  void DecodeCBType(Instruction* instr);
+ 
+   // Printing of instruction name.
+   void PrintInstructionName(Instruction* instr);
+@@ -326,6 +328,11 @@ void Decoder::PrintRvcImm11CJ(Instruction* instr) {
+   out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
+ }
+ 
++void Decoder::PrintRvcImm8B(Instruction* instr) {
++  int32_t imm = instr->RvcImm8BValue();
++  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
++}
++
+ void Decoder::PrintAcquireRelease(Instruction* instr) {
+   bool aq = instr->AqValue();
+   bool rl = instr->RlValue();
+@@ -599,6 +606,10 @@ int Decoder::FormatRvcImm(Instruction* instr, const char* format) {
+       DCHECK(STRING_STARTS_WITH(format, "Cimm8Addi4spn"));
+       PrintRvcImm8Addi4spn(instr);
+       return 13;
++    } else if (format[5] == 'B') {
++      DCHECK(STRING_STARTS_WITH(format, "Cimm8B"));
++      PrintRvcImm8B(instr);
++      return 6;
+     }
+     UNREACHABLE();
+   } else if (format[4] == '1') {
+@@ -1752,6 +1763,29 @@ void Decoder::DecodeCJType(Instruction* instr) {
+   }
+ }
+ 
++void Decoder::DecodeCBType(Instruction* instr) {
++  switch (instr->RvcOpcode()) {
++    case RO_C_BNEZ:
++      Format(instr, "bnez       'Crs1s, x0, 'Cimm8B");
++      break;
++    case RO_C_BEQZ:
++      Format(instr, "beqz       'Crs1s, x0, 'Cimm8B");
++      break;
++    case RO_C_MISC_ALU:
++      if (instr->RvcFunct2BValue() == 0b00)
++        Format(instr, "srli       'Crs1s, 'Crs1s, 'Cshamt");
++      else if (instr->RvcFunct2BValue() == 0b01)
++        Format(instr, "srai       'Crs1s, 'Crs1s, 'Cshamt");
++      else if (instr->RvcFunct2BValue() == 0b10)
++        Format(instr, "andi       'Crs1s, 'Crs1s, 'Cimm6");
++      else
++        UNSUPPORTED_RISCV();
++      break;
++    default:
++      UNSUPPORTED_RISCV();
++  }
++}
++
+ // Disassemble the instruction at *instr_ptr into the output buffer.
+ // All instructions are one word long, except for the simulator
+ // pseudo-instruction stop(msg). For that one special case, we return
+@@ -1807,6 +1841,9 @@ int Decoder::InstructionDecode(byte* instr_ptr) {
+     case Instruction::kCSType:
+       DecodeCSType(instr);
+       break;
++    case Instruction::kCBType:
++      DecodeCBType(instr);
++      break;
+     default:
+       Format(instr, "UNSUPPORTED");
+       UNSUPPORTED_RISCV();
+diff --git a/src/execution/riscv64/simulator-riscv64.cc b/src/execution/riscv64/simulator-riscv64.cc
+index e8f16155bef..c11e357ac55 100644
+--- a/src/execution/riscv64/simulator-riscv64.cc
++++ b/src/execution/riscv64/simulator-riscv64.cc
+@@ -3182,13 +3182,13 @@ void Simulator::DecodeCAType() {
+       set_rvc_rs1s(sext_xlen(rvc_rs1s() - rvc_rs2s()));
+       break;
+     case RO_C_XOR:
+-      set_rvc_rs1s(sext_xlen(rvc_rs1s() ^ rvc_rs2s()));
++      set_rvc_rs1s(rvc_rs1s() ^ rvc_rs2s());
+       break;
+     case RO_C_OR:
+-      set_rvc_rs1s(sext_xlen(rvc_rs1s() | rvc_rs2s()));
++      set_rvc_rs1s(rvc_rs1s() | rvc_rs2s());
+       break;
+     case RO_C_AND:
+-      set_rvc_rs1s(sext_xlen(rvc_rs1s() & rvc_rs2s()));
++      set_rvc_rs1s(rvc_rs1s() & rvc_rs2s());
+       break;
+     case RO_C_SUBW:
+       set_rvc_rs1s(sext32(rvc_rs1s() - rvc_rs2s()));
+@@ -3347,6 +3347,37 @@ void Simulator::DecodeCJType() {
+   }
+ }
+ 
++void Simulator::DecodeCBType() {
++  switch (instr_.RvcOpcode()) {
++    case RO_C_BNEZ:
++      if (rvc_rs1() != 0) {
++        int64_t next_pc = get_pc() + rvc_imm8_b();
++        set_pc(next_pc);
++      }
++      break;
++    case RO_C_BEQZ:
++      if (rvc_rs1() == 0) {
++        int64_t next_pc = get_pc() + rvc_imm8_b();
++        set_pc(next_pc);
++      }
++      break;
++    case RO_C_MISC_ALU:
++      if (instr_.RvcFunct2BValue() == 0b00) {  // c.srli
++        set_rvc_rs1s(sext_xlen(sext_xlen(rvc_rs1s()) >> rvc_shamt6()));
++      } else if (instr_.RvcFunct2BValue() == 0b01) {  // c.srai
++        require(rvc_shamt6() < xlen);
++        set_rvc_rs1s(sext_xlen(sext_xlen(rvc_rs1s()) >> rvc_shamt6()));
++      } else if (instr_.RvcFunct2BValue() == 0b10) {  // c.andi
++        set_rvc_rs1s(rvc_imm6() & rvc_rs1s());
++      } else {
++        UNSUPPORTED();
++      }
++      break;
++    default:
++      UNSUPPORTED();
++  }
++}
++
+ // Executes the current instruction.
+ void Simulator::InstructionDecode(Instruction* instr) {
+   if (v8::internal::FLAG_check_icache) {
+@@ -3399,6 +3430,9 @@ void Simulator::InstructionDecode(Instruction* instr) {
+     case Instruction::kCJType:
+       DecodeCJType();
+       break;
++    case Instruction::kCBType:
++      DecodeCBType();
++      break;
+     case Instruction::kCIType:
+       DecodeCIType();
+       break;
+diff --git a/src/execution/riscv64/simulator-riscv64.h b/src/execution/riscv64/simulator-riscv64.h
+index e5647b2c43f..b263c4af4a5 100644
+--- a/src/execution/riscv64/simulator-riscv64.h
++++ b/src/execution/riscv64/simulator-riscv64.h
+@@ -500,6 +500,7 @@ class Simulator : public SimulatorBase {
+   inline int16_t rvc_imm6_sdsp() const { return instr_.RvcImm6SdspValue(); }
+   inline int16_t rvc_imm5_w() const { return instr_.RvcImm5WValue(); }
+   inline int16_t rvc_imm5_d() const { return instr_.RvcImm5DValue(); }
++  inline int16_t rvc_imm8_b() const { return instr_.RvcImm8BValue(); }
+ 
+   inline void set_rd(int64_t value, bool trace = true) {
+     set_register(rd_reg(), value);
+@@ -627,6 +628,7 @@ class Simulator : public SimulatorBase {
+   void DecodeCLType();
+   void DecodeCSType();
+   void DecodeCJType();
++  void DecodeCBType();
+ 
+   // Used for breakpoints and traps.
+   void SoftwareInterrupt();
+diff --git a/test/cctest/test-assembler-riscv64.cc b/test/cctest/test-assembler-riscv64.cc
+index ef275f53c8a..29f8503c098 100644
+--- a/test/cctest/test-assembler-riscv64.cc
++++ b/test/cctest/test-assembler-riscv64.cc
+@@ -1503,6 +1503,100 @@ TEST(RVC_JUMP) {
+   CHECK_EQ(expected_res, res);
+ }
+ 
++TEST(RVC_CB) {
++  // Test RV64C extension CI type instructions.
++  FLAG_riscv_c_extension = true;
++  CcTest::InitializeVM();
++
++  // Test c.srai
++  {
++    auto fn = [](MacroAssembler& assm) { __ c_srai(a0, 13); };
++    auto res = GenAndRunTest<int64_t>(0x1234'5678ULL, fn);
++    CHECK_EQ(0x1234'5678ULL >> 13, res);
++  }
++
++  // Test c.srli
++  {
++    auto fn = [](MacroAssembler& assm) { __ c_srli(a0, 13); };
++    auto res = GenAndRunTest<int64_t>(0x1234'5678ULL, fn);
++    CHECK_EQ(0x1234'5678ULL >> 13, res);
++  }
++
++  // Test c.andi
++  {
++    auto fn = [](MacroAssembler& assm) { __ c_andi(a0, 13); };
++    auto res = GenAndRunTest<int64_t>(LARGE_INT_EXCEED_32_BIT, fn);
++    CHECK_EQ(LARGE_INT_EXCEED_32_BIT & 13, res);
++  }
++}
++
++TEST(RVC_CB_BRANCH) {
++  FLAG_riscv_c_extension = true;
++  // Test floating point compare and
++  // branch instructions.
++  CcTest::InitializeVM();
++  Isolate* isolate = CcTest::i_isolate();
++  HandleScope scope(isolate);
++
++  struct T {
++    double a;
++    double b;
++    double c;
++    double d;
++    double e;
++    double f;
++    int32_t result;
++  } t;
++
++  // Create a function that accepts &t,
++  // and loads, manipulates, and stores
++  // the doubles t.a ... t.f.
++  Label neither_is_nan, less_than, outa_here;
++  auto fn = [&neither_is_nan, &less_than, &outa_here](MacroAssembler& assm) {
++    __ fld(ft0, a0, offsetof(T, a));
++    __ fld(ft1, a0, offsetof(T, b));
++
++    __ fclass_d(t5, ft0);
++    __ fclass_d(t6, ft1);
++    __ or_(a1, t5, t6);
++    __ andi(a1, a1, kSignalingNaN | kQuietNaN);
++    __ c_beqz(a1, &neither_is_nan);
++    __ sw(zero_reg, a0, offsetof(T, result));
++    __ j(&outa_here);
++
++    __ bind(&neither_is_nan);
++
++    __ flt_d(a1, ft1, ft0);
++    __ c_bnez(a1, &less_than);
++
++    __ sw(zero_reg, a0, offsetof(T, result));
++    __ j(&outa_here);
++
++    __ bind(&less_than);
++    __ RV_li(a4, 1);
++    __ sw(a4, a0, offsetof(T, result));  // Set true.
++
++    // This test-case should have additional
++    // tests.
++
++    __ bind(&outa_here);
++  };
++
++  auto f = AssembleCode<F3>(fn);
++
++  t.a = 1.5e14;
++  t.b = 2.75e11;
++  t.c = 2.0;
++  t.d = -4.0;
++  t.e = 0.0;
++  t.f = 0.0;
++  t.result = 0;
++  f.Call(&t, 0, 0, 0, 0);
++  CHECK_EQ(1.5e14, t.a);
++  CHECK_EQ(2.75e11, t.b);
++  CHECK_EQ(1, t.result);
++}
++
+ TEST(TARGET_ADDR) {
+   CcTest::InitializeVM();
+   Isolate* isolate = CcTest::i_isolate();
+diff --git a/test/cctest/test-disasm-riscv64.cc b/test/cctest/test-disasm-riscv64.cc
+index 7c665a5cbb7..c39f6633da6 100644
+--- a/test/cctest/test-disasm-riscv64.cc
++++ b/test/cctest/test-disasm-riscv64.cc
+@@ -505,6 +505,13 @@ TEST(RV64C) {
+   COMPARE(c_fsd(fa1, s1, 24), "0000ac8c       fsd       fa1, 24(s1)");
+ 
+   COMPARE(c_j(-12), "0000bfd5       j       -12");
++
++  COMPARE(c_beqz(a0, -12), "0000d975       beqz       a0, x0, -12");
++  COMPARE(c_bnez(a0, -12), "0000f975       bnez       a0, x0, -12");
++  COMPARE(c_srli(a1, 24), "000081e1       srli       a1, a1, 24");
++  COMPARE(c_andi(a1, 24), "000089e1       andi       a1, a1, 24");
++  COMPARE(c_srai(a1, 24), "000085e1       srai       a1, a1, 24");
++
+   VERIFY_RUN();
+ }
+ 
+-- 
+2.35.1
+

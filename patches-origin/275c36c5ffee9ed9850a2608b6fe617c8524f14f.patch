@@ -1,0 +1,1675 @@
+From 275c36c5ffee9ed9850a2608b6fe617c8524f14f Mon Sep 17 00:00:00 2001
+From: Clemens Backes <clemensb@chromium.org>
+Date: Wed, 2 Aug 2023 14:26:37 +0200
+Subject: [PATCH] [wasm][test] Always call through the CEntry stub
+
+The cctests were calling Wasm code directly through a specially compiled
+wrapper that was only used in cctests. Also the generated code for traps
+was different in that it called a C callback and then returned instead
+of unwinding the stack via a runtime function.
+
+This CL removes this test-only code and always calls through the CEntry
+stub such that stack unwinding works as in production.
+
+R=ahaas@chromium.org
+
+Bug: v8:14235
+Cq-Include-Trybots: luci.v8.try:v8_linux64_ubsan_rel
+Change-Id: I446cdcc39e3132fd9f662453332e31ec2433b0e8
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4738812
+Commit-Queue: Clemens Backes <clemensb@chromium.org>
+Reviewed-by: Thibaud Michaud <thibaudm@chromium.org>
+Reviewed-by: Andreas Haas <ahaas@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#89321}
+---
+ src/codegen/external-reference.cc             |   2 -
+ src/codegen/external-reference.h              |   2 -
+ src/codegen/optimized-compilation-info.h      |   7 +-
+ .../backend/arm/code-generator-arm.cc         |  35 +--
+ .../backend/arm64/code-generator-arm64.cc     |  24 +-
+ src/compiler/backend/code-generator.cc        |   5 -
+ src/compiler/backend/code-generator.h         |   2 -
+ .../backend/ia32/code-generator-ia32.cc       |  32 +--
+ .../backend/loong64/code-generator-loong64.cc |  36 +--
+ .../backend/mips64/code-generator-mips64.cc   |  36 +--
+ .../backend/ppc/code-generator-ppc.cc         |  35 +--
+ .../backend/riscv/code-generator-riscv.cc     |  36 +--
+ .../backend/s390/code-generator-s390.cc       |  35 +--
+ .../backend/x64/code-generator-x64.cc         |  31 +--
+ src/compiler/common-operator.cc               |   2 -
+ src/compiler/common-operator.h                |   1 -
+ src/compiler/pipeline.cc                      |   2 -
+ .../turboshaft/wasm-turboshaft-compiler.cc    |   3 -
+ src/compiler/wasm-compiler.cc                 |  22 +-
+ src/objects/bigint.h                          |   3 +-
+ src/wasm/baseline/arm/liftoff-assembler-arm.h |   5 -
+ .../baseline/arm64/liftoff-assembler-arm64.h  |   4 -
+ .../baseline/ia32/liftoff-assembler-ia32.h    |   5 -
+ src/wasm/baseline/liftoff-assembler.h         |   2 -
+ src/wasm/baseline/liftoff-compiler.cc         |  14 +-
+ .../loong64/liftoff-assembler-loong64.h       |   5 -
+ .../mips64/liftoff-assembler-mips64.h         |   5 -
+ src/wasm/baseline/ppc/liftoff-assembler-ppc.h |   5 -
+ .../baseline/riscv/liftoff-assembler-riscv.h  |   5 -
+ .../baseline/s390/liftoff-assembler-s390.h    |   5 -
+ src/wasm/baseline/x64/liftoff-assembler-x64.h |   5 -
+ src/wasm/compilation-environment.h            |  12 -
+ src/wasm/wasm-code-manager.cc                 |   3 +-
+ src/wasm/wasm-external-refs.cc                |  20 +-
+ src/wasm/wasm-external-refs.h                 |   7 -
+ test/cctest/wasm/test-liftoff-inspection.cc   |   3 +-
+ test/cctest/wasm/test-run-wasm-exceptions.cc  |   5 +-
+ test/cctest/wasm/test-run-wasm-memory64.cc    |   3 +-
+ test/cctest/wasm/test-run-wasm.cc             |   8 +-
+ test/cctest/wasm/test-wasm-stack.cc           |   6 +-
+ test/cctest/wasm/test-wasm-trap-position.cc   |   6 +-
+ test/cctest/wasm/wasm-run-utils.cc            | 152 +-----------
+ test/cctest/wasm/wasm-run-utils.h             | 223 +++++++-----------
+ 43 files changed, 205 insertions(+), 654 deletions(-)
+
+diff --git a/src/codegen/external-reference.cc b/src/codegen/external-reference.cc
+index 1a55e0a4d98..7637d5f68a9 100644
+--- a/src/codegen/external-reference.cc
++++ b/src/codegen/external-reference.cc
+@@ -513,8 +513,6 @@ IF_WASM(FUNCTION_REFERENCE, wasm_memory_init, wasm::memory_init_wrapper)
+ IF_WASM(FUNCTION_REFERENCE, wasm_memory_copy, wasm::memory_copy_wrapper)
+ IF_WASM(FUNCTION_REFERENCE, wasm_memory_fill, wasm::memory_fill_wrapper)
+ IF_WASM(FUNCTION_REFERENCE, wasm_float64_pow, wasm::float64_pow_wrapper)
+-IF_WASM(FUNCTION_REFERENCE, wasm_call_trap_callback_for_testing,
+-        wasm::call_trap_callback_for_testing)
+ IF_WASM(FUNCTION_REFERENCE, wasm_array_copy, wasm::array_copy_wrapper)
+ IF_WASM(FUNCTION_REFERENCE, wasm_array_fill, wasm::array_fill_wrapper)
+ IF_WASM(FUNCTION_REFERENCE_WITH_TYPE, wasm_string_to_f64,
+diff --git a/src/codegen/external-reference.h b/src/codegen/external-reference.h
+index c47dcaa4188..200f1d48b82 100644
+--- a/src/codegen/external-reference.h
++++ b/src/codegen/external-reference.h
+@@ -260,8 +260,6 @@ class StatsCounter;
+           "wasm::switch_to_the_central_stack")                                 \
+   IF_WASM(V, wasm_switch_from_the_central_stack,                               \
+           "wasm::switch_from_the_central_stack")                               \
+-  IF_WASM(V, wasm_call_trap_callback_for_testing,                              \
+-          "wasm::call_trap_callback_for_testing")                              \
+   IF_WASM(V, wasm_f32_ceil, "wasm::f32_ceil_wrapper")                          \
+   IF_WASM(V, wasm_f32_floor, "wasm::f32_floor_wrapper")                        \
+   IF_WASM(V, wasm_f32_nearest_int, "wasm::f32_nearest_int_wrapper")            \
+diff --git a/src/codegen/optimized-compilation-info.h b/src/codegen/optimized-compilation-info.h
+index 644db8a0680..b5c4aac5503 100644
+--- a/src/codegen/optimized-compilation-info.h
++++ b/src/codegen/optimized-compilation-info.h
+@@ -69,10 +69,9 @@ class V8_EXPORT_PRIVATE OptimizedCompilationInfo final {
+   V(TraceTurboScheduled, trace_turbo_scheduled, 13)                  \
+   V(TraceTurboAllocation, trace_turbo_allocation, 14)                \
+   V(TraceHeapBroker, trace_heap_broker, 15)                          \
+-  V(WasmRuntimeExceptionSupport, wasm_runtime_exception_support, 16) \
+-  V(DiscardResultForTesting, discard_result_for_testing, 17)         \
+-  V(InlineJSWasmCalls, inline_js_wasm_calls, 18)                     \
+-  V(TurboshaftTraceReduction, turboshaft_trace_reduction, 19)
++  V(DiscardResultForTesting, discard_result_for_testing, 16)         \
++  V(InlineJSWasmCalls, inline_js_wasm_calls, 17)                     \
++  V(TurboshaftTraceReduction, turboshaft_trace_reduction, 18)
+ 
+   enum Flag {
+ #define DEF_ENUM(Camel, Lower, Bit) k##Camel = 1 << Bit,
+diff --git a/src/compiler/backend/arm/code-generator-arm.cc b/src/compiler/backend/arm/code-generator-arm.cc
+index 599c3a55731..43216266069 100644
+--- a/src/compiler/backend/arm/code-generator-arm.cc
++++ b/src/compiler/backend/arm/code-generator-arm.cc
+@@ -3619,31 +3619,16 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
+ 
+    private:
+     void GenerateCallToTrap(TrapId trap_id) {
+-      if (trap_id == TrapId::kInvalid) {
+-        // We cannot test calls to the runtime in cctest/test-run-wasm.
+-        // Therefore we emit a call to C here instead of a call to the runtime.
+-        // We use the context register as the scratch register, because we do
+-        // not have a context here.
+-        __ PrepareCallCFunction(0, 0);
+-        __ CallCFunction(
+-            ExternalReference::wasm_call_trap_callback_for_testing(), 0);
+-        __ LeaveFrame(StackFrame::WASM);
+-        auto call_descriptor = gen_->linkage()->GetIncomingDescriptor();
+-        int pop_count = static_cast<int>(call_descriptor->ParameterSlotCount());
+-        __ Drop(pop_count);
+-        __ Ret();
+-      } else {
+-        gen_->AssembleSourcePosition(instr_);
+-        // A direct call to a wasm runtime stub defined in this module.
+-        // Just encode the stub index. This will be patched when the code
+-        // is added to the native module and copied into wasm code space.
+-        __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
+-        ReferenceMap* reference_map =
+-            gen_->zone()->New<ReferenceMap>(gen_->zone());
+-        gen_->RecordSafepoint(reference_map);
+-        if (v8_flags.debug_code) {
+-          __ stop();
+-        }
++      gen_->AssembleSourcePosition(instr_);
++      // A direct call to a wasm runtime stub defined in this module.
++      // Just encode the stub index. This will be patched when the code
++      // is added to the native module and copied into wasm code space.
++      __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
++      ReferenceMap* reference_map =
++          gen_->zone()->New<ReferenceMap>(gen_->zone());
++      gen_->RecordSafepoint(reference_map);
++      if (v8_flags.debug_code) {
++        __ stop();
+       }
+     }
+ 
+diff --git a/src/compiler/backend/arm64/code-generator-arm64.cc b/src/compiler/backend/arm64/code-generator-arm64.cc
+index 56f81fa321c..c25312d986a 100644
+--- a/src/compiler/backend/arm64/code-generator-arm64.cc
++++ b/src/compiler/backend/arm64/code-generator-arm64.cc
+@@ -428,25 +428,11 @@ class WasmOutOfLineTrap : public OutOfLineCode {
+ 
+  private:
+   void GenerateCallToTrap(TrapId trap_id) {
+-    if (!gen_->wasm_runtime_exception_support()) {
+-      // We cannot test calls to the runtime in cctest/test-run-wasm.
+-      // Therefore we emit a call to C here instead of a call to the runtime.
+-      __ CallCFunction(ExternalReference::wasm_call_trap_callback_for_testing(),
+-                       0);
+-      __ LeaveFrame(StackFrame::WASM);
+-      auto call_descriptor = gen_->linkage()->GetIncomingDescriptor();
+-      int pop_count = static_cast<int>(call_descriptor->ParameterSlotCount());
+-      pop_count += (pop_count & 1);  // align
+-      __ Drop(pop_count);
+-      __ Ret();
+-    } else {
+-      gen_->AssembleSourcePosition(instr_);
+-      __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
+-      ReferenceMap* reference_map =
+-          gen_->zone()->New<ReferenceMap>(gen_->zone());
+-      gen_->RecordSafepoint(reference_map);
+-      __ AssertUnreachable(AbortReason::kUnexpectedReturnFromWasmTrap);
+-    }
++    gen_->AssembleSourcePosition(instr_);
++    __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
++    ReferenceMap* reference_map = gen_->zone()->New<ReferenceMap>(gen_->zone());
++    gen_->RecordSafepoint(reference_map);
++    __ AssertUnreachable(AbortReason::kUnexpectedReturnFromWasmTrap);
+   }
+ 
+   Instruction* instr_;
+diff --git a/src/compiler/backend/code-generator.cc b/src/compiler/backend/code-generator.cc
+index 2d9b2fd2a40..3ed2b1eca80 100644
+--- a/src/compiler/backend/code-generator.cc
++++ b/src/compiler/backend/code-generator.cc
+@@ -104,11 +104,6 @@ CodeGenerator::CodeGenerator(Zone* codegen_zone, Frame* frame, Linkage* linkage,
+   masm_.set_builtin(builtin);
+ }
+ 
+-bool CodeGenerator::wasm_runtime_exception_support() const {
+-  DCHECK_NOT_NULL(info_);
+-  return info_->wasm_runtime_exception_support();
+-}
+-
+ void CodeGenerator::AddProtectedInstructionLanding(uint32_t instr_offset,
+                                                    uint32_t landing_offset) {
+ #if V8_ENABLE_WEBASSEMBLY
+diff --git a/src/compiler/backend/code-generator.h b/src/compiler/backend/code-generator.h
+index 729aeec8193..25a0ddee2f3 100644
+--- a/src/compiler/backend/code-generator.h
++++ b/src/compiler/backend/code-generator.h
+@@ -173,8 +173,6 @@ class V8_EXPORT_PRIVATE CodeGenerator final : public GapResolver::Assembler {
+   void AddProtectedInstructionLanding(uint32_t instr_offset,
+                                       uint32_t landing_offset);
+ 
+-  bool wasm_runtime_exception_support() const;
+-
+   SourcePosition start_source_position() const {
+     return start_source_position_;
+   }
+diff --git a/src/compiler/backend/ia32/code-generator-ia32.cc b/src/compiler/backend/ia32/code-generator-ia32.cc
+index 1f197a073a2..198fdda061d 100644
+--- a/src/compiler/backend/ia32/code-generator-ia32.cc
++++ b/src/compiler/backend/ia32/code-generator-ia32.cc
+@@ -3777,29 +3777,15 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
+ 
+    private:
+     void GenerateCallToTrap(TrapId trap_id) {
+-      if (trap_id == TrapId::kInvalid) {
+-        // We cannot test calls to the runtime in cctest/test-run-wasm.
+-        // Therefore we emit a call to C here instead of a call to the runtime.
+-        __ PrepareCallCFunction(0, esi);
+-        __ CallCFunction(
+-            ExternalReference::wasm_call_trap_callback_for_testing(), 0);
+-        __ LeaveFrame(StackFrame::WASM);
+-        auto call_descriptor = gen_->linkage()->GetIncomingDescriptor();
+-        size_t pop_size =
+-            call_descriptor->ParameterSlotCount() * kSystemPointerSize;
+-        // Use ecx as a scratch register, we return anyways immediately.
+-        __ Ret(static_cast<int>(pop_size), ecx);
+-      } else {
+-        gen_->AssembleSourcePosition(instr_);
+-        // A direct call to a wasm runtime stub defined in this module.
+-        // Just encode the stub index. This will be patched when the code
+-        // is added to the native module and copied into wasm code space.
+-        __ wasm_call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
+-        ReferenceMap* reference_map =
+-            gen_->zone()->New<ReferenceMap>(gen_->zone());
+-        gen_->RecordSafepoint(reference_map);
+-        __ AssertUnreachable(AbortReason::kUnexpectedReturnFromWasmTrap);
+-      }
++      gen_->AssembleSourcePosition(instr_);
++      // A direct call to a wasm runtime stub defined in this module.
++      // Just encode the stub index. This will be patched when the code
++      // is added to the native module and copied into wasm code space.
++      __ wasm_call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
++      ReferenceMap* reference_map =
++          gen_->zone()->New<ReferenceMap>(gen_->zone());
++      gen_->RecordSafepoint(reference_map);
++      __ AssertUnreachable(AbortReason::kUnexpectedReturnFromWasmTrap);
+     }
+ 
+     Instruction* instr_;
+diff --git a/src/compiler/backend/loong64/code-generator-loong64.cc b/src/compiler/backend/loong64/code-generator-loong64.cc
+index 0397a4b2658..7d55ed2e279 100644
+--- a/src/compiler/backend/loong64/code-generator-loong64.cc
++++ b/src/compiler/backend/loong64/code-generator-loong64.cc
+@@ -2092,32 +2092,16 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
+ 
+    private:
+     void GenerateCallToTrap(TrapId trap_id) {
+-      if (trap_id == TrapId::kInvalid) {
+-        // We cannot test calls to the runtime in cctest/test-run-wasm.
+-        // Therefore we emit a call to C here instead of a call to the runtime.
+-        // We use the context register as the scratch register, because we do
+-        // not have a context here.
+-        __ PrepareCallCFunction(0, 0, cp);
+-        __ CallCFunction(
+-            ExternalReference::wasm_call_trap_callback_for_testing(), 0);
+-        __ LeaveFrame(StackFrame::WASM);
+-        auto call_descriptor = gen_->linkage()->GetIncomingDescriptor();
+-        int pop_count = static_cast<int>(call_descriptor->ParameterSlotCount());
+-        pop_count += (pop_count & 1);  // align
+-        __ Drop(pop_count);
+-        __ Ret();
+-      } else {
+-        gen_->AssembleSourcePosition(instr_);
+-        // A direct call to a wasm runtime stub defined in this module.
+-        // Just encode the stub index. This will be patched when the code
+-        // is added to the native module and copied into wasm code space.
+-        __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
+-        ReferenceMap* reference_map =
+-            gen_->zone()->New<ReferenceMap>(gen_->zone());
+-        gen_->RecordSafepoint(reference_map);
+-        if (v8_flags.debug_code) {
+-          __ stop();
+-        }
++      gen_->AssembleSourcePosition(instr_);
++      // A direct call to a wasm runtime stub defined in this module.
++      // Just encode the stub index. This will be patched when the code
++      // is added to the native module and copied into wasm code space.
++      __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
++      ReferenceMap* reference_map =
++          gen_->zone()->New<ReferenceMap>(gen_->zone());
++      gen_->RecordSafepoint(reference_map);
++      if (v8_flags.debug_code) {
++        __ stop();
+       }
+     }
+     Instruction* instr_;
+diff --git a/src/compiler/backend/mips64/code-generator-mips64.cc b/src/compiler/backend/mips64/code-generator-mips64.cc
+index 01fa847a853..f44ad5fe628 100644
+--- a/src/compiler/backend/mips64/code-generator-mips64.cc
++++ b/src/compiler/backend/mips64/code-generator-mips64.cc
+@@ -3936,32 +3936,16 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
+ 
+    private:
+     void GenerateCallToTrap(TrapId trap_id) {
+-      if (trap_id == TrapId::kInvalid) {
+-        // We cannot test calls to the runtime in cctest/test-run-wasm.
+-        // Therefore we emit a call to C here instead of a call to the runtime.
+-        // We use the context register as the scratch register, because we do
+-        // not have a context here.
+-        __ PrepareCallCFunction(0, 0, cp);
+-        __ CallCFunction(
+-            ExternalReference::wasm_call_trap_callback_for_testing(), 0);
+-        __ LeaveFrame(StackFrame::WASM);
+-        auto call_descriptor = gen_->linkage()->GetIncomingDescriptor();
+-        int pop_count = static_cast<int>(call_descriptor->ParameterSlotCount());
+-        pop_count += (pop_count & 1);  // align
+-        __ Drop(pop_count);
+-        __ Ret();
+-      } else {
+-        gen_->AssembleSourcePosition(instr_);
+-        // A direct call to a wasm runtime stub defined in this module.
+-        // Just encode the stub index. This will be patched when the code
+-        // is added to the native module and copied into wasm code space.
+-        __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
+-        ReferenceMap* reference_map =
+-            gen_->zone()->New<ReferenceMap>(gen_->zone());
+-        gen_->RecordSafepoint(reference_map);
+-        if (v8_flags.debug_code) {
+-          __ stop();
+-        }
++      gen_->AssembleSourcePosition(instr_);
++      // A direct call to a wasm runtime stub defined in this module.
++      // Just encode the stub index. This will be patched when the code
++      // is added to the native module and copied into wasm code space.
++      __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
++      ReferenceMap* reference_map =
++          gen_->zone()->New<ReferenceMap>(gen_->zone());
++      gen_->RecordSafepoint(reference_map);
++      if (v8_flags.debug_code) {
++        __ stop();
+       }
+     }
+     Instruction* instr_;
+diff --git a/src/compiler/backend/ppc/code-generator-ppc.cc b/src/compiler/backend/ppc/code-generator-ppc.cc
+index 8166308869d..e4dcafd7c12 100644
+--- a/src/compiler/backend/ppc/code-generator-ppc.cc
++++ b/src/compiler/backend/ppc/code-generator-ppc.cc
+@@ -2883,31 +2883,16 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
+ 
+    private:
+     void GenerateCallToTrap(TrapId trap_id) {
+-      if (trap_id == TrapId::kInvalid) {
+-        // We cannot test calls to the runtime in cctest/test-run-wasm.
+-        // Therefore we emit a call to C here instead of a call to the runtime.
+-        // We use the context register as the scratch register, because we do
+-        // not have a context here.
+-        __ PrepareCallCFunction(0, 0, cp);
+-        __ CallCFunction(
+-            ExternalReference::wasm_call_trap_callback_for_testing(), 0);
+-        __ LeaveFrame(StackFrame::WASM);
+-        auto call_descriptor = gen_->linkage()->GetIncomingDescriptor();
+-        int pop_count = static_cast<int>(call_descriptor->ParameterSlotCount());
+-        __ Drop(pop_count);
+-        __ Ret();
+-      } else {
+-        gen_->AssembleSourcePosition(instr_);
+-        // A direct call to a wasm runtime stub defined in this module.
+-        // Just encode the stub index. This will be patched when the code
+-        // is added to the native module and copied into wasm code space.
+-        __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
+-        ReferenceMap* reference_map =
+-            gen_->zone()->New<ReferenceMap>(gen_->zone());
+-        gen_->RecordSafepoint(reference_map);
+-        if (v8_flags.debug_code) {
+-          __ stop();
+-        }
++      gen_->AssembleSourcePosition(instr_);
++      // A direct call to a wasm runtime stub defined in this module.
++      // Just encode the stub index. This will be patched when the code
++      // is added to the native module and copied into wasm code space.
++      __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
++      ReferenceMap* reference_map =
++          gen_->zone()->New<ReferenceMap>(gen_->zone());
++      gen_->RecordSafepoint(reference_map);
++      if (v8_flags.debug_code) {
++        __ stop();
+       }
+     }
+ 
+diff --git a/src/compiler/backend/riscv/code-generator-riscv.cc b/src/compiler/backend/riscv/code-generator-riscv.cc
+index 2f90086da94..da2323e4b01 100644
+--- a/src/compiler/backend/riscv/code-generator-riscv.cc
++++ b/src/compiler/backend/riscv/code-generator-riscv.cc
+@@ -4026,32 +4026,16 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
+ 
+    private:
+     void GenerateCallToTrap(TrapId trap_id) {
+-      if (trap_id == TrapId::kInvalid) {
+-        // We cannot test calls to the runtime in cctest/test-run-wasm.
+-        // Therefore we emit a call to C here instead of a call to the runtime.
+-        // We use the context register as the scratch register, because we do
+-        // not have a context here.
+-        __ PrepareCallCFunction(0, 0, cp);
+-        __ CallCFunction(
+-            ExternalReference::wasm_call_trap_callback_for_testing(), 0);
+-        __ LeaveFrame(StackFrame::WASM);
+-        auto call_descriptor = gen_->linkage()->GetIncomingDescriptor();
+-        int pop_count = static_cast<int>(call_descriptor->ParameterSlotCount());
+-        pop_count += (pop_count & 1);  // align
+-        __ Drop(pop_count);
+-        __ Ret();
+-      } else {
+-        gen_->AssembleSourcePosition(instr_);
+-        // A direct call to a wasm runtime stub defined in this module.
+-        // Just encode the stub index. This will be patched when the code
+-        // is added to the native module and copied into wasm code space.
+-        __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
+-        ReferenceMap* reference_map =
+-            gen_->zone()->New<ReferenceMap>(gen_->zone());
+-        gen_->RecordSafepoint(reference_map);
+-        if (v8_flags.debug_code) {
+-          __ stop();
+-        }
++      gen_->AssembleSourcePosition(instr_);
++      // A direct call to a wasm runtime stub defined in this module.
++      // Just encode the stub index. This will be patched when the code
++      // is added to the native module and copied into wasm code space.
++      __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
++      ReferenceMap* reference_map =
++          gen_->zone()->New<ReferenceMap>(gen_->zone());
++      gen_->RecordSafepoint(reference_map);
++      if (v8_flags.debug_code) {
++        __ stop();
+       }
+     }
+     Instruction* instr_;
+diff --git a/src/compiler/backend/s390/code-generator-s390.cc b/src/compiler/backend/s390/code-generator-s390.cc
+index 2c26967ff57..b717774fde4 100644
+--- a/src/compiler/backend/s390/code-generator-s390.cc
++++ b/src/compiler/backend/s390/code-generator-s390.cc
+@@ -3253,31 +3253,16 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
+ 
+    private:
+     void GenerateCallToTrap(TrapId trap_id) {
+-      if (trap_id == TrapId::kInvalid) {
+-        // We cannot test calls to the runtime in cctest/test-run-wasm.
+-        // Therefore we emit a call to C here instead of a call to the runtime.
+-        // We use the context register as the scratch register, because we do
+-        // not have a context here.
+-        __ PrepareCallCFunction(0, 0, cp);
+-        __ CallCFunction(
+-            ExternalReference::wasm_call_trap_callback_for_testing(), 0);
+-        __ LeaveFrame(StackFrame::WASM);
+-        auto call_descriptor = gen_->linkage()->GetIncomingDescriptor();
+-        int pop_count = static_cast<int>(call_descriptor->ParameterSlotCount());
+-        __ Drop(pop_count);
+-        __ Ret();
+-      } else {
+-        gen_->AssembleSourcePosition(instr_);
+-        // A direct call to a wasm runtime stub defined in this module.
+-        // Just encode the stub index. This will be patched when the code
+-        // is added to the native module and copied into wasm code space.
+-        __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
+-        ReferenceMap* reference_map =
+-            gen_->zone()->New<ReferenceMap>(gen_->zone());
+-        gen_->RecordSafepoint(reference_map);
+-        if (v8_flags.debug_code) {
+-          __ stop();
+-        }
++      gen_->AssembleSourcePosition(instr_);
++      // A direct call to a wasm runtime stub defined in this module.
++      // Just encode the stub index. This will be patched when the code
++      // is added to the native module and copied into wasm code space.
++      __ Call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
++      ReferenceMap* reference_map =
++          gen_->zone()->New<ReferenceMap>(gen_->zone());
++      gen_->RecordSafepoint(reference_map);
++      if (v8_flags.debug_code) {
++        __ stop();
+       }
+     }
+ 
+diff --git a/src/compiler/backend/x64/code-generator-x64.cc b/src/compiler/backend/x64/code-generator-x64.cc
+index 875f9326a3e..e1f48f1f0ab 100644
+--- a/src/compiler/backend/x64/code-generator-x64.cc
++++ b/src/compiler/backend/x64/code-generator-x64.cc
+@@ -471,29 +471,14 @@ class WasmOutOfLineTrap : public OutOfLineCode {
+ 
+  private:
+   void GenerateCallToTrap(TrapId trap_id) {
+-    if (!gen_->wasm_runtime_exception_support()) {
+-      // We cannot test calls to the runtime in cctest/test-run-wasm.
+-      // Therefore we emit a call to C here instead of a call to the runtime.
+-      __ PrepareCallCFunction(0);
+-      __ CallCFunction(ExternalReference::wasm_call_trap_callback_for_testing(),
+-                       0);
+-      __ LeaveFrame(StackFrame::WASM);
+-      auto call_descriptor = gen_->linkage()->GetIncomingDescriptor();
+-      size_t pop_size =
+-          call_descriptor->ParameterSlotCount() * kSystemPointerSize;
+-      // Use rcx as a scratch register, we return anyways immediately.
+-      __ Ret(static_cast<int>(pop_size), rcx);
+-    } else {
+-      gen_->AssembleSourcePosition(instr_);
+-      // A direct call to a wasm runtime stub defined in this module.
+-      // Just encode the stub index. This will be patched when the code
+-      // is added to the native module and copied into wasm code space.
+-      __ near_call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
+-      ReferenceMap* reference_map =
+-          gen_->zone()->New<ReferenceMap>(gen_->zone());
+-      gen_->RecordSafepoint(reference_map);
+-      __ AssertUnreachable(AbortReason::kUnexpectedReturnFromWasmTrap);
+-    }
++    gen_->AssembleSourcePosition(instr_);
++    // A direct call to a wasm runtime stub defined in this module.
++    // Just encode the stub index. This will be patched when the code
++    // is added to the native module and copied into wasm code space.
++    __ near_call(static_cast<Address>(trap_id), RelocInfo::WASM_STUB_CALL);
++    ReferenceMap* reference_map = gen_->zone()->New<ReferenceMap>(gen_->zone());
++    gen_->RecordSafepoint(reference_map);
++    __ AssertUnreachable(AbortReason::kUnexpectedReturnFromWasmTrap);
+   }
+ 
+   Instruction* instr_;
+diff --git a/src/compiler/common-operator.cc b/src/compiler/common-operator.cc
+index 82758bf0455..2207d56cf2d 100644
+--- a/src/compiler/common-operator.cc
++++ b/src/compiler/common-operator.cc
+@@ -48,8 +48,6 @@ std::ostream& operator<<(std::ostream& os, TrapId trap_id) {
+     return os << #Name;
+     FOREACH_WASM_TRAPREASON(TRAP_CASE)
+ #undef TRAP_CASE
+-    case TrapId::kInvalid:
+-      return os << "Invalid";
+   }
+   UNREACHABLE();
+ }
+diff --git a/src/compiler/common-operator.h b/src/compiler/common-operator.h
+index dfceea3e1e5..d7cda403c7e 100644
+--- a/src/compiler/common-operator.h
++++ b/src/compiler/common-operator.h
+@@ -58,7 +58,6 @@ enum class TrapId : uint32_t {
+ #define DEF_ENUM(Name, ...) k##Name,
+   FOREACH_WASM_TRAPREASON(DEF_ENUM)
+ #undef DEF_ENUM
+-      kInvalid
+ };
+ 
+ inline size_t hash_value(TrapId id) { return static_cast<uint32_t>(id); }
+diff --git a/src/compiler/pipeline.cc b/src/compiler/pipeline.cc
+index 4a35e86696d..583dfee17b5 100644
+--- a/src/compiler/pipeline.cc
++++ b/src/compiler/pipeline.cc
+@@ -1529,7 +1529,6 @@ struct JSWasmInliningPhase {
+     DCHECK(data->wasm_module_for_inlining() != nullptr);
+ 
+     OptimizedCompilationInfo* info = data->info();
+-    info->set_wasm_runtime_exception_support();
+     GraphReducer graph_reducer(temp_zone, data->graph(), &info->tick_counter(),
+                                data->broker(), data->jsgraph()->Dead());
+     DeadCodeElimination dead_code_elimination(&graph_reducer, data->graph(),
+@@ -1558,7 +1557,6 @@ struct JSWasmLoweringPhase {
+     DCHECK_NE(data->wasm_module_for_inlining(), nullptr);
+ 
+     OptimizedCompilationInfo* info = data->info();
+-    info->set_wasm_runtime_exception_support();
+     GraphReducer graph_reducer(temp_zone, data->graph(), &info->tick_counter(),
+                                data->broker(), data->jsgraph()->Dead());
+     // The Wasm trap handler is not supported in JavaScript.
+diff --git a/src/compiler/turboshaft/wasm-turboshaft-compiler.cc b/src/compiler/turboshaft/wasm-turboshaft-compiler.cc
+index 11506d8d594..9e640ab5b04 100644
+--- a/src/compiler/turboshaft/wasm-turboshaft-compiler.cc
++++ b/src/compiler/turboshaft/wasm-turboshaft-compiler.cc
+@@ -33,9 +33,6 @@ wasm::WasmCompilationResult ExecuteTurboshaftWasmCompilation(
+       GetDebugName(&zone, env->module, data.wire_bytes_storage,
+                    data.func_index),
+       &zone, CodeKind::WASM_FUNCTION);
+-  if (env->runtime_exception_support) {
+-    info.set_wasm_runtime_exception_support();
+-  }
+ 
+   if (info.trace_turbo_json()) {
+     TurboCfgFile tcf;
+diff --git a/src/compiler/wasm-compiler.cc b/src/compiler/wasm-compiler.cc
+index 259d7b97b0a..cbe889000ba 100644
+--- a/src/compiler/wasm-compiler.cc
++++ b/src/compiler/wasm-compiler.cc
+@@ -426,9 +426,7 @@ void WasmGraphBuilder::StackCheck(
+     WasmInstanceCacheNodes* shared_memory_instance_cache,
+     wasm::WasmCodePosition position) {
+   DCHECK_NOT_NULL(env_);  // Wrappers don't get stack checks.
+-  if (!v8_flags.wasm_stack_checks || !env_->runtime_exception_support) {
+-    return;
+-  }
++  if (!v8_flags.wasm_stack_checks) return;
+ 
+   Node* limit_address =
+       LOAD_INSTANCE_FIELD(StackLimitAddress, MachineType::Pointer());
+@@ -1181,15 +1179,6 @@ Node* WasmGraphBuilder::Select(Node *cond, Node* true_node,
+ }
+ 
+ TrapId WasmGraphBuilder::GetTrapIdForTrap(wasm::TrapReason reason) {
+-  // TODO(wasm): "!env_" should not happen when compiling an actual wasm
+-  // function.
+-  if (!env_ || !env_->runtime_exception_support) {
+-    // We use TrapId::kInvalid as a marker to tell the code generator
+-    // to generate a call to a testing c-function instead of a runtime
+-    // stub. This code should only be called from a cctest.
+-    return TrapId::kInvalid;
+-  }
+-
+   switch (reason) {
+ #define TRAPREASON_TO_TRAPID(name)                                             \
+   case wasm::k##name:                                                          \
+@@ -8525,9 +8514,8 @@ wasm::WasmCompilationResult CompileWasmMathIntrinsic(
+           InstructionSelector::SupportedMachineOperatorFlags(),
+           InstructionSelector::AlignmentRequirements()));
+ 
+-  wasm::CompilationEnv env(
+-      nullptr, wasm::RuntimeExceptionSupport::kNoRuntimeExceptionSupport,
+-      wasm::WasmFeatures::All(), wasm::kNoDynamicTiering);
++  wasm::CompilationEnv env(nullptr, wasm::WasmFeatures::All(),
++                           wasm::kNoDynamicTiering);
+ 
+   WasmGraphBuilder builder(&env, mcgraph->zone(), mcgraph, sig,
+                            source_positions);
+@@ -8943,10 +8931,6 @@ wasm::WasmCompilationResult ExecuteTurbofanWasmCompilation(
+       GetDebugName(&zone, env->module, data.wire_bytes_storage,
+                    data.func_index),
+       &zone, CodeKind::WASM_FUNCTION);
+-  if (env->runtime_exception_support) {
+-    info.set_wasm_runtime_exception_support();
+-  }
+-
+   if (env->enabled_features.has_gc()) info.set_allocation_folding();
+ 
+   if (info.trace_turbo_json()) {
+diff --git a/src/objects/bigint.h b/src/objects/bigint.h
+index 7fdb8246d4b..82c0bc9124c 100644
+--- a/src/objects/bigint.h
++++ b/src/objects/bigint.h
+@@ -256,7 +256,8 @@ class BigInt : public BigIntBase {
+ 
+   V8_EXPORT_PRIVATE static Handle<BigInt> FromInt64(Isolate* isolate,
+                                                     int64_t n);
+-  static Handle<BigInt> FromUint64(Isolate* isolate, uint64_t n);
++  V8_EXPORT_PRIVATE static Handle<BigInt> FromUint64(Isolate* isolate,
++                                                     uint64_t n);
+   static MaybeHandle<BigInt> FromWords64(Isolate* isolate, int sign_bit,
+                                          int words64_count,
+                                          const uint64_t* words);
+diff --git a/src/wasm/baseline/arm/liftoff-assembler-arm.h b/src/wasm/baseline/arm/liftoff-assembler-arm.h
+index 52c75958966..b4e16d9e572 100644
+--- a/src/wasm/baseline/arm/liftoff-assembler-arm.h
++++ b/src/wasm/baseline/arm/liftoff-assembler-arm.h
+@@ -4334,11 +4334,6 @@ void LiftoffAssembler::StackCheck(Label* ool_code, Register limit_address) {
+   b(ool_code, ls);
+ }
+ 
+-void LiftoffAssembler::CallTrapCallbackForTesting() {
+-  PrepareCallCFunction(0, 0);
+-  CallCFunction(ExternalReference::wasm_call_trap_callback_for_testing(), 0);
+-}
+-
+ void LiftoffAssembler::AssertUnreachable(AbortReason reason) {
+   // Asserts unreachable within the wasm code.
+   MacroAssembler::AssertUnreachable(reason);
+diff --git a/src/wasm/baseline/arm64/liftoff-assembler-arm64.h b/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
+index 61ca6db8bac..1abbdeed125 100644
+--- a/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
++++ b/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
+@@ -3435,10 +3435,6 @@ void LiftoffAssembler::StackCheck(Label* ool_code, Register limit_address) {
+   B(ool_code, ls);
+ }
+ 
+-void LiftoffAssembler::CallTrapCallbackForTesting() {
+-  CallCFunction(ExternalReference::wasm_call_trap_callback_for_testing(), 0);
+-}
+-
+ void LiftoffAssembler::AssertUnreachable(AbortReason reason) {
+   MacroAssembler::AssertUnreachable(reason);
+ }
+diff --git a/src/wasm/baseline/ia32/liftoff-assembler-ia32.h b/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
+index a2b30c26d09..ac5febd8c37 100644
+--- a/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
++++ b/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
+@@ -4659,11 +4659,6 @@ void LiftoffAssembler::StackCheck(Label* ool_code, Register limit_address) {
+   j(below_equal, ool_code);
+ }
+ 
+-void LiftoffAssembler::CallTrapCallbackForTesting() {
+-  PrepareCallCFunction(0, GetUnusedRegister(kGpReg, {}).gp());
+-  CallCFunction(ExternalReference::wasm_call_trap_callback_for_testing(), 0);
+-}
+-
+ void LiftoffAssembler::AssertUnreachable(AbortReason reason) {
+   MacroAssembler::AssertUnreachable(reason);
+ }
+diff --git a/src/wasm/baseline/liftoff-assembler.h b/src/wasm/baseline/liftoff-assembler.h
+index 411136813a3..a8bd1b52f18 100644
+--- a/src/wasm/baseline/liftoff-assembler.h
++++ b/src/wasm/baseline/liftoff-assembler.h
+@@ -1596,8 +1596,6 @@ class LiftoffAssembler : public MacroAssembler {
+ 
+   inline void StackCheck(Label* ool_code, Register limit_address);
+ 
+-  inline void CallTrapCallbackForTesting();
+-
+   inline void AssertUnreachable(AbortReason reason);
+ 
+   inline void PushRegisters(LiftoffRegList);
+diff --git a/src/wasm/baseline/liftoff-compiler.cc b/src/wasm/baseline/liftoff-compiler.cc
+index eabcc0d43c1..9c04079cf95 100644
+--- a/src/wasm/baseline/liftoff-compiler.cc
++++ b/src/wasm/baseline/liftoff-compiler.cc
+@@ -727,7 +727,7 @@ class LiftoffCompiler {
+ 
+   void StackCheck(FullDecoder* decoder, WasmCodePosition position) {
+     CODE_COMMENT("stack check");
+-    if (!v8_flags.wasm_stack_checks || !env_->runtime_exception_support) return;
++    if (!v8_flags.wasm_stack_checks) return;
+ 
+     // Loading the limit address can change the stack state, hence do this
+     // before storing information about registers.
+@@ -989,18 +989,6 @@ class LiftoffCompiler {
+           trap_handler::ProtectedInstructionData{ool->trapping_pc, pc});
+     }
+ 
+-    if (!env_->runtime_exception_support) {
+-      // We cannot test calls to the runtime in cctest/test-run-wasm.
+-      // Therefore we emit a call to C here instead of a call to the runtime.
+-      // In this mode, we never generate stack checks.
+-      DCHECK(!is_stack_check);
+-      __ CallTrapCallbackForTesting();
+-      __ LeaveFrame(StackFrame::WASM);
+-      __ DropStackSlotsAndRet(
+-          static_cast<uint32_t>(descriptor_->ParameterSlotCount()));
+-      return;
+-    }
+-
+     if (!ool->regs_to_save.is_empty()) {
+       __ PushRegisters(ool->regs_to_save);
+     }
+diff --git a/src/wasm/baseline/loong64/liftoff-assembler-loong64.h b/src/wasm/baseline/loong64/liftoff-assembler-loong64.h
+index 98415377501..7d8adf158dd 100644
+--- a/src/wasm/baseline/loong64/liftoff-assembler-loong64.h
++++ b/src/wasm/baseline/loong64/liftoff-assembler-loong64.h
+@@ -3037,11 +3037,6 @@ void LiftoffAssembler::StackCheck(Label* ool_code, Register limit_address) {
+   MacroAssembler::Branch(ool_code, ule, sp, Operand(limit_address));
+ }
+ 
+-void LiftoffAssembler::CallTrapCallbackForTesting() {
+-  PrepareCallCFunction(0, GetUnusedRegister(kGpReg, {}).gp());
+-  CallCFunction(ExternalReference::wasm_call_trap_callback_for_testing(), 0);
+-}
+-
+ void LiftoffAssembler::AssertUnreachable(AbortReason reason) {
+   if (v8_flags.debug_code) Abort(reason);
+ }
+diff --git a/src/wasm/baseline/mips64/liftoff-assembler-mips64.h b/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
+index 8388bfa2ef9..2f3aee7e1cd 100644
+--- a/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
++++ b/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
+@@ -3566,11 +3566,6 @@ void LiftoffAssembler::StackCheck(Label* ool_code, Register limit_address) {
+   MacroAssembler::Branch(ool_code, ule, sp, Operand(limit_address));
+ }
+ 
+-void LiftoffAssembler::CallTrapCallbackForTesting() {
+-  PrepareCallCFunction(0, GetUnusedRegister(kGpReg, {}).gp());
+-  CallCFunction(ExternalReference::wasm_call_trap_callback_for_testing(), 0);
+-}
+-
+ void LiftoffAssembler::AssertUnreachable(AbortReason reason) {
+   if (v8_flags.debug_code) Abort(reason);
+ }
+diff --git a/src/wasm/baseline/ppc/liftoff-assembler-ppc.h b/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
+index 3c4907b5eb5..b4eb32fb231 100644
+--- a/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
++++ b/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
+@@ -2514,11 +2514,6 @@ void LiftoffAssembler::StackCheck(Label* ool_code, Register limit_address) {
+   ble(ool_code);
+ }
+ 
+-void LiftoffAssembler::CallTrapCallbackForTesting() {
+-  PrepareCallCFunction(0, 0, ip);
+-  CallCFunction(ExternalReference::wasm_call_trap_callback_for_testing(), 0);
+-}
+-
+ void LiftoffAssembler::AssertUnreachable(AbortReason reason) {
+   if (v8_flags.debug_code) Abort(reason);
+ }
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv.h
+index 4bd5a476fa2..6668774c2af 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv.h
+@@ -2209,11 +2209,6 @@ void LiftoffAssembler::StackCheck(Label* ool_code, Register limit_address) {
+   MacroAssembler::Branch(ool_code, ule, sp, Operand(limit_address));
+ }
+ 
+-void LiftoffAssembler::CallTrapCallbackForTesting() {
+-  PrepareCallCFunction(0, GetUnusedRegister(kGpReg, {}).gp());
+-  CallCFunction(ExternalReference::wasm_call_trap_callback_for_testing(), 0);
+-}
+-
+ void LiftoffAssembler::AssertUnreachable(AbortReason reason) {
+   if (v8_flags.debug_code) Abort(reason);
+ }
+diff --git a/src/wasm/baseline/s390/liftoff-assembler-s390.h b/src/wasm/baseline/s390/liftoff-assembler-s390.h
+index d9a48737fd3..e03b0dfdd70 100644
+--- a/src/wasm/baseline/s390/liftoff-assembler-s390.h
++++ b/src/wasm/baseline/s390/liftoff-assembler-s390.h
+@@ -2942,11 +2942,6 @@ void LiftoffAssembler::StackCheck(Label* ool_code, Register limit_address) {
+   b(le, ool_code);
+ }
+ 
+-void LiftoffAssembler::CallTrapCallbackForTesting() {
+-  PrepareCallCFunction(0, 0, no_reg);
+-  CallCFunction(ExternalReference::wasm_call_trap_callback_for_testing(), 0);
+-}
+-
+ void LiftoffAssembler::AssertUnreachable(AbortReason reason) {
+   // Asserts unreachable within the wasm code.
+   MacroAssembler::AssertUnreachable(reason);
+diff --git a/src/wasm/baseline/x64/liftoff-assembler-x64.h b/src/wasm/baseline/x64/liftoff-assembler-x64.h
+index 6a2e247addb..9b6c35409d3 100644
+--- a/src/wasm/baseline/x64/liftoff-assembler-x64.h
++++ b/src/wasm/baseline/x64/liftoff-assembler-x64.h
+@@ -4173,11 +4173,6 @@ void LiftoffAssembler::StackCheck(Label* ool_code, Register limit_address) {
+   j(below_equal, ool_code);
+ }
+ 
+-void LiftoffAssembler::CallTrapCallbackForTesting() {
+-  PrepareCallCFunction(0);
+-  CallCFunction(ExternalReference::wasm_call_trap_callback_for_testing(), 0);
+-}
+-
+ void LiftoffAssembler::AssertUnreachable(AbortReason reason) {
+   MacroAssembler::AssertUnreachable(reason);
+ }
+diff --git a/src/wasm/compilation-environment.h b/src/wasm/compilation-environment.h
+index 8440f7804e3..faf67788675 100644
+--- a/src/wasm/compilation-environment.h
++++ b/src/wasm/compilation-environment.h
+@@ -31,11 +31,6 @@ class WasmCode;
+ class WasmEngine;
+ class WasmError;
+ 
+-enum RuntimeExceptionSupport : bool {
+-  kRuntimeExceptionSupport = true,
+-  kNoRuntimeExceptionSupport = false
+-};
+-
+ enum DynamicTiering : bool {
+   kDynamicTiering = true,
+   kNoDynamicTiering = false
+@@ -59,22 +54,15 @@ struct CompilationEnv {
+   // A pointer to the decoded module's static representation.
+   const WasmModule* const module;
+ 
+-  // If the runtime doesn't support exception propagation,
+-  // we won't generate stack checks, and trap handling will also
+-  // be generated differently.
+-  const RuntimeExceptionSupport runtime_exception_support;
+-
+   // Features enabled for this compilation.
+   const WasmFeatures enabled_features;
+ 
+   const DynamicTiering dynamic_tiering;
+ 
+   constexpr CompilationEnv(const WasmModule* module,
+-                           RuntimeExceptionSupport runtime_exception_support,
+                            const WasmFeatures& enabled_features,
+                            DynamicTiering dynamic_tiering)
+       : module(module),
+-        runtime_exception_support(runtime_exception_support),
+         enabled_features(enabled_features),
+         dynamic_tiering(dynamic_tiering) {}
+ };
+diff --git a/src/wasm/wasm-code-manager.cc b/src/wasm/wasm-code-manager.cc
+index 93281f306bf..2b03f782d7a 100644
+--- a/src/wasm/wasm-code-manager.cc
++++ b/src/wasm/wasm-code-manager.cc
+@@ -892,8 +892,7 @@ void NativeModule::LogWasmCodes(Isolate* isolate, Script script) {
+ }
+ 
+ CompilationEnv NativeModule::CreateCompilationEnv() const {
+-  return {module(), kRuntimeExceptionSupport, enabled_features_,
+-          compilation_state()->dynamic_tiering()};
++  return {module(), enabled_features_, compilation_state()->dynamic_tiering()};
+ }
+ 
+ WasmCode* NativeModule::AddCodeForTesting(Handle<Code> code) {
+diff --git a/src/wasm/wasm-external-refs.cc b/src/wasm/wasm-external-refs.cc
+index abb675d68bc..9a7709238fd 100644
+--- a/src/wasm/wasm-external-refs.cc
++++ b/src/wasm/wasm-external-refs.cc
+@@ -35,9 +35,7 @@
+ #include "src/utils/utils.h"
+ #include "src/wasm/wasm-external-refs.h"
+ 
+-namespace v8 {
+-namespace internal {
+-namespace wasm {
++namespace v8::internal::wasm {
+ 
+ using base::ReadUnalignedValue;
+ using base::WriteUnalignedValue;
+@@ -735,21 +733,7 @@ void switch_from_the_central_stack(Isolate* isolate) {
+   stack_guard->SetStackLimitForStackSwitching(secondary_stack_limit);
+ }
+ 
+-static WasmTrapCallbackForTesting wasm_trap_callback_for_testing = nullptr;
+-
+-void set_trap_callback_for_testing(WasmTrapCallbackForTesting callback) {
+-  wasm_trap_callback_for_testing = callback;
+-}
+-
+-void call_trap_callback_for_testing() {
+-  if (wasm_trap_callback_for_testing) {
+-    wasm_trap_callback_for_testing();
+-  }
+-}
+-
+-}  // namespace wasm
+-}  // namespace internal
+-}  // namespace v8
++}  // namespace v8::internal::wasm
+ 
+ #undef V8_WITH_SANITIZER
+ #undef RESET_THREAD_IN_WASM_FLAG_FOR_ASAN_ON_WINDOWS
+diff --git a/src/wasm/wasm-external-refs.h b/src/wasm/wasm-external-refs.h
+index 8c4f3ccf243..724abd421f1 100644
+--- a/src/wasm/wasm-external-refs.h
++++ b/src/wasm/wasm-external-refs.h
+@@ -136,13 +136,6 @@ void sync_stack_limit(Isolate* isolate);
+ intptr_t switch_to_the_central_stack(Isolate* isolate, uintptr_t sp);
+ void switch_from_the_central_stack(Isolate* isolate);
+ 
+-using WasmTrapCallbackForTesting = void (*)();
+-
+-V8_EXPORT_PRIVATE void set_trap_callback_for_testing(
+-    WasmTrapCallbackForTesting callback);
+-
+-V8_EXPORT_PRIVATE void call_trap_callback_for_testing();
+-
+ }  // namespace wasm
+ }  // namespace internal
+ }  // namespace v8
+diff --git a/test/cctest/wasm/test-liftoff-inspection.cc b/test/cctest/wasm/test-liftoff-inspection.cc
+index caa98fb7e2e..56e7fd84537 100644
+--- a/test/cctest/wasm/test-liftoff-inspection.cc
++++ b/test/cctest/wasm/test-liftoff-inspection.cc
+@@ -21,8 +21,7 @@ class LiftoffCompileEnvironment {
+       : isolate_(CcTest::InitIsolateOnce()),
+         handle_scope_(isolate_),
+         zone_(isolate_->allocator(), ZONE_NAME),
+-        wasm_runner_(nullptr, kWasmOrigin, TestExecutionTier::kLiftoff, 0,
+-                     kRuntimeExceptionSupport) {
++        wasm_runner_(nullptr, kWasmOrigin, TestExecutionTier::kLiftoff, 0) {
+     // Add a table of length 1, for indirect calls.
+     wasm_runner_.builder().AddIndirectFunctionTable(nullptr, 1);
+     // Set tiered down such that we generate debugging code.
+diff --git a/test/cctest/wasm/test-run-wasm-exceptions.cc b/test/cctest/wasm/test-run-wasm-exceptions.cc
+index 54bfc117365..732a9b0fdd8 100644
+--- a/test/cctest/wasm/test-run-wasm-exceptions.cc
++++ b/test/cctest/wasm/test-run-wasm-exceptions.cc
+@@ -407,8 +407,7 @@ namespace {
+ void TestTrapNotCaught(uint8_t* code, size_t code_size,
+                        TestExecutionTier execution_tier) {
+   TestSignatures sigs;
+-  WasmRunner<uint32_t> r(execution_tier, kWasmOrigin, nullptr, "main",
+-                         kRuntimeExceptionSupport);
++  WasmRunner<uint32_t> r(execution_tier, kWasmOrigin, nullptr, "main");
+   r.builder().AddMemory(kWasmPageSize);
+   constexpr uint32_t kResultSuccess = 23;
+   constexpr uint32_t kResultCaught = 47;
+@@ -500,7 +499,7 @@ UNINITIALIZED_WASM_EXEC_TEST(TestStackOverflowNotCaught) {
+   LocalContext context(isolate_scope.isolate());
+ 
+   WasmRunner<uint32_t> r(execution_tier, kWasmOrigin, nullptr, "main",
+-                         kRuntimeExceptionSupport, isolate_scope.i_isolate());
++                         isolate_scope.i_isolate());
+ 
+   // Build a function that calls itself until stack overflow.
+   WasmFunctionCompiler& stack_overflow = r.NewFunction(sigs.v_v());
+diff --git a/test/cctest/wasm/test-run-wasm-memory64.cc b/test/cctest/wasm/test-run-wasm-memory64.cc
+index 1262dbafed2..213f3a6eaae 100644
+--- a/test/cctest/wasm/test-run-wasm-memory64.cc
++++ b/test/cctest/wasm/test-run-wasm-memory64.cc
+@@ -16,8 +16,7 @@ class Memory64Runner : public WasmRunner<ReturnType, ParamTypes...> {
+  public:
+   explicit Memory64Runner(TestExecutionTier execution_tier)
+       : WasmRunner<ReturnType, ParamTypes...>(execution_tier, kWasmOrigin,
+-                                              nullptr, "main",
+-                                              kNoRuntimeExceptionSupport) {
++                                              nullptr, "main") {
+     this->builder().EnableFeature(kFeature_memory64);
+   }
+ 
+diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.cc
+index df718ff6aef..950126e2303 100644
+--- a/test/cctest/wasm/test-run-wasm.cc
++++ b/test/cctest/wasm/test-run-wasm.cc
+@@ -2129,8 +2129,7 @@ static void TestBuildGraphForSimpleExpression(WasmOpcode opcode) {
+   const FunctionSig* sig = WasmOpcodes::Signature(opcode);
+   WasmModule module;
+   WasmFeatures enabled;
+-  CompilationEnv env(&module, RuntimeExceptionSupport::kRuntimeExceptionSupport,
+-                     enabled, DynamicTiering::kDynamicTiering);
++  CompilationEnv env(&module, enabled, DynamicTiering::kDynamicTiering);
+ 
+   if (sig->parameter_count() == 1) {
+     uint8_t code[] = {WASM_NO_LOCALS, kExprLocalGet, 0,
+@@ -2553,7 +2552,6 @@ UNINITIALIZED_WASM_EXEC_TEST(ReturnCall_Factorial) {
+   LocalContext current(isolate_scope.isolate());
+ 
+   WasmRunner<uint32_t, uint32_t> r(execution_tier, kWasmOrigin, nullptr, "main",
+-                                   kRuntimeExceptionSupport,
+                                    isolate_scope.i_isolate());
+ 
+   WasmFunctionCompiler& fact_aux_fn =
+@@ -2590,7 +2588,6 @@ UNINITIALIZED_WASM_EXEC_TEST(ReturnCall_MutualFactorial) {
+   LocalContext current(isolate_scope.isolate());
+ 
+   WasmRunner<uint32_t, uint32_t> r(execution_tier, kWasmOrigin, nullptr, "main",
+-                                   kRuntimeExceptionSupport,
+                                    isolate_scope.i_isolate());
+ 
+   WasmFunctionCompiler& f_fn = r.NewFunction<uint32_t, uint32_t, uint32_t>("f");
+@@ -2634,7 +2631,6 @@ UNINITIALIZED_WASM_EXEC_TEST(ReturnCall_IndirectFactorial) {
+   LocalContext current(isolate_scope.isolate());
+ 
+   WasmRunner<uint32_t, uint32_t> r(execution_tier, kWasmOrigin, nullptr, "main",
+-                                   kRuntimeExceptionSupport,
+                                    isolate_scope.i_isolate());
+ 
+   TestSignatures sigs;
+@@ -2682,7 +2678,6 @@ UNINITIALIZED_WASM_EXEC_TEST(ReturnCall_Sum) {
+   LocalContext current(isolate_scope.isolate());
+ 
+   WasmRunner<int32_t, int32_t> r(execution_tier, kWasmOrigin, nullptr, "main",
+-                                 kRuntimeExceptionSupport,
+                                  isolate_scope.i_isolate());
+   TestSignatures sigs;
+ 
+@@ -2723,7 +2718,6 @@ UNINITIALIZED_WASM_EXEC_TEST(ReturnCall_Bounce_Sum) {
+   LocalContext current(isolate_scope.isolate());
+ 
+   WasmRunner<int32_t, int32_t> r(execution_tier, kWasmOrigin, nullptr, "main",
+-                                 kRuntimeExceptionSupport,
+                                  isolate_scope.i_isolate());
+   TestSignatures sigs;
+ 
+diff --git a/test/cctest/wasm/test-wasm-stack.cc b/test/cctest/wasm/test-wasm-stack.cc
+index bcf015d840e..ec16e22343b 100644
+--- a/test/cctest/wasm/test-wasm-stack.cc
++++ b/test/cctest/wasm/test-wasm-stack.cc
+@@ -172,8 +172,7 @@ WASM_COMPILED_EXEC_TEST(CollectDetailedWasmStack_ExplicitThrowFromJs) {
+ // Trigger a trap in wasm, stack should contain a source url.
+ WASM_COMPILED_EXEC_TEST(CollectDetailedWasmStack_WasmUrl) {
+   // Create a WasmRunner with stack checks and traps enabled.
+-  WasmRunner<int> r(execution_tier, kWasmOrigin, nullptr, "main",
+-                    kRuntimeExceptionSupport);
++  WasmRunner<int> r(execution_tier, kWasmOrigin, nullptr, "main");
+ 
+   std::vector<uint8_t> trap_code(1, kExprUnreachable);
+   r.Build(trap_code.data(), trap_code.data() + trap_code.size());
+@@ -234,8 +233,7 @@ WASM_COMPILED_EXEC_TEST(CollectDetailedWasmStack_WasmError) {
+     int unreachable_pos = 1 << (8 * pos_shift);
+     TestSignatures sigs;
+     // Create a WasmRunner with stack checks and traps enabled.
+-    WasmRunner<int> r(execution_tier, kWasmOrigin, nullptr, "main",
+-                      kRuntimeExceptionSupport);
++    WasmRunner<int> r(execution_tier, kWasmOrigin, nullptr, "main");
+ 
+     std::vector<uint8_t> trap_code(unreachable_pos + 1, kExprNop);
+     trap_code[unreachable_pos] = kExprUnreachable;
+diff --git a/test/cctest/wasm/test-wasm-trap-position.cc b/test/cctest/wasm/test-wasm-trap-position.cc
+index 6f617260a22..7de643a230d 100644
+--- a/test/cctest/wasm/test-wasm-trap-position.cc
++++ b/test/cctest/wasm/test-wasm-trap-position.cc
+@@ -68,8 +68,7 @@ void CheckExceptionInfos(v8::internal::Isolate* isolate, Handle<Object> exc,
+ // Trigger a trap for executing unreachable.
+ WASM_COMPILED_EXEC_TEST(Unreachable) {
+   // Create a WasmRunner with stack checks and traps enabled.
+-  WasmRunner<void> r(execution_tier, kWasmOrigin, nullptr, "main",
+-                     kRuntimeExceptionSupport);
++  WasmRunner<void> r(execution_tier, kWasmOrigin, nullptr, "main");
+   TestSignatures sigs;
+ 
+   r.Build({WASM_UNREACHABLE});
+@@ -102,8 +101,7 @@ WASM_COMPILED_EXEC_TEST(Unreachable) {
+ 
+ // Trigger a trap for loading from out-of-bounds.
+ WASM_COMPILED_EXEC_TEST(IllegalLoad) {
+-  WasmRunner<void> r(execution_tier, kWasmOrigin, nullptr, "main",
+-                     kRuntimeExceptionSupport);
++  WasmRunner<void> r(execution_tier, kWasmOrigin, nullptr, "main");
+   TestSignatures sigs;
+ 
+   r.builder().AddMemory(0L);
+diff --git a/test/cctest/wasm/wasm-run-utils.cc b/test/cctest/wasm/wasm-run-utils.cc
+index 423dae48378..bb97259b447 100644
+--- a/test/cctest/wasm/wasm-run-utils.cc
++++ b/test/cctest/wasm/wasm-run-utils.cc
+@@ -46,13 +46,11 @@ bool IsSameNan(double expected, double actual) {
+ 
+ TestingModuleBuilder::TestingModuleBuilder(
+     Zone* zone, ModuleOrigin origin, ManuallyImportedJSFunction* maybe_import,
+-    TestExecutionTier tier, RuntimeExceptionSupport exception_support,
+-    Isolate* isolate)
++    TestExecutionTier tier, Isolate* isolate)
+     : test_module_(std::make_shared<WasmModule>(origin)),
+       isolate_(isolate ? isolate : CcTest::InitIsolateOnce()),
+       enabled_features_(WasmFeatures::FromIsolate(isolate_)),
+-      execution_tier_(tier),
+-      runtime_exception_support_(exception_support) {
++      execution_tier_(tier) {
+   WasmJs::Install(isolate_, true);
+   test_module_->untagged_globals_buffer_size = kMaxGlobalsSize;
+   // The GlobalsData must be located inside the sandbox, so allocate it from the
+@@ -362,8 +360,7 @@ uint32_t TestingModuleBuilder::AddPassiveDataSegment(
+ }
+ 
+ CompilationEnv TestingModuleBuilder::CreateCompilationEnv() {
+-  return {test_module_.get(), runtime_exception_support_, enabled_features_,
+-          kNoDynamicTiering};
++  return {test_module_.get(), enabled_features_, kNoDynamicTiering};
+ }
+ 
+ const WasmGlobal* TestingModuleBuilder::AddGlobal(ValueType type) {
+@@ -390,6 +387,12 @@ Handle<WasmInstanceObject> TestingModuleBuilder::InitInstanceObject() {
+   constexpr base::Vector<const char> kNoSourceUrl{"", 0};
+   Handle<Script> script =
+       GetWasmEngine()->GetOrCreateScript(isolate_, native_module, kNoSourceUrl);
++  // Asm.js modules are expected to have "normal" scripts, not Wasm scripts.
++  if (is_asmjs_module(native_module->module())) {
++    script->set_type(Script::Type::kNormal);
++    script->set_shared_function_infos(
++        ReadOnlyRoots{isolate_}.empty_weak_fixed_array());
++  }
+ 
+   Handle<WasmModuleObject> module_object =
+       WasmModuleObject::New(isolate_, std::move(native_module), script);
+@@ -426,135 +429,16 @@ void TestBuildingGraph(Zone* zone, compiler::JSGraph* jsgraph,
+   TestBuildingGraphWithBuilder(&builder, zone, sig, start, end);
+ }
+ 
+-WasmFunctionWrapper::WasmFunctionWrapper(Zone* zone, int num_params)
+-    : GraphAndBuilders(zone),
+-      inner_code_node_(nullptr),
+-      context_address_(nullptr),
+-      signature_(nullptr) {
+-  // One additional parameter for the pointer to the return value memory.
+-  Signature<MachineType>::Builder sig_builder(zone, 1, num_params + 1);
+-
+-  sig_builder.AddReturn(MachineType::Int32());
+-  for (int i = 0; i < num_params + 1; i++) {
+-    sig_builder.AddParam(MachineType::Pointer());
+-  }
+-  signature_ = sig_builder.Build();
+-}
+-
+-void WasmFunctionWrapper::Init(CallDescriptor* call_descriptor,
+-                               MachineType return_type,
+-                               base::Vector<MachineType> param_types) {
+-  DCHECK_NOT_NULL(call_descriptor);
+-  DCHECK_EQ(signature_->parameter_count(), param_types.length() + 1);
+-
+-  // Create the TF graph for the wrapper.
+-
+-  // Function, context_address, effect, and control.
+-  Node** parameters = zone()->AllocateArray<Node*>(param_types.length() + 4);
+-  int start_value_output_count =
+-      static_cast<int>(signature_->parameter_count()) + 1;
+-  graph()->SetStart(
+-      graph()->NewNode(common()->Start(start_value_output_count)));
+-  Node* effect = graph()->start();
+-  int parameter_count = 0;
+-
+-  // Dummy node which gets replaced in SetInnerCode.
+-  inner_code_node_ = graph()->NewNode(common()->Int32Constant(0));
+-  parameters[parameter_count++] = inner_code_node_;
+-
+-  // Dummy node that gets replaced in SetContextAddress.
+-  context_address_ = graph()->NewNode(IntPtrConstant(0));
+-  parameters[parameter_count++] = context_address_;
+-
+-  int param_idx = 0;
+-  for (MachineType t : param_types) {
+-    DCHECK_NE(MachineType::None(), t);
+-    parameters[parameter_count] = graph()->NewNode(
+-        machine()->Load(t),
+-        graph()->NewNode(common()->Parameter(param_idx++), graph()->start()),
+-        graph()->NewNode(common()->Int32Constant(0)), effect, graph()->start());
+-    effect = parameters[parameter_count++];
+-  }
+-
+-  parameters[parameter_count++] = effect;
+-  parameters[parameter_count++] = graph()->start();
+-  const compiler::Operator* call_op = common()->Call(call_descriptor);
+-  // The following code assumes the call node has effect and control inputs and
+-  // outputs.
+-  DCHECK_GT(call_op->EffectInputCount(), 0);
+-  DCHECK_GT(call_op->EffectOutputCount(), 0);
+-  DCHECK_GT(call_op->ControlInputCount(), 0);
+-  DCHECK_GT(call_op->ControlOutputCount(), 0);
+-
+-  Node* call = graph()->NewNode(call_op, parameter_count, parameters);
+-
+-  if (!return_type.IsNone()) {
+-    effect = graph()->NewNode(
+-        machine()->Store(compiler::StoreRepresentation(
+-            return_type.representation(),
+-            compiler::WriteBarrierKind::kNoWriteBarrier)),
+-        graph()->NewNode(common()->Parameter(param_types.length()),
+-                         graph()->start()),
+-        graph()->NewNode(common()->Int32Constant(0)), call, call, call);
+-  }
+-  Node* zero = graph()->NewNode(common()->Int32Constant(0));
+-  Node* r = graph()->NewNode(
+-      common()->Return(), zero,
+-      graph()->NewNode(common()->Int32Constant(WASM_WRAPPER_RETURN_VALUE)),
+-      effect, call);
+-  graph()->SetEnd(graph()->NewNode(common()->End(1), r));
+-}
+-
+-Handle<Code> WasmFunctionWrapper::GetWrapperCode(Isolate* isolate) {
+-  Handle<Code> code;
+-  if (!code_.ToHandle(&code)) {
+-    auto call_descriptor = compiler::Linkage::GetSimplifiedCDescriptor(
+-        zone(), signature_, CallDescriptor::kInitializeRootRegister);
+-
+-    if (kSystemPointerSize == 4) {
+-      size_t num_params = signature_->parameter_count();
+-      // One additional parameter for the pointer of the return value.
+-      Signature<MachineRepresentation>::Builder rep_builder(zone(), 1,
+-                                                            num_params + 1);
+-
+-      rep_builder.AddReturn(MachineRepresentation::kWord32);
+-      for (size_t i = 0; i < num_params + 1; i++) {
+-        rep_builder.AddParam(MachineRepresentation::kWord32);
+-      }
+-      compiler::Int64Lowering r(graph(), machine(), common(), simplified(),
+-                                zone(), rep_builder.Build());
+-      r.LowerGraph();
+-    }
+-
+-    OptimizedCompilationInfo info(base::ArrayVector("testing"), graph()->zone(),
+-                                  CodeKind::C_WASM_ENTRY);
+-    code_ = compiler::Pipeline::GenerateCodeForTesting(
+-        &info, isolate, call_descriptor, graph(),
+-        AssemblerOptions::Default(isolate));
+-    code = code_.ToHandleChecked();
+-#ifdef ENABLE_DISASSEMBLER
+-    if (v8_flags.print_opt_code) {
+-      CodeTracer::Scope tracing_scope(isolate->GetCodeTracer());
+-      OFStream os(tracing_scope.file());
+-
+-      code->Disassemble("wasm wrapper", os, isolate);
+-    }
+-#endif
+-  }
+-
+-  return code;
+-}
+-
+ // This struct is just a type tag for Zone::NewArray<T>(size_t) call.
+ struct WasmFunctionCompilerBuffer {};
+ 
+ void WasmFunctionCompiler::Build(base::Vector<const uint8_t> bytes) {
+-  size_t locals_size = local_decls.Size();
++  size_t locals_size = local_decls_.Size();
+   size_t total_size = bytes.size() + locals_size + 1;
+   uint8_t* buffer =
+-      zone()->AllocateArray<uint8_t, WasmFunctionCompilerBuffer>(total_size);
++      zone_->AllocateArray<uint8_t, WasmFunctionCompilerBuffer>(total_size);
+   // Prepend the local decls to the code.
+-  local_decls.Emit(buffer);
++  local_decls_.Emit(buffer);
+   // Emit the code.
+   memcpy(buffer + locals_size, bytes.begin(), bytes.size());
+   // Append an extra end opcode.
+@@ -627,14 +511,7 @@ void WasmFunctionCompiler::Build(base::Vector<const uint8_t> bytes) {
+ WasmFunctionCompiler::WasmFunctionCompiler(Zone* zone, const FunctionSig* sig,
+                                            TestingModuleBuilder* builder,
+                                            const char* name)
+-    : GraphAndBuilders(zone),
+-      jsgraph(builder->isolate(), this->graph(), this->common(), nullptr,
+-              nullptr, this->machine()),
+-      sig(sig),
+-      descriptor_(nullptr),
+-      builder_(builder),
+-      local_decls(zone, sig),
+-      source_position_table_(this->graph()) {
++    : zone_(zone), builder_(builder), local_decls_(zone, sig) {
+   // Get a new function from the testing module.
+   int index = builder->AddFunction(sig, name, TestingModuleBuilder::kWasm);
+   function_ = builder_->GetFunctionAt(index);
+@@ -663,9 +540,6 @@ FunctionSig* WasmRunnerBase::CreateSig(Zone* zone, MachineType return_type,
+   return zone->New<FunctionSig>(return_count, param_count, sig_types);
+ }
+ 
+-// static
+-bool WasmRunnerBase::trap_happened;
+-
+ }  // namespace wasm
+ }  // namespace internal
+ }  // namespace v8
+diff --git a/test/cctest/wasm/wasm-run-utils.h b/test/cctest/wasm/wasm-run-utils.h
+index 07508e66aaa..0560e925814 100644
+--- a/test/cctest/wasm/wasm-run-utils.h
++++ b/test/cctest/wasm/wasm-run-utils.h
+@@ -101,8 +101,7 @@ bool IsSameNan(double expected, double actual);
+ class TestingModuleBuilder {
+  public:
+   TestingModuleBuilder(Zone*, ModuleOrigin origin, ManuallyImportedJSFunction*,
+-                       TestExecutionTier, RuntimeExceptionSupport,
+-                       Isolate* isolate);
++                       TestExecutionTier, Isolate* isolate);
+   ~TestingModuleBuilder();
+ 
+   uint8_t* AddMemory(uint32_t size, SharedFlag shared = SharedFlag::kNotShared,
+@@ -264,10 +263,6 @@ class TestingModuleBuilder {
+     }
+   }
+ 
+-  RuntimeExceptionSupport runtime_exception_support() const {
+-    return runtime_exception_support_;
+-  }
+-
+   void set_max_steps(int n) { max_steps_ = n; }
+   int* max_steps_ptr() { return &max_steps_; }
+   int32_t nondeterminism() { return nondeterminism_; }
+@@ -287,7 +282,6 @@ class TestingModuleBuilder {
+   TestExecutionTier execution_tier_;
+   Handle<WasmInstanceObject> instance_object_;
+   NativeModule* native_module_ = nullptr;
+-  RuntimeExceptionSupport runtime_exception_support_;
+   int32_t max_steps_ = kMaxNumSteps;
+   int32_t nondeterminism_ = 0;
+ 
+@@ -307,64 +301,13 @@ void TestBuildingGraph(Zone* zone, compiler::JSGraph* jsgraph,
+                        compiler::SourcePositionTable* source_position_table,
+                        const uint8_t* start, const uint8_t* end);
+ 
+-class WasmFunctionWrapper : private compiler::GraphAndBuilders {
+- public:
+-  WasmFunctionWrapper(Zone* zone, int num_params);
+-
+-  void Init(CallDescriptor* call_descriptor, MachineType return_type,
+-            base::Vector<MachineType> param_types);
+-
+-  template <typename ReturnType, typename... ParamTypes>
+-  void Init(CallDescriptor* call_descriptor) {
+-    std::array<MachineType, sizeof...(ParamTypes)> param_machine_types{
+-        {MachineTypeForC<ParamTypes>()...}};
+-    base::Vector<MachineType> param_vec(param_machine_types.data(),
+-                                        param_machine_types.size());
+-    Init(call_descriptor, MachineTypeForC<ReturnType>(), param_vec);
+-  }
+-
+-  void SetInnerCode(WasmCode* code) {
+-    intptr_t address = static_cast<intptr_t>(code->instruction_start());
+-    compiler::NodeProperties::ChangeOp(
+-        inner_code_node_,
+-        common()->ExternalConstant(ExternalReference::FromRawAddress(address)));
+-  }
+-
+-  const compiler::Operator* IntPtrConstant(intptr_t value) {
+-    return machine()->Is32()
+-               ? common()->Int32Constant(static_cast<int32_t>(value))
+-               : common()->Int64Constant(static_cast<int64_t>(value));
+-  }
+-
+-  void SetInstance(Handle<WasmInstanceObject> instance) {
+-    compiler::NodeProperties::ChangeOp(context_address_,
+-                                       common()->HeapConstant(instance));
+-  }
+-
+-  Handle<Code> GetWrapperCode(Isolate* isolate = nullptr);
+-
+-  Signature<MachineType>* signature() const { return signature_; }
+-
+- private:
+-  Node* inner_code_node_;
+-  Node* context_address_;
+-  MaybeHandle<Code> code_;
+-  Signature<MachineType>* signature_;
+-};
+-
+ // A helper for compiling wasm functions for testing.
+ // It contains the internal state for compilation (i.e. TurboFan graph).
+-class WasmFunctionCompiler : public compiler::GraphAndBuilders {
++class WasmFunctionCompiler {
+  public:
+   ~WasmFunctionCompiler();
+ 
+   Isolate* isolate() { return builder_->isolate(); }
+-  CallDescriptor* descriptor() {
+-    if (descriptor_ == nullptr) {
+-      descriptor_ = compiler::GetWasmCallDescriptor(zone(), sig);
+-    }
+-    return descriptor_;
+-  }
+   uint32_t function_index() { return function_->func_index; }
+   uint32_t sig_index() { return function_->sig_index; }
+ 
+@@ -374,7 +317,7 @@ class WasmFunctionCompiler : public compiler::GraphAndBuilders {
+   void Build(base::Vector<const uint8_t> bytes);
+ 
+   uint8_t AllocateLocal(ValueType type) {
+-    uint32_t index = local_decls.AddLocals(1, type);
++    uint32_t index = local_decls_.AddLocals(1, type);
+     uint8_t result = static_cast<uint8_t>(index);
+     DCHECK_EQ(index, result);
+     return result;
+@@ -388,14 +331,10 @@ class WasmFunctionCompiler : public compiler::GraphAndBuilders {
+   WasmFunctionCompiler(Zone* zone, const FunctionSig* sig,
+                        TestingModuleBuilder* builder, const char* name);
+ 
+-  compiler::JSGraph jsgraph;
+-  const FunctionSig* sig;
+-  // The call descriptor is initialized when the function is compiled.
+-  CallDescriptor* descriptor_;
++  Zone* zone_;
+   TestingModuleBuilder* builder_;
+   WasmFunction* function_;
+-  LocalDeclEncoder local_decls;
+-  compiler::SourcePositionTable source_position_table_;
++  LocalDeclEncoder local_decls_;
+ };
+ 
+ // A helper class to build a module around Wasm bytecode, generate machine
+@@ -404,23 +343,10 @@ class WasmRunnerBase : public InitializedHandleScope {
+  public:
+   WasmRunnerBase(ManuallyImportedJSFunction* maybe_import, ModuleOrigin origin,
+                  TestExecutionTier execution_tier, int num_params,
+-                 RuntimeExceptionSupport runtime_exception_support =
+-                     kNoRuntimeExceptionSupport,
+                  Isolate* isolate = nullptr)
+       : InitializedHandleScope(isolate),
+         zone_(&allocator_, ZONE_NAME, kCompressGraphZone),
+-        builder_(&zone_, origin, maybe_import, execution_tier,
+-                 runtime_exception_support, isolate),
+-        wrapper_(&zone_, num_params) {}
+-
+-  static void SetUpTrapCallback() {
+-    WasmRunnerBase::trap_happened = false;
+-    auto trap_callback = []() -> void {
+-      WasmRunnerBase::trap_happened = true;
+-      set_trap_callback_for_testing(nullptr);
+-    };
+-    set_trap_callback_for_testing(trap_callback);
+-  }
++        builder_(&zone_, origin, maybe_import, execution_tier, isolate) {}
+ 
+   // Builds a graph from the given Wasm code and generates the machine
+   // code and call wrapper for that graph. This method must not be called
+@@ -482,23 +408,13 @@ class WasmRunnerBase : public InitializedHandleScope {
+     return CreateSig(zone, MachineTypeForC<ReturnType>(), param_vec);
+   }
+ 
++  // TODO(clemensb): Remove, use {CallViaJS} directly.
+   void CheckCallApplyViaJS(double expected, uint32_t function_index,
+                            Handle<Object>* buffer, int count) {
+-    Isolate* isolate = builder_.isolate();
+-    SetUpTrapCallback();
+-    if (jsfuncs_.size() <= function_index) {
+-      jsfuncs_.resize(function_index + 1);
+-    }
+-    if (jsfuncs_[function_index].is_null()) {
+-      jsfuncs_[function_index] = builder_.WrapCode(function_index);
+-    }
+-    Handle<JSFunction> jsfunc = jsfuncs_[function_index];
+-    Handle<Object> global(isolate->context()->global_object(), isolate);
+     MaybeHandle<Object> retval =
+-        Execution::TryCall(isolate, jsfunc, global, count, buffer,
+-                           Execution::MessageHandling::kReport, nullptr);
++        CallViaJS(function_index, base::VectorOf(buffer, count));
+ 
+-    if (retval.is_null() || WasmRunnerBase::trap_happened) {
++    if (retval.is_null()) {
+       CHECK_EQ(expected, static_cast<double>(0xDEADBEEF));
+     } else {
+       Handle<Object> result = retval.ToHandleChecked();
+@@ -511,8 +427,24 @@ class WasmRunnerBase : public InitializedHandleScope {
+     }
+   }
+ 
+-  Handle<Code> GetWrapperCode() {
+-    return wrapper_.GetWrapperCode(main_isolate());
++  MaybeHandle<Object> CallViaJS(uint32_t function_index,
++                                base::Vector<Handle<Object>> parameters) {
++    Isolate* isolate = main_isolate();
++    // Save the original context, because CEntry (for runtime calls) will
++    // reset / invalidate it when returning.
++    SaveContext save_context(isolate);
++
++    if (jsfuncs_.size() <= function_index) {
++      jsfuncs_.resize(function_index + 1);
++    }
++    if (jsfuncs_[function_index].is_null()) {
++      jsfuncs_[function_index] = builder_.WrapCode(function_index);
++    }
++    Handle<JSFunction> jsfunc = jsfuncs_[function_index];
++    Handle<Object> global(isolate->context()->global_object(), isolate);
++    return Execution::TryCall(
++        isolate, jsfunc, global, static_cast<int>(parameters.size()),
++        parameters.data(), Execution::MessageHandling::kReport, nullptr);
+   }
+ 
+  private:
+@@ -527,7 +459,6 @@ class WasmRunnerBase : public InitializedHandleScope {
+   Zone zone_;
+   TestingModuleBuilder builder_;
+   std::vector<std::unique_ptr<WasmFunctionCompiler>> functions_;
+-  WasmFunctionWrapper wrapper_;
+   bool compiled_ = false;
+   bool possible_nondeterminism_ = false;
+   int32_t main_fn_index_ = 0;
+@@ -541,11 +472,6 @@ class WasmRunnerBase : public InitializedHandleScope {
+     *reinterpret_cast<int*>(trap_handler::GetThreadInWasmThreadLocalAddress()) =
+         false;
+   }
+-
+- public:
+-  // This field has to be static. Otherwise, gcc complains about the use in
+-  // the lambda context below.
+-  static bool trap_happened;
+ };
+ 
+ template <typename T>
+@@ -568,59 +494,88 @@ class WasmRunner : public WasmRunnerBase {
+                       ModuleOrigin origin = kWasmOrigin,
+                       ManuallyImportedJSFunction* maybe_import = nullptr,
+                       const char* main_fn_name = "main",
+-                      RuntimeExceptionSupport runtime_exception_support =
+-                          kNoRuntimeExceptionSupport,
+                       Isolate* isolate = nullptr)
+       : WasmRunnerBase(maybe_import, origin, execution_tier,
+-                       sizeof...(ParamTypes), runtime_exception_support,
+-                       isolate) {
++                       sizeof...(ParamTypes), isolate) {
+     WasmFunctionCompiler& main_fn =
+         NewFunction<ReturnType, ParamTypes...>(main_fn_name);
+     // Non-zero if there is an import.
+     main_fn_index_ = main_fn.function_index();
++  }
+ 
+-    wrapper_.Init<ReturnType, ParamTypes...>(main_fn.descriptor());
++  template <typename T>
++  Handle<Object> MakeParam(T t) {
++    Factory* factory = builder_.isolate()->factory();
++    if constexpr (std::is_integral_v<T> && std::is_signed_v<T> &&
++                  sizeof(T) <= sizeof(int)) {
++      return factory->NewNumberFromInt(t);
++    }
++    if constexpr (std::is_integral_v<T> && std::is_unsigned_v<T> &&
++                  sizeof(T) <= sizeof(int)) {
++      return factory->NewNumberFromUint(t);
++    }
++    if constexpr (std::is_same_v<T, int64_t>) {
++      return BigInt::FromInt64(builder_.isolate(), t);
++    }
++    if constexpr (std::is_same_v<T, uint64_t>) {
++      return BigInt::FromUint64(builder_.isolate(), t);
++    }
++    if constexpr (std::is_same_v<T, float>) {
++      return factory->NewNumber(t);
++    }
++    if constexpr (std::is_same_v<T, double>) {
++      return factory->NewNumber(t);
++    }
++    UNIMPLEMENTED();
+   }
+ 
+   ReturnType Call(ParamTypes... p) {
+-    DCHECK(compiled_);
+-    // Save the original context, because CEntry (for runtime calls) will
+-    // reset / invalidate it when returning.
+-    SaveContext save_context(main_isolate());
+-
+-    ReturnType return_value = static_cast<ReturnType>(0xDEADBEEFDEADBEEF);
+-    SetUpTrapCallback();
++    std::array<Handle<Object>, sizeof...(p)> param_objs = {MakeParam(p)...};
++    MaybeHandle<Object> retval =
++        CallViaJS(function()->func_index, base::VectorOf(param_objs));
+ 
+-    wrapper_.SetInnerCode(builder_.GetFunctionCode(main_fn_index_));
+-    wrapper_.SetInstance(builder_.instance_object());
+-    Handle<Code> wrapper_code = GetWrapperCode();
+-    compiler::CodeRunner<int32_t> runner(main_isolate(), wrapper_code,
+-                                         wrapper_.signature());
+-    int32_t result;
+-    {
+-      SetThreadInWasmFlag();
++    if (retval.is_null()) {
++      return static_cast<ReturnType>(0xDEADBEEFDEADBEEF);
++    }
+ 
+-      result = runner.Call(static_cast<void*>(&p)...,
+-                           static_cast<void*>(&return_value));
++    Handle<Object> result = retval.ToHandleChecked();
++    // For int64_t and uint64_t returns we will get a BigInt.
++    if constexpr (std::is_integral_v<ReturnType> &&
++                  sizeof(ReturnType) == sizeof(int64_t)) {
++      CHECK(IsBigInt(*result));
++      return BigInt::cast(*result).AsInt64();
++    }
+ 
+-      ClearThreadInWasmFlag();
++    // Otherwise it must be a number (Smi or HeapNumber).
++    CHECK(IsNumber(*result));
++    double value = Object::Number(*result);
++    // The JS API interprets all Wasm values as signed, hence we cast via the
++    // signed equivalent type to avoid undefined behaviour in the casting.
++    if constexpr (std::is_integral_v<ReturnType> &&
++                  std::is_unsigned_v<ReturnType>) {
++      using signed_t = std::make_signed_t<ReturnType>;
++      return static_cast<ReturnType>(static_cast<signed_t>(value));
+     }
+-    CHECK_EQ(WASM_WRAPPER_RETURN_VALUE, result);
+-    return WasmRunnerBase::trap_happened
+-               ? static_cast<ReturnType>(0xDEADBEEFDEADBEEF)
+-               : return_value;
++    return static_cast<ReturnType>(value);
+   }
+ 
+   void CheckCallViaJS(double expected, ParamTypes... p) {
+-    Isolate* isolate = builder_.isolate();
+-    // MSVC doesn't allow empty arrays, so include a dummy at the end.
+-    Handle<Object> buffer[] = {isolate->factory()->NewNumber(p)...,
+-                               Handle<Object>()};
+-    CheckCallApplyViaJS(expected, function()->func_index, buffer, sizeof...(p));
++    // TODO(clemensb): Inline into callers; use {Call} and {CHECK_EQ} directly.
++    ReturnType result = Call(p...);
++    if constexpr (std::is_floating_point_v<ReturnType>) {
++      if (std::isnan(result)) {
++        CHECK(IsSameNan(static_cast<ReturnType>(expected), result));
++        return;
++      }
++    }
++    CHECK_EQ(expected, result);
+   }
+ 
+   void CheckCallViaJSTraps(ParamTypes... p) {
+-    CheckCallViaJS(static_cast<double>(0xDEADBEEF), p...);
++    std::array<Handle<Object>, sizeof...(p)> param_objs = {MakeParam(p)...};
++    MaybeHandle<Object> retval =
++        CallViaJS(function()->func_index, base::VectorOf(param_objs));
++    CHECK(retval.is_null());
+   }
+ 
+   void SetMaxSteps(int n) { builder_.set_max_steps(n); }
+-- 
+2.35.1
+

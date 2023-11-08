@@ -1,0 +1,277 @@
+From d2a50664c09a4c6c7ee658d8c00416f8376eeefd Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Tue, 31 Jan 2023 18:15:51 +0800
+Subject: [PATCH] [riscv] Fix atomics
+
+Port commit 76a817e03a83414a5eb727e5f1c73cfa3831cf30
+Also, rename the enum variable in FFlagsMask from kOverflow to kFPUOverflow to avoid redefinition due to the commit 949bd4467df979bf4953992e6c5d7941bcfe94a0.
+
+
+Change-Id: I83e42d4cb0cf48d678719572adb008ef101b23e7
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4204830
+Commit-Queue: Yahan Lu <yahan@iscas.ac.cn>
+Reviewed-by: ji qiu <qiuji.odyssey@gmail.com>
+Auto-Submit: Yahan Lu <yahan@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#85577}
+---
+ src/codegen/riscv/base-constants-riscv.h      |  2 +-
+ src/execution/riscv/simulator-riscv.cc        |  4 +--
+ .../riscv/liftoff-assembler-riscv32.h         | 26 ++++++++++++-------
+ .../riscv/liftoff-assembler-riscv64.h         | 26 ++++++++++++-------
+ test/cctest/test-assembler-riscv32.cc         |  4 +--
+ test/cctest/test-assembler-riscv64.cc         |  4 +--
+ 6 files changed, 41 insertions(+), 25 deletions(-)
+
+diff --git a/src/codegen/riscv/base-constants-riscv.h b/src/codegen/riscv/base-constants-riscv.h
+index c3bbe23e71c..2950e9479d6 100644
+--- a/src/codegen/riscv/base-constants-riscv.h
++++ b/src/codegen/riscv/base-constants-riscv.h
+@@ -529,7 +529,7 @@ enum ControlStatusReg {
+ enum FFlagsMask {
+   kInvalidOperation = 0b10000,  // NV: Invalid
+   kDivideByZero = 0b1000,       // DZ:  Divide by Zero
+-  kOverflow = 0b100,            // OF: Overflow
++  kFPUOverflow = 0b100,         // OF: Overflow
+   kUnderflow = 0b10,            // UF: Underflow
+   kInexact = 0b1                // NX:  Inexact
+ };
+diff --git a/src/execution/riscv/simulator-riscv.cc b/src/execution/riscv/simulator-riscv.cc
+index 7b7b233d0b5..0c422d238f4 100644
+--- a/src/execution/riscv/simulator-riscv.cc
++++ b/src/execution/riscv/simulator-riscv.cc
+@@ -3665,14 +3665,14 @@ I_TYPE Simulator::RoundF2IHelper(F_TYPE original, int rmode) {
+                      // so use its float representation directly
+           : static_cast<float>(static_cast<uint64_t>(max_i) + 1);
+   if (rounded >= max_i_plus_1) {
+-    set_fflags(kOverflow | kInvalidOperation);
++    set_fflags(kFPUOverflow | kInvalidOperation);
+     return max_i;
+   }
+ 
+   // Since min_i (either 0 for unsigned, or for signed) is represented
+   // precisely in floating-point,  comparing rounded directly against min_i
+   if (rounded <= min_i) {
+-    if (rounded < min_i) set_fflags(kOverflow | kInvalidOperation);
++    if (rounded < min_i) set_fflags(kFPUOverflow | kInvalidOperation);
+     return min_i;
+   }
+ 
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h
+index 8b8473d6186..cc4e59f89a4 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h
+@@ -549,7 +549,8 @@ inline void AtomicBinop(LiftoffAssembler* lasm, Register dst_addr,
+ 
+ void LiftoffAssembler::AtomicLoad(LiftoffRegister dst, Register src_addr,
+                                   Register offset_reg, uintptr_t offset_imm,
+-                                  LoadType type, LiftoffRegList pinned) {
++                                  LoadType type, LiftoffRegList pinned,
++                                  bool i64_offset) {
+   UseScratchRegisterScope temps(this);
+   Register src_reg = liftoff::CalculateActualAddress(
+       this, src_addr, offset_reg, offset_imm, temps.Acquire());
+@@ -601,7 +602,8 @@ void LiftoffAssembler::AtomicLoad(LiftoffRegister dst, Register src_addr,
+ 
+ void LiftoffAssembler::AtomicStore(Register dst_addr, Register offset_reg,
+                                    uintptr_t offset_imm, LiftoffRegister src,
+-                                   StoreType type, LiftoffRegList pinned) {
++                                   StoreType type, LiftoffRegList pinned,
++                                   bool i64_offset) {
+   UseScratchRegisterScope temps(this);
+   Register dst_reg = liftoff::CalculateActualAddress(
+       this, dst_addr, offset_reg, offset_imm, temps.Acquire());
+@@ -648,7 +650,8 @@ void LiftoffAssembler::AtomicStore(Register dst_addr, Register offset_reg,
+ 
+ void LiftoffAssembler::AtomicAdd(Register dst_addr, Register offset_reg,
+                                  uint32_t offset_imm, LiftoffRegister value,
+-                                 LiftoffRegister result, StoreType type) {
++                                 LiftoffRegister result, StoreType type,
++                                 bool i64_offset) {
+   if (type.value() == StoreType::kI64Store) {
+     bailout(kAtomics, "Atomic64");
+   }
+@@ -671,7 +674,8 @@ void LiftoffAssembler::AtomicAdd(Register dst_addr, Register offset_reg,
+ 
+ void LiftoffAssembler::AtomicSub(Register dst_addr, Register offset_reg,
+                                  uint32_t offset_imm, LiftoffRegister value,
+-                                 LiftoffRegister result, StoreType type) {
++                                 LiftoffRegister result, StoreType type,
++                                 bool i64_offset) {
+   if (type.value() == StoreType::kI64Store) {
+     bailout(kAtomics, "Atomic64");
+   }
+@@ -694,7 +698,8 @@ void LiftoffAssembler::AtomicSub(Register dst_addr, Register offset_reg,
+ 
+ void LiftoffAssembler::AtomicAnd(Register dst_addr, Register offset_reg,
+                                  uint32_t offset_imm, LiftoffRegister value,
+-                                 LiftoffRegister result, StoreType type) {
++                                 LiftoffRegister result, StoreType type,
++                                 bool i64_offset) {
+   if (type.value() == StoreType::kI64Store) {
+     bailout(kAtomics, "Atomic64");
+   }
+@@ -716,7 +721,8 @@ void LiftoffAssembler::AtomicAnd(Register dst_addr, Register offset_reg,
+ 
+ void LiftoffAssembler::AtomicOr(Register dst_addr, Register offset_reg,
+                                 uint32_t offset_imm, LiftoffRegister value,
+-                                LiftoffRegister result, StoreType type) {
++                                LiftoffRegister result, StoreType type,
++                                bool i64_offset) {
+   if (type.value() == StoreType::kI64Store) {
+     bailout(kAtomics, "Atomic64");
+   }
+@@ -738,7 +744,8 @@ void LiftoffAssembler::AtomicOr(Register dst_addr, Register offset_reg,
+ 
+ void LiftoffAssembler::AtomicXor(Register dst_addr, Register offset_reg,
+                                  uint32_t offset_imm, LiftoffRegister value,
+-                                 LiftoffRegister result, StoreType type) {
++                                 LiftoffRegister result, StoreType type,
++                                 bool i64_offset) {
+   if (type.value() == StoreType::kI64Store) {
+     bailout(kAtomics, "Atomic64");
+   }
+@@ -761,7 +768,8 @@ void LiftoffAssembler::AtomicXor(Register dst_addr, Register offset_reg,
+ void LiftoffAssembler::AtomicExchange(Register dst_addr, Register offset_reg,
+                                       uint32_t offset_imm,
+                                       LiftoffRegister value,
+-                                      LiftoffRegister result, StoreType type) {
++                                      LiftoffRegister result, StoreType type,
++                                      bool i64_offset) {
+   if (type.value() == StoreType::kI64Store) {
+     bailout(kAtomics, "Atomic64");
+   }
+@@ -784,7 +792,7 @@ void LiftoffAssembler::AtomicExchange(Register dst_addr, Register offset_reg,
+ void LiftoffAssembler::AtomicCompareExchange(
+     Register dst_addr, Register offset_reg, uintptr_t offset_imm,
+     LiftoffRegister expected, LiftoffRegister new_value, LiftoffRegister result,
+-    StoreType type) {
++    StoreType type, bool i64_offset) {
+   ASM_CODE_COMMENT(this);
+   LiftoffRegList pinned{dst_addr, offset_reg, expected, new_value, result};
+ 
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
+index 317885563ea..43a84cd8184 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
+@@ -461,7 +461,8 @@ inline void AtomicBinop(LiftoffAssembler* lasm, Register dst_addr,
+ 
+ void LiftoffAssembler::AtomicLoad(LiftoffRegister dst, Register src_addr,
+                                   Register offset_reg, uintptr_t offset_imm,
+-                                  LoadType type, LiftoffRegList pinned) {
++                                  LoadType type, LiftoffRegList pinned,
++                                  bool i64_offset) {
+   UseScratchRegisterScope temps(this);
+   Register src_reg = liftoff::CalculateActualAddress(
+       this, src_addr, offset_reg, offset_imm, temps.Acquire());
+@@ -492,7 +493,8 @@ void LiftoffAssembler::AtomicLoad(LiftoffRegister dst, Register src_addr,
+ 
+ void LiftoffAssembler::AtomicStore(Register dst_addr, Register offset_reg,
+                                    uintptr_t offset_imm, LiftoffRegister src,
+-                                   StoreType type, LiftoffRegList pinned) {
++                                   StoreType type, LiftoffRegList pinned,
++                                   bool i64_offset) {
+   UseScratchRegisterScope temps(this);
+   Register dst_reg = liftoff::CalculateActualAddress(
+       this, dst_addr, offset_reg, offset_imm, temps.Acquire());
+@@ -523,35 +525,40 @@ void LiftoffAssembler::AtomicStore(Register dst_addr, Register offset_reg,
+ 
+ void LiftoffAssembler::AtomicAdd(Register dst_addr, Register offset_reg,
+                                  uintptr_t offset_imm, LiftoffRegister value,
+-                                 LiftoffRegister result, StoreType type) {
++                                 LiftoffRegister result, StoreType type,
++                                 bool i64_offset) {
+   liftoff::AtomicBinop(this, dst_addr, offset_reg, offset_imm, value, result,
+                        type, liftoff::Binop::kAdd);
+ }
+ 
+ void LiftoffAssembler::AtomicSub(Register dst_addr, Register offset_reg,
+                                  uintptr_t offset_imm, LiftoffRegister value,
+-                                 LiftoffRegister result, StoreType type) {
++                                 LiftoffRegister result, StoreType type,
++                                 bool i64_offset) {
+   liftoff::AtomicBinop(this, dst_addr, offset_reg, offset_imm, value, result,
+                        type, liftoff::Binop::kSub);
+ }
+ 
+ void LiftoffAssembler::AtomicAnd(Register dst_addr, Register offset_reg,
+                                  uintptr_t offset_imm, LiftoffRegister value,
+-                                 LiftoffRegister result, StoreType type) {
++                                 LiftoffRegister result, StoreType type,
++                                 bool i64_offset) {
+   liftoff::AtomicBinop(this, dst_addr, offset_reg, offset_imm, value, result,
+                        type, liftoff::Binop::kAnd);
+ }
+ 
+ void LiftoffAssembler::AtomicOr(Register dst_addr, Register offset_reg,
+                                 uintptr_t offset_imm, LiftoffRegister value,
+-                                LiftoffRegister result, StoreType type) {
++                                LiftoffRegister result, StoreType type,
++                                bool i64_offset) {
+   liftoff::AtomicBinop(this, dst_addr, offset_reg, offset_imm, value, result,
+                        type, liftoff::Binop::kOr);
+ }
+ 
+ void LiftoffAssembler::AtomicXor(Register dst_addr, Register offset_reg,
+                                  uintptr_t offset_imm, LiftoffRegister value,
+-                                 LiftoffRegister result, StoreType type) {
++                                 LiftoffRegister result, StoreType type,
++                                 bool i64_offset) {
+   liftoff::AtomicBinop(this, dst_addr, offset_reg, offset_imm, value, result,
+                        type, liftoff::Binop::kXor);
+ }
+@@ -559,7 +566,8 @@ void LiftoffAssembler::AtomicXor(Register dst_addr, Register offset_reg,
+ void LiftoffAssembler::AtomicExchange(Register dst_addr, Register offset_reg,
+                                       uintptr_t offset_imm,
+                                       LiftoffRegister value,
+-                                      LiftoffRegister result, StoreType type) {
++                                      LiftoffRegister result, StoreType type,
++                                      bool i64_offset) {
+   liftoff::AtomicBinop(this, dst_addr, offset_reg, offset_imm, value, result,
+                        type, liftoff::Binop::kExchange);
+ }
+@@ -604,7 +612,7 @@ void LiftoffAssembler::AtomicExchange(Register dst_addr, Register offset_reg,
+ void LiftoffAssembler::AtomicCompareExchange(
+     Register dst_addr, Register offset_reg, uintptr_t offset_imm,
+     LiftoffRegister expected, LiftoffRegister new_value, LiftoffRegister result,
+-    StoreType type) {
++    StoreType type, bool i64_offset) {
+   LiftoffRegList pinned{dst_addr, offset_reg, expected, new_value, result};
+   Register temp0 = pinned.set(GetUnusedRegister(kGpReg, pinned)).gp();
+   Register temp1 = pinned.set(GetUnusedRegister(kGpReg, pinned)).gp();
+diff --git a/test/cctest/test-assembler-riscv32.cc b/test/cctest/test-assembler-riscv32.cc
+index a72834e578f..418a8db8674 100644
+--- a/test/cctest/test-assembler-riscv32.cc
++++ b/test/cctest/test-assembler-riscv32.cc
+@@ -374,10 +374,10 @@ UTEST_R2_FORM_WITH_OP(sra, int32_t, -0x12340000, 17, >>)
+ // -- CSR --
+ UTEST_CSRI(csr_frm, DYN, RUP)
+ UTEST_CSRI(csr_fflags, kInexact | kInvalidOperation, kInvalidOperation)
+-UTEST_CSRI(csr_fcsr, kDivideByZero | kOverflow, kUnderflow)
++UTEST_CSRI(csr_fcsr, kDivideByZero | kFPUOverflow, kUnderflow)
+ UTEST_CSR(csr_frm, DYN, RUP)
+ UTEST_CSR(csr_fflags, kInexact | kInvalidOperation, kInvalidOperation)
+-UTEST_CSR(csr_fcsr, kDivideByZero | kOverflow | (RDN << kFcsrFrmShift),
++UTEST_CSR(csr_fcsr, kDivideByZero | kFPUOverflow | (RDN << kFcsrFrmShift),
+           kUnderflow | (RNE << kFcsrFrmShift))
+ 
+ // -- RV32M Standard Extension --
+diff --git a/test/cctest/test-assembler-riscv64.cc b/test/cctest/test-assembler-riscv64.cc
+index 898929b16d7..c0a027855fc 100644
+--- a/test/cctest/test-assembler-riscv64.cc
++++ b/test/cctest/test-assembler-riscv64.cc
+@@ -381,10 +381,10 @@ UTEST_R2_FORM_WITH_OP(sra, int64_t, -0x1234'5678'0000'0000LL, 33, >>)
+ // -- CSR --
+ UTEST_CSRI(csr_frm, DYN, RUP)
+ UTEST_CSRI(csr_fflags, kInexact | kInvalidOperation, kInvalidOperation)
+-UTEST_CSRI(csr_fcsr, kDivideByZero | kOverflow, kUnderflow)
++UTEST_CSRI(csr_fcsr, kDivideByZero | kFPUOverflow, kUnderflow)
+ UTEST_CSR(csr_frm, DYN, RUP)
+ UTEST_CSR(csr_fflags, kInexact | kInvalidOperation, kInvalidOperation)
+-UTEST_CSR(csr_fcsr, kDivideByZero | kOverflow | (RDN << kFcsrFrmShift),
++UTEST_CSR(csr_fcsr, kDivideByZero | kFPUOverflow | (RDN << kFcsrFrmShift),
+           kUnderflow | (RNE << kFcsrFrmShift))
+ 
+ // -- RV64I --
+-- 
+2.35.1
+

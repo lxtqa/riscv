@@ -1,0 +1,1364 @@
+From bb5cc0d54fb828bec334116be4a24fb5e0c57e0c Mon Sep 17 00:00:00 2001
+From: Leszek Swirski <leszeks@chromium.org>
+Date: Thu, 7 Apr 2022 13:12:07 +0000
+Subject: [PATCH] Revert "[osr] Add an install-by-offset mechanism"
+
+This reverts commit 51b99213e73045e9ffcae970e6c3f3cd07fc8381.
+
+Reason for revert: Speculative revert for MSAN failure  https://ci.chromium.org/ui/p/v8/builders/ci/V8%20Linux%20-%20arm64%20-%20sim%20-%20MSAN/43080/overview
+
+Original change's description:
+> [osr] Add an install-by-offset mechanism
+>
+> .. for concurrent OSR. There, the challenge is to hit the correct
+> JumpLoop bytecode once compilation completes, since execution has
+> moved on in the meantime.
+>
+> This CL adds a new mechanism to request installation at a specific
+> bytecode offset. We add a new `osr_install_target` field to the
+> BytecodeArray:
+>
+>   bitfield struct OSRUrgencyAndInstallTarget extends uint16 {
+>     osr_urgency: uint32: 3 bit;
+>     osr_install_target: uint32: 13 bit;
+>   }
+>
+>   // [...]
+>   osr_urgency_and_install_target: OSRUrgencyAndInstallTarget;
+>   bytecode_age: uint16;  // Only 3 bits used.
+>   // [...]
+>
+> Note urgency and install target are packed into one 16 bit field,
+> we can thus merge both checks into one comparison within JumpLoop.
+> Note also that these fields are adjacent to the bytecode age; we
+> still reset both OSR state and age with a single (now 32-bit)
+> store.
+>
+> The install target is the lowest 13 bits of the bytecode offset.
+> When set, every reached JumpLoop will check `is this my offset?`,
+> and if yes, jump into runtime to tier up.
+>
+> Drive-by: Rename BaselineAssembler::LoadByteField to LoadWord8Field.
+>
+> Bug: v8:12161
+> Change-Id: I275d468b19df3a4816392a2fec0713a8d211ef80
+> Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3571812
+> Reviewed-by: Leszek Swirski <leszeks@chromium.org>
+> Commit-Queue: Jakob Linke <jgruber@chromium.org>
+> Cr-Commit-Position: refs/heads/main@{#79853}
+
+Bug: v8:12161
+Change-Id: I0c47499544465c80b5b23a492c00ec1c62815caa
+No-Presubmit: true
+No-Tree-Checks: true
+No-Try: true
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3576121
+Auto-Submit: Leszek Swirski <leszeks@chromium.org>
+Owners-Override: Leszek Swirski <leszeks@chromium.org>
+Commit-Queue: Rubber Stamper <rubber-stamper@appspot.gserviceaccount.com>
+Bot-Commit: Rubber Stamper <rubber-stamper@appspot.gserviceaccount.com>
+Cr-Commit-Position: refs/heads/main@{#79855}
+---
+ src/baseline/arm/baseline-assembler-arm-inl.h | 29 +--------
+ .../arm64/baseline-assembler-arm64-inl.h      | 29 +--------
+ src/baseline/baseline-assembler.h             |  9 +--
+ src/baseline/baseline-compiler.cc             | 59 +++++-------------
+ .../ia32/baseline-assembler-ia32-inl.h        | 31 +---------
+ .../loong64/baseline-assembler-loong64-inl.h  |  4 +-
+ .../mips/baseline-assembler-mips-inl.h        |  4 +-
+ .../mips64/baseline-assembler-mips64-inl.h    |  4 +-
+ src/baseline/ppc/baseline-assembler-ppc-inl.h |  4 +-
+ .../riscv64/baseline-assembler-riscv64-inl.h  |  4 +-
+ .../s390/baseline-assembler-s390-inl.h        |  4 +-
+ src/baseline/x64/baseline-assembler-x64-inl.h | 21 +------
+ src/builtins/arm/builtins-arm.cc              | 50 ++++++++-------
+ src/builtins/arm64/builtins-arm64.cc          | 44 +++++++------
+ src/builtins/ia32/builtins-ia32.cc            | 43 +++++++------
+ src/builtins/x64/builtins-x64.cc              | 62 +++++++++----------
+ src/codegen/compiler.cc                       | 13 ++--
+ src/compiler/code-assembler.h                 | 14 -----
+ src/heap/factory-base.cc                      |  2 +-
+ src/interpreter/interpreter-assembler.cc      | 10 ++-
+ src/interpreter/interpreter-assembler.h       | 10 +--
+ src/interpreter/interpreter-generator.cc      | 42 +++----------
+ src/objects/code-inl.h                        | 28 +--------
+ src/objects/code.h                            | 31 ++--------
+ src/objects/code.tq                           | 14 ++---
+ src/utils/utils.h                             |  2 +-
+ 26 files changed, 176 insertions(+), 391 deletions(-)
+
+diff --git a/src/baseline/arm/baseline-assembler-arm-inl.h b/src/baseline/arm/baseline-assembler-arm-inl.h
+index b19b2f337c8..f77b85e2ef2 100644
+--- a/src/baseline/arm/baseline-assembler-arm-inl.h
++++ b/src/baseline/arm/baseline-assembler-arm-inl.h
+@@ -102,28 +102,18 @@ void BaselineAssembler::JumpTarget() {
+ void BaselineAssembler::Jump(Label* target, Label::Distance distance) {
+   __ b(target);
+ }
+-
+ void BaselineAssembler::JumpIfRoot(Register value, RootIndex index,
+                                    Label* target, Label::Distance) {
+   __ JumpIfRoot(value, index, target);
+ }
+-
+ void BaselineAssembler::JumpIfNotRoot(Register value, RootIndex index,
+                                       Label* target, Label::Distance) {
+   __ JumpIfNotRoot(value, index, target);
+ }
+-
+ void BaselineAssembler::JumpIfSmi(Register value, Label* target,
+                                   Label::Distance) {
+   __ JumpIfSmi(value, target);
+ }
+-
+-void BaselineAssembler::JumpIfImmediate(Condition cc, Register left, int right,
+-                                        Label* target,
+-                                        Label::Distance distance) {
+-  JumpIf(cc, left, Operand(right), target, distance);
+-}
+-
+ void BaselineAssembler::JumpIfNotSmi(Register value, Label* target,
+                                      Label::Distance) {
+   __ JumpIfNotSmi(value, target);
+@@ -361,27 +351,18 @@ void BaselineAssembler::LoadTaggedPointerField(Register output, Register source,
+                                                int offset) {
+   __ ldr(output, FieldMemOperand(source, offset));
+ }
+-
+ void BaselineAssembler::LoadTaggedSignedField(Register output, Register source,
+                                               int offset) {
+   __ ldr(output, FieldMemOperand(source, offset));
+ }
+-
+ void BaselineAssembler::LoadTaggedAnyField(Register output, Register source,
+                                            int offset) {
+   __ ldr(output, FieldMemOperand(source, offset));
+ }
+-
+-void BaselineAssembler::LoadWord16FieldZeroExtend(Register output,
+-                                                  Register source, int offset) {
+-  __ ldrh(output, FieldMemOperand(source, offset));
+-}
+-
+-void BaselineAssembler::LoadWord8Field(Register output, Register source,
+-                                       int offset) {
++void BaselineAssembler::LoadByteField(Register output, Register source,
++                                      int offset) {
+   __ ldrb(output, FieldMemOperand(source, offset));
+ }
+-
+ void BaselineAssembler::StoreTaggedSignedField(Register target, int offset,
+                                                Smi value) {
+   ASM_CODE_COMMENT(masm_);
+@@ -390,7 +371,6 @@ void BaselineAssembler::StoreTaggedSignedField(Register target, int offset,
+   __ mov(tmp, Operand(value));
+   __ str(tmp, FieldMemOperand(target, offset));
+ }
+-
+ void BaselineAssembler::StoreTaggedFieldWithWriteBarrier(Register target,
+                                                          int offset,
+                                                          Register value) {
+@@ -400,7 +380,6 @@ void BaselineAssembler::StoreTaggedFieldWithWriteBarrier(Register target,
+   __ RecordWriteField(target, offset, value, kLRHasNotBeenSaved,
+                       SaveFPRegsMode::kIgnore);
+ }
+-
+ void BaselineAssembler::StoreTaggedFieldNoWriteBarrier(Register target,
+                                                        int offset,
+                                                        Register value) {
+@@ -453,10 +432,6 @@ void BaselineAssembler::AddSmi(Register lhs, Smi rhs) {
+   __ add(lhs, lhs, Operand(rhs));
+ }
+ 
+-void BaselineAssembler::Word32And(Register output, Register lhs, int rhs) {
+-  __ and_(output, lhs, Operand(rhs));
+-}
+-
+ void BaselineAssembler::Switch(Register reg, int case_value_base,
+                                Label** labels, int num_labels) {
+   ASM_CODE_COMMENT(masm_);
+diff --git a/src/baseline/arm64/baseline-assembler-arm64-inl.h b/src/baseline/arm64/baseline-assembler-arm64-inl.h
+index 9c074c0b0ec..b08ac0d7ac8 100644
+--- a/src/baseline/arm64/baseline-assembler-arm64-inl.h
++++ b/src/baseline/arm64/baseline-assembler-arm64-inl.h
+@@ -100,33 +100,23 @@ void BaselineAssembler::JumpTarget() { __ JumpTarget(); }
+ void BaselineAssembler::Jump(Label* target, Label::Distance distance) {
+   __ B(target);
+ }
+-
+ void BaselineAssembler::JumpIfRoot(Register value, RootIndex index,
+                                    Label* target, Label::Distance) {
+   __ JumpIfRoot(value, index, target);
+ }
+-
+ void BaselineAssembler::JumpIfNotRoot(Register value, RootIndex index,
+                                       Label* target, Label::Distance) {
+   __ JumpIfNotRoot(value, index, target);
+ }
+-
+ void BaselineAssembler::JumpIfSmi(Register value, Label* target,
+                                   Label::Distance) {
+   __ JumpIfSmi(value, target);
+ }
+-
+ void BaselineAssembler::JumpIfNotSmi(Register value, Label* target,
+                                      Label::Distance) {
+   __ JumpIfNotSmi(value, target);
+ }
+ 
+-void BaselineAssembler::JumpIfImmediate(Condition cc, Register left, int right,
+-                                        Label* target,
+-                                        Label::Distance distance) {
+-  JumpIf(cc, left, Immediate(right), target, distance);
+-}
+-
+ void BaselineAssembler::CallBuiltin(Builtin builtin) {
+   if (masm()->options().short_builtin_calls) {
+     // Generate pc-relative call.
+@@ -434,27 +424,18 @@ void BaselineAssembler::LoadTaggedPointerField(Register output, Register source,
+                                                int offset) {
+   __ LoadTaggedPointerField(output, FieldMemOperand(source, offset));
+ }
+-
+ void BaselineAssembler::LoadTaggedSignedField(Register output, Register source,
+                                               int offset) {
+   __ LoadTaggedSignedField(output, FieldMemOperand(source, offset));
+ }
+-
+ void BaselineAssembler::LoadTaggedAnyField(Register output, Register source,
+                                            int offset) {
+   __ LoadAnyTaggedField(output, FieldMemOperand(source, offset));
+ }
+-
+-void BaselineAssembler::LoadWord16FieldZeroExtend(Register output,
+-                                                  Register source, int offset) {
+-  __ Ldrh(output, FieldMemOperand(source, offset));
+-}
+-
+-void BaselineAssembler::LoadWord8Field(Register output, Register source,
+-                                       int offset) {
++void BaselineAssembler::LoadByteField(Register output, Register source,
++                                      int offset) {
+   __ Ldrb(output, FieldMemOperand(source, offset));
+ }
+-
+ void BaselineAssembler::StoreTaggedSignedField(Register target, int offset,
+                                                Smi value) {
+   ASM_CODE_COMMENT(masm_);
+@@ -463,7 +444,6 @@ void BaselineAssembler::StoreTaggedSignedField(Register target, int offset,
+   __ Mov(tmp, Operand(value));
+   __ StoreTaggedField(tmp, FieldMemOperand(target, offset));
+ }
+-
+ void BaselineAssembler::StoreTaggedFieldWithWriteBarrier(Register target,
+                                                          int offset,
+                                                          Register value) {
+@@ -472,7 +452,6 @@ void BaselineAssembler::StoreTaggedFieldWithWriteBarrier(Register target,
+   __ RecordWriteField(target, offset, value, kLRHasNotBeenSaved,
+                       SaveFPRegsMode::kIgnore);
+ }
+-
+ void BaselineAssembler::StoreTaggedFieldNoWriteBarrier(Register target,
+                                                        int offset,
+                                                        Register value) {
+@@ -530,10 +509,6 @@ void BaselineAssembler::AddSmi(Register lhs, Smi rhs) {
+   }
+ }
+ 
+-void BaselineAssembler::Word32And(Register output, Register lhs, int rhs) {
+-  __ And(output, lhs, Immediate(rhs));
+-}
+-
+ void BaselineAssembler::Switch(Register reg, int case_value_base,
+                                Label** labels, int num_labels) {
+   ASM_CODE_COMMENT(masm_);
+diff --git a/src/baseline/baseline-assembler.h b/src/baseline/baseline-assembler.h
+index 41f34684a17..e0fe720bc4d 100644
+--- a/src/baseline/baseline-assembler.h
++++ b/src/baseline/baseline-assembler.h
+@@ -79,9 +79,6 @@ class BaselineAssembler {
+                         Label::Distance distance = Label::kFar);
+   inline void JumpIfSmi(Condition cc, Register lhs, Register rhs, Label* target,
+                         Label::Distance distance = Label::kFar);
+-  inline void JumpIfImmediate(Condition cc, Register left, int right,
+-                              Label* target,
+-                              Label::Distance distance = Label::kFar);
+   inline void JumpIfTagged(Condition cc, Register value, MemOperand operand,
+                            Label* target,
+                            Label::Distance distance = Label::kFar);
+@@ -155,9 +152,7 @@ class BaselineAssembler {
+   inline void LoadTaggedSignedField(Register output, Register source,
+                                     int offset);
+   inline void LoadTaggedAnyField(Register output, Register source, int offset);
+-  inline void LoadWord16FieldZeroExtend(Register output, Register source,
+-                                        int offset);
+-  inline void LoadWord8Field(Register output, Register source, int offset);
++  inline void LoadByteField(Register output, Register source, int offset);
+   inline void StoreTaggedSignedField(Register target, int offset, Smi value);
+   inline void StoreTaggedFieldWithWriteBarrier(Register target, int offset,
+                                                Register value);
+@@ -178,8 +173,6 @@ class BaselineAssembler {
+   inline void SmiUntag(Register value);
+   inline void SmiUntag(Register output, Register value);
+ 
+-  inline void Word32And(Register output, Register lhs, int rhs);
+-
+   inline void Switch(Register reg, int case_value_base, Label** labels,
+                      int num_labels);
+ 
+diff --git a/src/baseline/baseline-compiler.cc b/src/baseline/baseline-compiler.cc
+index 9d4d480da25..d2acaee1ce0 100644
+--- a/src/baseline/baseline-compiler.cc
++++ b/src/baseline/baseline-compiler.cc
+@@ -1538,7 +1538,7 @@ void BaselineCompiler::VisitTestUndetectable() {
+ 
+   Register map_bit_field = kInterpreterAccumulatorRegister;
+   __ LoadMap(map_bit_field, kInterpreterAccumulatorRegister);
+-  __ LoadWord8Field(map_bit_field, map_bit_field, Map::kBitFieldOffset);
++  __ LoadByteField(map_bit_field, map_bit_field, Map::kBitFieldOffset);
+   __ TestAndBranch(map_bit_field, Map::Bits1::IsUndetectableBit::kMask,
+                    Condition::kZero, &not_undetectable, Label::kNear);
+ 
+@@ -1665,7 +1665,7 @@ void BaselineCompiler::VisitTestTypeOf() {
+       // All other undetectable maps are typeof undefined.
+       Register map_bit_field = kInterpreterAccumulatorRegister;
+       __ LoadMap(map_bit_field, kInterpreterAccumulatorRegister);
+-      __ LoadWord8Field(map_bit_field, map_bit_field, Map::kBitFieldOffset);
++      __ LoadByteField(map_bit_field, map_bit_field, Map::kBitFieldOffset);
+       __ TestAndBranch(map_bit_field, Map::Bits1::IsUndetectableBit::kMask,
+                        Condition::kZero, &not_undetectable, Label::kNear);
+ 
+@@ -1685,7 +1685,7 @@ void BaselineCompiler::VisitTestTypeOf() {
+       // Check if the map is callable but not undetectable.
+       Register map_bit_field = kInterpreterAccumulatorRegister;
+       __ LoadMap(map_bit_field, kInterpreterAccumulatorRegister);
+-      __ LoadWord8Field(map_bit_field, map_bit_field, Map::kBitFieldOffset);
++      __ LoadByteField(map_bit_field, map_bit_field, Map::kBitFieldOffset);
+       __ TestAndBranch(map_bit_field, Map::Bits1::IsCallableBit::kMask,
+                        Condition::kZero, &not_callable, Label::kNear);
+       __ TestAndBranch(map_bit_field, Map::Bits1::IsUndetectableBit::kMask,
+@@ -1717,7 +1717,7 @@ void BaselineCompiler::VisitTestTypeOf() {
+ 
+       // If the map is undetectable or callable, return false.
+       Register map_bit_field = kInterpreterAccumulatorRegister;
+-      __ LoadWord8Field(map_bit_field, map, Map::kBitFieldOffset);
++      __ LoadByteField(map_bit_field, map, Map::kBitFieldOffset);
+       __ TestAndBranch(map_bit_field,
+                        Map::Bits1::IsUndetectableBit::kMask |
+                            Map::Bits1::IsCallableBit::kMask,
+@@ -1925,50 +1925,21 @@ void BaselineCompiler::VisitCreateRestParameter() {
+ }
+ 
+ void BaselineCompiler::VisitJumpLoop() {
+-  Label osr_not_armed, osr;
++  BaselineAssembler::ScratchRegisterScope scope(&basm_);
++  Register scratch = scope.AcquireScratch();
++  Label osr_not_armed;
+   {
+-    BaselineAssembler::ScratchRegisterScope scope(&basm_);
+-    Register osr_urgency_and_install_target = scope.AcquireScratch();
+-
+     ASM_CODE_COMMENT_STRING(&masm_, "OSR Check Armed");
+-    __ LoadRegister(osr_urgency_and_install_target,
+-                    interpreter::Register::bytecode_array());
+-    __ LoadWord16FieldZeroExtend(
+-        osr_urgency_and_install_target, osr_urgency_and_install_target,
+-        BytecodeArray::kOsrUrgencyAndInstallTargetOffset);
++    Register osr_urgency = scratch;
++    __ LoadRegister(osr_urgency, interpreter::Register::bytecode_array());
++    __ LoadByteField(osr_urgency, osr_urgency,
++                     BytecodeArray::kOsrUrgencyOffset);
+     int loop_depth = iterator().GetImmediateOperand(1);
+-    __ JumpIfImmediate(Condition::kUnsignedLessThanEqual,
+-                       osr_urgency_and_install_target, loop_depth,
+-                       &osr_not_armed, Label::kNear);
+-
+-    // TODO(jgruber): Move the extended checks into the
+-    // BaselineOnStackReplacement builtin.
+-
+-    // OSR based on urgency, i.e. is the OSR urgency greater than the current
+-    // loop depth?
+-    STATIC_ASSERT(BytecodeArray::OsrUrgencyBits::kShift == 0);
+-    Register scratch2 = scope.AcquireScratch();
+-    __ Word32And(scratch2, osr_urgency_and_install_target,
+-                 BytecodeArray::OsrUrgencyBits::kMask);
+-    __ JumpIfImmediate(Condition::kUnsignedGreaterThan, scratch2, loop_depth,
+-                       &osr, Label::kNear);
+-
+-    // OSR based on the install target offset, i.e. does the current bytecode
+-    // offset match the install target offset?
+-    static constexpr int kShift = BytecodeArray::OsrInstallTargetBits::kShift;
+-    static constexpr int kMask = BytecodeArray::OsrInstallTargetBits::kMask;
+-    const int encoded_current_offset =
+-        BytecodeArray::OsrInstallTargetFor(
+-            BytecodeOffset{iterator().current_offset()})
+-        << kShift;
+-    __ Word32And(scratch2, osr_urgency_and_install_target, kMask);
+-    __ JumpIfImmediate(Condition::kNotEqual, scratch2, encoded_current_offset,
+-                       &osr_not_armed, Label::kNear);
++    __ JumpIfByte(Condition::kUnsignedLessThanEqual, osr_urgency, loop_depth,
++                  &osr_not_armed);
++    CallBuiltin<Builtin::kBaselineOnStackReplacement>();
+   }
+ 
+-  __ Bind(&osr);
+-  CallBuiltin<Builtin::kBaselineOnStackReplacement>();
+-
+   __ Bind(&osr_not_armed);
+   Label* label = &labels_[iterator().GetJumpTargetOffset()]->unlinked;
+   int weight = iterator().GetRelativeJumpTargetOffset() -
+@@ -2213,7 +2184,7 @@ void BaselineCompiler::VisitThrowIfNotSuperConstructor() {
+   LoadRegister(reg, 0);
+   Register map_bit_field = scratch_scope.AcquireScratch();
+   __ LoadMap(map_bit_field, reg);
+-  __ LoadWord8Field(map_bit_field, map_bit_field, Map::kBitFieldOffset);
++  __ LoadByteField(map_bit_field, map_bit_field, Map::kBitFieldOffset);
+   __ TestAndBranch(map_bit_field, Map::Bits1::IsConstructorBit::kMask,
+                    Condition::kNotZero, &done, Label::kNear);
+ 
+diff --git a/src/baseline/ia32/baseline-assembler-ia32-inl.h b/src/baseline/ia32/baseline-assembler-ia32-inl.h
+index cfd4bdd5ae5..6c36c7e8ba3 100644
+--- a/src/baseline/ia32/baseline-assembler-ia32-inl.h
++++ b/src/baseline/ia32/baseline-assembler-ia32-inl.h
+@@ -103,29 +103,18 @@ void BaselineAssembler::JumpTarget() {
+ void BaselineAssembler::Jump(Label* target, Label::Distance distance) {
+   __ jmp(target, distance);
+ }
+-
+ void BaselineAssembler::JumpIfRoot(Register value, RootIndex index,
+                                    Label* target, Label::Distance distance) {
+   __ JumpIfRoot(value, index, target, distance);
+ }
+-
+ void BaselineAssembler::JumpIfNotRoot(Register value, RootIndex index,
+                                       Label* target, Label::Distance distance) {
+   __ JumpIfNotRoot(value, index, target, distance);
+ }
+-
+ void BaselineAssembler::JumpIfSmi(Register value, Label* target,
+                                   Label::Distance distance) {
+   __ JumpIfSmi(value, target, distance);
+ }
+-
+-void BaselineAssembler::JumpIfImmediate(Condition cc, Register left, int right,
+-                                        Label* target,
+-                                        Label::Distance distance) {
+-  __ cmp(left, Immediate(right));
+-  __ j(AsMasmCondition(cc), target, distance);
+-}
+-
+ void BaselineAssembler::JumpIfNotSmi(Register value, Label* target,
+                                      Label::Distance distance) {
+   __ JumpIfNotSmi(value, target, distance);
+@@ -334,32 +323,22 @@ void BaselineAssembler::LoadTaggedPointerField(Register output, Register source,
+                                                int offset) {
+   __ mov(output, FieldOperand(source, offset));
+ }
+-
+ void BaselineAssembler::LoadTaggedSignedField(Register output, Register source,
+                                               int offset) {
+   __ mov(output, FieldOperand(source, offset));
+ }
+-
+ void BaselineAssembler::LoadTaggedAnyField(Register output, Register source,
+                                            int offset) {
+   __ mov(output, FieldOperand(source, offset));
+ }
+-
+-void BaselineAssembler::LoadWord16FieldZeroExtend(Register output,
+-                                                  Register source, int offset) {
+-  __ movzx_w(output, FieldOperand(source, offset));
+-}
+-
+-void BaselineAssembler::LoadWord8Field(Register output, Register source,
+-                                       int offset) {
++void BaselineAssembler::LoadByteField(Register output, Register source,
++                                      int offset) {
+   __ mov_b(output, FieldOperand(source, offset));
+ }
+-
+ void BaselineAssembler::StoreTaggedSignedField(Register target, int offset,
+                                                Smi value) {
+   __ mov(FieldOperand(target, offset), Immediate(value));
+ }
+-
+ void BaselineAssembler::StoreTaggedFieldWithWriteBarrier(Register target,
+                                                          int offset,
+                                                          Register value) {
+@@ -370,7 +349,6 @@ void BaselineAssembler::StoreTaggedFieldWithWriteBarrier(Register target,
+   __ mov(FieldOperand(target, offset), value);
+   __ RecordWriteField(target, offset, value, scratch, SaveFPRegsMode::kIgnore);
+ }
+-
+ void BaselineAssembler::StoreTaggedFieldNoWriteBarrier(Register target,
+                                                        int offset,
+                                                        Register value) {
+@@ -413,11 +391,6 @@ void BaselineAssembler::AddSmi(Register lhs, Smi rhs) {
+   __ add(lhs, Immediate(rhs));
+ }
+ 
+-void BaselineAssembler::Word32And(Register output, Register lhs, int rhs) {
+-  Move(output, lhs);
+-  __ and_(output, Immediate(rhs));
+-}
+-
+ void BaselineAssembler::Switch(Register reg, int case_value_base,
+                                Label** labels, int num_labels) {
+   ASM_CODE_COMMENT(masm_);
+diff --git a/src/baseline/loong64/baseline-assembler-loong64-inl.h b/src/baseline/loong64/baseline-assembler-loong64-inl.h
+index dc0b0502d75..25b279ff8e7 100644
+--- a/src/baseline/loong64/baseline-assembler-loong64-inl.h
++++ b/src/baseline/loong64/baseline-assembler-loong64-inl.h
+@@ -346,8 +346,8 @@ void BaselineAssembler::LoadTaggedAnyField(Register output, Register source,
+                                            int offset) {
+   __ Ld_d(output, FieldMemOperand(source, offset));
+ }
+-void BaselineAssembler::LoadWord8Field(Register output, Register source,
+-                                       int offset) {
++void BaselineAssembler::LoadByteField(Register output, Register source,
++                                      int offset) {
+   __ Ld_b(output, FieldMemOperand(source, offset));
+ }
+ void BaselineAssembler::StoreTaggedSignedField(Register target, int offset,
+diff --git a/src/baseline/mips/baseline-assembler-mips-inl.h b/src/baseline/mips/baseline-assembler-mips-inl.h
+index 09c90af4c18..c33ff880242 100644
+--- a/src/baseline/mips/baseline-assembler-mips-inl.h
++++ b/src/baseline/mips/baseline-assembler-mips-inl.h
+@@ -356,8 +356,8 @@ void BaselineAssembler::LoadTaggedAnyField(Register output, Register source,
+                                            int offset) {
+   __ Lw(output, FieldMemOperand(source, offset));
+ }
+-void BaselineAssembler::LoadWord8Field(Register output, Register source,
+-                                       int offset) {
++void BaselineAssembler::LoadByteField(Register output, Register source,
++                                      int offset) {
+   __ lb(output, FieldMemOperand(source, offset));
+ }
+ void BaselineAssembler::StoreTaggedSignedField(Register target, int offset,
+diff --git a/src/baseline/mips64/baseline-assembler-mips64-inl.h b/src/baseline/mips64/baseline-assembler-mips64-inl.h
+index 0d01c58cf4d..8aa9122f516 100644
+--- a/src/baseline/mips64/baseline-assembler-mips64-inl.h
++++ b/src/baseline/mips64/baseline-assembler-mips64-inl.h
+@@ -354,8 +354,8 @@ void BaselineAssembler::LoadTaggedAnyField(Register output, Register source,
+                                            int offset) {
+   __ Ld(output, FieldMemOperand(source, offset));
+ }
+-void BaselineAssembler::LoadWord8Field(Register output, Register source,
+-                                       int offset) {
++void BaselineAssembler::LoadByteField(Register output, Register source,
++                                      int offset) {
+   __ Lb(output, FieldMemOperand(source, offset));
+ }
+ void BaselineAssembler::StoreTaggedSignedField(Register target, int offset,
+diff --git a/src/baseline/ppc/baseline-assembler-ppc-inl.h b/src/baseline/ppc/baseline-assembler-ppc-inl.h
+index cb9ab91378b..99f41a7776c 100644
+--- a/src/baseline/ppc/baseline-assembler-ppc-inl.h
++++ b/src/baseline/ppc/baseline-assembler-ppc-inl.h
+@@ -455,8 +455,8 @@ void BaselineAssembler::LoadTaggedAnyField(Register output, Register source,
+                                            int offset) {
+   UNIMPLEMENTED();
+ }
+-void BaselineAssembler::LoadWord8Field(Register output, Register source,
+-                                       int offset) {
++void BaselineAssembler::LoadByteField(Register output, Register source,
++                                      int offset) {
+   UNIMPLEMENTED();
+ }
+ void BaselineAssembler::StoreTaggedSignedField(Register target, int offset,
+diff --git a/src/baseline/riscv64/baseline-assembler-riscv64-inl.h b/src/baseline/riscv64/baseline-assembler-riscv64-inl.h
+index 7f4625f3f2c..7aef7d138e0 100644
+--- a/src/baseline/riscv64/baseline-assembler-riscv64-inl.h
++++ b/src/baseline/riscv64/baseline-assembler-riscv64-inl.h
+@@ -347,8 +347,8 @@ void BaselineAssembler::LoadTaggedAnyField(Register output, Register source,
+                                            int offset) {
+   __ LoadAnyTaggedField(output, FieldMemOperand(source, offset));
+ }
+-void BaselineAssembler::LoadWord8Field(Register output, Register source,
+-                                       int offset) {
++void BaselineAssembler::LoadByteField(Register output, Register source,
++                                      int offset) {
+   __ Lb(output, FieldMemOperand(source, offset));
+ }
+ void BaselineAssembler::StoreTaggedSignedField(Register target, int offset,
+diff --git a/src/baseline/s390/baseline-assembler-s390-inl.h b/src/baseline/s390/baseline-assembler-s390-inl.h
+index 8b4c419019d..705e7bbd859 100644
+--- a/src/baseline/s390/baseline-assembler-s390-inl.h
++++ b/src/baseline/s390/baseline-assembler-s390-inl.h
+@@ -439,8 +439,8 @@ void BaselineAssembler::LoadTaggedAnyField(Register output, Register source,
+                                            int offset) {
+   __ LoadAnyTaggedField(output, FieldMemOperand(source, offset), r0);
+ }
+-void BaselineAssembler::LoadWord8Field(Register output, Register source,
+-                                       int offset) {
++void BaselineAssembler::LoadByteField(Register output, Register source,
++                                      int offset) {
+   __ LoadU8(output, FieldMemOperand(source, offset));
+ }
+ void BaselineAssembler::StoreTaggedSignedField(Register target, int offset,
+diff --git a/src/baseline/x64/baseline-assembler-x64-inl.h b/src/baseline/x64/baseline-assembler-x64-inl.h
+index 7f3e6df021c..594b794672f 100644
+--- a/src/baseline/x64/baseline-assembler-x64-inl.h
++++ b/src/baseline/x64/baseline-assembler-x64-inl.h
+@@ -195,14 +195,6 @@ void BaselineAssembler::JumpIfSmi(Condition cc, Register lhs, Register rhs,
+   __ SmiCompare(lhs, rhs);
+   __ j(AsMasmCondition(cc), target, distance);
+ }
+-
+-void BaselineAssembler::JumpIfImmediate(Condition cc, Register left, int right,
+-                                        Label* target,
+-                                        Label::Distance distance) {
+-  __ cmpq(left, Immediate(right));
+-  __ j(AsMasmCondition(cc), target, distance);
+-}
+-
+ // cmp_tagged
+ void BaselineAssembler::JumpIfTagged(Condition cc, Register value,
+                                      MemOperand operand, Label* target,
+@@ -346,12 +338,8 @@ void BaselineAssembler::LoadTaggedAnyField(Register output, Register source,
+                                            int offset) {
+   __ LoadAnyTaggedField(output, FieldOperand(source, offset));
+ }
+-void BaselineAssembler::LoadWord16FieldZeroExtend(Register output,
+-                                                  Register source, int offset) {
+-  __ movzxwq(output, FieldOperand(source, offset));
+-}
+-void BaselineAssembler::LoadWord8Field(Register output, Register source,
+-                                       int offset) {
++void BaselineAssembler::LoadByteField(Register output, Register source,
++                                      int offset) {
+   __ movb(output, FieldOperand(source, offset));
+ }
+ void BaselineAssembler::StoreTaggedSignedField(Register target, int offset,
+@@ -414,11 +402,6 @@ void BaselineAssembler::AddSmi(Register lhs, Smi rhs) {
+   }
+ }
+ 
+-void BaselineAssembler::Word32And(Register output, Register lhs, int rhs) {
+-  Move(output, lhs);
+-  __ andq(output, Immediate(rhs));
+-}
+-
+ void BaselineAssembler::Switch(Register reg, int case_value_base,
+                                Label** labels, int num_labels) {
+   ASM_CODE_COMMENT(masm_);
+diff --git a/src/builtins/arm/builtins-arm.cc b/src/builtins/arm/builtins-arm.cc
+index b693ef4fcf8..5f075ac2087 100644
+--- a/src/builtins/arm/builtins-arm.cc
++++ b/src/builtins/arm/builtins-arm.cc
+@@ -1065,22 +1065,6 @@ static void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
+   TailCallOptimizedCodeSlot(masm, optimized_code_entry, r6);
+ }
+ 
+-namespace {
+-
+-void ResetBytecodeAgeAndOsrState(MacroAssembler* masm, Register bytecode_array,
+-                                 Register scratch) {
+-  // Reset the bytecode age and OSR state (optimized to a single write).
+-  STATIC_ASSERT(BytecodeArray::kBytecodeAgeOffset ==
+-                BytecodeArray::kOsrUrgencyAndInstallTargetOffset + kUInt16Size);
+-  STATIC_ASSERT(BytecodeArray::kNoAgeBytecodeAge == 0);
+-  __ mov(scratch, Operand(0));
+-  __ str(scratch,
+-         FieldMemOperand(bytecode_array,
+-                         BytecodeArray::kOsrUrgencyAndInstallTargetOffset));
+-}
+-
+-}  // namespace
+-
+ // static
+ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+   UseScratchRegisterScope temps(masm);
+@@ -1151,10 +1135,21 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+     // the frame, so load it into a register.
+     Register bytecodeArray = descriptor.GetRegisterParameter(
+         BaselineOutOfLinePrologueDescriptor::kInterpreterBytecodeArray);
++
++    // Reset code age and the OSR arming. The OSR field and BytecodeAgeOffset
++    // are 8-bit fields next to each other, so we could just optimize by writing
++    // a 16-bit. These static asserts guard our assumption is valid.
++    STATIC_ASSERT(BytecodeArray::kBytecodeAgeOffset ==
++                  BytecodeArray::kOsrUrgencyOffset + kCharSize);
++    STATIC_ASSERT(BytecodeArray::kNoAgeBytecodeAge == 0);
+     {
+       UseScratchRegisterScope temps(masm);
+-      ResetBytecodeAgeAndOsrState(masm, bytecodeArray, temps.Acquire());
++      Register scratch = temps.Acquire();
++      __ mov(scratch, Operand(0));
++      __ strh(scratch,
++              FieldMemOperand(bytecodeArray, BytecodeArray::kOsrUrgencyOffset));
+     }
++
+     __ Push(argc, bytecodeArray);
+ 
+     // Baseline code frames store the feedback vector where interpreter would
+@@ -1294,7 +1289,15 @@ void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
+   FrameScope frame_scope(masm, StackFrame::MANUAL);
+   __ PushStandardFrame(closure);
+ 
+-  ResetBytecodeAgeAndOsrState(masm, kInterpreterBytecodeArrayRegister, r9);
++  // Reset code age and the OSR arming. The OSR field and BytecodeAgeOffset are
++  // 8-bit fields next to each other, so we could just optimize by writing a
++  // 16-bit. These static asserts guard our assumption is valid.
++  STATIC_ASSERT(BytecodeArray::kBytecodeAgeOffset ==
++                BytecodeArray::kOsrUrgencyOffset + kCharSize);
++  STATIC_ASSERT(BytecodeArray::kNoAgeBytecodeAge == 0);
++  __ mov(r9, Operand(0));
++  __ strh(r9, FieldMemOperand(kInterpreterBytecodeArrayRegister,
++                              BytecodeArray::kOsrUrgencyOffset));
+ 
+   // Load the initial bytecode offset.
+   __ mov(kInterpreterBytecodeOffsetRegister,
+@@ -3656,11 +3659,14 @@ void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
+   __ Pop(kInterpreterAccumulatorRegister);
+ 
+   if (is_osr) {
+-    // TODO(pthier): Separate baseline Sparkplug from TF arming and don't
+-    // disarm Sparkplug here.
++    // Reset the OSR loop nesting depth to disarm back edges.
++    // TODO(pthier): Separate baseline Sparkplug from TF arming and don't disarm
++    // Sparkplug here.
+     UseScratchRegisterScope temps(masm);
+-    ResetBytecodeAgeAndOsrState(masm, kInterpreterBytecodeArrayRegister,
+-                                temps.Acquire());
++    Register scratch = temps.Acquire();
++    __ mov(scratch, Operand(0));
++    __ strh(scratch, FieldMemOperand(kInterpreterBytecodeArrayRegister,
++                                     BytecodeArray::kOsrUrgencyOffset));
+     Generate_OSREntry(masm, code_obj,
+                       Operand(Code::kHeaderSize - kHeapObjectTag));
+   } else {
+diff --git a/src/builtins/arm64/builtins-arm64.cc b/src/builtins/arm64/builtins-arm64.cc
+index 2550efa3ad6..3e8167835fe 100644
+--- a/src/builtins/arm64/builtins-arm64.cc
++++ b/src/builtins/arm64/builtins-arm64.cc
+@@ -1248,21 +1248,6 @@ static void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
+   TailCallOptimizedCodeSlot(masm, optimized_code_entry, x4);
+ }
+ 
+-namespace {
+-
+-void ResetBytecodeAgeAndOsrState(MacroAssembler* masm,
+-                                 Register bytecode_array) {
+-  // Reset the bytecode age and OSR state (optimized to a single write).
+-  STATIC_ASSERT(BytecodeArray::kBytecodeAgeOffset ==
+-                BytecodeArray::kOsrUrgencyAndInstallTargetOffset + kUInt16Size);
+-  STATIC_ASSERT(BytecodeArray::kNoAgeBytecodeAge == 0);
+-  __ Str(wzr,
+-         FieldMemOperand(bytecode_array,
+-                         BytecodeArray::kOsrUrgencyAndInstallTargetOffset));
+-}
+-
+-}  // namespace
+-
+ // static
+ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+   UseScratchRegisterScope temps(masm);
+@@ -1325,7 +1310,16 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+     // the frame, so load it into a register.
+     Register bytecode_array = descriptor.GetRegisterParameter(
+         BaselineOutOfLinePrologueDescriptor::kInterpreterBytecodeArray);
+-    ResetBytecodeAgeAndOsrState(masm, bytecode_array);
++
++    // Reset code age and the OSR arming. The OSR field and BytecodeAgeOffset
++    // are 8-bit fields next to each other, so we could just optimize by writing
++    // a 16-bit. These static asserts guard our assumption is valid.
++    STATIC_ASSERT(BytecodeArray::kBytecodeAgeOffset ==
++                  BytecodeArray::kOsrUrgencyOffset + kCharSize);
++    STATIC_ASSERT(BytecodeArray::kNoAgeBytecodeAge == 0);
++    __ Strh(wzr,
++            FieldMemOperand(bytecode_array, BytecodeArray::kOsrUrgencyOffset));
++
+     __ Push(argc, bytecode_array);
+ 
+     // Baseline code frames store the feedback vector where interpreter would
+@@ -1475,7 +1469,15 @@ void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
+   __ mov(fp, sp);
+   __ Push(cp, closure);
+ 
+-  ResetBytecodeAgeAndOsrState(masm, kInterpreterBytecodeArrayRegister);
++  // Reset code age.
++  // Reset code age and the OSR arming. The OSR field and BytecodeAgeOffset are
++  // 8-bit fields next to each other, so we could just optimize by writing a
++  // 16-bit. These static asserts guard our assumption is valid.
++  STATIC_ASSERT(BytecodeArray::kBytecodeAgeOffset ==
++                BytecodeArray::kOsrUrgencyOffset + kCharSize);
++  STATIC_ASSERT(BytecodeArray::kNoAgeBytecodeAge == 0);
++  __ Strh(wzr, FieldMemOperand(kInterpreterBytecodeArrayRegister,
++                               BytecodeArray::kOsrUrgencyOffset));
+ 
+   // Load the initial bytecode offset.
+   __ Mov(kInterpreterBytecodeOffsetRegister,
+@@ -4180,9 +4182,11 @@ void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
+   __ Pop(kInterpreterAccumulatorRegister, padreg);
+ 
+   if (is_osr) {
+-    // TODO(pthier): Separate baseline Sparkplug from TF arming and don't
+-    // disarm Sparkplug here.
+-    ResetBytecodeAgeAndOsrState(masm, kInterpreterBytecodeArrayRegister);
++    // Reset the OSR loop nesting depth to disarm back edges.
++    // TODO(pthier): Separate baseline Sparkplug from TF arming and don't disarm
++    // Sparkplug here.
++    __ Strh(wzr, FieldMemOperand(kInterpreterBytecodeArrayRegister,
++                                 BytecodeArray::kOsrUrgencyOffset));
+     Generate_OSREntry(masm, code_obj, Code::kHeaderSize - kHeapObjectTag);
+   } else {
+     __ Add(code_obj, code_obj, Code::kHeaderSize - kHeapObjectTag);
+diff --git a/src/builtins/ia32/builtins-ia32.cc b/src/builtins/ia32/builtins-ia32.cc
+index 4fb618ad903..21f2afa9c67 100644
+--- a/src/builtins/ia32/builtins-ia32.cc
++++ b/src/builtins/ia32/builtins-ia32.cc
+@@ -1036,21 +1036,6 @@ static void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
+   TailCallOptimizedCodeSlot(masm, optimized_code_entry);
+ }
+ 
+-namespace {
+-
+-void ResetBytecodeAgeAndOsrState(MacroAssembler* masm,
+-                                 Register bytecode_array) {
+-  // Reset the bytecode age and OSR state (optimized to a single write).
+-  STATIC_ASSERT(BytecodeArray::kBytecodeAgeOffset ==
+-                BytecodeArray::kOsrUrgencyAndInstallTargetOffset + kUInt16Size);
+-  STATIC_ASSERT(BytecodeArray::kNoAgeBytecodeAge == 0);
+-  __ mov_w(FieldOperand(bytecode_array,
+-                        BytecodeArray::kOsrUrgencyAndInstallTargetOffset),
+-           Immediate(0));
+-}
+-
+-}  // namespace
+-
+ // Generate code for entering a JS function with the interpreter.
+ // On entry to the function the receiver and arguments have been pushed on the
+ // stack left to right.
+@@ -1139,7 +1124,15 @@ void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
+         AbortReason::kFunctionDataShouldBeBytecodeArrayOnInterpreterEntry);
+   }
+ 
+-  ResetBytecodeAgeAndOsrState(masm, kInterpreterBytecodeArrayRegister);
++  // Reset code age and the OSR arming. The OSR field and BytecodeAgeOffset are
++  // 8-bit fields next to each other, so we could just optimize by writing a
++  // 16-bit. These static asserts guard our assumption is valid.
++  STATIC_ASSERT(BytecodeArray::kBytecodeAgeOffset ==
++                BytecodeArray::kOsrUrgencyOffset + kCharSize);
++  STATIC_ASSERT(BytecodeArray::kNoAgeBytecodeAge == 0);
++  __ mov_w(FieldOperand(kInterpreterBytecodeArrayRegister,
++                        BytecodeArray::kOsrUrgencyOffset),
++           Immediate(0));
+ 
+   // Push bytecode array.
+   __ push(kInterpreterBytecodeArrayRegister);
+@@ -1751,7 +1744,14 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+     // the frame, so load it into a register.
+     Register bytecode_array = scratch;
+     __ movd(bytecode_array, saved_bytecode_array);
+-    ResetBytecodeAgeAndOsrState(masm, bytecode_array);
++    // Reset code age and the OSR arming. The OSR field and BytecodeAgeOffset
++    // are 8-bit fields next to each other, so we could just optimize by writing
++    // a 16-bit. These static asserts guard our assumption is valid.
++    STATIC_ASSERT(BytecodeArray::kBytecodeAgeOffset ==
++                  BytecodeArray::kOsrUrgencyOffset + kCharSize);
++    STATIC_ASSERT(BytecodeArray::kNoAgeBytecodeAge == 0);
++    __ mov_w(FieldOperand(bytecode_array, BytecodeArray::kOsrUrgencyOffset),
++             Immediate(0));
+     __ Push(bytecode_array);
+ 
+     // Baseline code frames store the feedback vector where interpreter would
+@@ -4275,9 +4275,12 @@ void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
+   __ pop(kInterpreterAccumulatorRegister);
+ 
+   if (is_osr) {
+-    // TODO(pthier): Separate baseline Sparkplug from TF arming and don't
+-    // disarm Sparkplug here.
+-    ResetBytecodeAgeAndOsrState(masm, kInterpreterBytecodeArrayRegister);
++    // Reset the OSR loop nesting depth to disarm back edges.
++    // TODO(pthier): Separate baseline Sparkplug from TF arming and don't disarm
++    // Sparkplug here.
++    __ mov_w(FieldOperand(kInterpreterBytecodeArrayRegister,
++                          BytecodeArray::kOsrUrgencyOffset),
++             Immediate(0));
+     Generate_OSREntry(masm, code_obj);
+   } else {
+     __ jmp(code_obj);
+diff --git a/src/builtins/x64/builtins-x64.cc b/src/builtins/x64/builtins-x64.cc
+index 37f60dfba2a..6235dcf4f17 100644
+--- a/src/builtins/x64/builtins-x64.cc
++++ b/src/builtins/x64/builtins-x64.cc
+@@ -1144,21 +1144,6 @@ static void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
+                             jump_mode);
+ }
+ 
+-namespace {
+-
+-void ResetBytecodeAgeAndOsrState(MacroAssembler* masm,
+-                                 Register bytecode_array) {
+-  // Reset the bytecode age and OSR state (optimized to a single write).
+-  STATIC_ASSERT(BytecodeArray::kBytecodeAgeOffset ==
+-                BytecodeArray::kOsrUrgencyAndInstallTargetOffset + kUInt16Size);
+-  STATIC_ASSERT(BytecodeArray::kNoAgeBytecodeAge == 0);
+-  __ movl(FieldOperand(bytecode_array,
+-                       BytecodeArray::kOsrUrgencyAndInstallTargetOffset),
+-          Immediate(0));
+-}
+-
+-}  // namespace
+-
+ // Generate code for entering a JS function with the interpreter.
+ // On entry to the function the receiver and arguments have been pushed on the
+ // stack left to right.
+@@ -1234,7 +1219,15 @@ void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
+   __ Push(kJavaScriptCallTargetRegister);    // Callee's JS function.
+   __ Push(kJavaScriptCallArgCountRegister);  // Actual argument count.
+ 
+-  ResetBytecodeAgeAndOsrState(masm, kInterpreterBytecodeArrayRegister);
++  // Reset code age and the OSR arming. The OSR field and BytecodeAgeOffset are
++  // 8-bit fields next to each other, so we could just optimize by writing a
++  // 16-bit. These static asserts guard our assumption is valid.
++  STATIC_ASSERT(BytecodeArray::kBytecodeAgeOffset ==
++                BytecodeArray::kOsrUrgencyOffset + kCharSize);
++  STATIC_ASSERT(BytecodeArray::kNoAgeBytecodeAge == 0);
++  __ movw(FieldOperand(kInterpreterBytecodeArrayRegister,
++                       BytecodeArray::kOsrUrgencyOffset),
++          Immediate(0));
+ 
+   // Load initial bytecode offset.
+   __ Move(kInterpreterBytecodeOffsetRegister,
+@@ -1740,7 +1733,15 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+       // onto the frame, so load it into a register.
+       Register bytecode_array = descriptor.GetRegisterParameter(
+           BaselineOutOfLinePrologueDescriptor::kInterpreterBytecodeArray);
+-      ResetBytecodeAgeAndOsrState(masm, bytecode_array);
++
++      // Reset code age and the OSR arming. The OSR field and BytecodeAgeOffset
++      // are 8-bit fields next to each other, so we could just optimize by
++      // writing a 16-bit. These static asserts guard our assumption is valid.
++      STATIC_ASSERT(BytecodeArray::kBytecodeAgeOffset ==
++                    BytecodeArray::kOsrUrgencyOffset + kCharSize);
++      STATIC_ASSERT(BytecodeArray::kNoAgeBytecodeAge == 0);
++      __ movw(FieldOperand(bytecode_array, BytecodeArray::kOsrUrgencyOffset),
++              Immediate(0));
+       __ Push(bytecode_array);
+ 
+       // Baseline code frames store the feedback vector where interpreter would
+@@ -2725,26 +2726,21 @@ void Generate_OSREntry(MacroAssembler* masm, Register entry_address) {
+   __ ret(0);
+ }
+ 
+-enum class OsrSourceTier {
+-  kInterpreter,
+-  kBaseline,
+-};
+-
+-void OnStackReplacement(MacroAssembler* masm, OsrSourceTier source) {
++void OnStackReplacement(MacroAssembler* masm, bool is_interpreter) {
+   {
+     FrameScope scope(masm, StackFrame::INTERNAL);
+     __ CallRuntime(Runtime::kCompileOptimizedOSR);
+   }
+ 
+-  Label jump_to_returned_code;
++  Label skip;
+   // If the code object is null, just return to the caller.
+   __ testq(rax, rax);
+-  __ j(not_equal, &jump_to_returned_code, Label::kNear);
++  __ j(not_equal, &skip, Label::kNear);
+   __ ret(0);
+ 
+-  __ bind(&jump_to_returned_code);
++  __ bind(&skip);
+ 
+-  if (source == OsrSourceTier::kInterpreter) {
++  if (is_interpreter) {
+     // Drop the handler frame that is be sitting on top of the actual
+     // JavaScript frame. This is the case then OSR is triggered from bytecode.
+     __ leave();
+@@ -2772,13 +2768,13 @@ void OnStackReplacement(MacroAssembler* masm, OsrSourceTier source) {
+ }  // namespace
+ 
+ void Builtins::Generate_InterpreterOnStackReplacement(MacroAssembler* masm) {
+-  OnStackReplacement(masm, OsrSourceTier::kInterpreter);
++  return OnStackReplacement(masm, true);
+ }
+ 
+ void Builtins::Generate_BaselineOnStackReplacement(MacroAssembler* masm) {
+   __ movq(kContextRegister,
+           MemOperand(rbp, BaselineFrameConstants::kContextOffset));
+-  OnStackReplacement(masm, OsrSourceTier::kBaseline);
++  return OnStackReplacement(masm, false);
+ }
+ 
+ #if V8_ENABLE_WEBASSEMBLY
+@@ -5128,8 +5124,12 @@ void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
+   __ popq(kInterpreterAccumulatorRegister);
+ 
+   if (is_osr) {
+-    // TODO(pthier): Separate Sparkplug and Turbofan OSR states.
+-    ResetBytecodeAgeAndOsrState(masm, kInterpreterBytecodeArrayRegister);
++    // Reset the OSR loop nesting depth to disarm back edges.
++    // TODO(pthier): Separate baseline Sparkplug from TF arming and don't disarm
++    // Sparkplug here.
++    __ movw(FieldOperand(kInterpreterBytecodeArrayRegister,
++                         BytecodeArray::kOsrUrgencyOffset),
++            Immediate(0));
+     Generate_OSREntry(masm, code_obj);
+   } else {
+     __ jmp(code_obj);
+diff --git a/src/codegen/compiler.cc b/src/codegen/compiler.cc
+index 69649788d0b..4629436310f 100644
+--- a/src/codegen/compiler.cc
++++ b/src/codegen/compiler.cc
+@@ -3363,7 +3363,7 @@ MaybeHandle<CodeT> Compiler::CompileOptimizedOSR(Isolate* isolate,
+ 
+   // -- Alright, decided to proceed. --
+ 
+-  // Disarm all back edges, i.e. reset the OSR urgency and install target.
++  // Disarm all back edges, i.e. reset the OSR urgency.
+   //
+   // Note that the bytecode array active on the stack might be different from
+   // the one installed on the function (e.g. patched by debugger). This however
+@@ -3371,7 +3371,7 @@ MaybeHandle<CodeT> Compiler::CompileOptimizedOSR(Isolate* isolate,
+   // BytecodeOffset representing the entry point will be valid for any copy of
+   // the bytecode.
+   Handle<BytecodeArray> bytecode(frame->GetBytecodeArray(), isolate);
+-  bytecode->reset_osr_urgency_and_install_target();
++  bytecode->reset_osr_urgency();
+ 
+   CompilerTracer::TraceOptimizeOSR(isolate, function, osr_offset, mode);
+   MaybeHandle<CodeT> result = GetOrCompileOptimized(
+@@ -3435,12 +3435,9 @@ bool Compiler::FinalizeTurbofanCompilationJob(TurbofanCompilationJob* job,
+         OptimizedCodeCache::Insert(compilation_info);
+         CompilerTracer::TraceCompletedJob(isolate, compilation_info);
+         if (IsOSR(osr_offset)) {
+-          if (FLAG_trace_osr) {
+-            PrintF(CodeTracer::Scope{isolate->GetCodeTracer()}.file(),
+-                   "[OSR - requesting install. function: %s, osr offset: %d]\n",
+-                   function->DebugNameCStr().get(), osr_offset.ToInt());
+-          }
+-          shared->GetBytecodeArray(isolate).set_osr_install_target(osr_offset);
++          // TODO(jgruber): Implement a targeted install request for the
++          // specific osr_offset.
++          shared->GetBytecodeArray(isolate).RequestOsrAtNextOpportunity();
+         } else {
+           function->set_code(*compilation_info->code(), kReleaseStore);
+         }
+diff --git a/src/compiler/code-assembler.h b/src/compiler/code-assembler.h
+index 5d461fd9847..97231eecd93 100644
+--- a/src/compiler/code-assembler.h
++++ b/src/compiler/code-assembler.h
+@@ -1086,20 +1086,6 @@ class V8_EXPORT_PRIVATE CodeAssembler {
+   TNode<Word32T> Word32Shr(TNode<Word32T> value, int shift);
+   TNode<Word32T> Word32Sar(TNode<Word32T> value, int shift);
+ 
+-  // Convenience overloads.
+-  TNode<Int32T> Int32Sub(TNode<Int32T> left, int right) {
+-    return Int32Sub(left, Int32Constant(right));
+-  }
+-  TNode<Word32T> Word32And(TNode<Word32T> left, int right) {
+-    return Word32And(left, Int32Constant(right));
+-  }
+-  TNode<Int32T> Word32Shl(TNode<Int32T> left, int right) {
+-    return Word32Shl(left, Int32Constant(right));
+-  }
+-  TNode<BoolT> Word32Equal(TNode<Word32T> left, int right) {
+-    return Word32Equal(left, Int32Constant(right));
+-  }
+-
+ // Unary
+ #define DECLARE_CODE_ASSEMBLER_UNARY_OP(name, ResType, ArgType) \
+   TNode<ResType> name(TNode<ArgType> a);
+diff --git a/src/heap/factory-base.cc b/src/heap/factory-base.cc
+index 781a0bef384..92500c29bb1 100644
+--- a/src/heap/factory-base.cc
++++ b/src/heap/factory-base.cc
+@@ -247,7 +247,7 @@ Handle<BytecodeArray> FactoryBase<Impl>::NewBytecodeArray(
+   instance.set_parameter_count(parameter_count);
+   instance.set_incoming_new_target_or_generator_register(
+       interpreter::Register::invalid_value());
+-  instance.reset_osr_urgency_and_install_target();
++  instance.reset_osr_urgency();
+   instance.set_bytecode_age(BytecodeArray::kNoAgeBytecodeAge);
+   instance.set_constant_pool(*constant_pool);
+   instance.set_handler_table(read_only_roots().empty_byte_array(),
+diff --git a/src/interpreter/interpreter-assembler.cc b/src/interpreter/interpreter-assembler.cc
+index 415db8cb64c..05c4c41c464 100644
+--- a/src/interpreter/interpreter-assembler.cc
++++ b/src/interpreter/interpreter-assembler.cc
+@@ -1307,18 +1307,16 @@ void InterpreterAssembler::UpdateInterruptBudgetOnReturn() {
+   // length of the back-edge, so we just have to correct for the non-zero offset
+   // of the first bytecode.
+ 
++  const int kFirstBytecodeOffset = BytecodeArray::kHeaderSize - kHeapObjectTag;
+   TNode<Int32T> profiling_weight =
+       Int32Sub(TruncateIntPtrToInt32(BytecodeOffset()),
+                Int32Constant(kFirstBytecodeOffset));
+   UpdateInterruptBudget(profiling_weight, true);
+ }
+ 
+-TNode<Int16T> InterpreterAssembler::LoadOsrUrgencyAndInstallTarget() {
+-  // We're loading a 16-bit field, mask it.
+-  return UncheckedCast<Int16T>(Word32And(
+-      LoadObjectField<Int16T>(BytecodeArrayTaggedPointer(),
+-                              BytecodeArray::kOsrUrgencyAndInstallTargetOffset),
+-      0xFFFF));
++TNode<Int8T> InterpreterAssembler::LoadOsrUrgency() {
++  return LoadObjectField<Int8T>(BytecodeArrayTaggedPointer(),
++                                BytecodeArray::kOsrUrgencyOffset);
+ }
+ 
+ void InterpreterAssembler::Abort(AbortReason abort_reason) {
+diff --git a/src/interpreter/interpreter-assembler.h b/src/interpreter/interpreter-assembler.h
+index 6f17fadd430..9936d04d019 100644
+--- a/src/interpreter/interpreter-assembler.h
++++ b/src/interpreter/interpreter-assembler.h
+@@ -234,8 +234,8 @@ class V8_EXPORT_PRIVATE InterpreterAssembler : public CodeStubAssembler {
+   // Updates the profiler interrupt budget for a return.
+   void UpdateInterruptBudgetOnReturn();
+ 
+-  // Returns the OSR urgency and install target from the bytecode header.
+-  TNode<Int16T> LoadOsrUrgencyAndInstallTarget();
++  // Returns the OSR urgency from the bytecode header.
++  TNode<Int8T> LoadOsrUrgency();
+ 
+   // Dispatch to the bytecode.
+   void Dispatch();
+@@ -266,12 +266,6 @@ class V8_EXPORT_PRIVATE InterpreterAssembler : public CodeStubAssembler {
+   // Perform OnStackReplacement.
+   void OnStackReplacement(TNode<Context> context, TNode<IntPtrT> relative_jump);
+ 
+-  // The BytecodeOffset() is the offset from the ByteCodeArray pointer; to
+-  // translate into runtime `BytecodeOffset` (defined in utils.h as the offset
+-  // from the start of the bytecode section), this constant has to be applied.
+-  static constexpr int kFirstBytecodeOffset =
+-      BytecodeArray::kHeaderSize - kHeapObjectTag;
+-
+   // Returns the offset from the BytecodeArrayPointer of the current bytecode.
+   TNode<IntPtrT> BytecodeOffset();
+ 
+diff --git a/src/interpreter/interpreter-generator.cc b/src/interpreter/interpreter-generator.cc
+index e0c35ac2c9a..2de47febe69 100644
+--- a/src/interpreter/interpreter-generator.cc
++++ b/src/interpreter/interpreter-generator.cc
+@@ -2166,50 +2166,26 @@ IGNITION_HANDLER(JumpIfJSReceiverConstant, InterpreterAssembler) {
+ // JumpLoop <imm> <loop_depth>
+ //
+ // Jump by the number of bytes represented by the immediate operand |imm|. Also
+-// performs a loop nesting check, a stack check, and potentially triggers OSR.
++// performs a loop nesting check, a stack check, and potentially triggers OSR
++// in case `loop_depth < osr_urgency`.
+ IGNITION_HANDLER(JumpLoop, InterpreterAssembler) {
+   TNode<IntPtrT> relative_jump = Signed(BytecodeOperandUImmWord(0));
+   TNode<Int32T> loop_depth = BytecodeOperandImm(1);
+-  TNode<Int16T> osr_urgency_and_install_target =
+-      LoadOsrUrgencyAndInstallTarget();
++  TNode<Int8T> osr_urgency = LoadOsrUrgency();
+   TNode<Context> context = GetContext();
+ 
+-  // OSR requests can be triggered either through urgency (when > the current
+-  // loop depth), or an explicit install target (= the lower bits of the
+-  // targeted bytecode offset).
+-  Label ok(this), maybe_osr(this, Label::kDeferred);
+-  Branch(Int32GreaterThanOrEqual(loop_depth, osr_urgency_and_install_target),
+-         &ok, &maybe_osr);
++  // Check if OSR points at the given {loop_depth} are armed by comparing it to
++  // the current {osr_urgency} loaded from the header of the BytecodeArray.
++  Label ok(this), osr_armed(this, Label::kDeferred);
++  TNode<BoolT> condition = Int32GreaterThanOrEqual(loop_depth, osr_urgency);
++  Branch(condition, &ok, &osr_armed);
+ 
+   BIND(&ok);
+   // The backward jump can trigger a budget interrupt, which can handle stack
+   // interrupts, so we don't need to explicitly handle them here.
+   JumpBackward(relative_jump);
+ 
+-  BIND(&maybe_osr);
+-  Label osr(this);
+-  // OSR based on urgency, i.e. is the OSR urgency greater than the current
+-  // loop depth?
+-  STATIC_ASSERT(BytecodeArray::OsrUrgencyBits::kShift == 0);
+-  TNode<Word32T> osr_urgency = Word32And(osr_urgency_and_install_target,
+-                                         BytecodeArray::OsrUrgencyBits::kMask);
+-  GotoIf(Int32GreaterThan(osr_urgency, loop_depth), &osr);
+-
+-  // OSR based on the install target offset, i.e. does the current bytecode
+-  // offset match the install target offset?
+-  //
+-  //  if (((offset << kShift) & kMask) == (target & kMask)) { ... }
+-  static constexpr int kShift = BytecodeArray::OsrInstallTargetBits::kShift;
+-  static constexpr int kMask = BytecodeArray::OsrInstallTargetBits::kMask;
+-  // Note: We OR in 1 to avoid 0 offsets, see Code::OsrInstallTargetFor.
+-  TNode<Word32T> actual = Word32Or(
+-      Int32Sub(TruncateIntPtrToInt32(BytecodeOffset()), kFirstBytecodeOffset),
+-      Int32Constant(1));
+-  actual = Word32And(Word32Shl(UncheckedCast<Int32T>(actual), kShift), kMask);
+-  TNode<Word32T> expected = Word32And(osr_urgency_and_install_target, kMask);
+-  Branch(Word32Equal(actual, expected), &osr, &ok);
+-
+-  BIND(&osr);
++  BIND(&osr_armed);
+   OnStackReplacement(context, relative_jump);
+ }
+ 
+diff --git a/src/objects/code-inl.h b/src/objects/code-inl.h
+index 6e038cd0798..25663c6602a 100644
+--- a/src/objects/code-inl.h
++++ b/src/objects/code-inl.h
+@@ -1188,14 +1188,13 @@ void BytecodeArray::set_incoming_new_target_or_generator_register(
+ }
+ 
+ int BytecodeArray::osr_urgency() const {
+-  return OsrUrgencyBits::decode(osr_urgency_and_install_target());
++  return ACQUIRE_READ_INT8_FIELD(*this, kOsrUrgencyOffset);
+ }
+ 
+ void BytecodeArray::set_osr_urgency(int urgency) {
+   DCHECK(0 <= urgency && urgency <= BytecodeArray::kMaxOsrUrgency);
+-  STATIC_ASSERT(BytecodeArray::kMaxOsrUrgency <= OsrUrgencyBits::kMax);
+-  uint32_t value = osr_urgency_and_install_target();
+-  set_osr_urgency_and_install_target(OsrUrgencyBits::update(value, urgency));
++  STATIC_ASSERT(BytecodeArray::kMaxOsrUrgency < kMaxInt8);
++  RELEASE_WRITE_INT8_FIELD(*this, kOsrUrgencyOffset, urgency);
+ }
+ 
+ BytecodeArray::Age BytecodeArray::bytecode_age() const {
+@@ -1209,27 +1208,6 @@ void BytecodeArray::RequestOsrAtNextOpportunity() {
+   set_osr_urgency(kMaxOsrUrgency);
+ }
+ 
+-int BytecodeArray::osr_install_target() {
+-  return OsrInstallTargetBits::decode(osr_urgency_and_install_target());
+-}
+-
+-void BytecodeArray::set_osr_install_target(BytecodeOffset jump_loop_offset) {
+-  DCHECK_LE(jump_loop_offset.ToInt(), length());
+-  set_osr_urgency_and_install_target(OsrInstallTargetBits::update(
+-      osr_urgency_and_install_target(), OsrInstallTargetFor(jump_loop_offset)));
+-}
+-
+-void BytecodeArray::reset_osr_install_target() {
+-  uint32_t value = osr_urgency_and_install_target();
+-  set_osr_urgency_and_install_target(
+-      OsrInstallTargetBits::update(value, kNoOsrInstallTarget));
+-}
+-
+-void BytecodeArray::reset_osr_urgency_and_install_target() {
+-  set_osr_urgency_and_install_target(OsrUrgencyBits::encode(0) |
+-                                     OsrInstallTargetBits::encode(0));
+-}
+-
+ void BytecodeArray::set_bytecode_age(BytecodeArray::Age age) {
+   DCHECK_GE(age, kFirstBytecodeAge);
+   DCHECK_LE(age, kLastBytecodeAge);
+diff --git a/src/objects/code.h b/src/objects/code.h
+index f67029314d5..963f213a6ba 100644
+--- a/src/objects/code.h
++++ b/src/objects/code.h
+@@ -952,8 +952,6 @@ DEFINE_OPERATORS_FOR_FLAGS(DependentCode::DependencyGroups)
+ class BytecodeArray
+     : public TorqueGeneratedBytecodeArray<BytecodeArray, FixedArrayBase> {
+  public:
+-  DEFINE_TORQUE_GENERATED_OSRURGENCY_AND_INSTALL_TARGET()
+-
+   enum Age {
+     kNoAgeBytecodeAge = 0,
+     kQuadragenarianBytecodeAge,
+@@ -996,32 +994,11 @@ class BytecodeArray
+   // the function becomes hotter. When the current loop depth is less than the
+   // osr_urgency, JumpLoop calls into runtime to attempt OSR optimization.
+   static constexpr int kMaxOsrUrgency = 6;
+-  STATIC_ASSERT(kMaxOsrUrgency <= OsrUrgencyBits::kMax);
+   inline int osr_urgency() const;
+   inline void set_osr_urgency(int urgency);
+   inline void reset_osr_urgency();
+   inline void RequestOsrAtNextOpportunity();
+ 
+-  // The [osr_install_target] is used upon finishing concurrent OSR
+-  // compilation; instead of bumping the osr_urgency (which would target all
+-  // JumpLoops of appropriate loop_depth), we target a specific JumpLoop at the
+-  // given bytecode offset.
+-  static constexpr int kNoOsrInstallTarget = 0;
+-  static constexpr int OsrInstallTargetFor(BytecodeOffset offset) {
+-    // Any set `osr_install_target` must be non-zero since zero is the 'unset'
+-    // value and is ignored by generated code. For branchless code (both here
+-    // and in generated code), we simply OR in a 1.
+-    STATIC_ASSERT(kNoOsrInstallTarget == 0);
+-    return (offset.ToInt() | 1) &
+-           (OsrInstallTargetBits::kMask >> OsrInstallTargetBits::kShift);
+-  }
+-
+-  inline int osr_install_target();
+-  inline void set_osr_install_target(BytecodeOffset jump_loop_offset);
+-  inline void reset_osr_install_target();
+-
+-  inline void reset_osr_urgency_and_install_target();
+-
+   inline Age bytecode_age() const;
+   inline void set_bytecode_age(Age age);
+ 
+@@ -1040,6 +1017,8 @@ class BytecodeArray
+ 
+   inline int BytecodeArraySize();
+ 
++  inline int raw_instruction_size();
++
+   // Returns the size of bytecode and its metadata. This includes the size of
+   // bytecode, constant pool, source position table, and handler table.
+   inline int SizeIncludingMetadata();
+@@ -1060,9 +1039,9 @@ class BytecodeArray
+   inline void clear_padding();
+ 
+   // InterpreterEntryTrampoline expects these fields to be next to each other
+-  // and writes a 32-bit value to reset them.
+-  STATIC_ASSERT(kBytecodeAgeOffset ==
+-                kOsrUrgencyAndInstallTargetOffset + kUInt16Size);
++  // and writes a 16-bit value to reset them.
++  STATIC_ASSERT(BytecodeArray::kBytecodeAgeOffset ==
++                kOsrUrgencyOffset + kCharSize);
+ 
+   // Maximal memory consumption for a single BytecodeArray.
+   static const int kMaxSize = 512 * MB;
+diff --git a/src/objects/code.tq b/src/objects/code.tq
+index 7fe82f6b75a..aa7bcf47988 100644
+--- a/src/objects/code.tq
++++ b/src/objects/code.tq
+@@ -4,14 +4,6 @@
+ 
+ type DependentCode extends WeakFixedArray;
+ 
+-bitfield struct OSRUrgencyAndInstallTarget extends uint16 {
+-  // The layout is chosen s.t. urgency and the install target offset can be
+-  // loaded with a single 16-bit load (i.e. no masking required).
+-  osr_urgency: uint32: 3 bit;
+-  // The 13 LSB of the install target bytecode offset.
+-  osr_install_target: uint32: 13 bit;
+-}
+-
+ extern class BytecodeArray extends FixedArrayBase {
+   // TODO(v8:8983): bytecode array object sizes vary based on their contents.
+   constant_pool: FixedArray;
+@@ -30,8 +22,10 @@ extern class BytecodeArray extends FixedArrayBase {
+   frame_size: int32;
+   parameter_size: int32;
+   incoming_new_target_or_generator_register: int32;
+-  osr_urgency_and_install_target: OSRUrgencyAndInstallTarget;
+-  bytecode_age: uint16;  // Only 3 bits used.
++  // TODO(jgruber): We only use 3 bits for the urgency; consider folding
++  // into other fields.
++  osr_urgency: int8;
++  bytecode_age: int8;
+ }
+ 
+ extern class CodeDataContainer extends HeapObject;
+diff --git a/src/utils/utils.h b/src/utils/utils.h
+index 6eafcf5466e..77b132b2782 100644
+--- a/src/utils/utils.h
++++ b/src/utils/utils.h
+@@ -491,7 +491,7 @@ V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream& os, FeedbackSlot);
+ class BytecodeOffset {
+  public:
+   explicit constexpr BytecodeOffset(int id) : id_(id) {}
+-  constexpr int ToInt() const { return id_; }
++  int ToInt() const { return id_; }
+ 
+   static constexpr BytecodeOffset None() { return BytecodeOffset(kNoneId); }
+ 
+-- 
+2.35.1
+

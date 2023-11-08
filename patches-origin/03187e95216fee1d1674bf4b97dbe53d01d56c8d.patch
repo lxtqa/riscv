@@ -1,0 +1,347 @@
+From 03187e95216fee1d1674bf4b97dbe53d01d56c8d Mon Sep 17 00:00:00 2001
+From: JianxiaoLuIntel <jianxiao.lu@intel.com>
+Date: Fri, 16 Jun 2023 09:42:25 +0800
+Subject: [PATCH] [x64] Enable jump table switch for builtin
+
+In V8 compiler, there are two methods to implement a 'switch' statement:
+Table Switch and Binary Search Switch. If the amount of cases is large
+and the values are contiguous, the Table Switch is usually better
+choice.
+
+Currently, the jump table will store absolute address of the jump
+target, it's position dependent, so it can not be used in builtins
+functions because their code positions may be changed.
+
+To solve this problem, when compile builtins, we replace the values
+stored in the table from `target_address` to
+`target_address-table_address` and it will become position independent,
+then we can enable Table Switch for builtins as well.
+
+As for the disassembler for such switch table, this CL add a new
+RelocInfo mode: "RELATIVE_SWITCH_TABLE_ENTRY" for recording the position
+of the table entries and the postion of the jump target.
+
+Bug: v8:13710
+
+Change-Id: I2f2ef10d739f9e4419e506ae0e4c164d0cf51309
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4352114
+Commit-Queue: Jianxiao Lu <jianxiao.lu@intel.com>
+Reviewed-by: Jakob Linke <jgruber@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#88474}
+---
+ BUILD.gn                                      |  6 ++++
+ src/codegen/assembler.h                       |  7 ++++
+ src/codegen/macro-assembler-base.h            |  1 +
+ src/codegen/optimized-compilation-info.cc     |  4 +++
+ src/codegen/reloc-info.cc                     |  9 +++--
+ src/codegen/reloc-info.h                      | 10 ++++++
+ src/codegen/x64/assembler-x64.cc              | 10 +++++-
+ src/codegen/x64/assembler-x64.h               |  3 ++
+ .../backend/x64/code-generator-x64.cc         | 35 ++++++++++++++++++-
+ src/diagnostics/disassembler.cc               | 13 +++++++
+ src/objects/code.cc                           |  4 +++
+ 11 files changed, 98 insertions(+), 4 deletions(-)
+
+diff --git a/BUILD.gn b/BUILD.gn
+index d0194c72151..4672af98952 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -408,6 +408,9 @@ declare_args() {
+   # Enable Maglev's graph printer.
+   # Sets -DV8_MAGLEV_GRAPH_PRINTER.
+   v8_enable_maglev_graph_printer = !build_with_chromium
++
++  # Enable jump table switch for built-in.
++  v8_enable_builtin_jump_table_switch = v8_current_cpu == "x64"
+ }
+ 
+ # Derived defaults.
+@@ -1189,6 +1192,9 @@ config("features") {
+   if (v8_enable_maglev_graph_printer) {
+     defines += [ "V8_ENABLE_MAGLEV_GRAPH_PRINTER" ]
+   }
++  if (v8_enable_builtin_jump_table_switch) {
++    defines += [ "V8_ENABLE_BUILTIN_JUMP_TABLE_SWITCH" ]
++  }
+ }
+ 
+ config("toolchain") {
+diff --git a/src/codegen/assembler.h b/src/codegen/assembler.h
+index 73b96407411..bd4fba814b1 100644
+--- a/src/codegen/assembler.h
++++ b/src/codegen/assembler.h
+@@ -453,6 +453,13 @@ class V8_EXPORT_PRIVATE AssemblerBase : public Malloced {
+         !v8_flags.debug_code) {
+       return false;
+     }
++    if (RelocInfo::IsOnlyForDisassembler(rmode)) {
++#ifdef ENABLE_DISASSEMBLER
++      return true;
++#else
++      return false;
++#endif  // ENABLE_DISASSEMBLER
++    }
+     return true;
+   }
+ 
+diff --git a/src/codegen/macro-assembler-base.h b/src/codegen/macro-assembler-base.h
+index a66f594aff6..b51a6847c0e 100644
+--- a/src/codegen/macro-assembler-base.h
++++ b/src/codegen/macro-assembler-base.h
+@@ -48,6 +48,7 @@ class V8_EXPORT_PRIVATE MacroAssemblerBase : public Assembler {
+   void set_abort_hard(bool v) { hard_abort_ = v; }
+ 
+   void set_builtin(Builtin builtin) { maybe_builtin_ = builtin; }
++  Builtin builtin() const { return maybe_builtin_; }
+ 
+   void set_has_frame(bool v) { has_frame_ = v; }
+   bool has_frame() const { return has_frame_; }
+diff --git a/src/codegen/optimized-compilation-info.cc b/src/codegen/optimized-compilation-info.cc
+index bd352d3fc2b..717cf71020a 100644
+--- a/src/codegen/optimized-compilation-info.cc
++++ b/src/codegen/optimized-compilation-info.cc
+@@ -82,6 +82,10 @@ void OptimizedCompilationInfo::ConfigureFlags() {
+       if (v8_flags.turbo_splitting) set_splitting();
+       break;
+     case CodeKind::BUILTIN:
++#ifdef V8_ENABLE_BUILTIN_JUMP_TABLE_SWITCH
++      set_switch_jump_table();
++#endif  // V8_TARGET_ARCH_X64
++      V8_FALLTHROUGH;
+     case CodeKind::FOR_TESTING:
+       if (v8_flags.turbo_splitting) set_splitting();
+       if (v8_flags.enable_allocation_folding) set_allocation_folding();
+diff --git a/src/codegen/reloc-info.cc b/src/codegen/reloc-info.cc
+index 1bbcb36355a..c60f740e128 100644
+--- a/src/codegen/reloc-info.cc
++++ b/src/codegen/reloc-info.cc
+@@ -94,7 +94,8 @@ void RelocInfoWriter::Write(const RelocInfo* rinfo) {
+     } else if (RelocInfo::IsConstPool(rmode) ||
+                RelocInfo::IsVeneerPool(rmode) || RelocInfo::IsDeoptId(rmode) ||
+                RelocInfo::IsDeoptPosition(rmode) ||
+-               RelocInfo::IsDeoptNodeId(rmode)) {
++               RelocInfo::IsDeoptNodeId(rmode) ||
++               RelocInfo::IsRelativeSwitchTableEntry(rmode)) {
+       WriteIntData(static_cast<int>(rinfo->data()));
+     }
+   }
+@@ -161,7 +162,8 @@ void RelocIterator::next() {
+                    RelocInfo::IsVeneerPool(rmode) ||
+                    RelocInfo::IsDeoptId(rmode) ||
+                    RelocInfo::IsDeoptPosition(rmode) ||
+-                   RelocInfo::IsDeoptNodeId(rmode)) {
++                   RelocInfo::IsDeoptNodeId(rmode) ||
++                   RelocInfo::IsRelativeSwitchTableEntry(rmode)) {
+           if (SetMode(rmode)) {
+             AdvanceReadInt();
+             return;
+@@ -325,6 +327,8 @@ const char* RelocInfo::RelocModeName(RelocInfo::Mode rmode) {
+       return "internal reference";
+     case INTERNAL_REFERENCE_ENCODED:
+       return "encoded internal reference";
++    case RELATIVE_SWITCH_TABLE_ENTRY:
++      return "relative switch table entry";
+     case OFF_HEAP_TARGET:
+       return "off heap target";
+     case NEAR_BUILTIN_ENTRY:
+@@ -454,6 +458,7 @@ void RelocInfo::Verify(Isolate* isolate) {
+     case VENEER_POOL:
+     case WASM_CALL:
+     case NO_INFO:
++    case RELATIVE_SWITCH_TABLE_ENTRY:
+       break;
+     case NUMBER_OF_MODES:
+     case PC_JUMP:
+diff --git a/src/codegen/reloc-info.h b/src/codegen/reloc-info.h
+index 035e54be7d3..db29de2964d 100644
+--- a/src/codegen/reloc-info.h
++++ b/src/codegen/reloc-info.h
+@@ -119,6 +119,9 @@ class RelocInfo {
+     EXTERNAL_REFERENCE,  // The address of an external C++ function.
+     INTERNAL_REFERENCE,  // An address inside the same function.
+ 
++    // The relative address (target-table) in the switch table.
++    RELATIVE_SWITCH_TABLE_ENTRY,
++
+     // Encoded internal reference, used only on RISCV64, RISCV32, MIPS64
+     // and PPC.
+     INTERNAL_REFERENCE_ENCODED,
+@@ -225,6 +228,9 @@ class RelocInfo {
+   static constexpr bool IsInternalReference(Mode mode) {
+     return mode == INTERNAL_REFERENCE;
+   }
++  static constexpr bool IsRelativeSwitchTableEntry(Mode mode) {
++    return mode == RELATIVE_SWITCH_TABLE_ENTRY;
++  }
+   static constexpr bool IsInternalReferenceEncoded(Mode mode) {
+     return mode == INTERNAL_REFERENCE_ENCODED;
+   }
+@@ -253,6 +259,10 @@ class RelocInfo {
+ #endif
+   }
+ 
++  static bool IsOnlyForDisassembler(Mode mode) {
++    return mode == RELATIVE_SWITCH_TABLE_ENTRY;
++  }
++
+   static constexpr int ModeMask(Mode mode) { return 1 << mode; }
+ 
+   // Accessors
+diff --git a/src/codegen/x64/assembler-x64.cc b/src/codegen/x64/assembler-x64.cc
+index c2a8597cbd7..ef92bd495df 100644
+--- a/src/codegen/x64/assembler-x64.cc
++++ b/src/codegen/x64/assembler-x64.cc
+@@ -646,7 +646,7 @@ void Assembler::emit_operand(int code, Operand adr) {
+ 
+   // Compute the opcode extension to be encoded in the ModR/M byte.
+   V8_ASSUME(0 <= code && code <= 7);
+-  DCHECK((adr.memory().buf[0] & 0x38) == 0);
++  DCHECK_EQ((adr.memory().buf[0] & 0x38), 0);
+   uint8_t opcode_extension = code << 3;
+ 
+   // Use an optimized routine for copying the 1-6 bytes into the assembler
+@@ -4541,6 +4541,14 @@ void Assembler::dq(Label* label) {
+   }
+ }
+ 
++void Assembler::WriteBuiltinJumpTableEntry(Label* label, const int table_pos) {
++  EnsureSpace ensure_space(this);
++  CHECK(label->is_bound());
++  int32_t value = label->pos() - table_pos;
++  RecordRelocInfo(RelocInfo::RELATIVE_SWITCH_TABLE_ENTRY, label->pos());
++  emitl(value);
++}
++
+ // Relocation information implementations.
+ 
+ void Assembler::RecordRelocInfo(RelocInfo::Mode rmode, intptr_t data) {
+diff --git a/src/codegen/x64/assembler-x64.h b/src/codegen/x64/assembler-x64.h
+index c15855610bf..aa67811e3c7 100644
+--- a/src/codegen/x64/assembler-x64.h
++++ b/src/codegen/x64/assembler-x64.h
+@@ -51,6 +51,7 @@
+ #include "src/codegen/x64/register-x64.h"
+ #include "src/codegen/x64/sse-instr.h"
+ #include "src/objects/smi.h"
++
+ #if defined(V8_OS_WIN_X64)
+ #include "src/diagnostics/unwinding-info-win64.h"
+ #endif
+@@ -2196,6 +2197,8 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   void dp(uintptr_t data) { dq(data); }
+   void dq(Label* label);
+ 
++  void WriteBuiltinJumpTableEntry(Label* label, const int table_pos);
++
+   // Patch entries for partial constant pool.
+   void PatchConstPool();
+ 
+diff --git a/src/compiler/backend/x64/code-generator-x64.cc b/src/compiler/backend/x64/code-generator-x64.cc
+index 97c56595d16..ce2c2fdbc1c 100644
+--- a/src/compiler/backend/x64/code-generator-x64.cc
++++ b/src/compiler/backend/x64/code-generator-x64.cc
+@@ -7,6 +7,7 @@
+ #include "src/base/logging.h"
+ #include "src/base/optional.h"
+ #include "src/base/overflowing-math.h"
++#include "src/builtins/builtins.h"
+ #include "src/codegen/assembler.h"
+ #include "src/codegen/cpu-features.h"
+ #include "src/codegen/external-reference.h"
+@@ -6594,7 +6595,22 @@ void CodeGenerator::AssembleArchTableSwitch(Instruction* instr) {
+   __ cmpl(input, Immediate(case_count));
+   __ j(above_equal, GetLabel(i.InputRpo(1)));
+   __ leaq(kScratchRegister, Operand(table));
+-  __ jmp(Operand(kScratchRegister, input, times_8, 0));
++
++  if (V8_UNLIKELY(Builtins::IsBuiltinId(masm_.builtin()))) {
++    // For builtins, the value in the table is 'target_address - table_address'
++    // (4 bytes) Load the value in the table with index.
++    // value = [table +index*4]
++    __ movsxlq(input, Operand(kScratchRegister, input, times_4, 0));
++    // Calculate the absolute address of target:
++    // target = table + (target - table)
++    __ addq(input, kScratchRegister);
++    // Jump to the target.
++    __ jmp(input);
++  } else {
++    // For non builtins, the value in the table is 'target_address' (8 bytes)
++    // jmp [table + index*8]
++    __ jmp(Operand(kScratchRegister, input, times_8, 0));
++  }
+ }
+ 
+ void CodeGenerator::AssembleArchSelect(Instruction* instr,
+@@ -7422,6 +7438,23 @@ void CodeGenerator::AssembleSwap(InstructionOperand* source,
+ }
+ 
+ void CodeGenerator::AssembleJumpTable(Label** targets, size_t target_count) {
++#ifdef V8_ENABLE_BUILTIN_JUMP_TABLE_SWITCH
++  // For builtins, the value in table is `target_address - table_address`.
++  // The reason is that the builtins code position may be changed so the table
++  // value should be position independent.
++  if (V8_UNLIKELY(Builtins::IsBuiltinId(masm_.builtin()))) {
++    int table_pos = __ pc_offset();
++
++    for (size_t index = 0; index < target_count; ++index) {
++      __ WriteBuiltinJumpTableEntry(targets[index], table_pos);
++    }
++    return;
++  }
++
++#endif  // V8_ENABLE_BUILTIN_JUMP_TABLE_SWITCH
++
++  // For non-builtins, the value in table is just the target absolute address,
++  // it's position dependent.
+   for (size_t index = 0; index < target_count; ++index) {
+     __ dq(targets[index]);
+   }
+diff --git a/src/diagnostics/disassembler.cc b/src/diagnostics/disassembler.cc
+index 54b7fe84056..26632e9f78d 100644
+--- a/src/diagnostics/disassembler.cc
++++ b/src/diagnostics/disassembler.cc
+@@ -321,6 +321,19 @@ static int DecodeIt(Isolate* isolate, ExternalReferenceEncoder* ref_encoder,
+                  reinterpret_cast<intptr_t>(ptr),
+                  static_cast<size_t>(ptr - begin));
+         pc += sizeof(ptr);
++#ifdef V8_TARGET_ARCH_X64
++      } else if (!rit.done() &&
++                 rit.rinfo()->pc() == reinterpret_cast<Address>(pc) &&
++                 rit.rinfo()->rmode() ==
++                     RelocInfo::RELATIVE_SWITCH_TABLE_ENTRY) {
++        int target_pc_offset = static_cast<int>(rit.rinfo()->data());
++        uint8_t* ptr = begin + target_pc_offset;
++        SNPrintF(decode_buffer, "%08" V8PRIxPTR "       jump table entry %4zx",
++                 reinterpret_cast<intptr_t>(ptr),
++                 static_cast<size_t>(target_pc_offset));
++        // We use emitl (4 bytes) for the value in the table.
++        pc += 4;
++#endif  // V8_TARGET_ARCH_X64
+       } else {
+         decode_buffer[0] = '\0';
+         pc += d.InstructionDecode(decode_buffer, pc);
+diff --git a/src/objects/code.cc b/src/objects/code.cc
+index 5cfcbdbf887..79a508d7d60 100644
+--- a/src/objects/code.cc
++++ b/src/objects/code.cc
+@@ -174,6 +174,7 @@ bool Code::IsIsolateIndependent(Isolate* isolate) {
+                  RelocInfo::ModeMask(RelocInfo::FULL_EMBEDDED_OBJECT) |
+                  RelocInfo::ModeMask(RelocInfo::EXTERNAL_REFERENCE) |
+                  RelocInfo::ModeMask(RelocInfo::INTERNAL_REFERENCE) |
++                 RelocInfo::ModeMask(RelocInfo::RELATIVE_SWITCH_TABLE_ENTRY) |
+                  RelocInfo::ModeMask(RelocInfo::INTERNAL_REFERENCE_ENCODED) |
+                  RelocInfo::ModeMask(RelocInfo::NEAR_BUILTIN_ENTRY) |
+                  RelocInfo::ModeMask(RelocInfo::WASM_CALL) |
+@@ -200,6 +201,9 @@ bool Code::IsIsolateIndependent(Isolate* isolate) {
+       if (Builtins::IsIsolateIndependentBuiltin(target)) {
+         continue;
+       }
++    } else if (RelocInfo::IsRelativeSwitchTableEntry(it.rinfo()->rmode())) {
++      CHECK(is_builtin());
++      continue;
+     }
+     return false;
+   }
+-- 
+2.35.1
+

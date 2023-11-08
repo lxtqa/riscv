@@ -1,0 +1,49 @@
+From 2d134cf555625e320c67f265f0b79ffa137b28c8 Mon Sep 17 00:00:00 2001
+From: McKnight22 <tao.wang.2261@gmail.com>
+Date: Mon, 15 May 2023 17:44:54 +0800
+Subject: [PATCH] [riscv64][android] apply flush_icache system call number
+ directly
+
+Substitue traditional form SYS_<name> SYS_riscv_flush_icache with Linux
+kernel header file defined macros __NR_<name> __NR_riscv_flush_icache.
+It brings the compatibility to satisfy build toolchain for riscv64
+android case (android_ndk&clang) and other legacy cases.
+
+            Wang Chen <wangchen20@iscas.ac.cn>
+
+co-authors: McKnight22 <tao.wang.2261@gmail.com>
+Change-Id: I89d25b99544016a1447791e9f37e11e155a29604
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4531055
+Commit-Queue: Yahan Lu <yahan@iscas.ac.cn>
+Reviewed-by: Ji Qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#87721}
+---
+ src/codegen/riscv/cpu-riscv.cc | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/src/codegen/riscv/cpu-riscv.cc b/src/codegen/riscv/cpu-riscv.cc
+index 205e13fa988..613c54439a5 100644
+--- a/src/codegen/riscv/cpu-riscv.cc
++++ b/src/codegen/riscv/cpu-riscv.cc
+@@ -15,12 +15,16 @@ namespace internal {
+ void CpuFeatures::FlushICache(void* start, size_t size) {
+ #if !defined(USE_SIMULATOR)
+   char* end = reinterpret_cast<char*>(start) + size;
+-  // The definition of this syscall is
++  // The definition of this syscall is equal to
+   // SYSCALL_DEFINE3(riscv_flush_icache, uintptr_t, start,
+   //                 uintptr_t, end, uintptr_t, flags)
+   // The flag here is set to be SYS_RISCV_FLUSH_ICACHE_LOCAL, which is
+   // defined as 1 in the Linux kernel.
+-  syscall(SYS_riscv_flush_icache, start, end, 1);
++  // SYS_riscv_flush_icache is a symbolic constant used in user-space code to
++  // identify the flush_icache system call, while __NR_riscv_flush_icache is the
++  // corresponding system call number used in the kernel to dispatch the system
++  // call.
++  syscall(__NR_riscv_flush_icache, start, end, 1);
+ #endif  // !USE_SIMULATOR.
+ }
+ 
+-- 
+2.35.1
+

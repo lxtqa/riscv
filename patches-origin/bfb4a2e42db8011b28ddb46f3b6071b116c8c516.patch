@@ -1,0 +1,99 @@
+From bfb4a2e42db8011b28ddb46f3b6071b116c8c516 Mon Sep 17 00:00:00 2001
+From: jingpeiyang <jingpeiyang@eswincomputing.com>
+Date: Wed, 26 Apr 2023 17:10:47 +0800
+Subject: [PATCH] [riscv][assembler] Make UseScratchRegisterScope inlinable
+
+Port commit 3ea267f2758c3e35f24ac897f62f43b4993129cc
+Original commit message:
+This moves the constructor and destructor of {UseScratchRegisterScope}
+to the header file in order to make it trivially inlinable.
+
+Also the {Acquire} method is called a lot, so move it as well.
+
+```
+Original commit caused by commit 1f24e64c78b0baf6854484d341d0f57921e30c03, this CL fix dst register may alias src3, it seems that riscv does not need to do this.
+
+Signed-off-by: jingpeiyang <jingpeiyang@eswincomputing.com>
+Change-Id: I342169eb95324dc399333049b8ac43db53d16d03
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4478762
+Reviewed-by: Ji Qiu <qiuji@iscas.ac.cn>
+Commit-Queue: Ji Qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#87294}
+---
+ src/codegen/riscv/assembler-riscv.cc | 18 ------------------
+ src/codegen/riscv/assembler-riscv.h  | 27 ++++++++++++++++++++++++---
+ 2 files changed, 24 insertions(+), 21 deletions(-)
+
+diff --git a/src/codegen/riscv/assembler-riscv.cc b/src/codegen/riscv/assembler-riscv.cc
+index a9bcf07273a..f0a8ac16d95 100644
+--- a/src/codegen/riscv/assembler-riscv.cc
++++ b/src/codegen/riscv/assembler-riscv.cc
+@@ -1604,24 +1604,6 @@ void Assembler::set_target_value_at(Address pc, uint32_t target,
+ }
+ #endif
+ 
+-UseScratchRegisterScope::UseScratchRegisterScope(Assembler* assembler)
+-    : available_(assembler->GetScratchRegisterList()),
+-      old_available_(*available_) {}
+-
+-UseScratchRegisterScope::~UseScratchRegisterScope() {
+-  *available_ = old_available_;
+-}
+-
+-Register UseScratchRegisterScope::Acquire() {
+-  DCHECK_NOT_NULL(available_);
+-  DCHECK(!available_->is_empty());
+-  int index =
+-      static_cast<int>(base::bits::CountTrailingZeros32(available_->bits()));
+-  *available_ &= RegList::FromBits(~(1U << index));
+-
+-  return Register::from_code(index);
+-}
+-
+ bool UseScratchRegisterScope::hasAvailable() const {
+   return !available_->is_empty();
+ }
+diff --git a/src/codegen/riscv/assembler-riscv.h b/src/codegen/riscv/assembler-riscv.h
+index 0dbeae0eae2..4b97e74ab42 100644
+--- a/src/codegen/riscv/assembler-riscv.h
++++ b/src/codegen/riscv/assembler-riscv.h
+@@ -839,12 +839,33 @@ class EnsureSpace {
+   explicit inline EnsureSpace(Assembler* assembler);
+ };
+ 
++// This scope utility allows scratch registers to be managed safely. The
++// Assembler's GetScratchRegisterList() is used as a pool of scratch
++// registers. These registers can be allocated on demand, and will be returned
++// at the end of the scope.
++//
++// When the scope ends, the Assembler's list will be restored to its original
++// state, even if the list is modified by some other means. Note that this scope
++// can be nested but the destructors need to run in the opposite order as the
++// constructors. We do not have assertions for this.
+ class V8_EXPORT_PRIVATE UseScratchRegisterScope {
+  public:
+-  explicit UseScratchRegisterScope(Assembler* assembler);
+-  ~UseScratchRegisterScope();
++  explicit UseScratchRegisterScope(Assembler* assembler)
++      : available_(assembler->GetScratchRegisterList()),
++        old_available_(*available_) {}
++
++  ~UseScratchRegisterScope() { *available_ = old_available_; }
+ 
+-  Register Acquire();
++  // Take a register from the list and return it.
++  Register Acquire() {
++    DCHECK_NOT_NULL(available_);
++    DCHECK(!available_->is_empty());
++    int index =
++        static_cast<int>(base::bits::CountTrailingZeros32(available_->bits()));
++    *available_ &= RegList::FromBits(~(1U << index));
++
++    return Register::from_code(index);
++  }
+   bool hasAvailable() const;
+   void Include(const RegList& list) { *available_ |= list; }
+   void Exclude(const RegList& list) {
+-- 
+2.35.1
+

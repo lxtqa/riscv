@@ -1,0 +1,2302 @@
+From 62155dbd3cacb167f57739ba80f495ebdcc18ef0 Mon Sep 17 00:00:00 2001
+From: legendecas <legendecas@gmail.com>
+Date: Sat, 26 Feb 2022 02:27:19 +0800
+Subject: [PATCH] [ShadowRealm] ShadowRealm.prototype.evaluate and
+ WrappedFunction
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Bootstrap ShadowRealm.prototype.evaluate, WrappedFunction
+and WrappedFunction.[[Call]].
+
+Bug: v8:11989
+Change-Id: Id380acb71cd5719e783c8f5d741cc4ccf2a93e78
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3432729
+Reviewed-by: Igor Sheludko <ishell@chromium.org>
+Reviewed-by: Tobias Tebbi <tebbi@chromium.org>
+Reviewed-by: Marja Hölttä <marja@chromium.org>
+Reviewed-by: Shu-yu Guo <syg@chromium.org>
+Commit-Queue: Chengzhong Wu <legendecas@gmail.com>
+Cr-Commit-Position: refs/heads/main@{#79293}
+---
+ BUILD.bazel                                   |   1 +
+ BUILD.gn                                      |   1 +
+ src/builtins/arm/builtins-arm.cc              |   6 +
+ src/builtins/arm64/builtins-arm64.cc          |   6 +
+ src/builtins/base.tq                          |   3 +-
+ src/builtins/builtins-definitions.h           |   3 +
+ src/builtins/builtins-shadow-realms.cc        | 179 ++++++++-
+ src/builtins/builtins-shadowrealm-gen.cc      | 186 +++++++++
+ src/builtins/function.tq                      |   6 +-
+ src/builtins/ia32/builtins-ia32.cc            |  12 +-
+ src/builtins/loong64/builtins-loong64.cc      |   6 +
+ src/builtins/mips/builtins-mips.cc            |   6 +
+ src/builtins/mips64/builtins-mips64.cc        |   6 +
+ src/builtins/ppc/builtins-ppc.cc              |   6 +
+ src/builtins/riscv64/builtins-riscv64.cc      |   5 +
+ src/builtins/s390/builtins-s390.cc            |   6 +
+ src/builtins/x64/builtins-x64.cc              |   6 +
+ src/codegen/code-stub-assembler.cc            |  73 +++-
+ src/codegen/code-stub-assembler.h             |   4 +
+ src/common/message-template.h                 |   3 +
+ src/compiler/js-call-reducer.cc               |  12 +-
+ src/compiler/types.cc                         |   3 +
+ src/d8/d8.cc                                  |  16 +-
+ src/diagnostics/objects-debug.cc              |   3 +-
+ src/diagnostics/objects-printer.cc            |   6 +
+ src/heap/factory.cc                           |  27 +-
+ src/heap/factory.h                            |   3 +
+ src/init/bootstrapper.cc                      |  24 +-
+ src/objects/contexts.h                        |   3 +
+ src/objects/js-function-inl.h                 |   3 +-
+ src/objects/js-function.cc                    |   7 +
+ src/objects/js-function.h                     |  32 +-
+ src/objects/js-function.tq                    |  15 +-
+ src/objects/js-objects.cc                     |   7 +
+ src/objects/map.cc                            |   3 +-
+ src/objects/object-list-macros.h              | 375 +++++++++---------
+ src/objects/objects-body-descriptors-inl.h    |   1 +
+ src/objects/objects-inl.h                     |   2 +-
+ src/objects/objects.h                         |   3 +-
+ .../PrivateAccessorAccess.golden              |   8 +-
+ .../PrivateMethodAccess.golden                |   4 +-
+ .../StaticPrivateMethodAccess.golden          |  30 +-
+ test/mjsunit/harmony/shadowrealm-evaluate.js  |  64 +++
+ .../harmony/shadowrealm-wrapped-function.js   |  30 ++
+ test/test262/test262.status                   |  31 --
+ tools/v8heapconst.py                          | 177 +++++----
+ 46 files changed, 1047 insertions(+), 366 deletions(-)
+ create mode 100644 src/builtins/builtins-shadowrealm-gen.cc
+ create mode 100644 test/mjsunit/harmony/shadowrealm-evaluate.js
+ create mode 100644 test/mjsunit/harmony/shadowrealm-wrapped-function.js
+
+diff --git a/BUILD.bazel b/BUILD.bazel
+index 64314952bac..9cd785e274e 100644
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -2783,6 +2783,7 @@ filegroup(
+         "src/builtins/builtins-proxy-gen.h",
+         "src/builtins/builtins-regexp-gen.cc",
+         "src/builtins/builtins-regexp-gen.h",
++        "src/builtins/builtins-shadowrealm-gen.cc",
+         "src/builtins/builtins-sharedarraybuffer-gen.cc",
+         "src/builtins/builtins-string-gen.cc",
+         "src/builtins/builtins-string-gen.h",
+diff --git a/BUILD.gn b/BUILD.gn
+index 159439090f0..11915f40f87 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -2363,6 +2363,7 @@ v8_source_set("v8_initializers") {
+     "src/builtins/builtins-proxy-gen.h",
+     "src/builtins/builtins-regexp-gen.cc",
+     "src/builtins/builtins-regexp-gen.h",
++    "src/builtins/builtins-shadowrealm-gen.cc",
+     "src/builtins/builtins-sharedarraybuffer-gen.cc",
+     "src/builtins/builtins-string-gen.cc",
+     "src/builtins/builtins-string-gen.h",
+diff --git a/src/builtins/arm/builtins-arm.cc b/src/builtins/arm/builtins-arm.cc
+index 60a9410cc29..c388d255082 100644
+--- a/src/builtins/arm/builtins-arm.cc
++++ b/src/builtins/arm/builtins-arm.cc
+@@ -2457,6 +2457,12 @@ void Builtins::Generate_Call(MacroAssembler* masm, ConvertReceiverMode mode) {
+   __ cmp(instance_type, Operand(JS_PROXY_TYPE));
+   __ Jump(BUILTIN_CODE(masm->isolate(), CallProxy), RelocInfo::CODE_TARGET, eq);
+ 
++  // Check if target is a wrapped function and call CallWrappedFunction external
++  // builtin
++  __ cmp(instance_type, Operand(JS_WRAPPED_FUNCTION_TYPE));
++  __ Jump(BUILTIN_CODE(masm->isolate(), CallWrappedFunction),
++          RelocInfo::CODE_TARGET, eq);
++
+   // ES6 section 9.2.1 [[Call]] ( thisArgument, argumentsList)
+   // Check that the function is not a "classConstructor".
+   __ cmp(instance_type, Operand(JS_CLASS_CONSTRUCTOR_TYPE));
+diff --git a/src/builtins/arm64/builtins-arm64.cc b/src/builtins/arm64/builtins-arm64.cc
+index 051644b150d..ce5e5710076 100644
+--- a/src/builtins/arm64/builtins-arm64.cc
++++ b/src/builtins/arm64/builtins-arm64.cc
+@@ -2852,6 +2852,12 @@ void Builtins::Generate_Call(MacroAssembler* masm, ConvertReceiverMode mode) {
+   __ Cmp(instance_type, JS_PROXY_TYPE);
+   __ Jump(BUILTIN_CODE(masm->isolate(), CallProxy), RelocInfo::CODE_TARGET, eq);
+ 
++  // Check if target is a wrapped function and call CallWrappedFunction external
++  // builtin
++  __ Cmp(instance_type, JS_WRAPPED_FUNCTION_TYPE);
++  __ Jump(BUILTIN_CODE(masm->isolate(), CallWrappedFunction),
++          RelocInfo::CODE_TARGET, eq);
++
+   // ES6 section 9.2.1 [[Call]] ( thisArgument, argumentsList)
+   // Check that the function is not a "classConstructor".
+   __ Cmp(instance_type, JS_CLASS_CONSTRUCTOR_TYPE);
+diff --git a/src/builtins/base.tq b/src/builtins/base.tq
+index 7c6ccd0b705..db5534a501c 100644
+--- a/src/builtins/base.tq
++++ b/src/builtins/base.tq
+@@ -258,7 +258,8 @@ type CallableApiObject extends JSObject;
+ // A JSProxy with the callable bit set.
+ type CallableJSProxy extends JSProxy;
+ 
+-type Callable = JSFunction|JSBoundFunction|CallableJSProxy|CallableApiObject;
++type Callable = JSFunction|JSBoundFunction|JSWrappedFunction|CallableJSProxy|
++    CallableApiObject;
+ 
+ type WriteBarrierMode
+     generates 'TNode<Int32T>' constexpr 'WriteBarrierMode';
+diff --git a/src/builtins/builtins-definitions.h b/src/builtins/builtins-definitions.h
+index e322b405d5d..5d9e42cd8b6 100644
+--- a/src/builtins/builtins-definitions.h
++++ b/src/builtins/builtins-definitions.h
+@@ -95,6 +95,8 @@ namespace internal {
+   ASM(CallFunction_ReceiverIsAny, CallTrampoline)                              \
+   /* ES6 section 9.4.1.1 [[Call]] ( thisArgument, argumentsList) */            \
+   ASM(CallBoundFunction, CallTrampoline)                                       \
++  /* #sec-wrapped-function-exotic-objects-call-thisargument-argumentslist */   \
++  TFC(CallWrappedFunction, CallTrampoline)                                     \
+   /* ES6 section 7.3.12 Call(F, V, [argumentsList]) */                         \
+   ASM(Call_ReceiverIsNullOrUndefined, CallTrampoline)                          \
+   ASM(Call_ReceiverIsNotNullOrUndefined, CallTrampoline)                       \
+@@ -874,6 +876,7 @@ namespace internal {
+   CPP(ShadowRealmConstructor)                                                  \
+   CPP(ShadowRealmPrototypeEvaluate)                                            \
+   CPP(ShadowRealmPrototypeImportValue)                                         \
++  TFS(ShadowRealmGetWrappedValue, kCreationContext, kValue)                    \
+                                                                                \
+   /* SharedArrayBuffer */                                                      \
+   CPP(SharedArrayBufferPrototypeGetByteLength)                                 \
+diff --git a/src/builtins/builtins-shadow-realms.cc b/src/builtins/builtins-shadow-realms.cc
+index c61f00bd3bb..b39f570ef80 100644
+--- a/src/builtins/builtins-shadow-realms.cc
++++ b/src/builtins/builtins-shadow-realms.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "src/builtins/builtins-utils-inl.h"
++#include "src/codegen/compiler.h"
+ #include "src/logging/counters.h"
+ #include "src/objects/js-shadow-realms-inl.h"
+ 
+@@ -55,10 +56,186 @@ BUILTIN(ShadowRealmConstructor) {
+   return *O;
+ }
+ 
++namespace {
++
++// https://tc39.es/proposal-shadowrealm/#sec-getwrappedvalue
++MaybeHandle<Object> GetWrappedValue(Isolate* isolate, Handle<Object> value,
++                                    Handle<NativeContext> creation_context,
++                                    Handle<NativeContext> target_context) {
++  // 1. If Type(value) is Object, then
++  if (!value->IsJSReceiver()) {
++    // 2. Return value.
++    return value;
++  }
++  // 1a. If IsCallable(value) is false, throw a TypeError exception.
++  if (!value->IsCallable()) {
++    THROW_NEW_ERROR_RETURN_VALUE(
++        isolate,
++        NewError(Handle<JSFunction>(creation_context->type_error_function(),
++                                    isolate),
++                 MessageTemplate::kNotCallable),
++        {});
++  }
++  // 1b. Return ? WrappedFunctionCreate(callerRealm, value).
++
++  // WrappedFunctionCreate
++  // https://tc39.es/proposal-shadowrealm/#sec-wrappedfunctioncreate
++
++  // The intermediate wrapped functions are not user-visible. And calling a
++  // wrapped function won't cause a side effect in the creation realm.
++  // Unwrap here to avoid nested unwrapping at the call site.
++  if (value->IsJSWrappedFunction()) {
++    Handle<JSWrappedFunction> target_wrapped =
++        Handle<JSWrappedFunction>::cast(value);
++    value = Handle<Object>(target_wrapped->wrapped_target_function(), isolate);
++  }
++
++  // 1. Let internalSlotsList be the internal slots listed in Table 2, plus
++  // [[Prototype]] and [[Extensible]].
++  // 2. Let wrapped be ! MakeBasicObject(internalSlotsList).
++  // 3. Set wrapped.[[Prototype]] to
++  // callerRealm.[[Intrinsics]].[[%Function.prototype%]].
++  // 4. Set wrapped.[[Call]] as described in 2.1.
++  // 5. Set wrapped.[[WrappedTargetFunction]] to Target.
++  // 6. Set wrapped.[[Realm]] to callerRealm.
++  // 7. Let result be CopyNameAndLength(wrapped, Target, "wrapped").
++  // 8. If result is an Abrupt Completion, throw a TypeError exception.
++  Handle<JSWrappedFunction> wrapped =
++      isolate->factory()->NewJSWrappedFunction(creation_context, value);
++
++  // 9. Return wrapped.
++  return wrapped;
++}
++
++}  // namespace
++
+ // https://tc39.es/proposal-shadowrealm/#sec-shadowrealm.prototype.evaluate
+ BUILTIN(ShadowRealmPrototypeEvaluate) {
+   HandleScope scope(isolate);
+-  return ReadOnlyRoots(isolate).undefined_value();
++
++  Handle<Object> source_text = args.atOrUndefined(isolate, 1);
++  // 1. Let O be this value.
++  Handle<Object> receiver = args.receiver();
++
++  Factory* factory = isolate->factory();
++
++  // 2. Perform ? ValidateShadowRealmObject(O).
++  if (!receiver->IsJSShadowRealm()) {
++    THROW_NEW_ERROR_RETURN_FAILURE(
++        isolate, NewTypeError(MessageTemplate::kIncompatibleMethodReceiver));
++  }
++  Handle<JSShadowRealm> shadow_realm = Handle<JSShadowRealm>::cast(receiver);
++
++  // 3. If Type(sourceText) is not String, throw a TypeError exception.
++  if (!source_text->IsString()) {
++    THROW_NEW_ERROR_RETURN_FAILURE(
++        isolate,
++        NewTypeError(MessageTemplate::kInvalidShadowRealmEvaluateSourceText));
++  }
++
++  // 4. Let callerRealm be the current Realm Record.
++  Handle<NativeContext> caller_context = isolate->native_context();
++
++  // 5. Let evalRealm be O.[[ShadowRealm]].
++  Handle<NativeContext> eval_context =
++      Handle<NativeContext>(shadow_realm->native_context(), isolate);
++  // 6. Return ? PerformShadowRealmEval(sourceText, callerRealm, evalRealm).
++
++  // PerformShadowRealmEval
++  // https://tc39.es/proposal-shadowrealm/#sec-performshadowrealmeval
++  // 1. Perform ? HostEnsureCanCompileStrings(callerRealm, evalRealm).
++  // Run embedder pre-checks before executing the source code.
++  MaybeHandle<String> validated_source;
++  bool unhandled_object;
++  std::tie(validated_source, unhandled_object) =
++      Compiler::ValidateDynamicCompilationSource(isolate, eval_context,
++                                                 source_text);
++  if (unhandled_object) {
++    THROW_NEW_ERROR_RETURN_FAILURE(
++        isolate,
++        NewTypeError(MessageTemplate::kInvalidShadowRealmEvaluateSourceText));
++  }
++
++  Handle<JSObject> eval_global_proxy(eval_context->global_proxy(), isolate);
++  MaybeHandle<Object> result;
++  bool is_parse_failed = false;
++  {
++    // 8. If runningContext is not already suspended, suspend runningContext.
++    // 9. Let evalContext be a new ECMAScript code execution context.
++    // 10. Set evalContext's Function to null.
++    // 11. Set evalContext's Realm to evalRealm.
++    // 12. Set evalContext's ScriptOrModule to null.
++    // 13. Set evalContext's VariableEnvironment to varEnv.
++    // 14. Set evalContext's LexicalEnvironment to lexEnv.
++    // 15. Push evalContext onto the execution context stack; evalContext is now
++    // the running execution context.
++    SaveAndSwitchContext save(isolate, *eval_context);
++
++    // 2. Perform the following substeps in an implementation-defined order,
++    // possibly interleaving parsing and error detection:
++    // 2a. Let script be ParseText(! StringToCodePoints(sourceText), Script).
++    // 2b. If script is a List of errors, throw a SyntaxError exception.
++    // 2c. If script Contains ScriptBody is false, return undefined.
++    // 2d. Let body be the ScriptBody of script.
++    // 2e. If body Contains NewTarget is true, throw a SyntaxError
++    // exception.
++    // 2f. If body Contains SuperProperty is true, throw a SyntaxError
++    // exception.
++    // 2g. If body Contains SuperCall is true, throw a SyntaxError exception.
++    // 3. Let strictEval be IsStrict of script.
++    // 4. Let runningContext be the running execution context.
++    // 5. Let lexEnv be NewDeclarativeEnvironment(evalRealm.[[GlobalEnv]]).
++    // 6. Let varEnv be evalRealm.[[GlobalEnv]].
++    // 7. If strictEval is true, set varEnv to lexEnv.
++    Handle<JSFunction> function;
++    MaybeHandle<JSFunction> maybe_function =
++        Compiler::GetFunctionFromValidatedString(eval_context, validated_source,
++                                                 NO_PARSE_RESTRICTION,
++                                                 kNoSourcePosition);
++    if (maybe_function.is_null()) {
++      is_parse_failed = true;
++    } else {
++      function = maybe_function.ToHandleChecked();
++
++      // 16. Let result be EvalDeclarationInstantiation(body, varEnv,
++      // lexEnv, null, strictEval).
++      // 17. If result.[[Type]] is normal, then
++      // 20a. Set result to the result of evaluating body.
++      // 18. If result.[[Type]] is normal and result.[[Value]] is empty, then
++      // 21a. Set result to NormalCompletion(undefined).
++      result =
++          Execution::Call(isolate, function, eval_global_proxy, 0, nullptr);
++
++      // 19. Suspend evalContext and remove it from the execution context stack.
++      // 20. Resume the context that is now on the top of the execution context
++      // stack as the running execution context. Done by the scope.
++    }
++  }
++
++  if (result.is_null()) {
++    Handle<Object> pending_exception =
++        Handle<Object>(isolate->pending_exception(), isolate);
++    isolate->clear_pending_exception();
++    if (is_parse_failed) {
++      Handle<JSObject> error_object = Handle<JSObject>::cast(pending_exception);
++      Handle<String> message = Handle<String>::cast(JSReceiver::GetDataProperty(
++          isolate, error_object, factory->message_string()));
++
++      return isolate->ReThrow(
++          *factory->NewError(isolate->syntax_error_function(), message));
++    }
++    // 21. If result.[[Type]] is not normal, throw a TypeError exception.
++    // TODO(v8:11989): provide a non-observable inspection.
++    THROW_NEW_ERROR_RETURN_FAILURE(
++        isolate, NewTypeError(MessageTemplate::kCallShadowRealmFunctionThrown));
++  }
++  // 22. Return ? GetWrappedValue(callerRealm, result.[[Value]]).
++  Handle<Object> wrapped_result;
++  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
++      isolate, wrapped_result,
++      GetWrappedValue(isolate, result.ToHandleChecked(), caller_context,
++                      eval_context));
++  return *wrapped_result;
+ }
+ 
+ // https://tc39.es/proposal-shadowrealm/#sec-shadowrealm.prototype.importvalue
+diff --git a/src/builtins/builtins-shadowrealm-gen.cc b/src/builtins/builtins-shadowrealm-gen.cc
+new file mode 100644
+index 00000000000..03bc854c9c1
+--- /dev/null
++++ b/src/builtins/builtins-shadowrealm-gen.cc
+@@ -0,0 +1,186 @@
++// Copyright 2022 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "src/builtins/builtins-utils-gen.h"
++#include "src/builtins/builtins.h"
++#include "src/codegen/code-stub-assembler.h"
++
++namespace v8 {
++namespace internal {
++
++class ShadowRealmBuiltinsAssembler : public CodeStubAssembler {
++ public:
++  explicit ShadowRealmBuiltinsAssembler(compiler::CodeAssemblerState* state)
++      : CodeStubAssembler(state) {}
++
++ protected:
++  TNode<JSObject> AllocateJSWrappedFunction(TNode<Context> context);
++};
++
++TNode<JSObject> ShadowRealmBuiltinsAssembler::AllocateJSWrappedFunction(
++    TNode<Context> context) {
++  TNode<NativeContext> native_context = LoadNativeContext(context);
++  TNode<Map> map = CAST(
++      LoadContextElement(native_context, Context::WRAPPED_FUNCTION_MAP_INDEX));
++  return AllocateJSObjectFromMap(map);
++}
++
++// https://tc39.es/proposal-shadowrealm/#sec-getwrappedvalue
++TF_BUILTIN(ShadowRealmGetWrappedValue, ShadowRealmBuiltinsAssembler) {
++  auto context = Parameter<Context>(Descriptor::kContext);
++  auto creation_context = Parameter<Context>(Descriptor::kCreationContext);
++  auto value = Parameter<Object>(Descriptor::kValue);
++
++  Label if_primitive(this), if_callable(this), unwrap(this), wrap(this),
++      bailout(this, Label::kDeferred);
++
++  // 2. Return value.
++  GotoIf(TaggedIsSmi(value), &if_primitive);
++  GotoIfNot(IsJSReceiver(CAST(value)), &if_primitive);
++
++  // 1. If Type(value) is Object, then
++  // 1a. If IsCallable(value) is false, throw a TypeError exception.
++  // 1b. Return ? WrappedFunctionCreate(callerRealm, value).
++  Branch(IsCallable(CAST(value)), &if_callable, &bailout);
++
++  BIND(&if_primitive);
++  Return(value);
++
++  BIND(&if_callable);
++  TVARIABLE(Object, target);
++  target = value;
++  // WrappedFunctionCreate
++  // https://tc39.es/proposal-shadowrealm/#sec-wrappedfunctioncreate
++  Branch(IsJSWrappedFunction(CAST(value)), &unwrap, &wrap);
++
++  BIND(&unwrap);
++  // The intermediate wrapped functions are not user-visible. And calling a
++  // wrapped function won't cause a side effect in the creation realm.
++  // Unwrap here to avoid nested unwrapping at the call site.
++  TNode<JSWrappedFunction> target_wrapped_function = CAST(value);
++  target = LoadObjectField(target_wrapped_function,
++                           JSWrappedFunction::kWrappedTargetFunctionOffset);
++  Goto(&wrap);
++
++  BIND(&wrap);
++  // 1. Let internalSlotsList be the internal slots listed in Table 2, plus
++  // [[Prototype]] and [[Extensible]].
++  // 2. Let wrapped be ! MakeBasicObject(internalSlotsList).
++  // 3. Set wrapped.[[Prototype]] to
++  // callerRealm.[[Intrinsics]].[[%Function.prototype%]].
++  // 4. Set wrapped.[[Call]] as described in 2.1.
++  TNode<JSObject> wrapped = AllocateJSWrappedFunction(creation_context);
++
++  // 5. Set wrapped.[[WrappedTargetFunction]] to Target.
++  StoreObjectFieldNoWriteBarrier(
++      wrapped, JSWrappedFunction::kWrappedTargetFunctionOffset, target.value());
++  // 6. Set wrapped.[[Realm]] to callerRealm.
++  StoreObjectFieldNoWriteBarrier(wrapped, JSWrappedFunction::kContextOffset,
++                                 creation_context);
++
++  // 7. Let result be CopyNameAndLength(wrapped, Target, "wrapped").
++  // 8. If result is an Abrupt Completion, throw a TypeError exception.
++  // TODO(v8:11989): https://github.com/tc39/proposal-shadowrealm/pull/348
++
++  // 9. Return wrapped.
++  Return(wrapped);
++
++  BIND(&bailout);
++  ThrowTypeError(context, MessageTemplate::kNotCallable, value);
++}
++
++// https://tc39.es/proposal-shadowrealm/#sec-wrapped-function-exotic-objects-call-thisargument-argumentslist
++TF_BUILTIN(CallWrappedFunction, ShadowRealmBuiltinsAssembler) {
++  auto argc = UncheckedParameter<Int32T>(Descriptor::kActualArgumentsCount);
++  TNode<IntPtrT> argc_ptr = ChangeInt32ToIntPtr(argc);
++  auto wrapped_function = Parameter<JSWrappedFunction>(Descriptor::kFunction);
++  auto context = Parameter<Context>(Descriptor::kContext);
++
++  PerformStackCheck(context);
++
++  Label call_exception(this, Label::kDeferred),
++      target_not_callable(this, Label::kDeferred);
++
++  // 1. Let target be F.[[WrappedTargetFunction]].
++  TNode<JSReceiver> target = CAST(LoadObjectField(
++      wrapped_function, JSWrappedFunction::kWrappedTargetFunctionOffset));
++  // 2. Assert: IsCallable(target) is true.
++  CSA_DCHECK(this, IsCallable(target));
++
++  // 4. Let callerRealm be ? GetFunctionRealm(F).
++  TNode<Context> caller_context = LoadObjectField<Context>(
++      wrapped_function, JSWrappedFunction::kContextOffset);
++  // 3. Let targetRealm be ? GetFunctionRealm(target).
++  TNode<Context> target_context =
++      GetFunctionRealm(caller_context, target, &target_not_callable);
++  // 5. NOTE: Any exception objects produced after this point are associated
++  // with callerRealm.
++
++  CodeStubArguments args(this, argc_ptr);
++  TNode<Object> receiver = args.GetReceiver();
++
++  // 6. Let wrappedArgs be a new empty List.
++  TNode<FixedArray> wrapped_args =
++      CAST(AllocateFixedArray(ElementsKind::PACKED_ELEMENTS, argc_ptr));
++  // Fill the fixed array so that heap verifier doesn't complain about it.
++  FillFixedArrayWithValue(ElementsKind::PACKED_ELEMENTS, wrapped_args,
++                          IntPtrConstant(0), argc_ptr,
++                          RootIndex::kUndefinedValue);
++
++  // 8. Let wrappedThisArgument to ? GetWrappedValue(targetRealm, thisArgument).
++  // Create wrapped value in the target realm.
++  TNode<Object> wrapped_receiver =
++      CallBuiltin(Builtin::kShadowRealmGetWrappedValue, caller_context,
++                  target_context, receiver);
++  StoreFixedArrayElement(wrapped_args, 0, wrapped_receiver);
++  // 7. For each element arg of argumentsList, do
++  BuildFastLoop<IntPtrT>(
++      IntPtrConstant(0), args.GetLengthWithoutReceiver(),
++      [&](TNode<IntPtrT> index) {
++        // 7a. Let wrappedValue be ? GetWrappedValue(targetRealm, arg).
++        // Create wrapped value in the target realm.
++        TNode<Object> wrapped_value =
++            CallBuiltin(Builtin::kShadowRealmGetWrappedValue, caller_context,
++                        target_context, args.AtIndex(index));
++        // 7b. Append wrappedValue to wrappedArgs.
++        StoreFixedArrayElement(
++            wrapped_args, IntPtrAdd(index, IntPtrConstant(1)), wrapped_value);
++      },
++      1, IndexAdvanceMode::kPost);
++
++  TVARIABLE(Object, var_exception);
++  TNode<Object> result;
++  {
++    compiler::ScopedExceptionHandler handler(this, &call_exception,
++                                             &var_exception);
++    TNode<Int32T> args_count = Int32Constant(0);  // args already on the stack
++    Callable callable = CodeFactory::CallVarargs(isolate());
++
++    // 9. Let result be the Completion Record of Call(target,
++    // wrappedThisArgument, wrappedArgs).
++    result = CallStub(callable, target_context, target, args_count, argc,
++                      wrapped_args);
++  }
++
++  // 10. If result.[[Type]] is normal or result.[[Type]] is return, then
++  // 10a. Return ? GetWrappedValue(callerRealm, result.[[Value]]).
++  TNode<Object> wrapped_result =
++      CallBuiltin(Builtin::kShadowRealmGetWrappedValue, caller_context,
++                  caller_context, result);
++  args.PopAndReturn(wrapped_result);
++
++  // 11. Else,
++  BIND(&call_exception);
++  // 11a. Throw a TypeError exception.
++  // TODO(v8:11989): provide a non-observable inspection.
++  ThrowTypeError(context, MessageTemplate::kCallShadowRealmFunctionThrown,
++                 var_exception.value());
++
++  BIND(&target_not_callable);
++  // A wrapped value should not be non-callable.
++  Unreachable();
++}
++
++}  // namespace internal
++}  // namespace v8
+diff --git a/src/builtins/function.tq b/src/builtins/function.tq
+index 4bd134e25f5..d9eb1740aa4 100644
+--- a/src/builtins/function.tq
++++ b/src/builtins/function.tq
+@@ -17,9 +17,11 @@ FunctionPrototypeBind(implicit context: Context)(
+     JSFunction, JSAny, int32): JSAny;
+ 
+ const kLengthDescriptorIndex: constexpr int32
+-    generates 'JSFunctionOrBoundFunction::kLengthDescriptorIndex';
++    generates 'JSFunctionOrBoundFunctionOrWrappedFunction::kLengthDescriptorIndex'
++    ;
+ const kNameDescriptorIndex: constexpr int32
+-    generates 'JSFunctionOrBoundFunction::kNameDescriptorIndex';
++    generates 'JSFunctionOrBoundFunctionOrWrappedFunction::kNameDescriptorIndex'
++    ;
+ const kMinDescriptorsForFastBind:
+     constexpr int31 generates 'JSFunction::kMinDescriptorsForFastBind';
+ 
+diff --git a/src/builtins/ia32/builtins-ia32.cc b/src/builtins/ia32/builtins-ia32.cc
+index c5b0157602a..bf4118b5ac2 100644
+--- a/src/builtins/ia32/builtins-ia32.cc
++++ b/src/builtins/ia32/builtins-ia32.cc
+@@ -2600,7 +2600,7 @@ void Builtins::Generate_Call(MacroAssembler* masm, ConvertReceiverMode mode) {
+   StackArgumentsAccessor args(argc);
+ 
+   Label non_callable, non_smi, non_callable_jsfunction, non_jsboundfunction,
+-      non_proxy, class_constructor;
++      non_proxy, non_wrapped_function, class_constructor;
+   __ JumpIfSmi(target, &non_callable);
+   __ bind(&non_smi);
+   __ LoadMap(map, target);
+@@ -2629,9 +2629,17 @@ void Builtins::Generate_Call(MacroAssembler* masm, ConvertReceiverMode mode) {
+   __ j(not_equal, &non_proxy);
+   __ Jump(BUILTIN_CODE(masm->isolate(), CallProxy), RelocInfo::CODE_TARGET);
+ 
++  // Check if target is a wrapped function and call CallWrappedFunction external
++  // builtin
++  __ bind(&non_proxy);
++  __ cmpw(instance_type, Immediate(JS_WRAPPED_FUNCTION_TYPE));
++  __ j(not_equal, &non_wrapped_function);
++  __ Jump(BUILTIN_CODE(masm->isolate(), CallWrappedFunction),
++          RelocInfo::CODE_TARGET);
++
+   // ES6 section 9.2.1 [[Call]] ( thisArgument, argumentsList)
+   // Check that the function is not a "classConstructor".
+-  __ bind(&non_proxy);
++  __ bind(&non_wrapped_function);
+   __ cmpw(instance_type, Immediate(JS_CLASS_CONSTRUCTOR_TYPE));
+   __ j(equal, &class_constructor);
+ 
+diff --git a/src/builtins/loong64/builtins-loong64.cc b/src/builtins/loong64/builtins-loong64.cc
+index 28e167406b9..cbd943a8c5a 100644
+--- a/src/builtins/loong64/builtins-loong64.cc
++++ b/src/builtins/loong64/builtins-loong64.cc
+@@ -2444,6 +2444,12 @@ void Builtins::Generate_Call(MacroAssembler* masm, ConvertReceiverMode mode) {
+   __ Jump(BUILTIN_CODE(masm->isolate(), CallProxy), RelocInfo::CODE_TARGET, eq,
+           instance_type, Operand(JS_PROXY_TYPE));
+ 
++  // Check if target is a wrapped function and call CallWrappedFunction external
++  // builtin
++  __ Jump(BUILTIN_CODE(masm->isolate(), CallWrappedFunction),
++          RelocInfo::CODE_TARGET, eq, instance_type,
++          Operand(JS_WRAPPED_FUNCTION_TYPE));
++
+   // ES6 section 9.2.1 [[Call]] ( thisArgument, argumentsList)
+   // Check that the function is not a "classConstructor".
+   __ Branch(&class_constructor, eq, instance_type,
+diff --git a/src/builtins/mips/builtins-mips.cc b/src/builtins/mips/builtins-mips.cc
+index beb0d9d299d..d98b2d73418 100644
+--- a/src/builtins/mips/builtins-mips.cc
++++ b/src/builtins/mips/builtins-mips.cc
+@@ -2388,6 +2388,12 @@ void Builtins::Generate_Call(MacroAssembler* masm, ConvertReceiverMode mode) {
+   __ Jump(BUILTIN_CODE(masm->isolate(), CallProxy), RelocInfo::CODE_TARGET, eq,
+           instance_type, Operand(JS_PROXY_TYPE));
+ 
++  // Check if target is a wrapped function and call CallWrappedFunction external
++  // builtin
++  __ Jump(BUILTIN_CODE(masm->isolate(), CallWrappedFunction),
++          RelocInfo::CODE_TARGET, eq, instance_type,
++          Operand(JS_WRAPPED_FUNCTION_TYPE));
++
+   // ES6 section 9.2.1 [[Call]] ( thisArgument, argumentsList)
+   // Check that the function is not a "classConstructor".
+   __ Branch(&class_constructor, eq, instance_type,
+diff --git a/src/builtins/mips64/builtins-mips64.cc b/src/builtins/mips64/builtins-mips64.cc
+index ce7983eb94f..cee8868d3c8 100644
+--- a/src/builtins/mips64/builtins-mips64.cc
++++ b/src/builtins/mips64/builtins-mips64.cc
+@@ -2439,6 +2439,12 @@ void Builtins::Generate_Call(MacroAssembler* masm, ConvertReceiverMode mode) {
+   __ Jump(BUILTIN_CODE(masm->isolate(), CallProxy), RelocInfo::CODE_TARGET, eq,
+           instance_type, Operand(JS_PROXY_TYPE));
+ 
++  // Check if target is a wrapped function and call CallWrappedFunction external
++  // builtin
++  __ Jump(BUILTIN_CODE(masm->isolate(), CallWrappedFunction),
++          RelocInfo::CODE_TARGET, eq, instance_type,
++          Operand(JS_WRAPPED_FUNCTION_TYPE));
++
+   // ES6 section 9.2.1 [[Call]] ( thisArgument, argumentsList)
+   // Check that the function is not a "classConstructor".
+   __ Branch(&class_constructor, eq, instance_type,
+diff --git a/src/builtins/ppc/builtins-ppc.cc b/src/builtins/ppc/builtins-ppc.cc
+index eca67ac1193..d8ccf644c5a 100644
+--- a/src/builtins/ppc/builtins-ppc.cc
++++ b/src/builtins/ppc/builtins-ppc.cc
+@@ -2292,6 +2292,12 @@ void Builtins::Generate_Call(MacroAssembler* masm, ConvertReceiverMode mode) {
+   __ cmpi(instance_type, Operand(JS_PROXY_TYPE));
+   __ Jump(BUILTIN_CODE(masm->isolate(), CallProxy), RelocInfo::CODE_TARGET, eq);
+ 
++  // Check if target is a wrapped function and call CallWrappedFunction external
++  // builtin
++  __ cmpi(instance_type, Operand(JS_WRAPPED_FUNCTION_TYPE));
++  __ Jump(BUILTIN_CODE(masm->isolate(), CallWrappedFunction),
++          RelocInfo::CODE_TARGET, eq);
++
+   // ES6 section 9.2.1 [[Call]] ( thisArgument, argumentsList)
+   // Check that the function is not a "classConstructor".
+   __ cmpi(instance_type, Operand(JS_CLASS_CONSTRUCTOR_TYPE));
+diff --git a/src/builtins/riscv64/builtins-riscv64.cc b/src/builtins/riscv64/builtins-riscv64.cc
+index 8a0901ab488..5a9e26fce64 100644
+--- a/src/builtins/riscv64/builtins-riscv64.cc
++++ b/src/builtins/riscv64/builtins-riscv64.cc
+@@ -2599,6 +2599,11 @@ void Builtins::Generate_Call(MacroAssembler* masm, ConvertReceiverMode mode) {
+   __ Jump(BUILTIN_CODE(masm->isolate(), CallProxy), RelocInfo::CODE_TARGET, eq,
+           type, Operand(JS_PROXY_TYPE));
+ 
++  // Check if target is a wrapped function and call CallWrappedFunction external
++  // builtin
++  __ Jump(BUILTIN_CODE(masm->isolate(), CallWrappedFunction),
++          RelocInfo::CODE_TARGET, eq, type, Operand(JS_WRAPPED_FUNCTION_TYPE));
++
+   // ES6 section 9.2.1 [[Call]] ( thisArgument, argumentsList)
+   // Check that the function is not a "classConstructor".
+   __ Branch(&class_constructor, eq, type, Operand(JS_CLASS_CONSTRUCTOR_TYPE));
+diff --git a/src/builtins/s390/builtins-s390.cc b/src/builtins/s390/builtins-s390.cc
+index 1e0893aef51..79b5ee2ad73 100644
+--- a/src/builtins/s390/builtins-s390.cc
++++ b/src/builtins/s390/builtins-s390.cc
+@@ -2722,6 +2722,12 @@ void Builtins::Generate_Call(MacroAssembler* masm, ConvertReceiverMode mode) {
+   __ CmpS64(instance_type, Operand(JS_PROXY_TYPE));
+   __ Jump(BUILTIN_CODE(masm->isolate(), CallProxy), RelocInfo::CODE_TARGET, eq);
+ 
++  // Check if target is a wrapped function and call CallWrappedFunction external
++  // builtin
++  __ CmpS64(instance_type, Operand(JS_WRAPPED_FUNCTION_TYPE));
++  __ Jump(BUILTIN_CODE(masm->isolate(), CallWrappedFunction),
++          RelocInfo::CODE_TARGET, eq);
++
+   // ES6 section 9.2.1 [[Call]] ( thisArgument, argumentsList)
+   // Check that the function is not a "classConstructor".
+   __ CmpS64(instance_type, Operand(JS_CLASS_CONSTRUCTOR_TYPE));
+diff --git a/src/builtins/x64/builtins-x64.cc b/src/builtins/x64/builtins-x64.cc
+index cf6099aa8b8..5958bab7e28 100644
+--- a/src/builtins/x64/builtins-x64.cc
++++ b/src/builtins/x64/builtins-x64.cc
+@@ -2565,6 +2565,12 @@ void Builtins::Generate_Call(MacroAssembler* masm, ConvertReceiverMode mode) {
+   __ Jump(BUILTIN_CODE(masm->isolate(), CallProxy), RelocInfo::CODE_TARGET,
+           equal);
+ 
++  // Check if target is a wrapped function and call CallWrappedFunction external
++  // builtin
++  __ cmpw(instance_type, Immediate(JS_WRAPPED_FUNCTION_TYPE));
++  __ Jump(BUILTIN_CODE(masm->isolate(), CallWrappedFunction),
++          RelocInfo::CODE_TARGET, equal);
++
+   // ES6 section 9.2.1 [[Call]] ( thisArgument, argumentsList)
+   // Check that the function is not a "classConstructor".
+   __ cmpw(instance_type, Immediate(JS_CLASS_CONSTRUCTOR_TYPE));
+diff --git a/src/codegen/code-stub-assembler.cc b/src/codegen/code-stub-assembler.cc
+index 0d4b924aba1..d07c6d23bb4 100644
+--- a/src/codegen/code-stub-assembler.cc
++++ b/src/codegen/code-stub-assembler.cc
+@@ -6542,6 +6542,10 @@ TNode<BoolT> CodeStubAssembler::IsJSPrimitiveWrapperMap(TNode<Map> map) {
+   return IsJSPrimitiveWrapperInstanceType(LoadMapInstanceType(map));
+ }
+ 
++TNode<BoolT> CodeStubAssembler::IsJSWrappedFunction(TNode<HeapObject> object) {
++  return HasInstanceType(object, JS_WRAPPED_FUNCTION_TYPE);
++}
++
+ TNode<BoolT> CodeStubAssembler::IsJSArrayInstanceType(
+     TNode<Int32T> instance_type) {
+   return InstanceTypeEqual(instance_type, JS_ARRAY_TYPE);
+@@ -6815,8 +6819,9 @@ TNode<BoolT> CodeStubAssembler::IsJSGeneratorObject(TNode<HeapObject> object) {
+ 
+ TNode<BoolT> CodeStubAssembler::IsFunctionInstanceType(
+     TNode<Int32T> instance_type) {
+-  return IsInRange(instance_type, FIRST_JS_FUNCTION_OR_BOUND_FUNCTION_TYPE,
+-                   LAST_JS_FUNCTION_OR_BOUND_FUNCTION_TYPE);
++  return IsInRange(instance_type,
++                   FIRST_JS_FUNCTION_OR_BOUND_FUNCTION_OR_WRAPPED_FUNCTION_TYPE,
++                   LAST_JS_FUNCTION_OR_BOUND_FUNCTION_OR_WRAPPED_FUNCTION_TYPE);
+ }
+ TNode<BoolT> CodeStubAssembler::IsJSFunctionInstanceType(
+     TNode<Int32T> instance_type) {
+@@ -9268,6 +9273,70 @@ TNode<NativeContext> CodeStubAssembler::GetCreationContext(
+   return native_context;
+ }
+ 
++TNode<NativeContext> CodeStubAssembler::GetFunctionRealm(
++    TNode<Context> context, TNode<JSReceiver> receiver, Label* if_bailout) {
++  TVARIABLE(JSReceiver, current);
++  Label loop(this, VariableList({&current}, zone())), is_proxy(this),
++      is_function(this), is_bound_function(this), is_wrapped_function(this),
++      proxy_revoked(this, Label::kDeferred);
++  CSA_DCHECK(this, IsCallable(receiver));
++  current = receiver;
++  Goto(&loop);
++
++  BIND(&loop);
++  {
++    TNode<JSReceiver> current_value = current.value();
++    GotoIf(IsJSProxy(current_value), &is_proxy);
++    GotoIf(IsJSFunction(current_value), &is_function);
++    GotoIf(IsJSBoundFunction(current_value), &is_bound_function);
++    GotoIf(IsJSWrappedFunction(current_value), &is_wrapped_function);
++    Goto(if_bailout);
++  }
++
++  BIND(&is_proxy);
++  {
++    TNode<JSProxy> proxy = CAST(current.value());
++    TNode<HeapObject> handler =
++        CAST(LoadObjectField(proxy, JSProxy::kHandlerOffset));
++    // Proxy is revoked.
++    GotoIfNot(IsJSReceiver(handler), &proxy_revoked);
++    TNode<JSReceiver> target =
++        CAST(LoadObjectField(proxy, JSProxy::kTargetOffset));
++    current = target;
++    Goto(&loop);
++  }
++
++  BIND(&proxy_revoked);
++  { ThrowTypeError(context, MessageTemplate::kProxyRevoked, "apply"); }
++
++  BIND(&is_bound_function);
++  {
++    TNode<JSBoundFunction> bound_function = CAST(current.value());
++    TNode<JSReceiver> target = CAST(LoadObjectField(
++        bound_function, JSBoundFunction::kBoundTargetFunctionOffset));
++    current = target;
++    Goto(&loop);
++  }
++
++  BIND(&is_wrapped_function);
++  {
++    TNode<JSWrappedFunction> wrapped_function = CAST(current.value());
++    TNode<JSReceiver> target = CAST(LoadObjectField(
++        wrapped_function, JSWrappedFunction::kWrappedTargetFunctionOffset));
++    current = target;
++    Goto(&loop);
++  }
++
++  BIND(&is_function);
++  {
++    TNode<JSFunction> function = CAST(current.value());
++    TNode<Context> context =
++        CAST(LoadObjectField(function, JSFunction::kContextOffset));
++    TNode<NativeContext> native_context = LoadNativeContext(context);
++    return native_context;
++  }
++}
++
+ void CodeStubAssembler::DescriptorLookup(TNode<Name> unique_name,
+                                          TNode<DescriptorArray> descriptors,
+                                          TNode<Uint32T> bitfield3,
+diff --git a/src/codegen/code-stub-assembler.h b/src/codegen/code-stub-assembler.h
+index 465b6f2ee14..b69183148fe 100644
+--- a/src/codegen/code-stub-assembler.h
++++ b/src/codegen/code-stub-assembler.h
+@@ -2027,6 +2027,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
+ 
+   TNode<NativeContext> GetCreationContext(TNode<JSReceiver> receiver,
+                                           Label* if_bailout);
++  TNode<NativeContext> GetFunctionRealm(TNode<Context> context,
++                                        TNode<JSReceiver> receiver,
++                                        Label* if_bailout);
+   TNode<Object> GetConstructor(TNode<Map> map);
+ 
+   TNode<Map> GetInstanceTypeMap(InstanceType instance_type);
+@@ -2593,6 +2596,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
+   TNode<BoolT> IsJSSharedStructInstanceType(TNode<Int32T> instance_type);
+   TNode<BoolT> IsJSSharedStructMap(TNode<Map> map);
+   TNode<BoolT> IsJSSharedStruct(TNode<HeapObject> object);
++  TNode<BoolT> IsJSWrappedFunction(TNode<HeapObject> object);
+   TNode<BoolT> IsMap(TNode<HeapObject> object);
+   TNode<BoolT> IsName(TNode<HeapObject> object);
+   TNode<BoolT> IsNameInstanceType(TNode<Int32T> instance_type);
+diff --git a/src/common/message-template.h b/src/common/message-template.h
+index cd487efb839..e5d4e915444 100644
+--- a/src/common/message-template.h
++++ b/src/common/message-template.h
+@@ -56,6 +56,7 @@ namespace internal {
+   T(CalledNonCallable, "% is not a function")                                  \
+   T(CalledOnNonObject, "% called on non-object")                               \
+   T(CalledOnNullOrUndefined, "% called on null or undefined")                  \
++  T(CallShadowRealmFunctionThrown, "Called throwing ShadowRealm function")     \
+   T(CallSiteExpectsFunction,                                                   \
+     "CallSite expects wasm object as first or function as second argument, "   \
+     "got <%, %>")                                                              \
+@@ -150,6 +151,7 @@ namespace internal {
+   T(NotConstructor, "% is not a constructor")                                  \
+   T(NotDateObject, "this is not a Date object.")                               \
+   T(NotGeneric, "% requires that 'this' be a %")                               \
++  T(NotCallable, "% is not a function")                                        \
+   T(NotCallableOrIterable,                                                     \
+     "% is not a function or its return value is not iterable")                 \
+   T(NotCallableOrAsyncIterable,                                                \
+@@ -361,6 +363,7 @@ namespace internal {
+   T(InvalidLanguageTag, "Invalid language tag: %")                             \
+   T(InvalidWeakMapKey, "Invalid value used as weak map key")                   \
+   T(InvalidWeakSetValue, "Invalid value used in weak set")                     \
++  T(InvalidShadowRealmEvaluateSourceText, "Invalid value used as source text") \
+   T(InvalidStringLength, "Invalid string length")                              \
+   T(InvalidTimeValue, "Invalid time value")                                    \
+   T(InvalidTimeValueForTemporal, "Invalid time value for Temporal %")          \
+diff --git a/src/compiler/js-call-reducer.cc b/src/compiler/js-call-reducer.cc
+index f231991e793..ad54b68bb24 100644
+--- a/src/compiler/js-call-reducer.cc
++++ b/src/compiler/js-call-reducer.cc
+@@ -2636,7 +2636,7 @@ Reduction JSCallReducer::ReduceFunctionPrototypeBind(Node* node) {
+     // Check for consistency among the {receiver_maps}.
+     if (!map_prototype.equals(prototype) ||
+         receiver_map.is_constructor() != is_constructor ||
+-        !InstanceTypeChecker::IsJSFunctionOrBoundFunction(
++        !InstanceTypeChecker::IsJSFunctionOrBoundFunctionOrWrappedFunction(
+             receiver_map.instance_type())) {
+       return inference.NoChange();
+     }
+@@ -2651,16 +2651,18 @@ Reduction JSCallReducer::ReduceFunctionPrototypeBind(Node* node) {
+     // This mirrors the checks done in builtins-function-gen.cc at
+     // runtime otherwise.
+     int minimum_nof_descriptors =
+-        std::max({JSFunctionOrBoundFunction::kLengthDescriptorIndex,
+-                  JSFunctionOrBoundFunction::kNameDescriptorIndex}) +
++        std::max(
++            {JSFunctionOrBoundFunctionOrWrappedFunction::kLengthDescriptorIndex,
++             JSFunctionOrBoundFunctionOrWrappedFunction::
++                 kNameDescriptorIndex}) +
+         1;
+     if (receiver_map.NumberOfOwnDescriptors() < minimum_nof_descriptors) {
+       return inference.NoChange();
+     }
+     const InternalIndex kLengthIndex(
+-        JSFunctionOrBoundFunction::kLengthDescriptorIndex);
++        JSFunctionOrBoundFunctionOrWrappedFunction::kLengthDescriptorIndex);
+     const InternalIndex kNameIndex(
+-        JSFunctionOrBoundFunction::kNameDescriptorIndex);
++        JSFunctionOrBoundFunctionOrWrappedFunction::kNameDescriptorIndex);
+     ReadOnlyRoots roots(isolate());
+     StringRef length_string = MakeRef(broker(), roots.length_string_handle());
+     StringRef name_string = MakeRef(broker(), roots.name_string_handle());
+diff --git a/src/compiler/types.cc b/src/compiler/types.cc
+index 9c41942de37..60eceec4362 100644
+--- a/src/compiler/types.cc
++++ b/src/compiler/types.cc
+@@ -288,6 +288,9 @@ Type::bitset BitsetType::Lub(const MapRefLike& map) {
+     case JS_BOUND_FUNCTION_TYPE:
+       DCHECK(!map.is_undetectable());
+       return kBoundFunction;
++    case JS_WRAPPED_FUNCTION_TYPE:
++      DCHECK(!map.is_undetectable());
++      return kOtherCallable;
+     case JS_FUNCTION_TYPE:
+     case JS_PROMISE_CONSTRUCTOR_TYPE:
+     case JS_REG_EXP_CONSTRUCTOR_TYPE:
+diff --git a/src/d8/d8.cc b/src/d8/d8.cc
+index e0b170357a0..dd55dfa0044 100644
+--- a/src/d8/d8.cc
++++ b/src/d8/d8.cc
+@@ -2087,8 +2087,9 @@ void Shell::TestVerifySourcePositions(
+     return;
+   }
+   auto arg_handle = Utils::OpenHandle(*args[0]);
+-  if (!arg_handle->IsHeapObject() || !i::Handle<i::HeapObject>::cast(arg_handle)
+-                                          ->IsJSFunctionOrBoundFunction()) {
++  if (!arg_handle->IsHeapObject() ||
++      !i::Handle<i::HeapObject>::cast(arg_handle)
++           ->IsJSFunctionOrBoundFunctionOrWrappedFunction()) {
+     isolate->ThrowError("Expected function as single argument.");
+     return;
+   }
+@@ -2096,18 +2097,21 @@ void Shell::TestVerifySourcePositions(
+   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
+   HandleScope handle_scope(isolate);
+ 
+-  auto callable = i::Handle<i::JSFunctionOrBoundFunction>::cast(arg_handle);
++  auto callable =
++      i::Handle<i::JSFunctionOrBoundFunctionOrWrappedFunction>::cast(
++          arg_handle);
+   while (callable->IsJSBoundFunction()) {
+     internal::DisallowGarbageCollection no_gc;
+     auto bound_function = i::Handle<i::JSBoundFunction>::cast(callable);
+     auto bound_target = bound_function->bound_target_function();
+-    if (!bound_target.IsJSFunctionOrBoundFunction()) {
++    if (!bound_target.IsJSFunctionOrBoundFunctionOrWrappedFunction()) {
+       internal::AllowGarbageCollection allow_gc;
+       isolate->ThrowError("Expected function as bound target.");
+       return;
+     }
+-    callable =
+-        handle(i::JSFunctionOrBoundFunction::cast(bound_target), i_isolate);
++    callable = handle(
++        i::JSFunctionOrBoundFunctionOrWrappedFunction::cast(bound_target),
++        i_isolate);
+   }
+ 
+   i::Handle<i::JSFunction> function = i::Handle<i::JSFunction>::cast(callable);
+diff --git a/src/diagnostics/objects-debug.cc b/src/diagnostics/objects-debug.cc
+index c62577e4bf5..3e4dc1b4776 100644
+--- a/src/diagnostics/objects-debug.cc
++++ b/src/diagnostics/objects-debug.cc
+@@ -879,7 +879,7 @@ void JSFunction::JSFunctionVerify(Isolate* isolate) {
+   STATIC_ASSERT(JSFunction::TorqueGeneratedClass::kHeaderSize ==
+                 8 * kTaggedSize);
+ 
+-  JSFunctionOrBoundFunctionVerify(isolate);
++  JSFunctionOrBoundFunctionOrWrappedFunctionVerify(isolate);
+   CHECK(IsJSFunction());
+   VerifyPointer(isolate, shared(isolate));
+   CHECK(shared(isolate).IsSharedFunctionInfo());
+@@ -1194,6 +1194,7 @@ void JSMapIterator::JSMapIteratorVerify(Isolate* isolate) {
+ }
+ 
+ USE_TORQUE_VERIFIER(JSShadowRealm)
++USE_TORQUE_VERIFIER(JSWrappedFunction)
+ 
+ void JSSharedStruct::JSSharedStructVerify(Isolate* isolate) {
+   CHECK(IsJSSharedStruct());
+diff --git a/src/diagnostics/objects-printer.cc b/src/diagnostics/objects-printer.cc
+index ed3e5a8d375..97c709cf90a 100644
+--- a/src/diagnostics/objects-printer.cc
++++ b/src/diagnostics/objects-printer.cc
+@@ -1413,6 +1413,12 @@ void JSShadowRealm::JSShadowRealmPrint(std::ostream& os) {
+   JSObjectPrintBody(os, *this);
+ }
+ 
++void JSWrappedFunction::JSWrappedFunctionPrint(std::ostream& os) {
++  JSObjectPrintHeader(os, *this, "JSWrappedFunction");
++  os << "\n - wrapped_target_function: " << Brief(wrapped_target_function());
++  JSObjectPrintBody(os, *this);
++}
++
+ void JSFinalizationRegistry::JSFinalizationRegistryPrint(std::ostream& os) {
+   JSObjectPrintHeader(os, *this, "JSFinalizationRegistry");
+   os << "\n - native_context: " << Brief(native_context());
+diff --git a/src/heap/factory.cc b/src/heap/factory.cc
+index abc54084abe..536a1d9b219 100644
+--- a/src/heap/factory.cc
++++ b/src/heap/factory.cc
+@@ -2722,6 +2722,27 @@ Handle<JSModuleNamespace> Factory::NewJSModuleNamespace() {
+   return module_namespace;
+ }
+ 
++Handle<JSWrappedFunction> Factory::NewJSWrappedFunction(
++    Handle<NativeContext> creation_context, Handle<Object> target) {
++  DCHECK(target->IsCallable());
++  Handle<Map> map(
++      Map::cast(creation_context->get(Context::WRAPPED_FUNCTION_MAP_INDEX)),
++      isolate());
++  // 2. Let wrapped be ! MakeBasicObject(internalSlotsList).
++  // 3. Set wrapped.[[Prototype]] to
++  // callerRealm.[[Intrinsics]].[[%Function.prototype%]].
++  // 4. Set wrapped.[[Call]] as described in 2.1.
++  Handle<JSWrappedFunction> wrapped = Handle<JSWrappedFunction>::cast(
++      isolate()->factory()->NewJSObjectFromMap(map));
++  // 5. Set wrapped.[[WrappedTargetFunction]] to Target.
++  wrapped->set_wrapped_target_function(JSReceiver::cast(*target));
++  // 6. Set wrapped.[[Realm]] to callerRealm.
++  wrapped->set_context(*creation_context);
++  // TODO(v8:11989): https://github.com/tc39/proposal-shadowrealm/pull/348
++
++  return wrapped;
++}
++
+ Handle<JSGeneratorObject> Factory::NewJSGeneratorObject(
+     Handle<JSFunction> function) {
+   DCHECK(IsResumableFunction(function->shared().kind()));
+@@ -3679,14 +3700,16 @@ Handle<Map> Factory::CreateSloppyFunctionMap(
+       static_cast<PropertyAttributes>(DONT_ENUM | READ_ONLY);
+ 
+   int field_index = 0;
+-  STATIC_ASSERT(JSFunctionOrBoundFunction::kLengthDescriptorIndex == 0);
++  STATIC_ASSERT(
++      JSFunctionOrBoundFunctionOrWrappedFunction::kLengthDescriptorIndex == 0);
+   {  // Add length accessor.
+     Descriptor d = Descriptor::AccessorConstant(
+         length_string(), function_length_accessor(), roc_attribs);
+     map->AppendDescriptor(isolate(), &d);
+   }
+ 
+-  STATIC_ASSERT(JSFunctionOrBoundFunction::kNameDescriptorIndex == 1);
++  STATIC_ASSERT(
++      JSFunctionOrBoundFunctionOrWrappedFunction::kNameDescriptorIndex == 1);
+   if (IsFunctionModeWithName(function_mode)) {
+     // Add name field.
+     Handle<Name> name = isolate()->factory()->name_string();
+diff --git a/src/heap/factory.h b/src/heap/factory.h
+index f9081c13bd5..03874820103 100644
+--- a/src/heap/factory.h
++++ b/src/heap/factory.h
+@@ -586,6 +586,9 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
+ 
+   Handle<JSModuleNamespace> NewJSModuleNamespace();
+ 
++  Handle<JSWrappedFunction> NewJSWrappedFunction(
++      Handle<NativeContext> creation_context, Handle<Object> target);
++
+ #if V8_ENABLE_WEBASSEMBLY
+   Handle<WasmTypeInfo> NewWasmTypeInfo(Address type_address,
+                                        Handle<Map> opt_parent,
+diff --git a/src/init/bootstrapper.cc b/src/init/bootstrapper.cc
+index 86996027e1b..6d403be8c3e 100644
+--- a/src/init/bootstrapper.cc
++++ b/src/init/bootstrapper.cc
+@@ -1637,6 +1637,7 @@ void Genesis::InitializeGlobal(Handle<JSGlobalObject> global_object,
+     function_fun->shared().set_length(1);
+     InstallWithIntrinsicDefaultProto(isolate_, function_fun,
+                                      Context::FUNCTION_FUNCTION_INDEX);
++    native_context()->set_function_prototype(*prototype);
+ 
+     // Setup the methods on the %FunctionPrototype%.
+     JSObject::AddProperty(isolate_, prototype, factory->constructor_string(),
+@@ -3786,7 +3787,9 @@ void Genesis::InitializeGlobal(Handle<JSGlobalObject> global_object,
+     Map::EnsureDescriptorSlack(isolate_, map, 2);
+ 
+     {  // length
+-      STATIC_ASSERT(JSFunctionOrBoundFunction::kLengthDescriptorIndex == 0);
++      STATIC_ASSERT(
++          JSFunctionOrBoundFunctionOrWrappedFunction::kLengthDescriptorIndex ==
++          0);
+       Descriptor d = Descriptor::AccessorConstant(
+           factory->length_string(), factory->bound_function_length_accessor(),
+           roc_attribs);
+@@ -3794,7 +3797,9 @@ void Genesis::InitializeGlobal(Handle<JSGlobalObject> global_object,
+     }
+ 
+     {  // name
+-      STATIC_ASSERT(JSFunctionOrBoundFunction::kNameDescriptorIndex == 1);
++      STATIC_ASSERT(
++          JSFunctionOrBoundFunctionOrWrappedFunction::kNameDescriptorIndex ==
++          1);
+       Descriptor d = Descriptor::AccessorConstant(
+           factory->name_string(), factory->bound_function_name_accessor(),
+           roc_attribs);
+@@ -4449,6 +4454,19 @@ void Genesis::InitializeGlobal_harmony_shadow_realm() {
+                         Builtin::kShadowRealmPrototypeEvaluate, 1, true);
+   SimpleInstallFunction(isolate_, prototype, "importValue",
+                         Builtin::kShadowRealmPrototypeImportValue, 2, true);
++
++  {  // --- W r a p p e d F u n c t i o n
++    Handle<Map> map = factory()->NewMap(JS_WRAPPED_FUNCTION_TYPE,
++                                        JSWrappedFunction::kHeaderSize,
++                                        TERMINAL_FAST_ELEMENTS_KIND, 0);
++    map->SetConstructor(native_context()->object_function());
++    map->set_is_callable(true);
++    Handle<JSObject> empty_function(native_context()->function_prototype(),
++                                    isolate());
++    Map::SetPrototype(isolate(), map, empty_function);
++
++    native_context()->set_wrapped_function_map(*map);
++  }
+ }
+ 
+ void Genesis::InitializeGlobal_harmony_struct() {
+@@ -5406,6 +5424,8 @@ bool Genesis::InstallABunchOfRandomThings() {
+                                        isolate());
+     DCHECK(JSObject::cast(object_function->initial_map().prototype())
+                .HasFastProperties());
++    native_context()->set_object_function_prototype(
++        JSObject::cast(object_function->initial_map().prototype()));
+     native_context()->set_object_function_prototype_map(
+         HeapObject::cast(object_function->initial_map().prototype()).map());
+   }
+diff --git a/src/objects/contexts.h b/src/objects/contexts.h
+index 0d5b810ca89..a84fdcfba74 100644
+--- a/src/objects/contexts.h
++++ b/src/objects/contexts.h
+@@ -122,6 +122,7 @@ enum ContextLookupFlags {
+   V(FAST_TEMPLATE_INSTANTIATIONS_CACHE_INDEX, FixedArray,                      \
+     fast_template_instantiations_cache)                                        \
+   V(FUNCTION_FUNCTION_INDEX, JSFunction, function_function)                    \
++  V(FUNCTION_PROTOTYPE_INDEX, JSObject, function_prototype)                    \
+   V(GENERATOR_FUNCTION_FUNCTION_INDEX, JSFunction,                             \
+     generator_function_function)                                               \
+   V(GENERATOR_OBJECT_PROTOTYPE_MAP_INDEX, Map, generator_object_prototype_map) \
+@@ -231,6 +232,7 @@ enum ContextLookupFlags {
+   V(NORMALIZED_MAP_CACHE_INDEX, Object, normalized_map_cache)                  \
+   V(NUMBER_FUNCTION_INDEX, JSFunction, number_function)                        \
+   V(OBJECT_FUNCTION_INDEX, JSFunction, object_function)                        \
++  V(OBJECT_FUNCTION_PROTOTYPE_INDEX, JSObject, object_function_prototype)      \
+   V(OBJECT_FUNCTION_PROTOTYPE_MAP_INDEX, Map, object_function_prototype_map)   \
+   V(PROMISE_HOOK_INIT_FUNCTION_INDEX, Object, promise_hook_init_function)      \
+   V(PROMISE_HOOK_BEFORE_FUNCTION_INDEX, Object, promise_hook_before_function)  \
+@@ -362,6 +364,7 @@ enum ContextLookupFlags {
+   V(WEAKMAP_GET_INDEX, JSFunction, weakmap_get)                                \
+   V(WEAKMAP_DELETE_INDEX, JSFunction, weakmap_delete)                          \
+   V(WEAKSET_ADD_INDEX, JSFunction, weakset_add)                                \
++  V(WRAPPED_FUNCTION_MAP_INDEX, Map, wrapped_function_map)                     \
+   V(RETAINED_MAPS, Object, retained_maps)                                      \
+   V(OSR_CODE_CACHE_INDEX, WeakFixedArray, osr_code_cache)
+ 
+diff --git a/src/objects/js-function-inl.h b/src/objects/js-function-inl.h
+index a50ace4665b..e9dfb465916 100644
+--- a/src/objects/js-function-inl.h
++++ b/src/objects/js-function-inl.h
+@@ -25,8 +25,9 @@ namespace internal {
+ 
+ #include "torque-generated/src/objects/js-function-tq-inl.inc"
+ 
+-TQ_OBJECT_CONSTRUCTORS_IMPL(JSFunctionOrBoundFunction)
++TQ_OBJECT_CONSTRUCTORS_IMPL(JSFunctionOrBoundFunctionOrWrappedFunction)
+ TQ_OBJECT_CONSTRUCTORS_IMPL(JSBoundFunction)
++TQ_OBJECT_CONSTRUCTORS_IMPL(JSWrappedFunction)
+ TQ_OBJECT_CONSTRUCTORS_IMPL(JSFunction)
+ 
+ ACCESSORS(JSFunction, raw_feedback_cell, FeedbackCell, kFeedbackCellOffset)
+diff --git a/src/objects/js-function.cc b/src/objects/js-function.cc
+index d80a8446b79..f5ff454ebae 100644
+--- a/src/objects/js-function.cc
++++ b/src/objects/js-function.cc
+@@ -277,6 +277,12 @@ Handle<String> JSBoundFunction::ToString(Handle<JSBoundFunction> function) {
+   return isolate->factory()->function_native_code_string();
+ }
+ 
++// static
++Handle<String> JSWrappedFunction::ToString(Handle<JSWrappedFunction> function) {
++  Isolate* const isolate = function->GetIsolate();
++  return isolate->factory()->function_native_code_string();
++}
++
+ // static
+ Handle<Object> JSFunction::GetName(Isolate* isolate,
+                                    Handle<JSFunction> function) {
+@@ -680,6 +686,7 @@ bool CanSubclassHaveInobjectProperties(InstanceType instance_type) {
+     case JS_GLOBAL_OBJECT_TYPE:
+     case JS_GLOBAL_PROXY_TYPE:
+     case JS_PROXY_TYPE:
++    case JS_WRAPPED_FUNCTION_TYPE:
+     case MAP_TYPE:
+     case ODDBALL_TYPE:
+     case PROPERTY_CELL_TYPE:
+diff --git a/src/objects/js-function.h b/src/objects/js-function.h
+index 7a35e8d8a8d..06ff915d569 100644
+--- a/src/objects/js-function.h
++++ b/src/objects/js-function.h
+@@ -19,21 +19,21 @@ namespace internal {
+ // An abstract superclass for classes representing JavaScript function values.
+ // It doesn't carry any functionality but allows function classes to be
+ // identified in the type system.
+-class JSFunctionOrBoundFunction
+-    : public TorqueGeneratedJSFunctionOrBoundFunction<JSFunctionOrBoundFunction,
+-                                                      JSObject> {
++class JSFunctionOrBoundFunctionOrWrappedFunction
++    : public TorqueGeneratedJSFunctionOrBoundFunctionOrWrappedFunction<
++          JSFunctionOrBoundFunctionOrWrappedFunction, JSObject> {
+  public:
+   static const int kLengthDescriptorIndex = 0;
+   static const int kNameDescriptorIndex = 1;
+ 
+   STATIC_ASSERT(kHeaderSize == JSObject::kHeaderSize);
+-  TQ_OBJECT_CONSTRUCTORS(JSFunctionOrBoundFunction)
++  TQ_OBJECT_CONSTRUCTORS(JSFunctionOrBoundFunctionOrWrappedFunction)
+ };
+ 
+ // JSBoundFunction describes a bound function exotic object.
+ class JSBoundFunction
+-    : public TorqueGeneratedJSBoundFunction<JSBoundFunction,
+-                                            JSFunctionOrBoundFunction> {
++    : public TorqueGeneratedJSBoundFunction<
++          JSBoundFunction, JSFunctionOrBoundFunctionOrWrappedFunction> {
+  public:
+   static MaybeHandle<String> GetName(Isolate* isolate,
+                                      Handle<JSBoundFunction> function);
+@@ -51,9 +51,25 @@ class JSBoundFunction
+   TQ_OBJECT_CONSTRUCTORS(JSBoundFunction)
+ };
+ 
++// JSWrappedFunction describes a wrapped function exotic object.
++class JSWrappedFunction
++    : public TorqueGeneratedJSWrappedFunction<
++          JSWrappedFunction, JSFunctionOrBoundFunctionOrWrappedFunction> {
++ public:
++  // Dispatched behavior.
++  DECL_PRINTER(JSWrappedFunction)
++  DECL_VERIFIER(JSWrappedFunction)
++
++  // The wrapped function's string representation implemented according
++  // to ES6 section 19.2.3.5 Function.prototype.toString ( ).
++  static Handle<String> ToString(Handle<JSWrappedFunction> function);
++
++  TQ_OBJECT_CONSTRUCTORS(JSWrappedFunction)
++};
++
+ // JSFunction describes JavaScript functions.
+-class JSFunction
+-    : public TorqueGeneratedJSFunction<JSFunction, JSFunctionOrBoundFunction> {
++class JSFunction : public TorqueGeneratedJSFunction<
++                       JSFunction, JSFunctionOrBoundFunctionOrWrappedFunction> {
+  public:
+   // [prototype_or_initial_map]:
+   DECL_RELEASE_ACQUIRE_ACCESSORS(prototype_or_initial_map, HeapObject)
+diff --git a/src/objects/js-function.tq b/src/objects/js-function.tq
+index 59dd2d5dc25..5ffed873563 100644
+--- a/src/objects/js-function.tq
++++ b/src/objects/js-function.tq
+@@ -3,10 +3,11 @@
+ // found in the LICENSE file.
+ 
+ @abstract
+-extern class JSFunctionOrBoundFunction extends JSObject {
++extern class JSFunctionOrBoundFunctionOrWrappedFunction extends JSObject {
+ }
+ 
+-extern class JSBoundFunction extends JSFunctionOrBoundFunction {
++extern class JSBoundFunction extends
++    JSFunctionOrBoundFunctionOrWrappedFunction {
+   // The wrapped function object.
+   bound_target_function: Callable;
+   // The value that is always passed as the this value when calling the wrapped
+@@ -17,10 +18,18 @@ extern class JSBoundFunction extends JSFunctionOrBoundFunction {
+   bound_arguments: FixedArray;
+ }
+ 
++extern class JSWrappedFunction extends
++    JSFunctionOrBoundFunctionOrWrappedFunction {
++  // The wrapped function object.
++  wrapped_target_function: Callable;
++  // The creation context.
++  context: NativeContext;
++}
++
+ // This class does not use the generated verifier, so if you change anything
+ // here, please also update JSFunctionVerify in objects-debug.cc.
+ @highestInstanceTypeWithinParentClassRange
+-extern class JSFunction extends JSFunctionOrBoundFunction {
++extern class JSFunction extends JSFunctionOrBoundFunctionOrWrappedFunction {
+   shared_function_info: SharedFunctionInfo;
+   context: Context;
+   feedback_cell: FeedbackCell;
+diff --git a/src/objects/js-objects.cc b/src/objects/js-objects.cc
+index 0ede4f451c7..b5e478fc5fa 100644
+--- a/src/objects/js-objects.cc
++++ b/src/objects/js-objects.cc
+@@ -636,6 +636,11 @@ MaybeHandle<NativeContext> JSReceiver::GetFunctionRealm(
+       current = function.bound_target_function();
+       continue;
+     }
++    if (current.IsJSWrappedFunction()) {
++      JSWrappedFunction function = JSWrappedFunction::cast(current);
++      current = function.wrapped_target_function();
++      continue;
++    }
+     JSObject object = JSObject::cast(current);
+     DCHECK(!object.IsJSFunction());
+     return object.GetCreationContext();
+@@ -2365,6 +2370,8 @@ int JSObject::GetHeaderSize(InstanceType type,
+       return JSTemporalTimeZone::kHeaderSize;
+     case JS_TEMPORAL_ZONED_DATE_TIME_TYPE:
+       return JSTemporalZonedDateTime::kHeaderSize;
++    case JS_WRAPPED_FUNCTION_TYPE:
++      return JSWrappedFunction::kHeaderSize;
+ #ifdef V8_INTL_SUPPORT
+     case JS_V8_BREAK_ITERATOR_TYPE:
+       return JSV8BreakIterator::kHeaderSize;
+diff --git a/src/objects/map.cc b/src/objects/map.cc
+index 2d9dbd3cd7e..6f71db84fc5 100644
+--- a/src/objects/map.cc
++++ b/src/objects/map.cc
+@@ -310,7 +310,8 @@ VisitorId Map::GetVisitorId(Map map) {
+     case WASM_TABLE_OBJECT_TYPE:
+     case WASM_VALUE_OBJECT_TYPE:
+ #endif  // V8_ENABLE_WEBASSEMBLY
+-    case JS_BOUND_FUNCTION_TYPE: {
++    case JS_BOUND_FUNCTION_TYPE:
++    case JS_WRAPPED_FUNCTION_TYPE: {
+       const bool has_raw_data_fields =
+           COMPRESS_POINTERS_BOOL && JSObject::GetEmbedderFieldCount(map) > 0;
+       return has_raw_data_fields ? kVisitJSObject : kVisitJSObjectFast;
+diff --git a/src/objects/object-list-macros.h b/src/objects/object-list-macros.h
+index 3032fbc1891..69f487e4871 100644
+--- a/src/objects/object-list-macros.h
++++ b/src/objects/object-list-macros.h
+@@ -74,193 +74,194 @@ class ZoneForwardList;
+   V(Number)                 \
+   V(Numeric)
+ 
+-#define HEAP_OBJECT_ORDINARY_TYPE_LIST_BASE(V) \
+-  V(AbstractCode)                              \
+-  V(AccessCheckNeeded)                         \
+-  V(AllocationSite)                            \
+-  V(ArrayList)                                 \
+-  V(BigInt)                                    \
+-  V(BigIntBase)                                \
+-  V(BigIntWrapper)                             \
+-  V(ObjectBoilerplateDescription)              \
+-  V(Boolean)                                   \
+-  V(BooleanWrapper)                            \
+-  V(ByteArray)                                 \
+-  V(BytecodeArray)                             \
+-  V(CallHandlerInfo)                           \
+-  V(Callable)                                  \
+-  V(Cell)                                      \
+-  V(ClassBoilerplate)                          \
+-  V(Code)                                      \
+-  V(CodeDataContainer)                         \
+-  V(CompilationCacheTable)                     \
+-  V(ConsString)                                \
+-  V(Constructor)                               \
+-  V(Context)                                   \
+-  V(CoverageInfo)                              \
+-  V(ClosureFeedbackCellArray)                  \
+-  V(DataHandler)                               \
+-  V(DeoptimizationData)                        \
+-  V(DependentCode)                             \
+-  V(DescriptorArray)                           \
+-  V(EmbedderDataArray)                         \
+-  V(EphemeronHashTable)                        \
+-  V(ExternalOneByteString)                     \
+-  V(ExternalString)                            \
+-  V(ExternalTwoByteString)                     \
+-  V(FeedbackCell)                              \
+-  V(FeedbackMetadata)                          \
+-  V(FeedbackVector)                            \
+-  V(Filler)                                    \
+-  V(FixedArray)                                \
+-  V(FixedArrayBase)                            \
+-  V(FixedArrayExact)                           \
+-  V(FixedDoubleArray)                          \
+-  V(Foreign)                                   \
+-  V(FreeSpace)                                 \
+-  V(Function)                                  \
+-  V(GlobalDictionary)                          \
+-  V(HandlerTable)                              \
+-  V(HeapNumber)                                \
+-  V(InternalizedString)                        \
+-  V(JSArgumentsObject)                         \
+-  V(JSArray)                                   \
+-  V(JSArrayBuffer)                             \
+-  V(JSArrayBufferView)                         \
+-  V(JSArrayIterator)                           \
+-  V(JSAsyncFromSyncIterator)                   \
+-  V(JSAsyncFunctionObject)                     \
+-  V(JSAsyncGeneratorObject)                    \
+-  V(JSBoundFunction)                           \
+-  V(JSCollection)                              \
+-  V(JSCollectionIterator)                      \
+-  V(JSContextExtensionObject)                  \
+-  V(JSCustomElementsObject)                    \
+-  V(JSDataView)                                \
+-  V(JSDate)                                    \
+-  V(JSError)                                   \
+-  V(JSFinalizationRegistry)                    \
+-  V(JSFunction)                                \
+-  V(JSFunctionOrBoundFunction)                 \
+-  V(JSGeneratorObject)                         \
+-  V(JSGlobalObject)                            \
+-  V(JSGlobalProxy)                             \
+-  V(JSMap)                                     \
+-  V(JSMapIterator)                             \
+-  V(JSMessageObject)                           \
+-  V(JSModuleNamespace)                         \
+-  V(JSObject)                                  \
+-  V(JSPrimitiveWrapper)                        \
+-  V(JSPromise)                                 \
+-  V(JSProxy)                                   \
+-  V(JSReceiver)                                \
+-  V(JSRegExp)                                  \
+-  V(JSRegExpStringIterator)                    \
+-  V(JSSet)                                     \
+-  V(JSSetIterator)                             \
+-  V(JSShadowRealm)                             \
+-  V(JSSharedStruct)                            \
+-  V(JSSpecialObject)                           \
+-  V(JSStringIterator)                          \
+-  V(JSTemporalCalendar)                        \
+-  V(JSTemporalDuration)                        \
+-  V(JSTemporalInstant)                         \
+-  V(JSTemporalPlainDate)                       \
+-  V(JSTemporalPlainTime)                       \
+-  V(JSTemporalPlainDateTime)                   \
+-  V(JSTemporalPlainMonthDay)                   \
+-  V(JSTemporalPlainYearMonth)                  \
+-  V(JSTemporalTimeZone)                        \
+-  V(JSTemporalZonedDateTime)                   \
+-  V(JSTypedArray)                              \
+-  V(JSWeakCollection)                          \
+-  V(JSWeakRef)                                 \
+-  V(JSWeakMap)                                 \
+-  V(JSWeakSet)                                 \
+-  V(LoadHandler)                               \
+-  V(Map)                                       \
+-  V(MapCache)                                  \
+-  V(MegaDomHandler)                            \
+-  V(Module)                                    \
+-  V(Microtask)                                 \
+-  V(Name)                                      \
+-  V(NameDictionary)                            \
+-  V(NameToIndexHashTable)                      \
+-  V(NativeContext)                             \
+-  V(NormalizedMapCache)                        \
+-  V(NumberDictionary)                          \
+-  V(NumberWrapper)                             \
+-  V(ObjectHashSet)                             \
+-  V(ObjectHashTable)                           \
+-  V(Oddball)                                   \
+-  V(OrderedHashMap)                            \
+-  V(OrderedHashSet)                            \
+-  V(OrderedNameDictionary)                     \
+-  V(OSROptimizedCodeCache)                     \
+-  V(PreparseData)                              \
+-  V(PrimitiveHeapObject)                       \
+-  V(PromiseReactionJobTask)                    \
+-  V(PropertyArray)                             \
+-  V(PropertyCell)                              \
+-  V(RegExpMatchInfo)                           \
+-  V(ScopeInfo)                                 \
+-  V(ScriptContextTable)                        \
+-  V(ScriptWrapper)                             \
+-  V(SeqOneByteString)                          \
+-  V(SeqString)                                 \
+-  V(SeqTwoByteString)                          \
+-  V(SharedFunctionInfo)                        \
+-  V(SimpleNumberDictionary)                    \
+-  V(SlicedString)                              \
+-  V(SmallOrderedHashMap)                       \
+-  V(SmallOrderedHashSet)                       \
+-  V(SmallOrderedNameDictionary)                \
+-  V(SourceTextModule)                          \
+-  V(SourceTextModuleInfo)                      \
+-  V(StoreHandler)                              \
+-  V(String)                                    \
+-  V(StringSet)                                 \
+-  V(RegisteredSymbolTable)                     \
+-  V(StringWrapper)                             \
+-  V(Struct)                                    \
+-  V(SwissNameDictionary)                       \
+-  V(Symbol)                                    \
+-  V(SymbolWrapper)                             \
+-  V(SyntheticModule)                           \
+-  V(TemplateInfo)                              \
+-  V(TemplateList)                              \
+-  V(ThinString)                                \
+-  V(TransitionArray)                           \
+-  V(UncompiledData)                            \
+-  V(UncompiledDataWithPreparseData)            \
+-  V(UncompiledDataWithoutPreparseData)         \
+-  V(UncompiledDataWithPreparseDataAndJob)      \
+-  V(UncompiledDataWithoutPreparseDataWithJob)  \
+-  V(Undetectable)                              \
+-  V(UniqueName)                                \
+-  IF_WASM(V, WasmApiFunctionRef)               \
+-  IF_WASM(V, WasmArray)                        \
+-  IF_WASM(V, WasmCapiFunctionData)             \
+-  IF_WASM(V, WasmTagObject)                    \
+-  IF_WASM(V, WasmExceptionPackage)             \
+-  IF_WASM(V, WasmExportedFunctionData)         \
+-  IF_WASM(V, WasmFunctionData)                 \
+-  IF_WASM(V, WasmGlobalObject)                 \
+-  IF_WASM(V, WasmInternalFunction)             \
+-  IF_WASM(V, WasmInstanceObject)               \
+-  IF_WASM(V, WasmJSFunctionData)               \
+-  IF_WASM(V, WasmMemoryObject)                 \
+-  IF_WASM(V, WasmModuleObject)                 \
+-  IF_WASM(V, WasmObject)                       \
+-  IF_WASM(V, WasmOnFulfilledData)              \
+-  IF_WASM(V, WasmStruct)                       \
+-  IF_WASM(V, WasmTypeInfo)                     \
+-  IF_WASM(V, WasmTableObject)                  \
+-  IF_WASM(V, WasmValueObject)                  \
+-  IF_WASM(V, WasmSuspenderObject)              \
+-  V(WeakFixedArray)                            \
+-  V(WeakArrayList)                             \
+-  V(WeakCell)                                  \
++#define HEAP_OBJECT_ORDINARY_TYPE_LIST_BASE(V)  \
++  V(AbstractCode)                               \
++  V(AccessCheckNeeded)                          \
++  V(AllocationSite)                             \
++  V(ArrayList)                                  \
++  V(BigInt)                                     \
++  V(BigIntBase)                                 \
++  V(BigIntWrapper)                              \
++  V(ObjectBoilerplateDescription)               \
++  V(Boolean)                                    \
++  V(BooleanWrapper)                             \
++  V(ByteArray)                                  \
++  V(BytecodeArray)                              \
++  V(CallHandlerInfo)                            \
++  V(Callable)                                   \
++  V(Cell)                                       \
++  V(ClassBoilerplate)                           \
++  V(Code)                                       \
++  V(CodeDataContainer)                          \
++  V(CompilationCacheTable)                      \
++  V(ConsString)                                 \
++  V(Constructor)                                \
++  V(Context)                                    \
++  V(CoverageInfo)                               \
++  V(ClosureFeedbackCellArray)                   \
++  V(DataHandler)                                \
++  V(DeoptimizationData)                         \
++  V(DependentCode)                              \
++  V(DescriptorArray)                            \
++  V(EmbedderDataArray)                          \
++  V(EphemeronHashTable)                         \
++  V(ExternalOneByteString)                      \
++  V(ExternalString)                             \
++  V(ExternalTwoByteString)                      \
++  V(FeedbackCell)                               \
++  V(FeedbackMetadata)                           \
++  V(FeedbackVector)                             \
++  V(Filler)                                     \
++  V(FixedArray)                                 \
++  V(FixedArrayBase)                             \
++  V(FixedArrayExact)                            \
++  V(FixedDoubleArray)                           \
++  V(Foreign)                                    \
++  V(FreeSpace)                                  \
++  V(Function)                                   \
++  V(GlobalDictionary)                           \
++  V(HandlerTable)                               \
++  V(HeapNumber)                                 \
++  V(InternalizedString)                         \
++  V(JSArgumentsObject)                          \
++  V(JSArray)                                    \
++  V(JSArrayBuffer)                              \
++  V(JSArrayBufferView)                          \
++  V(JSArrayIterator)                            \
++  V(JSAsyncFromSyncIterator)                    \
++  V(JSAsyncFunctionObject)                      \
++  V(JSAsyncGeneratorObject)                     \
++  V(JSBoundFunction)                            \
++  V(JSCollection)                               \
++  V(JSCollectionIterator)                       \
++  V(JSContextExtensionObject)                   \
++  V(JSCustomElementsObject)                     \
++  V(JSDataView)                                 \
++  V(JSDate)                                     \
++  V(JSError)                                    \
++  V(JSFinalizationRegistry)                     \
++  V(JSFunction)                                 \
++  V(JSFunctionOrBoundFunctionOrWrappedFunction) \
++  V(JSGeneratorObject)                          \
++  V(JSGlobalObject)                             \
++  V(JSGlobalProxy)                              \
++  V(JSMap)                                      \
++  V(JSMapIterator)                              \
++  V(JSMessageObject)                            \
++  V(JSModuleNamespace)                          \
++  V(JSObject)                                   \
++  V(JSPrimitiveWrapper)                         \
++  V(JSPromise)                                  \
++  V(JSProxy)                                    \
++  V(JSReceiver)                                 \
++  V(JSRegExp)                                   \
++  V(JSRegExpStringIterator)                     \
++  V(JSSet)                                      \
++  V(JSSetIterator)                              \
++  V(JSShadowRealm)                              \
++  V(JSSharedStruct)                             \
++  V(JSSpecialObject)                            \
++  V(JSStringIterator)                           \
++  V(JSTemporalCalendar)                         \
++  V(JSTemporalDuration)                         \
++  V(JSTemporalInstant)                          \
++  V(JSTemporalPlainDate)                        \
++  V(JSTemporalPlainTime)                        \
++  V(JSTemporalPlainDateTime)                    \
++  V(JSTemporalPlainMonthDay)                    \
++  V(JSTemporalPlainYearMonth)                   \
++  V(JSTemporalTimeZone)                         \
++  V(JSTemporalZonedDateTime)                    \
++  V(JSTypedArray)                               \
++  V(JSWeakCollection)                           \
++  V(JSWeakRef)                                  \
++  V(JSWeakMap)                                  \
++  V(JSWeakSet)                                  \
++  V(JSWrappedFunction)                          \
++  V(LoadHandler)                                \
++  V(Map)                                        \
++  V(MapCache)                                   \
++  V(MegaDomHandler)                             \
++  V(Module)                                     \
++  V(Microtask)                                  \
++  V(Name)                                       \
++  V(NameDictionary)                             \
++  V(NameToIndexHashTable)                       \
++  V(NativeContext)                              \
++  V(NormalizedMapCache)                         \
++  V(NumberDictionary)                           \
++  V(NumberWrapper)                              \
++  V(ObjectHashSet)                              \
++  V(ObjectHashTable)                            \
++  V(Oddball)                                    \
++  V(OrderedHashMap)                             \
++  V(OrderedHashSet)                             \
++  V(OrderedNameDictionary)                      \
++  V(OSROptimizedCodeCache)                      \
++  V(PreparseData)                               \
++  V(PrimitiveHeapObject)                        \
++  V(PromiseReactionJobTask)                     \
++  V(PropertyArray)                              \
++  V(PropertyCell)                               \
++  V(RegExpMatchInfo)                            \
++  V(ScopeInfo)                                  \
++  V(ScriptContextTable)                         \
++  V(ScriptWrapper)                              \
++  V(SeqOneByteString)                           \
++  V(SeqString)                                  \
++  V(SeqTwoByteString)                           \
++  V(SharedFunctionInfo)                         \
++  V(SimpleNumberDictionary)                     \
++  V(SlicedString)                               \
++  V(SmallOrderedHashMap)                        \
++  V(SmallOrderedHashSet)                        \
++  V(SmallOrderedNameDictionary)                 \
++  V(SourceTextModule)                           \
++  V(SourceTextModuleInfo)                       \
++  V(StoreHandler)                               \
++  V(String)                                     \
++  V(StringSet)                                  \
++  V(RegisteredSymbolTable)                      \
++  V(StringWrapper)                              \
++  V(Struct)                                     \
++  V(SwissNameDictionary)                        \
++  V(Symbol)                                     \
++  V(SymbolWrapper)                              \
++  V(SyntheticModule)                            \
++  V(TemplateInfo)                               \
++  V(TemplateList)                               \
++  V(ThinString)                                 \
++  V(TransitionArray)                            \
++  V(UncompiledData)                             \
++  V(UncompiledDataWithPreparseData)             \
++  V(UncompiledDataWithoutPreparseData)          \
++  V(UncompiledDataWithPreparseDataAndJob)       \
++  V(UncompiledDataWithoutPreparseDataWithJob)   \
++  V(Undetectable)                               \
++  V(UniqueName)                                 \
++  IF_WASM(V, WasmApiFunctionRef)                \
++  IF_WASM(V, WasmArray)                         \
++  IF_WASM(V, WasmCapiFunctionData)              \
++  IF_WASM(V, WasmTagObject)                     \
++  IF_WASM(V, WasmExceptionPackage)              \
++  IF_WASM(V, WasmExportedFunctionData)          \
++  IF_WASM(V, WasmFunctionData)                  \
++  IF_WASM(V, WasmGlobalObject)                  \
++  IF_WASM(V, WasmInternalFunction)              \
++  IF_WASM(V, WasmInstanceObject)                \
++  IF_WASM(V, WasmJSFunctionData)                \
++  IF_WASM(V, WasmMemoryObject)                  \
++  IF_WASM(V, WasmModuleObject)                  \
++  IF_WASM(V, WasmObject)                        \
++  IF_WASM(V, WasmOnFulfilledData)               \
++  IF_WASM(V, WasmStruct)                        \
++  IF_WASM(V, WasmTypeInfo)                      \
++  IF_WASM(V, WasmTableObject)                   \
++  IF_WASM(V, WasmValueObject)                   \
++  IF_WASM(V, WasmSuspenderObject)               \
++  V(WeakFixedArray)                             \
++  V(WeakArrayList)                              \
++  V(WeakCell)                                   \
+   TORQUE_DEFINED_CLASS_LIST(V)
+ 
+ #ifdef V8_INTL_SUPPORT
+diff --git a/src/objects/objects-body-descriptors-inl.h b/src/objects/objects-body-descriptors-inl.h
+index 80ab44991e9..5d4d15bc2c1 100644
+--- a/src/objects/objects-body-descriptors-inl.h
++++ b/src/objects/objects-body-descriptors-inl.h
+@@ -1176,6 +1176,7 @@ auto BodyDescriptorApply(InstanceType type, Args&&... args) {
+     case JS_CLASS_CONSTRUCTOR_TYPE:
+     case JS_PROMISE_CONSTRUCTOR_TYPE:
+     case JS_REG_EXP_CONSTRUCTOR_TYPE:
++    case JS_WRAPPED_FUNCTION_TYPE:
+     case JS_ARRAY_CONSTRUCTOR_TYPE:
+ #define TYPED_ARRAY_CONSTRUCTORS_SWITCH(Type, type, TYPE, Ctype) \
+   case TYPE##_TYPED_ARRAY_CONSTRUCTOR_TYPE:
+diff --git a/src/objects/objects-inl.h b/src/objects/objects-inl.h
+index df69c8169a6..981a45c18c5 100644
+--- a/src/objects/objects-inl.h
++++ b/src/objects/objects-inl.h
+@@ -205,7 +205,7 @@ DEF_GETTER(HeapObject, IsUniqueName, bool) {
+ }
+ 
+ DEF_GETTER(HeapObject, IsFunction, bool) {
+-  return IsJSFunctionOrBoundFunction();
++  return IsJSFunctionOrBoundFunctionOrWrappedFunction();
+ }
+ 
+ DEF_GETTER(HeapObject, IsCallable, bool) {
+diff --git a/src/objects/objects.h b/src/objects/objects.h
+index b3da16e7561..cd08a3a8fa7 100644
+--- a/src/objects/objects.h
++++ b/src/objects/objects.h
+@@ -57,9 +57,10 @@
+ //             - JSModuleNamespace
+ //           - JSPrimitiveWrapper
+ //         - JSDate
+-//         - JSFunctionOrBoundFunction
++//         - JSFunctionOrBoundFunctionOrWrappedFunction
+ //           - JSBoundFunction
+ //           - JSFunction
++//           - JSWrappedFunction
+ //         - JSGeneratorObject
+ //         - JSMapIterator
+ //         - JSMessageObject
+diff --git a/test/cctest/interpreter/bytecode_expectations/PrivateAccessorAccess.golden b/test/cctest/interpreter/bytecode_expectations/PrivateAccessorAccess.golden
+index 9311b2613e4..08239c49854 100644
+--- a/test/cctest/interpreter/bytecode_expectations/PrivateAccessorAccess.golden
++++ b/test/cctest/interpreter/bytecode_expectations/PrivateAccessorAccess.golden
+@@ -83,7 +83,7 @@ bytecodes: [
+   /*   48 E> */ B(StaKeyedPropertyAsDefine), R(this), R(0), U8(0),
+   /*   53 S> */ B(LdaImmutableCurrentContextSlot), U8(3),
+   /*   58 E> */ B(LdaKeyedProperty), R(this), U8(2),
+-                B(Wide), B(LdaSmi), I16(293),
++                B(Wide), B(LdaSmi), I16(296),
+                 B(Star2),
+                 B(LdaConstant), U8(0),
+                 B(Star3),
+@@ -115,7 +115,7 @@ bytecodes: [
+   /*   41 E> */ B(StaKeyedPropertyAsDefine), R(this), R(0), U8(0),
+   /*   46 S> */ B(LdaImmutableCurrentContextSlot), U8(3),
+   /*   51 E> */ B(LdaKeyedProperty), R(this), U8(2),
+-                B(Wide), B(LdaSmi), I16(292),
++                B(Wide), B(LdaSmi), I16(295),
+                 B(Star2),
+                 B(LdaConstant), U8(0),
+                 B(Star3),
+@@ -147,7 +147,7 @@ bytecodes: [
+   /*   48 E> */ B(StaKeyedPropertyAsDefine), R(this), R(0), U8(0),
+   /*   53 S> */ B(LdaImmutableCurrentContextSlot), U8(3),
+   /*   58 E> */ B(LdaKeyedProperty), R(this), U8(2),
+-                B(Wide), B(LdaSmi), I16(293),
++                B(Wide), B(LdaSmi), I16(296),
+                 B(Star2),
+                 B(LdaConstant), U8(0),
+                 B(Star3),
+@@ -179,7 +179,7 @@ bytecodes: [
+   /*   41 E> */ B(StaKeyedPropertyAsDefine), R(this), R(0), U8(0),
+   /*   46 S> */ B(LdaImmutableCurrentContextSlot), U8(3),
+   /*   51 E> */ B(LdaKeyedProperty), R(this), U8(2),
+-                B(Wide), B(LdaSmi), I16(292),
++                B(Wide), B(LdaSmi), I16(295),
+                 B(Star2),
+                 B(LdaConstant), U8(0),
+                 B(Star3),
+diff --git a/test/cctest/interpreter/bytecode_expectations/PrivateMethodAccess.golden b/test/cctest/interpreter/bytecode_expectations/PrivateMethodAccess.golden
+index 94fecee7bd4..793e6787b18 100644
+--- a/test/cctest/interpreter/bytecode_expectations/PrivateMethodAccess.golden
++++ b/test/cctest/interpreter/bytecode_expectations/PrivateMethodAccess.golden
+@@ -56,7 +56,7 @@ bytecodes: [
+   /*   44 E> */ B(StaKeyedPropertyAsDefine), R(this), R(0), U8(0),
+   /*   49 S> */ B(LdaImmutableCurrentContextSlot), U8(3),
+   /*   54 E> */ B(LdaKeyedProperty), R(this), U8(2),
+-                B(Wide), B(LdaSmi), I16(291),
++                B(Wide), B(LdaSmi), I16(294),
+                 B(Star2),
+                 B(LdaConstant), U8(0),
+                 B(Star3),
+@@ -89,7 +89,7 @@ bytecodes: [
+   /*   44 E> */ B(StaKeyedPropertyAsDefine), R(this), R(0), U8(0),
+   /*   49 S> */ B(LdaImmutableCurrentContextSlot), U8(3),
+   /*   54 E> */ B(LdaKeyedProperty), R(this), U8(2),
+-                B(Wide), B(LdaSmi), I16(291),
++                B(Wide), B(LdaSmi), I16(294),
+                 B(Star2),
+                 B(LdaConstant), U8(0),
+                 B(Star3),
+diff --git a/test/cctest/interpreter/bytecode_expectations/StaticPrivateMethodAccess.golden b/test/cctest/interpreter/bytecode_expectations/StaticPrivateMethodAccess.golden
+index ca157c4f3fc..3d20cffd18c 100644
+--- a/test/cctest/interpreter/bytecode_expectations/StaticPrivateMethodAccess.golden
++++ b/test/cctest/interpreter/bytecode_expectations/StaticPrivateMethodAccess.golden
+@@ -24,7 +24,7 @@ bytecodes: [
+                 B(TestReferenceEqual), R(this),
+                 B(Mov), R(this), R(1),
+                 B(JumpIfTrue), U8(16),
+-                B(Wide), B(LdaSmi), I16(285),
++                B(Wide), B(LdaSmi), I16(288),
+                 B(Star2),
+                 B(LdaConstant), U8(0),
+                 B(Star3),
+@@ -59,13 +59,13 @@ bytecodes: [
+                 B(TestReferenceEqual), R(this),
+                 B(Mov), R(this), R(0),
+                 B(JumpIfTrue), U8(16),
+-                B(Wide), B(LdaSmi), I16(285),
++                B(Wide), B(LdaSmi), I16(288),
+                 B(Star1),
+                 B(LdaConstant), U8(0),
+                 B(Star2),
+   /*   61 E> */ B(CallRuntime), U16(Runtime::kNewTypeError), R(1), U8(2),
+                 B(Throw),
+-                B(Wide), B(LdaSmi), I16(291),
++                B(Wide), B(LdaSmi), I16(294),
+                 B(Star1),
+                 B(LdaConstant), U8(1),
+                 B(Star2),
+@@ -97,13 +97,13 @@ bytecodes: [
+                 B(TestReferenceEqual), R(this),
+                 B(Mov), R(this), R(0),
+                 B(JumpIfTrue), U8(16),
+-                B(Wide), B(LdaSmi), I16(285),
++                B(Wide), B(LdaSmi), I16(288),
+                 B(Star1),
+                 B(LdaConstant), U8(0),
+                 B(Star2),
+   /*   61 E> */ B(CallRuntime), U16(Runtime::kNewTypeError), R(1), U8(2),
+                 B(Throw),
+-                B(Wide), B(LdaSmi), I16(291),
++                B(Wide), B(LdaSmi), I16(294),
+                 B(Star1),
+                 B(LdaConstant), U8(1),
+                 B(Star2),
+@@ -143,7 +143,7 @@ bytecodes: [
+                 B(TestReferenceEqual), R(this),
+                 B(Mov), R(this), R(0),
+                 B(JumpIfTrue), U8(16),
+-                B(Wide), B(LdaSmi), I16(285),
++                B(Wide), B(LdaSmi), I16(288),
+                 B(Star2),
+                 B(LdaConstant), U8(0),
+                 B(Star3),
+@@ -165,7 +165,7 @@ bytecodes: [
+                 B(TestReferenceEqual), R(this),
+                 B(Mov), R(this), R(0),
+                 B(JumpIfTrue), U8(16),
+-                B(Wide), B(LdaSmi), I16(285),
++                B(Wide), B(LdaSmi), I16(288),
+                 B(Star3),
+                 B(LdaConstant), U8(0),
+                 B(Star4),
+@@ -180,7 +180,7 @@ bytecodes: [
+                 B(TestReferenceEqual), R(this),
+                 B(Mov), R(this), R(0),
+                 B(JumpIfTrue), U8(16),
+-                B(Wide), B(LdaSmi), I16(285),
++                B(Wide), B(LdaSmi), I16(288),
+                 B(Star2),
+                 B(LdaConstant), U8(0),
+                 B(Star3),
+@@ -214,13 +214,13 @@ bytecodes: [
+                 B(TestReferenceEqual), R(this),
+                 B(Mov), R(this), R(0),
+                 B(JumpIfTrue), U8(16),
+-                B(Wide), B(LdaSmi), I16(285),
++                B(Wide), B(LdaSmi), I16(288),
+                 B(Star1),
+                 B(LdaConstant), U8(0),
+                 B(Star2),
+   /*   65 E> */ B(CallRuntime), U16(Runtime::kNewTypeError), R(1), U8(2),
+                 B(Throw),
+-                B(Wide), B(LdaSmi), I16(293),
++                B(Wide), B(LdaSmi), I16(296),
+                 B(Star1),
+                 B(LdaConstant), U8(1),
+                 B(Star2),
+@@ -251,13 +251,13 @@ bytecodes: [
+                 B(TestReferenceEqual), R(this),
+                 B(Mov), R(this), R(0),
+                 B(JumpIfTrue), U8(16),
+-                B(Wide), B(LdaSmi), I16(285),
++                B(Wide), B(LdaSmi), I16(288),
+                 B(Star1),
+                 B(LdaConstant), U8(0),
+                 B(Star2),
+   /*   58 E> */ B(CallRuntime), U16(Runtime::kNewTypeError), R(1), U8(2),
+                 B(Throw),
+-                B(Wide), B(LdaSmi), I16(292),
++                B(Wide), B(LdaSmi), I16(295),
+                 B(Star1),
+                 B(LdaConstant), U8(1),
+                 B(Star2),
+@@ -288,13 +288,13 @@ bytecodes: [
+                 B(TestReferenceEqual), R(this),
+                 B(Mov), R(this), R(0),
+                 B(JumpIfTrue), U8(16),
+-                B(Wide), B(LdaSmi), I16(285),
++                B(Wide), B(LdaSmi), I16(288),
+                 B(Star1),
+                 B(LdaConstant), U8(0),
+                 B(Star2),
+   /*   65 E> */ B(CallRuntime), U16(Runtime::kNewTypeError), R(1), U8(2),
+                 B(Throw),
+-                B(Wide), B(LdaSmi), I16(293),
++                B(Wide), B(LdaSmi), I16(296),
+                 B(Star1),
+                 B(LdaConstant), U8(1),
+                 B(Star2),
+@@ -323,7 +323,7 @@ bytecode array length: 19
+ bytecodes: [
+   /*   46 S> */ B(LdaImmutableCurrentContextSlot), U8(3),
+   /*   51 E> */ B(LdaKeyedProperty), R(this), U8(0),
+-                B(Wide), B(LdaSmi), I16(292),
++                B(Wide), B(LdaSmi), I16(295),
+                 B(Star1),
+                 B(LdaConstant), U8(0),
+                 B(Star2),
+diff --git a/test/mjsunit/harmony/shadowrealm-evaluate.js b/test/mjsunit/harmony/shadowrealm-evaluate.js
+new file mode 100644
+index 00000000000..a6709f210eb
+--- /dev/null
++++ b/test/mjsunit/harmony/shadowrealm-evaluate.js
+@@ -0,0 +1,64 @@
++// Copyright 2022 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Flags: --harmony-shadow-realm
++
++var shadowRealm = new ShadowRealm();
++
++// re-throwing with SyntaxError
++assertThrows(() => shadowRealm.evaluate('...'), SyntaxError, 'Unexpected end of input')
++
++// builtin
++var wrapped = shadowRealm.evaluate('String.prototype.substring');
++assertEquals(wrapped.call('123', 1), '23');
++
++// bound function
++var wrapped = shadowRealm.evaluate('(function it() { return this.a }).bind({ a: 1 })');
++assertEquals(wrapped(), 1);
++
++// nested bound function
++var wrapped = shadowRealm.evaluate('(function it() { return this.a }).bind({ a: 1 }).bind().bind()');
++assertEquals(wrapped(), 1);
++
++// function with function context
++var wrapped = shadowRealm.evaluate(`
++(function () {
++  var a = 1;
++  function it() { return a++; };
++  return it;
++})()
++`);
++assertEquals(wrapped(), 1);
++assertEquals(wrapped(), 2);
++
++// callable proxy
++var wrapped = shadowRealm.evaluate('new Proxy(() => 1, {})');
++assertEquals(wrapped(), 1);
++
++// nested callable proxy
++var wrapped = shadowRealm.evaluate('new Proxy(new Proxy(new Proxy(() => 1, {}), {}), {})');
++assertEquals(wrapped(), 1);
++
++// revocable proxy
++var wrapped = shadowRealm.evaluate(`
++var revocable = Proxy.revocable(() => 1, {});
++globalThis.revoke = () => {
++  revocable.revoke();
++};
++
++revocable.proxy;
++`);
++var revoke = shadowRealm.evaluate('globalThis.revoke');
++assertEquals(wrapped(), 1);
++revoke();
++assertThrows(() => wrapped(), TypeError, "Cannot perform 'apply' on a proxy that has been revoked");
++
++// revoked proxy
++var wrapped = shadowRealm.evaluate(`
++var revocable = Proxy.revocable(() => 1, {});
++revocable.revoke();
++revocable.proxy;
++`);
++var revoke = shadowRealm.evaluate('globalThis.revoke');
++assertThrows(() => wrapped(), TypeError, "Cannot perform 'apply' on a proxy that has been revoked");
+diff --git a/test/mjsunit/harmony/shadowrealm-wrapped-function.js b/test/mjsunit/harmony/shadowrealm-wrapped-function.js
+new file mode 100644
+index 00000000000..5c39a71f5b3
+--- /dev/null
++++ b/test/mjsunit/harmony/shadowrealm-wrapped-function.js
+@@ -0,0 +1,30 @@
++// Copyright 2022 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Flags: --harmony-shadow-realm
++
++var shadowRealm = new ShadowRealm();
++
++// create a proxy on the wrapped value
++var wrapped = shadowRealm.evaluate('() => 1');
++assertEquals(wrapped(), 1);
++var proxy = new Proxy(wrapped, {
++  call: function(target, thisArg, args) {
++    assertEquals(target, wrapped);
++    return target();
++  },
++});
++assertEquals(proxy(), 1);
++
++// create a revocable proxy on the wrapped value
++var revocable = Proxy.revocable(wrapped, {
++  call: function(target, thisArg, args) {
++    assertEquals(target, wrapped);
++    return target();
++  },
++});
++var proxy = revocable.proxy;
++assertEquals(proxy(), 1);
++revocable.revoke();
++assertThrows(() => proxy(), TypeError, "Cannot perform 'apply' on a proxy that has been revoked");
+diff --git a/test/test262/test262.status b/test/test262/test262.status
+index 3e5102c9172..14563f82289 100644
+--- a/test/test262/test262.status
++++ b/test/test262/test262.status
+@@ -2564,38 +2564,7 @@
+ 
+ 
+   # https://bugs.chromium.org/p/v8/issues/detail?id=11989
+-  'built-ins/ShadowRealm/prototype/evaluate/errors-from-the-other-realm-is-wrapped-into-a-typeerror': [FAIL],
+-  'built-ins/ShadowRealm/prototype/evaluate/globalthis-available-properties': [FAIL],
+-  'built-ins/ShadowRealm/prototype/evaluate/globalthis-config-only-properties': [FAIL],
+   'built-ins/ShadowRealm/prototype/evaluate/globalthis-orginary-object': [FAIL],
+-  'built-ins/ShadowRealm/prototype/evaluate/no-conditional-strict-mode': [FAIL],
+-  'built-ins/ShadowRealm/prototype/evaluate/not-constructor': [FAIL],
+-  'built-ins/ShadowRealm/prototype/evaluate/returns-primitive-values': [FAIL],
+-  'built-ins/ShadowRealm/prototype/evaluate/returns-proxy-callable-object': [FAIL],
+-  'built-ins/ShadowRealm/prototype/evaluate/returns-symbol-values': [FAIL],
+-  'built-ins/ShadowRealm/prototype/evaluate/throws-error-from-ctor-realm': [FAIL],
+-  'built-ins/ShadowRealm/prototype/evaluate/throws-syntaxerror-on-bad-syntax': [FAIL],
+-  'built-ins/ShadowRealm/prototype/evaluate/throws-typeerror-if-evaluation-resolves-to-non-primitive': [FAIL],
+-  'built-ins/ShadowRealm/prototype/evaluate/throws-when-argument-is-not-a-string': [FAIL],
+-  'built-ins/ShadowRealm/prototype/evaluate/validates-realm-object': [FAIL],
+-  'built-ins/ShadowRealm/prototype/evaluate/wrapped-function-arguments-are-wrapped-into-the-inner-realm': [FAIL],
+-  'built-ins/ShadowRealm/prototype/evaluate/wrapped-function-arguments-are-wrapped-into-the-inner-realm-extended': [FAIL],
+-  'built-ins/ShadowRealm/prototype/evaluate/wrapped-function-from-return-values-share-no-identity': [FAIL],
+-  'built-ins/ShadowRealm/prototype/evaluate/wrapped-function-observing-their-scopes': [FAIL],
+-  'built-ins/ShadowRealm/prototype/evaluate/wrapped-functions-accepts-callable-objects': [FAIL],
+-  'built-ins/ShadowRealm/prototype/evaluate/wrapped-functions-can-resolve-callable-returns': [FAIL],
+-  'built-ins/ShadowRealm/prototype/evaluate/wrapped-functions-new-wrapping-on-each-evaluation': [FAIL],
+-  'built-ins/ShadowRealm/prototype/evaluate/wrapped-functions-share-no-properties': [FAIL],
+-  'built-ins/ShadowRealm/prototype/evaluate/wrapped-functions-share-no-properties-extended': [FAIL],
+-  'built-ins/ShadowRealm/prototype/evaluate/wrapped-function-multiple-different-realms-nested': [FAIL],
+-  'built-ins/ShadowRealm/prototype/evaluate/wrapped-function-multiple-different-realms': [FAIL],
+-  'built-ins/ShadowRealm/prototype/evaluate/wrapped-function-proto-from-caller-realm': [FAIL],
+-  'built-ins/ShadowRealm/prototype/evaluate/wrapped-function-proxied-observes-boundary': [FAIL],
+-  'built-ins/ShadowRealm/prototype/evaluate/wrapped-function-throws-typeerror-from-caller-realm': [FAIL],
+-  'built-ins/ShadowRealm/prototype/evaluate/wrapped-function-throws-typeerror-on-exceptional-exit': [FAIL],
+-  'built-ins/ShadowRealm/prototype/evaluate/wrapped-function-throws-typeerror-on-non-primitive-arguments': [FAIL],
+-  'built-ins/ShadowRealm/prototype/evaluate/wrapped-function-throws-typeerror-on-non-primitive-returns': [FAIL],
+-  'built-ins/ShadowRealm/prototype/evaluate/nested-realms': [FAIL],
+   'built-ins/ShadowRealm/prototype/importValue/exportName-tostring': [FAIL],
+   'built-ins/ShadowRealm/prototype/importValue/import-value': [FAIL],
+   'built-ins/ShadowRealm/prototype/importValue/specifier-tostring': [FAIL],
+diff --git a/tools/v8heapconst.py b/tools/v8heapconst.py
+index af19c298df2..e1d605b47e4 100644
+--- a/tools/v8heapconst.py
++++ b/tools/v8heapconst.py
+@@ -180,93 +180,94 @@ INSTANCE_TYPES = {
+   1058: "JS_API_OBJECT_TYPE",
+   2058: "JS_LAST_DUMMY_API_OBJECT_TYPE",
+   2059: "JS_BOUND_FUNCTION_TYPE",
+-  2060: "JS_FUNCTION_TYPE",
+-  2061: "BIGINT64_TYPED_ARRAY_CONSTRUCTOR_TYPE",
+-  2062: "BIGUINT64_TYPED_ARRAY_CONSTRUCTOR_TYPE",
+-  2063: "FLOAT32_TYPED_ARRAY_CONSTRUCTOR_TYPE",
+-  2064: "FLOAT64_TYPED_ARRAY_CONSTRUCTOR_TYPE",
+-  2065: "INT16_TYPED_ARRAY_CONSTRUCTOR_TYPE",
+-  2066: "INT32_TYPED_ARRAY_CONSTRUCTOR_TYPE",
+-  2067: "INT8_TYPED_ARRAY_CONSTRUCTOR_TYPE",
+-  2068: "UINT16_TYPED_ARRAY_CONSTRUCTOR_TYPE",
+-  2069: "UINT32_TYPED_ARRAY_CONSTRUCTOR_TYPE",
+-  2070: "UINT8_CLAMPED_TYPED_ARRAY_CONSTRUCTOR_TYPE",
+-  2071: "UINT8_TYPED_ARRAY_CONSTRUCTOR_TYPE",
+-  2072: "JS_ARRAY_CONSTRUCTOR_TYPE",
+-  2073: "JS_PROMISE_CONSTRUCTOR_TYPE",
+-  2074: "JS_REG_EXP_CONSTRUCTOR_TYPE",
+-  2075: "JS_CLASS_CONSTRUCTOR_TYPE",
+-  2076: "JS_ARRAY_ITERATOR_PROTOTYPE_TYPE",
+-  2077: "JS_ITERATOR_PROTOTYPE_TYPE",
+-  2078: "JS_MAP_ITERATOR_PROTOTYPE_TYPE",
+-  2079: "JS_OBJECT_PROTOTYPE_TYPE",
+-  2080: "JS_PROMISE_PROTOTYPE_TYPE",
+-  2081: "JS_REG_EXP_PROTOTYPE_TYPE",
+-  2082: "JS_SET_ITERATOR_PROTOTYPE_TYPE",
+-  2083: "JS_SET_PROTOTYPE_TYPE",
+-  2084: "JS_STRING_ITERATOR_PROTOTYPE_TYPE",
+-  2085: "JS_TYPED_ARRAY_PROTOTYPE_TYPE",
+-  2086: "JS_MAP_KEY_ITERATOR_TYPE",
+-  2087: "JS_MAP_KEY_VALUE_ITERATOR_TYPE",
+-  2088: "JS_MAP_VALUE_ITERATOR_TYPE",
+-  2089: "JS_SET_KEY_VALUE_ITERATOR_TYPE",
+-  2090: "JS_SET_VALUE_ITERATOR_TYPE",
+-  2091: "JS_GENERATOR_OBJECT_TYPE",
+-  2092: "JS_ASYNC_FUNCTION_OBJECT_TYPE",
+-  2093: "JS_ASYNC_GENERATOR_OBJECT_TYPE",
+-  2094: "JS_DATA_VIEW_TYPE",
+-  2095: "JS_TYPED_ARRAY_TYPE",
+-  2096: "JS_MAP_TYPE",
+-  2097: "JS_SET_TYPE",
+-  2098: "JS_WEAK_MAP_TYPE",
+-  2099: "JS_WEAK_SET_TYPE",
+-  2100: "JS_ARGUMENTS_OBJECT_TYPE",
+-  2101: "JS_ARRAY_TYPE",
+-  2102: "JS_ARRAY_BUFFER_TYPE",
+-  2103: "JS_ARRAY_ITERATOR_TYPE",
+-  2104: "JS_ASYNC_FROM_SYNC_ITERATOR_TYPE",
+-  2105: "JS_COLLATOR_TYPE",
+-  2106: "JS_CONTEXT_EXTENSION_OBJECT_TYPE",
+-  2107: "JS_DATE_TYPE",
+-  2108: "JS_DATE_TIME_FORMAT_TYPE",
+-  2109: "JS_DISPLAY_NAMES_TYPE",
+-  2110: "JS_ERROR_TYPE",
+-  2111: "JS_FINALIZATION_REGISTRY_TYPE",
+-  2112: "JS_LIST_FORMAT_TYPE",
+-  2113: "JS_LOCALE_TYPE",
+-  2114: "JS_MESSAGE_OBJECT_TYPE",
+-  2115: "JS_NUMBER_FORMAT_TYPE",
+-  2116: "JS_PLURAL_RULES_TYPE",
+-  2117: "JS_PROMISE_TYPE",
+-  2118: "JS_REG_EXP_TYPE",
+-  2119: "JS_REG_EXP_STRING_ITERATOR_TYPE",
+-  2120: "JS_RELATIVE_TIME_FORMAT_TYPE",
+-  2121: "JS_SEGMENT_ITERATOR_TYPE",
+-  2122: "JS_SEGMENTER_TYPE",
+-  2123: "JS_SEGMENTS_TYPE",
+-  2124: "JS_SHADOW_REALM_TYPE",
+-  2125: "JS_SHARED_STRUCT_TYPE",
+-  2126: "JS_STRING_ITERATOR_TYPE",
+-  2127: "JS_TEMPORAL_CALENDAR_TYPE",
+-  2128: "JS_TEMPORAL_DURATION_TYPE",
+-  2129: "JS_TEMPORAL_INSTANT_TYPE",
+-  2130: "JS_TEMPORAL_PLAIN_DATE_TYPE",
+-  2131: "JS_TEMPORAL_PLAIN_DATE_TIME_TYPE",
+-  2132: "JS_TEMPORAL_PLAIN_MONTH_DAY_TYPE",
+-  2133: "JS_TEMPORAL_PLAIN_TIME_TYPE",
+-  2134: "JS_TEMPORAL_PLAIN_YEAR_MONTH_TYPE",
+-  2135: "JS_TEMPORAL_TIME_ZONE_TYPE",
+-  2136: "JS_TEMPORAL_ZONED_DATE_TIME_TYPE",
+-  2137: "JS_V8_BREAK_ITERATOR_TYPE",
+-  2138: "JS_WEAK_REF_TYPE",
+-  2139: "WASM_GLOBAL_OBJECT_TYPE",
+-  2140: "WASM_INSTANCE_OBJECT_TYPE",
+-  2141: "WASM_MEMORY_OBJECT_TYPE",
+-  2142: "WASM_MODULE_OBJECT_TYPE",
+-  2143: "WASM_SUSPENDER_OBJECT_TYPE",
+-  2144: "WASM_TABLE_OBJECT_TYPE",
+-  2145: "WASM_TAG_OBJECT_TYPE",
+-  2146: "WASM_VALUE_OBJECT_TYPE",
++  2060: "JS_WRAPPED_FUNCTION_TYPE",
++  2061: "JS_FUNCTION_TYPE",
++  2062: "BIGINT64_TYPED_ARRAY_CONSTRUCTOR_TYPE",
++  2063: "BIGUINT64_TYPED_ARRAY_CONSTRUCTOR_TYPE",
++  2064: "FLOAT32_TYPED_ARRAY_CONSTRUCTOR_TYPE",
++  2065: "FLOAT64_TYPED_ARRAY_CONSTRUCTOR_TYPE",
++  2066: "INT16_TYPED_ARRAY_CONSTRUCTOR_TYPE",
++  2067: "INT32_TYPED_ARRAY_CONSTRUCTOR_TYPE",
++  2068: "INT8_TYPED_ARRAY_CONSTRUCTOR_TYPE",
++  2069: "UINT16_TYPED_ARRAY_CONSTRUCTOR_TYPE",
++  2070: "UINT32_TYPED_ARRAY_CONSTRUCTOR_TYPE",
++  2071: "UINT8_CLAMPED_TYPED_ARRAY_CONSTRUCTOR_TYPE",
++  2072: "UINT8_TYPED_ARRAY_CONSTRUCTOR_TYPE",
++  2073: "JS_ARRAY_CONSTRUCTOR_TYPE",
++  2074: "JS_PROMISE_CONSTRUCTOR_TYPE",
++  2075: "JS_REG_EXP_CONSTRUCTOR_TYPE",
++  2076: "JS_CLASS_CONSTRUCTOR_TYPE",
++  2077: "JS_ARRAY_ITERATOR_PROTOTYPE_TYPE",
++  2078: "JS_ITERATOR_PROTOTYPE_TYPE",
++  2079: "JS_MAP_ITERATOR_PROTOTYPE_TYPE",
++  2080: "JS_OBJECT_PROTOTYPE_TYPE",
++  2081: "JS_PROMISE_PROTOTYPE_TYPE",
++  2082: "JS_REG_EXP_PROTOTYPE_TYPE",
++  2083: "JS_SET_ITERATOR_PROTOTYPE_TYPE",
++  2084: "JS_SET_PROTOTYPE_TYPE",
++  2085: "JS_STRING_ITERATOR_PROTOTYPE_TYPE",
++  2086: "JS_TYPED_ARRAY_PROTOTYPE_TYPE",
++  2087: "JS_MAP_KEY_ITERATOR_TYPE",
++  2088: "JS_MAP_KEY_VALUE_ITERATOR_TYPE",
++  2089: "JS_MAP_VALUE_ITERATOR_TYPE",
++  2090: "JS_SET_KEY_VALUE_ITERATOR_TYPE",
++  2091: "JS_SET_VALUE_ITERATOR_TYPE",
++  2092: "JS_GENERATOR_OBJECT_TYPE",
++  2093: "JS_ASYNC_FUNCTION_OBJECT_TYPE",
++  2094: "JS_ASYNC_GENERATOR_OBJECT_TYPE",
++  2095: "JS_DATA_VIEW_TYPE",
++  2096: "JS_TYPED_ARRAY_TYPE",
++  2097: "JS_MAP_TYPE",
++  2098: "JS_SET_TYPE",
++  2099: "JS_WEAK_MAP_TYPE",
++  2100: "JS_WEAK_SET_TYPE",
++  2101: "JS_ARGUMENTS_OBJECT_TYPE",
++  2102: "JS_ARRAY_TYPE",
++  2103: "JS_ARRAY_BUFFER_TYPE",
++  2104: "JS_ARRAY_ITERATOR_TYPE",
++  2105: "JS_ASYNC_FROM_SYNC_ITERATOR_TYPE",
++  2106: "JS_COLLATOR_TYPE",
++  2107: "JS_CONTEXT_EXTENSION_OBJECT_TYPE",
++  2108: "JS_DATE_TYPE",
++  2109: "JS_DATE_TIME_FORMAT_TYPE",
++  2110: "JS_DISPLAY_NAMES_TYPE",
++  2111: "JS_ERROR_TYPE",
++  2112: "JS_FINALIZATION_REGISTRY_TYPE",
++  2113: "JS_LIST_FORMAT_TYPE",
++  2114: "JS_LOCALE_TYPE",
++  2115: "JS_MESSAGE_OBJECT_TYPE",
++  2116: "JS_NUMBER_FORMAT_TYPE",
++  2117: "JS_PLURAL_RULES_TYPE",
++  2118: "JS_PROMISE_TYPE",
++  2119: "JS_REG_EXP_TYPE",
++  2120: "JS_REG_EXP_STRING_ITERATOR_TYPE",
++  2121: "JS_RELATIVE_TIME_FORMAT_TYPE",
++  2122: "JS_SEGMENT_ITERATOR_TYPE",
++  2123: "JS_SEGMENTER_TYPE",
++  2124: "JS_SEGMENTS_TYPE",
++  2125: "JS_SHADOW_REALM_TYPE",
++  2126: "JS_SHARED_STRUCT_TYPE",
++  2127: "JS_STRING_ITERATOR_TYPE",
++  2128: "JS_TEMPORAL_CALENDAR_TYPE",
++  2129: "JS_TEMPORAL_DURATION_TYPE",
++  2130: "JS_TEMPORAL_INSTANT_TYPE",
++  2131: "JS_TEMPORAL_PLAIN_DATE_TYPE",
++  2132: "JS_TEMPORAL_PLAIN_DATE_TIME_TYPE",
++  2133: "JS_TEMPORAL_PLAIN_MONTH_DAY_TYPE",
++  2134: "JS_TEMPORAL_PLAIN_TIME_TYPE",
++  2135: "JS_TEMPORAL_PLAIN_YEAR_MONTH_TYPE",
++  2136: "JS_TEMPORAL_TIME_ZONE_TYPE",
++  2137: "JS_TEMPORAL_ZONED_DATE_TIME_TYPE",
++  2138: "JS_V8_BREAK_ITERATOR_TYPE",
++  2139: "JS_WEAK_REF_TYPE",
++  2140: "WASM_GLOBAL_OBJECT_TYPE",
++  2141: "WASM_INSTANCE_OBJECT_TYPE",
++  2142: "WASM_MEMORY_OBJECT_TYPE",
++  2143: "WASM_MODULE_OBJECT_TYPE",
++  2144: "WASM_SUSPENDER_OBJECT_TYPE",
++  2145: "WASM_TABLE_OBJECT_TYPE",
++  2146: "WASM_TAG_OBJECT_TYPE",
++  2147: "WASM_VALUE_OBJECT_TYPE",
+ }
+ 
+ # List of known V8 maps.
+@@ -447,7 +448,7 @@ KNOWN_MAPS = {
+     ("read_only_space", 0x06aa5): (138, "StoreHandler2Map"),
+     ("read_only_space", 0x06acd): (138, "StoreHandler3Map"),
+     ("map_space", 0x02149): (1057, "ExternalMap"),
+-    ("map_space", 0x02171): (2114, "JSMessageObjectMap"),
++    ("map_space", 0x02171): (2115, "JSMessageObjectMap"),
+ }
+ 
+ # List of known V8 objects.
+-- 
+2.35.1
+

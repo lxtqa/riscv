@@ -1,0 +1,504 @@
+From fb4f89aede6f7acc219e964ac294a291d2280d4e Mon Sep 17 00:00:00 2001
+From: Victor Gomes <victorgomes@chromium.org>
+Date: Wed, 4 Aug 2021 15:11:27 +0200
+Subject: [PATCH] [baseline] Retry compiling on-heap when growing buffer
+
+Bug: v8:11872
+Change-Id: I6d133ee33b48fa1f02442564b6a30d56986758eb
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3071401
+Reviewed-by: Leszek Swirski <leszeks@chromium.org>
+Commit-Queue: Victor Gomes <victorgomes@chromium.org>
+Cr-Commit-Position: refs/heads/master@{#76092}
+---
+ src/codegen/arm/assembler-arm.cc         | 18 ++++++++++++++---
+ src/codegen/arm/assembler-arm.h          |  4 ++++
+ src/codegen/arm64/assembler-arm64.cc     | 25 +++++++++++++++++++++---
+ src/codegen/arm64/assembler-arm64.h      |  4 ++++
+ src/codegen/assembler.cc                 | 24 ++++++++++++++++-------
+ src/codegen/ia32/assembler-ia32.cc       | 18 ++++++++++++++---
+ src/codegen/ia32/assembler-ia32.h        |  4 ++++
+ src/codegen/mips/assembler-mips.cc       | 20 +++++++++++++++++--
+ src/codegen/mips/assembler-mips.h        |  2 ++
+ src/codegen/mips64/assembler-mips64.cc   |  8 ++++++++
+ src/codegen/mips64/assembler-mips64.h    |  2 ++
+ src/codegen/ppc/assembler-ppc.cc         |  6 ++++++
+ src/codegen/ppc/assembler-ppc.h          |  4 ++++
+ src/codegen/riscv64/assembler-riscv64.cc |  2 ++
+ src/codegen/riscv64/assembler-riscv64.h  |  4 ++++
+ src/codegen/s390/assembler-s390.cc       |  6 ++++++
+ src/codegen/s390/assembler-s390.h        |  4 ++++
+ src/codegen/x64/assembler-x64.cc         | 23 +++++++++++++++++++---
+ src/codegen/x64/assembler-x64.h          |  4 ++++
+ src/heap/factory.cc                      |  7 +------
+ 20 files changed, 162 insertions(+), 27 deletions(-)
+
+diff --git a/src/codegen/arm/assembler-arm.cc b/src/codegen/arm/assembler-arm.cc
+index d897c6ae6a4..3ee9f11c59f 100644
+--- a/src/codegen/arm/assembler-arm.cc
++++ b/src/codegen/arm/assembler-arm.cc
+@@ -5173,6 +5173,14 @@ void Assembler::RecordConstPool(int size) {
+ }
+ 
+ void Assembler::FixOnHeapReferences() {
++  Address base = reinterpret_cast<Address>(buffer_->start());
++  for (auto p : saved_handles_for_raw_object_ptr_) {
++    Handle<HeapObject> object(reinterpret_cast<Address*>(p.second));
++    WriteUnalignedValue(base + p.first, *object);
++  }
++}
++
++void Assembler::FixOnHeapReferencesToHandles() {
+   Address base = reinterpret_cast<Address>(buffer_->start());
+   for (auto p : saved_handles_for_raw_object_ptr_) {
+     WriteUnalignedValue(base + p.first, p.second);
+@@ -5216,9 +5224,13 @@ void Assembler::GrowBuffer() {
+       reinterpret_cast<Address>(reloc_info_writer.last_pc()) + pc_delta);
+   reloc_info_writer.Reposition(new_reloc_start, new_last_pc);
+ 
+-  // Patch on-heap references to handles.
+-  if (previously_on_heap && !buffer_->IsOnHeap()) {
+-    FixOnHeapReferences();
++  // Fix on-heap references.
++  if (previously_on_heap) {
++    if (buffer_->IsOnHeap()) {
++      FixOnHeapReferences();
++    } else {
++      FixOnHeapReferencesToHandles();
++    }
+   }
+ 
+   // None of our relocation types are pc relative pointing outside the code
+diff --git a/src/codegen/arm/assembler-arm.h b/src/codegen/arm/assembler-arm.h
+index b11118ca7c6..11b39615f42 100644
+--- a/src/codegen/arm/assembler-arm.h
++++ b/src/codegen/arm/assembler-arm.h
+@@ -333,6 +333,10 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // between Code object allocation and Code object finalization.
+   void FixOnHeapReferences();
+ 
++  // This function is called when we fallback from on-heap to off-heap
++  // compilation and patch on-heap references to handles.
++  void FixOnHeapReferencesToHandles();
++
+   // Label operations & relative jumps (PPUM Appendix D)
+   //
+   // Takes a branch opcode (cc) and a label (L) and generates
+diff --git a/src/codegen/arm64/assembler-arm64.cc b/src/codegen/arm64/assembler-arm64.cc
+index d730e90f32e..c5328646bc7 100644
+--- a/src/codegen/arm64/assembler-arm64.cc
++++ b/src/codegen/arm64/assembler-arm64.cc
+@@ -4276,6 +4276,21 @@ bool Assembler::IsImmFP64(double imm) {
+ }
+ 
+ void Assembler::FixOnHeapReferences() {
++  Address base = reinterpret_cast<Address>(buffer_->start());
++  for (auto p : saved_handles_for_raw_object_ptr_) {
++    Handle<HeapObject> object = GetEmbeddedObject(p.second);
++    WriteUnalignedValue(base + p.first, object->ptr());
++  }
++  for (auto p : saved_offsets_for_runtime_entries_) {
++    Instruction* instr = reinterpret_cast<Instruction*>(base + p.first);
++    Address target = p.second * kInstrSize + options().code_range_start;
++    DCHECK(is_int26(p.second));
++    DCHECK(instr->IsBranchAndLink() || instr->IsUnconditionalBranch());
++    instr->SetBranchImmTarget(reinterpret_cast<Instruction*>(target));
++  }
++}
++
++void Assembler::FixOnHeapReferencesToHandles() {
+   Address base = reinterpret_cast<Address>(buffer_->start());
+   for (auto p : saved_handles_for_raw_object_ptr_) {
+     WriteUnalignedValue(base + p.first, p.second);
+@@ -4333,9 +4348,13 @@ void Assembler::GrowBuffer() {
+     WriteUnalignedValue<intptr_t>(address, internal_ref);
+   }
+ 
+-  // Patch on-heap references to handles.
+-  if (previously_on_heap && !buffer_->IsOnHeap()) {
+-    FixOnHeapReferences();
++  // Fix on-heap references.
++  if (previously_on_heap) {
++    if (buffer_->IsOnHeap()) {
++      FixOnHeapReferences();
++    } else {
++      FixOnHeapReferencesToHandles();
++    }
+   }
+ 
+   // Pending relocation entries are also relative, no need to relocate.
+diff --git a/src/codegen/arm64/assembler-arm64.h b/src/codegen/arm64/assembler-arm64.h
+index 15c786e95c0..a8431bb42ab 100644
+--- a/src/codegen/arm64/assembler-arm64.h
++++ b/src/codegen/arm64/assembler-arm64.h
+@@ -209,6 +209,10 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // between Code object allocation and Code object finalization.
+   void FixOnHeapReferences();
+ 
++  // This function is called when we fallback from on-heap to off-heap
++  // compilation and patch on-heap references to handles.
++  void FixOnHeapReferencesToHandles();
++
+   // Insert the smallest number of nop instructions
+   // possible to align the pc offset to a multiple
+   // of m. m must be a power of 2 (>= 4).
+diff --git a/src/codegen/assembler.cc b/src/codegen/assembler.cc
+index 8b2a93f048a..c09420a4658 100644
+--- a/src/codegen/assembler.cc
++++ b/src/codegen/assembler.cc
+@@ -142,8 +142,9 @@ class ExternalAssemblerBufferImpl : public AssemblerBuffer {
+ 
+ class OnHeapAssemblerBuffer : public AssemblerBuffer {
+  public:
+-  OnHeapAssemblerBuffer(Handle<Code> code, int size, int gc_count)
+-      : code_(code), size_(size), gc_count_(gc_count) {}
++  OnHeapAssemblerBuffer(Isolate* isolate, Handle<Code> code, int size,
++                        int gc_count)
++      : isolate_(isolate), code_(code), size_(size), gc_count_(gc_count) {}
+ 
+   byte* start() const override {
+     return reinterpret_cast<byte*>(code_->raw_instruction_start());
+@@ -153,10 +154,18 @@ class OnHeapAssemblerBuffer : public AssemblerBuffer {
+ 
+   std::unique_ptr<AssemblerBuffer> Grow(int new_size) override {
+     DCHECK_LT(size(), new_size);
++    Heap* heap = isolate_->heap();
++    if (Code::SizeFor(new_size) <
++        heap->MaxRegularHeapObjectSize(AllocationType::kCode)) {
++      MaybeHandle<Code> code =
++          isolate_->factory()->NewEmptyCode(CodeKind::BASELINE, new_size);
++      if (!code.is_null()) {
++        return std::make_unique<OnHeapAssemblerBuffer>(
++            isolate_, code.ToHandleChecked(), new_size, heap->gc_count());
++      }
++    }
+     // We fall back to the slow path using the default assembler buffer and
+-    // compile the code off the GC heap. Compiling directly on heap makes less
+-    // sense now, since we will need to allocate a new Code object, copy the
+-    // content generated so far and relocate.
++    // compile the code off the GC heap.
+     return std::make_unique<DefaultAssemblerBuffer>(new_size);
+   }
+ 
+@@ -167,6 +176,7 @@ class OnHeapAssemblerBuffer : public AssemblerBuffer {
+   MaybeHandle<Code> code() const override { return code_; }
+ 
+  private:
++  Isolate* isolate_;
+   Handle<Code> code_;
+   const int size_;
+   const int gc_count_;
+@@ -214,8 +224,8 @@ std::unique_ptr<AssemblerBuffer> NewOnHeapAssemblerBuffer(Isolate* isolate,
+   MaybeHandle<Code> code =
+       isolate->factory()->NewEmptyCode(CodeKind::BASELINE, size);
+   if (code.is_null()) return {};
+-  return std::make_unique<OnHeapAssemblerBuffer>(code.ToHandleChecked(), size,
+-                                                 isolate->heap()->gc_count());
++  return std::make_unique<OnHeapAssemblerBuffer>(
++      isolate, code.ToHandleChecked(), size, isolate->heap()->gc_count());
+ }
+ 
+ // -----------------------------------------------------------------------------
+diff --git a/src/codegen/ia32/assembler-ia32.cc b/src/codegen/ia32/assembler-ia32.cc
+index c859e385576..20ad36cb7ea 100644
+--- a/src/codegen/ia32/assembler-ia32.cc
++++ b/src/codegen/ia32/assembler-ia32.cc
+@@ -3342,6 +3342,14 @@ void Assembler::emit_vex_prefix(Register vreg, VectorLength l, SIMDPrefix pp,
+ }
+ 
+ void Assembler::FixOnHeapReferences() {
++  Address base = reinterpret_cast<Address>(buffer_->start());
++  for (auto p : saved_handles_for_raw_object_ptr_) {
++    Handle<HeapObject> object(reinterpret_cast<Address*>(p.second));
++    WriteUnalignedValue(base + p.first, *object);
++  }
++}
++
++void Assembler::FixOnHeapReferencesToHandles() {
+   Address base = reinterpret_cast<Address>(buffer_->start());
+   for (auto p : saved_handles_for_raw_object_ptr_) {
+     WriteUnalignedValue<uint32_t>(base + p.first, p.second);
+@@ -3401,9 +3409,13 @@ void Assembler::GrowBuffer() {
+     it.rinfo()->apply(pc_delta);
+   }
+ 
+-  // Patch on-heap references to handles.
+-  if (previously_on_heap && !buffer_->IsOnHeap()) {
+-    FixOnHeapReferences();
++  // Fix on-heap references.
++  if (previously_on_heap) {
++    if (buffer_->IsOnHeap()) {
++      FixOnHeapReferences();
++    } else {
++      FixOnHeapReferencesToHandles();
++    }
+   }
+ 
+   DCHECK(!buffer_overflow());
+diff --git a/src/codegen/ia32/assembler-ia32.h b/src/codegen/ia32/assembler-ia32.h
+index a39afbc9ab1..94366e15ee2 100644
+--- a/src/codegen/ia32/assembler-ia32.h
++++ b/src/codegen/ia32/assembler-ia32.h
+@@ -397,6 +397,10 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // between Code object allocation and Code object finalization.
+   void FixOnHeapReferences();
+ 
++  // This function is called when we fallback from on-heap to off-heap
++  // compilation and patch on-heap references to handles.
++  void FixOnHeapReferencesToHandles();
++
+   void FinalizeJumpOptimizationInfo();
+ 
+   // Unused on this architecture.
+diff --git a/src/codegen/mips/assembler-mips.cc b/src/codegen/mips/assembler-mips.cc
+index 9c3c8304124..7851312e43a 100644
+--- a/src/codegen/mips/assembler-mips.cc
++++ b/src/codegen/mips/assembler-mips.cc
+@@ -3538,6 +3538,14 @@ void Assembler::RelocateRelativeReference(RelocInfo::Mode rmode, Address pc,
+ }
+ 
+ void Assembler::FixOnHeapReferences() {
++  for (auto p : saved_handles_for_raw_object_ptr_) {
++    Address base = reinterpret_cast<Address>(buffer_->start() + p.first);
++    Handle<HeapObject> object(reinterpret_cast<Address*>(p.second));
++    set_target_value_at(base, *object);
++  }
++}
++
++void Assembler::FixOnHeapReferencesToHandles() {
+   for (auto p : saved_handles_for_raw_object_ptr_) {
+     Address base = reinterpret_cast<Address>(buffer_->start() + p.first);
+     set_target_value_at(base, p.second);
+@@ -3589,8 +3597,16 @@ void Assembler::GrowBuffer() {
+       RelocateInternalReference(rmode, it.rinfo()->pc(), pc_delta);
+     }
+   }
+-  // Patch on-heap references to handles.
+-  if (previously_on_heap && !buffer_->IsOnHeap()) FixOnHeapReferences();
++
++  // Fix on-heap references.
++  if (previously_on_heap) {
++    if (buffer_->IsOnHeap()) {
++      FixOnHeapReferences();
++    } else {
++      FixOnHeapReferencesToHandles();
++    }
++  }
++
+   DCHECK(!overflow());
+ }
+ 
+diff --git a/src/codegen/mips/assembler-mips.h b/src/codegen/mips/assembler-mips.h
+index 091f236061d..90bfb78bc00 100644
+--- a/src/codegen/mips/assembler-mips.h
++++ b/src/codegen/mips/assembler-mips.h
+@@ -169,6 +169,8 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+ 
+   void FixOnHeapReferences();
+ 
++  void FixOnHeapReferencesToHandles();
++
+   // Unused on this architecture.
+   void MaybeEmitOutOfLineConstantPool() {}
+ 
+diff --git a/src/codegen/mips64/assembler-mips64.cc b/src/codegen/mips64/assembler-mips64.cc
+index c27a65c1284..29342b44273 100644
+--- a/src/codegen/mips64/assembler-mips64.cc
++++ b/src/codegen/mips64/assembler-mips64.cc
+@@ -3737,6 +3737,14 @@ int Assembler::RelocateInternalReference(RelocInfo::Mode rmode, Address pc,
+ }
+ 
+ void Assembler::FixOnHeapReferences() {
++  for (auto p : saved_handles_for_raw_object_ptr_) {
++    Address base = reinterpret_cast<Address>(buffer_->start() + p.first);
++    Handle<HeapObject> object(reinterpret_cast<Address*>(p.second));
++    set_target_value_at(base, *object);
++  }
++}
++
++void Assembler::FixOnHeapReferencesToHandles() {
+   for (auto p : saved_handles_for_raw_object_ptr_) {
+     Address base = reinterpret_cast<Address>(buffer_->start() + p.first);
+     set_target_value_at(base, p.second);
+diff --git a/src/codegen/mips64/assembler-mips64.h b/src/codegen/mips64/assembler-mips64.h
+index f0730de30c4..555f4b8f1c4 100644
+--- a/src/codegen/mips64/assembler-mips64.h
++++ b/src/codegen/mips64/assembler-mips64.h
+@@ -169,6 +169,8 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+ 
+   void FixOnHeapReferences();
+ 
++  void FixOnHeapReferencesToHandles();
++
+   // Unused on this architecture.
+   void MaybeEmitOutOfLineConstantPool() {}
+ 
+diff --git a/src/codegen/ppc/assembler-ppc.cc b/src/codegen/ppc/assembler-ppc.cc
+index 4cafce32884..dfb25090994 100644
+--- a/src/codegen/ppc/assembler-ppc.cc
++++ b/src/codegen/ppc/assembler-ppc.cc
+@@ -1937,6 +1937,12 @@ void Assembler::FixOnHeapReferences() {
+   UNREACHABLE();
+ }
+ 
++void Assembler::FixOnHeapReferencesToHandles() {
++  // TODO(v8:11872) This function should never be called if Sparkplug on heap
++  // compilation is not supported.
++  UNREACHABLE();
++}
++
+ void Assembler::GrowBuffer(int needed) {
+   DCHECK_EQ(buffer_start_, buffer_->start());
+ 
+diff --git a/src/codegen/ppc/assembler-ppc.h b/src/codegen/ppc/assembler-ppc.h
+index bfe40b24c55..1b3290fbe1e 100644
+--- a/src/codegen/ppc/assembler-ppc.h
++++ b/src/codegen/ppc/assembler-ppc.h
+@@ -201,6 +201,10 @@ class Assembler : public AssemblerBase {
+   // between Code object allocation and Code object finalization.
+   void FixOnHeapReferences();
+ 
++  // This function is called when we fallback from on-heap to off-heap
++  // compilation and patch on-heap references to handles.
++  void FixOnHeapReferencesToHandles();
++
+   void MaybeEmitOutOfLineConstantPool() { EmitConstantPool(); }
+ 
+   inline void CheckTrampolinePoolQuick(int extra_space = 0) {
+diff --git a/src/codegen/riscv64/assembler-riscv64.cc b/src/codegen/riscv64/assembler-riscv64.cc
+index f574d0aaca7..ef06240ffa6 100644
+--- a/src/codegen/riscv64/assembler-riscv64.cc
++++ b/src/codegen/riscv64/assembler-riscv64.cc
+@@ -2760,6 +2760,8 @@ void Assembler::RelocateRelativeReference(RelocInfo::Mode rmode, Address pc,
+ 
+ void Assembler::FixOnHeapReferences() { UNIMPLEMENTED(); }
+ 
++void Assembler::FixOnHeapReferencesToHandles() { UNIMPLEMENTED(); }
++
+ void Assembler::GrowBuffer() {
+   DEBUG_PRINTF("GrowBuffer: %p -> ", buffer_start_);
+   // Compute new buffer size.
+diff --git a/src/codegen/riscv64/assembler-riscv64.h b/src/codegen/riscv64/assembler-riscv64.h
+index 0fb64143322..77fbbc7c1cd 100644
+--- a/src/codegen/riscv64/assembler-riscv64.h
++++ b/src/codegen/riscv64/assembler-riscv64.h
+@@ -359,6 +359,10 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // between Code object allocation and Code object finalization.
+   void FixOnHeapReferences();
+ 
++  // This function is called when we fallback from on-heap to off-heap
++  // compilation and patch on-heap references to handles.
++  void FixOnHeapReferencesToHandles();
++
+   // Insert the smallest number of nop instructions
+   // possible to align the pc offset to a multiple
+   // of m. m must be a power of 2 (>= 4).
+diff --git a/src/codegen/s390/assembler-s390.cc b/src/codegen/s390/assembler-s390.cc
+index 7dafd3818a3..fbd136b0a34 100644
+--- a/src/codegen/s390/assembler-s390.cc
++++ b/src/codegen/s390/assembler-s390.cc
+@@ -756,6 +756,12 @@ void Assembler::FixOnHeapReferences() {
+   UNREACHABLE();
+ }
+ 
++void Assembler::FixOnHeapReferencesToHandles() {
++  // TODO(v8:11872) This function should never be called if Sparkplug on heap
++  // compilation is not supported.
++  UNREACHABLE();
++}
++
+ void Assembler::GrowBuffer(int needed) {
+   DCHECK_EQ(buffer_start_, buffer_->start());
+ 
+diff --git a/src/codegen/s390/assembler-s390.h b/src/codegen/s390/assembler-s390.h
+index 5716923a55c..0f3fc270eb0 100644
+--- a/src/codegen/s390/assembler-s390.h
++++ b/src/codegen/s390/assembler-s390.h
+@@ -246,6 +246,10 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // between Code object allocation and Code object finalization.
+   void FixOnHeapReferences();
+ 
++  // This function is called when we fallback from on-heap to off-heap
++  // compilation and patch on-heap references to handles.
++  void FixOnHeapReferencesToHandles();
++
+   // Unused on this architecture.
+   void MaybeEmitOutOfLineConstantPool() {}
+ 
+diff --git a/src/codegen/x64/assembler-x64.cc b/src/codegen/x64/assembler-x64.cc
+index 3fed1b956be..81c7354ee7e 100644
+--- a/src/codegen/x64/assembler-x64.cc
++++ b/src/codegen/x64/assembler-x64.cc
+@@ -538,6 +538,19 @@ bool Assembler::is_optimizable_farjmp(int idx) {
+ }
+ 
+ void Assembler::FixOnHeapReferences() {
++  Address base = reinterpret_cast<Address>(buffer_->start());
++  for (auto p : saved_handles_for_raw_object_ptr_) {
++    Handle<HeapObject> object(reinterpret_cast<Address*>(p.second));
++    WriteUnalignedValue(base + p.first, *object);
++  }
++  for (auto p : saved_offsets_for_runtime_entries_) {
++    Address pc = base + p.first;
++    Address target = p.second + options().code_range_start;
++    WriteUnalignedValue<uint32_t>(pc, relative_target_offset(target, pc));
++  }
++}
++
++void Assembler::FixOnHeapReferencesToHandles() {
+   Address base = reinterpret_cast<Address>(buffer_->start());
+   for (auto p : saved_handles_for_raw_object_ptr_) {
+     WriteUnalignedValue(base + p.first, p.second);
+@@ -589,9 +602,13 @@ void Assembler::GrowBuffer() {
+     WriteUnalignedValue(p, ReadUnalignedValue<intptr_t>(p) + pc_delta);
+   }
+ 
+-  // Patch on-heap references to handles.
+-  if (previously_on_heap && !buffer_->IsOnHeap()) {
+-    FixOnHeapReferences();
++  // Fix on-heap references.
++  if (previously_on_heap) {
++    if (buffer_->IsOnHeap()) {
++      FixOnHeapReferences();
++    } else {
++      FixOnHeapReferencesToHandles();
++    }
+   }
+ 
+   DCHECK(!buffer_overflow());
+diff --git a/src/codegen/x64/assembler-x64.h b/src/codegen/x64/assembler-x64.h
+index 2511c0f69c3..1555fc04e2a 100644
+--- a/src/codegen/x64/assembler-x64.h
++++ b/src/codegen/x64/assembler-x64.h
+@@ -426,6 +426,10 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // between Code object allocation and Code object finalization.
+   void FixOnHeapReferences();
+ 
++  // This function is called when we fallback from on-heap to off-heap
++  // compilation and patch on-heap references to handles.
++  void FixOnHeapReferencesToHandles();
++
+   void FinalizeJumpOptimizationInfo();
+ 
+   // Unused on this architecture.
+diff --git a/src/heap/factory.cc b/src/heap/factory.cc
+index 75f64a76d99..33ba4e1739b 100644
+--- a/src/heap/factory.cc
++++ b/src/heap/factory.cc
+@@ -299,13 +299,8 @@ void Factory::CodeBuilder::FinalizeOnHeapCode(Handle<Code> code,
+ 
+   if (code_desc_.origin->OnHeapGCCount() != heap->gc_count()) {
+     // If a GC happens between Code object allocation and now, we might have
+-    // invalid embedded object references. We need to fix them back to handles,
+-    // then unbox and relocate them.
+-    // TODO(victorgomes): FixOnHeapReferences could already do the full
+-    // relocation, to avoid having to call RelocateFromDesc. Additionally, we
+-    // could used it to make grown buffers on-heap.
++    // invalid embedded object references.
+     code_desc_.origin->FixOnHeapReferences();
+-    code->RelocateFromDesc(reloc_info, heap, code_desc_);
+   }
+ 
+ #ifdef VERIFY_HEAP
+-- 
+2.35.1
+

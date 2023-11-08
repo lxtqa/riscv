@@ -1,0 +1,796 @@
+From 8713dc57775726e235d8449d7284ab411c3349d9 Mon Sep 17 00:00:00 2001
+From: jgruber <jgruber@chromium.org>
+Date: Wed, 11 Jan 2017 03:34:02 -0800
+Subject: [PATCH] [stubs] Add CreateIterResultObject stub
+
+Most notably, the interpreter now calls this stub instead of the
+runtime.
+
+BUG=
+
+Review-Url: https://codereview.chromium.org/2619163004
+Cr-Commit-Position: refs/heads/master@{#42218}
+---
+ src/builtins/builtins-generator.cc            | 14 +--
+ src/builtins/builtins-object.cc               | 23 +++++
+ src/builtins/builtins.h                       |  4 +
+ src/code-factory.cc                           |  1 +
+ src/code-factory.h                            |  1 +
+ src/interface-descriptors.h                   |  8 ++
+ src/interpreter/interpreter-intrinsics.cc     |  6 ++
+ src/interpreter/interpreter-intrinsics.h      | 35 ++++----
+ .../bytecode_expectations/Generators.golden   | 80 ++++++++---------
+ .../bytecode_expectations/Modules.golden      | 88 +++++++++----------
+ 10 files changed, 153 insertions(+), 107 deletions(-)
+
+diff --git a/src/builtins/builtins-generator.cc b/src/builtins/builtins-generator.cc
+index 5c53ec9dd6f..d22c3cdd643 100644
+--- a/src/builtins/builtins-generator.cc
++++ b/src/builtins/builtins-generator.cc
+@@ -65,18 +65,20 @@ void Generate_GeneratorPrototypeResume(
+ 
+   assembler->Bind(&if_receiverisclosed);
+   {
++    Callable create_iter_result_object =
++        CodeFactory::CreateIterResultObject(assembler->isolate());
++
+     // The {receiver} is closed already.
+     Node* result = nullptr;
+     switch (resume_mode) {
+       case JSGeneratorObject::kNext:
+-        result = assembler->CallRuntime(Runtime::kCreateIterResultObject,
+-                                        context, assembler->UndefinedConstant(),
+-                                        assembler->BooleanConstant(true));
++        result = assembler->CallStub(create_iter_result_object, context,
++                                     assembler->UndefinedConstant(),
++                                     assembler->TrueConstant());
+         break;
+       case JSGeneratorObject::kReturn:
+-        result =
+-            assembler->CallRuntime(Runtime::kCreateIterResultObject, context,
+-                                   value, assembler->BooleanConstant(true));
++        result = assembler->CallStub(create_iter_result_object, context, value,
++                                     assembler->TrueConstant());
+         break;
+       case JSGeneratorObject::kThrow:
+         result = assembler->CallRuntime(Runtime::kThrow, context, value);
+diff --git a/src/builtins/builtins-object.cc b/src/builtins/builtins-object.cc
+index 6b2d5865103..95ef2441b2d 100644
+--- a/src/builtins/builtins-object.cc
++++ b/src/builtins/builtins-object.cc
+@@ -927,6 +927,29 @@ BUILTIN(ObjectSeal) {
+   return *object;
+ }
+ 
++void Builtins::Generate_CreateIterResultObject(
++    compiler::CodeAssemblerState* state) {
++  typedef CreateIterResultObjectDescriptor Descriptor;
++  typedef compiler::Node Node;
++  CodeStubAssembler a(state);
++
++  Node* const value = a.Parameter(Descriptor::kValue);
++  Node* const done = a.Parameter(Descriptor::kDone);
++  Node* const context = a.Parameter(Descriptor::kContext);
++
++  Node* const native_context = a.LoadNativeContext(context);
++  Node* const map =
++      a.LoadContextElement(native_context, Context::ITERATOR_RESULT_MAP_INDEX);
++
++  Node* const result = a.AllocateJSObjectFromMap(map);
++
++  a.StoreObjectFieldNoWriteBarrier(result, JSIteratorResult::kValueOffset,
++                                   value);
++  a.StoreObjectFieldNoWriteBarrier(result, JSIteratorResult::kDoneOffset, done);
++
++  a.Return(result);
++}
++
+ void Builtins::Generate_HasProperty(compiler::CodeAssemblerState* state) {
+   typedef HasPropertyDescriptor Descriptor;
+   typedef compiler::Node Node;
+diff --git a/src/builtins/builtins.h b/src/builtins/builtins.h
+index 1cc0e0a732e..dcff15068f8 100644
+--- a/src/builtins/builtins.h
++++ b/src/builtins/builtins.h
+@@ -412,6 +412,10 @@ namespace internal {
+   TFJ(FunctionPrototypeHasInstance, 1)                                         \
+   CPP(FunctionPrototypeToString)                                               \
+                                                                                \
++  /* Belongs to Objects but is a dependency of GeneratorPrototypeResume */     \
++  TFS(CreateIterResultObject, BUILTIN, kNoExtraICState,                        \
++      CreateIterResultObject)                                                  \
++                                                                               \
+   /* Generator and Async */                                                    \
+   CPP(GeneratorFunctionConstructor)                                            \
+   /* ES6 section 25.3.1.2 Generator.prototype.next ( value ) */                \
+diff --git a/src/code-factory.cc b/src/code-factory.cc
+index 7c6a3363197..ab652964c65 100644
+--- a/src/code-factory.cc
++++ b/src/code-factory.cc
+@@ -252,6 +252,7 @@ TFS_BUILTIN(Equal)
+ TFS_BUILTIN(NotEqual)
+ TFS_BUILTIN(StrictEqual)
+ TFS_BUILTIN(StrictNotEqual)
++TFS_BUILTIN(CreateIterResultObject)
+ TFS_BUILTIN(HasProperty)
+ TFS_BUILTIN(ToInteger)
+ TFS_BUILTIN(ToLength)
+diff --git a/src/code-factory.h b/src/code-factory.h
+index 2aa8f0daf63..2500ebd2743 100644
+--- a/src/code-factory.h
++++ b/src/code-factory.h
+@@ -167,6 +167,7 @@ class V8_EXPORT_PRIVATE CodeFactory final {
+       Isolate* isolate, ConvertReceiverMode mode = ConvertReceiverMode::kAny);
+   static Callable Construct(Isolate* isolate);
+   static Callable ConstructFunction(Isolate* isolate);
++  static Callable CreateIterResultObject(Isolate* isolate);
+   static Callable HasProperty(Isolate* isolate);
+   static Callable ForInFilter(Isolate* isolate);
+ 
+diff --git a/src/interface-descriptors.h b/src/interface-descriptors.h
+index e821a8b1b97..1d1b48af93a 100644
+--- a/src/interface-descriptors.h
++++ b/src/interface-descriptors.h
+@@ -80,6 +80,7 @@ class PlatformInterfaceDescriptor;
+   V(SubString)                            \
+   V(Keyed)                                \
+   V(Named)                                \
++  V(CreateIterResultObject)               \
+   V(HasProperty)                          \
+   V(ForInFilter)                          \
+   V(GetProperty)                          \
+@@ -479,6 +480,13 @@ class TypeConversionDescriptor final : public CallInterfaceDescriptor {
+   static const Register ArgumentRegister();
+ };
+ 
++class CreateIterResultObjectDescriptor final : public CallInterfaceDescriptor {
++ public:
++  DEFINE_PARAMETERS(kValue, kDone)
++  DECLARE_DEFAULT_DESCRIPTOR(CreateIterResultObjectDescriptor,
++                             CallInterfaceDescriptor, kParameterCount)
++};
++
+ class HasPropertyDescriptor final : public CallInterfaceDescriptor {
+  public:
+   DEFINE_PARAMETERS(kKey, kObject)
+diff --git a/src/interpreter/interpreter-intrinsics.cc b/src/interpreter/interpreter-intrinsics.cc
+index 81ce5563f82..a2820fb1286 100644
+--- a/src/interpreter/interpreter-intrinsics.cc
++++ b/src/interpreter/interpreter-intrinsics.cc
+@@ -230,6 +230,12 @@ Node* IntrinsicsHelper::IntrinsicAsStubCall(Node* args_reg, Node* context,
+   return __ CallStubN(callable.descriptor(), 1, input_count, args);
+ }
+ 
++Node* IntrinsicsHelper::CreateIterResultObject(Node* input, Node* arg_count,
++                                               Node* context) {
++  return IntrinsicAsStubCall(input, context,
++                             CodeFactory::CreateIterResultObject(isolate()));
++}
++
+ Node* IntrinsicsHelper::HasProperty(Node* input, Node* arg_count,
+                                     Node* context) {
+   return IntrinsicAsStubCall(input, context,
+diff --git a/src/interpreter/interpreter-intrinsics.h b/src/interpreter/interpreter-intrinsics.h
+index 5a55d3a16a0..825e2b9a98a 100644
+--- a/src/interpreter/interpreter-intrinsics.h
++++ b/src/interpreter/interpreter-intrinsics.h
+@@ -23,23 +23,24 @@ namespace interpreter {
+ 
+ // List of supported intrisics, with upper case name, lower case name and
+ // expected number of arguments (-1 denoting argument count is variable).
+-#define INTRINSICS_LIST(V)                              \
+-  V(Call, call, -1)                                     \
+-  V(ClassOf, class_of, 1)                               \
+-  V(HasProperty, has_property, 2)                       \
+-  V(IsArray, is_array, 1)                               \
+-  V(IsJSProxy, is_js_proxy, 1)                          \
+-  V(IsJSReceiver, is_js_receiver, 1)                    \
+-  V(IsSmi, is_smi, 1)                                   \
+-  V(IsTypedArray, is_typed_array, 1)                    \
+-  V(NumberToString, number_to_string, 1)                \
+-  V(RegExpExec, reg_exp_exec, 4)                        \
+-  V(SubString, sub_string, 3)                           \
+-  V(ToString, to_string, 1)                             \
+-  V(ToLength, to_length, 1)                             \
+-  V(ToInteger, to_integer, 1)                           \
+-  V(ToNumber, to_number, 1)                             \
+-  V(ToObject, to_object, 1)                             \
++#define INTRINSICS_LIST(V)                                \
++  V(Call, call, -1)                                       \
++  V(ClassOf, class_of, 1)                                 \
++  V(CreateIterResultObject, create_iter_result_object, 2) \
++  V(HasProperty, has_property, 2)                         \
++  V(IsArray, is_array, 1)                                 \
++  V(IsJSProxy, is_js_proxy, 1)                            \
++  V(IsJSReceiver, is_js_receiver, 1)                      \
++  V(IsSmi, is_smi, 1)                                     \
++  V(IsTypedArray, is_typed_array, 1)                      \
++  V(NumberToString, number_to_string, 1)                  \
++  V(RegExpExec, reg_exp_exec, 4)                          \
++  V(SubString, sub_string, 3)                             \
++  V(ToString, to_string, 1)                               \
++  V(ToLength, to_length, 1)                               \
++  V(ToInteger, to_integer, 1)                             \
++  V(ToNumber, to_number, 1)                               \
++  V(ToObject, to_object, 1)                               \
+   V(ValueOf, value_of, 1)
+ 
+ class IntrinsicsHelper {
+diff --git a/test/cctest/interpreter/bytecode_expectations/Generators.golden b/test/cctest/interpreter/bytecode_expectations/Generators.golden
+index 4daf6e55695..657ced1c755 100644
+--- a/test/cctest/interpreter/bytecode_expectations/Generators.golden
++++ b/test/cctest/interpreter/bytecode_expectations/Generators.golden
+@@ -13,7 +13,7 @@ snippet: "
+ "
+ frame size: 11
+ parameter count: 1
+-bytecode array length: 199
++bytecode array length: 197
+ bytecodes: [
+                 B(Ldar), R(new_target),
+                 B(JumpIfUndefined), U8(21),
+@@ -53,26 +53,26 @@ bytecodes: [
+                 B(Star), R(8),
+                 B(LdaZero),
+                 B(TestEqualStrict), R(8), U8(0),
+-                B(JumpIfTrue), U8(32),
++                B(JumpIfTrue), U8(31),
+                 B(LdaSmi), U8(2),
+                 B(TestEqualStrict), R(8), U8(0),
+-                B(JumpIfTrue), U8(22),
++                B(JumpIfTrue), U8(21),
+                 B(Jump), U8(2),
+                 B(LdaTrue),
+                 B(Star), R(10),
+                 B(Mov), R(7), R(9),
+-                B(CallRuntime), U16(Runtime::k_CreateIterResultObject), R(9), U8(2),
++                B(InvokeIntrinsic), U8(Runtime::k_CreateIterResultObject), R(9), U8(2),
+                 B(Star), R(3),
+                 B(LdaZero),
+                 B(Star), R(2),
+-                B(Jump), U8(36),
++                B(Jump), U8(35),
+                 B(Ldar), R(7),
+   /*   11 E> */ B(Throw),
+                 B(LdaUndefined),
+                 B(Star), R(5),
+                 B(LdaTrue),
+                 B(Star), R(6),
+-                B(CallRuntime), U16(Runtime::k_CreateIterResultObject), R(5), U8(2),
++                B(InvokeIntrinsic), U8(Runtime::k_CreateIterResultObject), R(5), U8(2),
+                 B(Star), R(3),
+                 B(LdaSmi), U8(1),
+                 B(Star), R(2),
+@@ -113,7 +113,7 @@ bytecodes: [
+ constant pool: [
+ ]
+ handlers: [
+-  [39, 138, 144],
++  [39, 136, 142],
+ ]
+ 
+ ---
+@@ -123,7 +123,7 @@ snippet: "
+ "
+ frame size: 11
+ parameter count: 1
+-bytecode array length: 296
++bytecode array length: 292
+ bytecodes: [
+                 B(Ldar), R(new_target),
+                 B(JumpIfUndefined), U8(28),
+@@ -166,26 +166,26 @@ bytecodes: [
+                 B(Star), R(8),
+                 B(LdaZero),
+                 B(TestEqualStrict), R(8), U8(0),
+-                B(JumpIfTrue), U8(32),
++                B(JumpIfTrue), U8(31),
+                 B(LdaSmi), U8(2),
+                 B(TestEqualStrict), R(8), U8(0),
+-                B(JumpIfTrue), U8(22),
++                B(JumpIfTrue), U8(21),
+                 B(Jump), U8(2),
+                 B(LdaTrue),
+                 B(Star), R(10),
+                 B(Mov), R(7), R(9),
+-                B(CallRuntime), U16(Runtime::k_CreateIterResultObject), R(9), U8(2),
++                B(InvokeIntrinsic), U8(Runtime::k_CreateIterResultObject), R(9), U8(2),
+                 B(Star), R(3),
+                 B(LdaZero),
+                 B(Star), R(2),
+-                B(Jump), U8(116),
++                B(Jump), U8(113),
+                 B(Ldar), R(7),
+   /*   11 E> */ B(Throw),
+   /*   16 S> */ B(LdaSmi), U8(42),
+                 B(Star), R(5),
+                 B(LdaFalse),
+                 B(Star), R(6),
+-                B(CallRuntime), U16(Runtime::k_CreateIterResultObject), R(5), U8(2),
++                B(InvokeIntrinsic), U8(Runtime::k_CreateIterResultObject), R(5), U8(2),
+                 B(Star), R(5),
+                 B(LdaCurrentContextSlot), U8(5),
+                 B(Star), R(6),
+@@ -201,26 +201,26 @@ bytecodes: [
+                 B(Star), R(8),
+                 B(LdaZero),
+                 B(TestEqualStrict), R(8), U8(0),
+-                B(JumpIfTrue), U8(33),
++                B(JumpIfTrue), U8(32),
+                 B(LdaSmi), U8(2),
+                 B(TestEqualStrict), R(8), U8(0),
+-                B(JumpIfTrue), U8(23),
++                B(JumpIfTrue), U8(22),
+                 B(Jump), U8(2),
+                 B(LdaTrue),
+                 B(Star), R(10),
+                 B(Mov), R(7), R(9),
+-                B(CallRuntime), U16(Runtime::k_CreateIterResultObject), R(9), U8(2),
++                B(InvokeIntrinsic), U8(Runtime::k_CreateIterResultObject), R(9), U8(2),
+                 B(Star), R(3),
+                 B(LdaSmi), U8(1),
+                 B(Star), R(2),
+-                B(Jump), U8(36),
++                B(Jump), U8(35),
+                 B(Ldar), R(7),
+   /*   16 E> */ B(Throw),
+                 B(LdaUndefined),
+                 B(Star), R(5),
+                 B(LdaTrue),
+                 B(Star), R(6),
+-                B(CallRuntime), U16(Runtime::k_CreateIterResultObject), R(5), U8(2),
++                B(InvokeIntrinsic), U8(Runtime::k_CreateIterResultObject), R(5), U8(2),
+                 B(Star), R(3),
+                 B(LdaSmi), U8(2),
+                 B(Star), R(2),
+@@ -264,10 +264,10 @@ bytecodes: [
+   /*   25 S> */ B(Return),
+ ]
+ constant pool: [
+-  Smi [132],
++  Smi [130],
+ ]
+ handlers: [
+-  [46, 225, 231],
++  [46, 221, 227],
+ ]
+ 
+ ---
+@@ -277,7 +277,7 @@ snippet: "
+ "
+ frame size: 17
+ parameter count: 1
+-bytecode array length: 775
++bytecode array length: 771
+ bytecodes: [
+                 B(Ldar), R(new_target),
+                 B(JumpIfUndefined), U8(28),
+@@ -320,15 +320,15 @@ bytecodes: [
+                 B(Star), R(10),
+                 B(LdaZero),
+                 B(TestEqualStrict), R(10), U8(0),
+-                B(JumpIfTrue), U8(32),
++                B(JumpIfTrue), U8(31),
+                 B(LdaSmi), U8(2),
+                 B(TestEqualStrict), R(10), U8(0),
+-                B(JumpIfTrue), U8(22),
++                B(JumpIfTrue), U8(21),
+                 B(Jump), U8(2),
+                 B(LdaTrue),
+                 B(Star), R(12),
+                 B(Mov), R(9), R(11),
+-                B(CallRuntime), U16(Runtime::k_CreateIterResultObject), R(11), U8(2),
++                B(InvokeIntrinsic), U8(Runtime::k_CreateIterResultObject), R(11), U8(2),
+                 B(Star), R(5),
+                 B(LdaZero),
+                 B(Star), R(4),
+@@ -398,7 +398,7 @@ bytecodes: [
+                 B(Star), R(11),
+                 B(LdaFalse),
+                 B(Star), R(12),
+-                B(CallRuntime), U16(Runtime::k_CreateIterResultObject), R(11), U8(2),
++                B(InvokeIntrinsic), U8(Runtime::k_CreateIterResultObject), R(11), U8(2),
+                 B(Star), R(11),
+                 B(LdaContextSlot), R(1), U8(5), U8(0),
+                 B(Star), R(12),
+@@ -414,15 +414,15 @@ bytecodes: [
+                 B(Star), R(14),
+                 B(LdaZero),
+                 B(TestEqualStrict), R(14), U8(0),
+-                B(JumpIfTrue), U8(44),
++                B(JumpIfTrue), U8(43),
+                 B(LdaSmi), U8(2),
+                 B(TestEqualStrict), R(14), U8(0),
+-                B(JumpIfTrue), U8(34),
++                B(JumpIfTrue), U8(33),
+                 B(Jump), U8(2),
+                 B(LdaTrue),
+                 B(Star), R(16),
+                 B(Mov), R(13), R(15),
+-                B(CallRuntime), U16(Runtime::k_CreateIterResultObject), R(15), U8(2),
++                B(InvokeIntrinsic), U8(Runtime::k_CreateIterResultObject), R(15), U8(2),
+                 B(PopContext), R(2),
+                 B(PopContext), R(2),
+                 B(PopContext), R(2),
+@@ -438,7 +438,7 @@ bytecodes: [
+                 B(PopContext), R(2),
+                 B(LdaZero),
+                 B(StaContextSlot), R(1), U8(9), U8(0),
+-                B(Wide), B(JumpLoop), U16(-221), U16(0),
++                B(Wide), B(JumpLoop), U16(-219), U16(0),
+                 B(Jump), U8(44),
+                 B(Star), R(11),
+                 B(Ldar), R(closure),
+@@ -542,19 +542,19 @@ bytecodes: [
+                 B(LdaSmi), U8(1),
+                 B(Star), R(4),
+                 B(Mov), R(8), R(5),
+-                B(Jump), U8(48),
++                B(Jump), U8(47),
+                 B(PopContext), R(1),
+                 B(PopContext), R(1),
+                 B(LdaSmi), U8(2),
+                 B(Star), R(4),
+                 B(Mov), R(8), R(5),
+-                B(Jump), U8(35),
++                B(Jump), U8(34),
+                 B(PopContext), R(1),
+                 B(LdaUndefined),
+                 B(Star), R(7),
+                 B(LdaTrue),
+                 B(Star), R(8),
+-                B(CallRuntime), U16(Runtime::k_CreateIterResultObject), R(7), U8(2),
++                B(InvokeIntrinsic), U8(Runtime::k_CreateIterResultObject), R(7), U8(2),
+                 B(Star), R(5),
+                 B(LdaSmi), U8(3),
+                 B(Star), R(4),
+@@ -606,13 +606,13 @@ constant pool: [
+   FIXED_ARRAY_TYPE,
+   CONSTANT_ELEMENTS_PAIR_TYPE,
+   SYMBOL_TYPE,
+-  Smi [155],
++  Smi [154],
+   ONE_BYTE_INTERNALIZED_STRING_TYPE ["next"],
+   ONE_BYTE_INTERNALIZED_STRING_TYPE ["done"],
+   ONE_BYTE_INTERNALIZED_STRING_TYPE ["value"],
+   FIXED_ARRAY_TYPE,
+-  Smi [135],
+-  Smi [152],
++  Smi [134],
++  Smi [150],
+   ONE_BYTE_INTERNALIZED_STRING_TYPE [".catch"],
+   FIXED_ARRAY_TYPE,
+   ONE_BYTE_INTERNALIZED_STRING_TYPE ["return"],
+@@ -621,12 +621,12 @@ constant pool: [
+   FIXED_ARRAY_TYPE,
+   Smi [133],
+   Smi [159],
+-  Smi [585],
++  Smi [582],
+ ]
+ handlers: [
+-  [46, 694, 700],
+-  [143, 444, 450],
+-  [146, 400, 402],
+-  [546, 562, 564],
++  [46, 690, 696],
++  [142, 441, 447],
++  [145, 397, 399],
++  [543, 559, 561],
+ ]
+ 
+diff --git a/test/cctest/interpreter/bytecode_expectations/Modules.golden b/test/cctest/interpreter/bytecode_expectations/Modules.golden
+index 447a00a977a..910f26d4e1d 100644
+--- a/test/cctest/interpreter/bytecode_expectations/Modules.golden
++++ b/test/cctest/interpreter/bytecode_expectations/Modules.golden
+@@ -13,7 +13,7 @@ snippet: "
+ "
+ frame size: 8
+ parameter count: 2
+-bytecode array length: 125
++bytecode array length: 124
+ bytecodes: [
+                 B(Ldar), R(new_target),
+                 B(JumpIfUndefined), U8(21),
+@@ -56,15 +56,15 @@ bytecodes: [
+                 B(Star), R(5),
+                 B(LdaZero),
+                 B(TestEqualStrict), R(5), U8(0),
+-                B(JumpIfTrue), U8(26),
++                B(JumpIfTrue), U8(25),
+                 B(LdaSmi), U8(2),
+                 B(TestEqualStrict), R(5), U8(0),
+-                B(JumpIfTrue), U8(16),
++                B(JumpIfTrue), U8(15),
+                 B(Jump), U8(2),
+                 B(LdaTrue),
+                 B(Star), R(7),
+                 B(Mov), R(4), R(6),
+-                B(CallRuntime), U16(Runtime::k_CreateIterResultObject), R(6), U8(2),
++                B(InvokeIntrinsic), U8(Runtime::k_CreateIterResultObject), R(6), U8(2),
+   /*   13 S> */ B(Return),
+                 B(Ldar), R(4),
+   /*    0 E> */ B(Throw),
+@@ -83,7 +83,7 @@ snippet: "
+ "
+ frame size: 8
+ parameter count: 2
+-bytecode array length: 125
++bytecode array length: 124
+ bytecodes: [
+                 B(Ldar), R(new_target),
+                 B(JumpIfUndefined), U8(21),
+@@ -126,15 +126,15 @@ bytecodes: [
+                 B(Star), R(5),
+                 B(LdaZero),
+                 B(TestEqualStrict), R(5), U8(0),
+-                B(JumpIfTrue), U8(26),
++                B(JumpIfTrue), U8(25),
+                 B(LdaSmi), U8(2),
+                 B(TestEqualStrict), R(5), U8(0),
+-                B(JumpIfTrue), U8(16),
++                B(JumpIfTrue), U8(15),
+                 B(Jump), U8(2),
+                 B(LdaTrue),
+                 B(Star), R(7),
+                 B(Mov), R(4), R(6),
+-                B(CallRuntime), U16(Runtime::k_CreateIterResultObject), R(6), U8(2),
++                B(InvokeIntrinsic), U8(Runtime::k_CreateIterResultObject), R(6), U8(2),
+   /*   24 S> */ B(Return),
+                 B(Ldar), R(4),
+   /*    0 E> */ B(Throw),
+@@ -155,7 +155,7 @@ snippet: "
+ "
+ frame size: 9
+ parameter count: 2
+-bytecode array length: 195
++bytecode array length: 194
+ bytecodes: [
+                 B(Ldar), R(new_target),
+                 B(JumpIfUndefined), U8(21),
+@@ -198,15 +198,15 @@ bytecodes: [
+                 B(Star), R(6),
+                 B(LdaZero),
+                 B(TestEqualStrict), R(6), U8(0),
+-                B(JumpIfTrue), U8(26),
++                B(JumpIfTrue), U8(25),
+                 B(LdaSmi), U8(2),
+                 B(TestEqualStrict), R(6), U8(0),
+-                B(JumpIfTrue), U8(16),
++                B(JumpIfTrue), U8(15),
+                 B(Jump), U8(2),
+                 B(LdaTrue),
+                 B(Star), R(8),
+                 B(Mov), R(5), R(7),
+-                B(CallRuntime), U16(Runtime::k_CreateIterResultObject), R(7), U8(2),
++                B(InvokeIntrinsic), U8(Runtime::k_CreateIterResultObject), R(7), U8(2),
+   /*   64 S> */ B(Return),
+                 B(Ldar), R(5),
+   /*    0 E> */ B(Throw),
+@@ -259,7 +259,7 @@ snippet: "
+ "
+ frame size: 9
+ parameter count: 2
+-bytecode array length: 160
++bytecode array length: 159
+ bytecodes: [
+                 B(Ldar), R(new_target),
+                 B(JumpIfUndefined), U8(21),
+@@ -302,15 +302,15 @@ bytecodes: [
+                 B(Star), R(6),
+                 B(LdaZero),
+                 B(TestEqualStrict), R(6), U8(0),
+-                B(JumpIfTrue), U8(26),
++                B(JumpIfTrue), U8(25),
+                 B(LdaSmi), U8(2),
+                 B(TestEqualStrict), R(6), U8(0),
+-                B(JumpIfTrue), U8(16),
++                B(JumpIfTrue), U8(15),
+                 B(Jump), U8(2),
+                 B(LdaTrue),
+                 B(Star), R(8),
+                 B(Mov), R(5), R(7),
+-                B(CallRuntime), U16(Runtime::k_CreateIterResultObject), R(7), U8(2),
++                B(InvokeIntrinsic), U8(Runtime::k_CreateIterResultObject), R(7), U8(2),
+   /*   49 S> */ B(Return),
+                 B(Ldar), R(5),
+   /*    0 E> */ B(Throw),
+@@ -348,7 +348,7 @@ snippet: "
+ "
+ frame size: 9
+ parameter count: 2
+-bytecode array length: 164
++bytecode array length: 163
+ bytecodes: [
+                 B(Ldar), R(new_target),
+                 B(JumpIfUndefined), U8(21),
+@@ -393,15 +393,15 @@ bytecodes: [
+                 B(Star), R(6),
+                 B(LdaZero),
+                 B(TestEqualStrict), R(6), U8(0),
+-                B(JumpIfTrue), U8(26),
++                B(JumpIfTrue), U8(25),
+                 B(LdaSmi), U8(2),
+                 B(TestEqualStrict), R(6), U8(0),
+-                B(JumpIfTrue), U8(16),
++                B(JumpIfTrue), U8(15),
+                 B(Jump), U8(2),
+                 B(LdaTrue),
+                 B(Star), R(8),
+                 B(Mov), R(5), R(7),
+-                B(CallRuntime), U16(Runtime::k_CreateIterResultObject), R(7), U8(2),
++                B(InvokeIntrinsic), U8(Runtime::k_CreateIterResultObject), R(7), U8(2),
+   /*   49 S> */ B(Return),
+                 B(Ldar), R(5),
+   /*    0 E> */ B(Throw),
+@@ -439,7 +439,7 @@ snippet: "
+ "
+ frame size: 9
+ parameter count: 2
+-bytecode array length: 168
++bytecode array length: 167
+ bytecodes: [
+                 B(Ldar), R(new_target),
+                 B(JumpIfUndefined), U8(21),
+@@ -484,15 +484,15 @@ bytecodes: [
+                 B(Star), R(6),
+                 B(LdaZero),
+                 B(TestEqualStrict), R(6), U8(0),
+-                B(JumpIfTrue), U8(26),
++                B(JumpIfTrue), U8(25),
+                 B(LdaSmi), U8(2),
+                 B(TestEqualStrict), R(6), U8(0),
+-                B(JumpIfTrue), U8(16),
++                B(JumpIfTrue), U8(15),
+                 B(Jump), U8(2),
+                 B(LdaTrue),
+                 B(Star), R(8),
+                 B(Mov), R(5), R(7),
+-                B(CallRuntime), U16(Runtime::k_CreateIterResultObject), R(7), U8(2),
++                B(InvokeIntrinsic), U8(Runtime::k_CreateIterResultObject), R(7), U8(2),
+   /*   51 S> */ B(Return),
+                 B(Ldar), R(5),
+   /*    0 E> */ B(Throw),
+@@ -528,7 +528,7 @@ snippet: "
+ "
+ frame size: 8
+ parameter count: 2
+-bytecode array length: 136
++bytecode array length: 135
+ bytecodes: [
+                 B(Ldar), R(new_target),
+                 B(JumpIfUndefined), U8(21),
+@@ -573,15 +573,15 @@ bytecodes: [
+                 B(Star), R(5),
+                 B(LdaZero),
+                 B(TestEqualStrict), R(5), U8(0),
+-                B(JumpIfTrue), U8(26),
++                B(JumpIfTrue), U8(25),
+                 B(LdaSmi), U8(2),
+                 B(TestEqualStrict), R(5), U8(0),
+-                B(JumpIfTrue), U8(16),
++                B(JumpIfTrue), U8(15),
+                 B(Jump), U8(2),
+                 B(LdaTrue),
+                 B(Star), R(7),
+                 B(Mov), R(4), R(6),
+-                B(CallRuntime), U16(Runtime::k_CreateIterResultObject), R(6), U8(2),
++                B(InvokeIntrinsic), U8(Runtime::k_CreateIterResultObject), R(6), U8(2),
+   /*   32 S> */ B(Return),
+                 B(Ldar), R(4),
+   /*    0 E> */ B(Throw),
+@@ -603,7 +603,7 @@ snippet: "
+ "
+ frame size: 8
+ parameter count: 2
+-bytecode array length: 173
++bytecode array length: 172
+ bytecodes: [
+                 B(Ldar), R(new_target),
+                 B(JumpIfUndefined), U8(21),
+@@ -648,15 +648,15 @@ bytecodes: [
+                 B(Star), R(5),
+                 B(LdaZero),
+                 B(TestEqualStrict), R(5), U8(0),
+-                B(JumpIfTrue), U8(26),
++                B(JumpIfTrue), U8(25),
+                 B(LdaSmi), U8(2),
+                 B(TestEqualStrict), R(5), U8(0),
+-                B(JumpIfTrue), U8(16),
++                B(JumpIfTrue), U8(15),
+                 B(Jump), U8(2),
+                 B(LdaTrue),
+                 B(Star), R(7),
+                 B(Mov), R(4), R(6),
+-                B(CallRuntime), U16(Runtime::k_CreateIterResultObject), R(6), U8(2),
++                B(InvokeIntrinsic), U8(Runtime::k_CreateIterResultObject), R(6), U8(2),
+   /*   26 S> */ B(Return),
+                 B(Ldar), R(4),
+   /*    0 E> */ B(Throw),
+@@ -692,7 +692,7 @@ snippet: "
+ "
+ frame size: 8
+ parameter count: 2
+-bytecode array length: 125
++bytecode array length: 124
+ bytecodes: [
+                 B(Ldar), R(new_target),
+                 B(JumpIfUndefined), U8(21),
+@@ -735,15 +735,15 @@ bytecodes: [
+                 B(Star), R(5),
+                 B(LdaZero),
+                 B(TestEqualStrict), R(5), U8(0),
+-                B(JumpIfTrue), U8(26),
++                B(JumpIfTrue), U8(25),
+                 B(LdaSmi), U8(2),
+                 B(TestEqualStrict), R(5), U8(0),
+-                B(JumpIfTrue), U8(16),
++                B(JumpIfTrue), U8(15),
+                 B(Jump), U8(2),
+                 B(LdaTrue),
+                 B(Star), R(7),
+                 B(Mov), R(4), R(6),
+-                B(CallRuntime), U16(Runtime::k_CreateIterResultObject), R(6), U8(2),
++                B(InvokeIntrinsic), U8(Runtime::k_CreateIterResultObject), R(6), U8(2),
+   /*   30 S> */ B(Return),
+                 B(Ldar), R(4),
+   /*    0 E> */ B(Throw),
+@@ -762,7 +762,7 @@ snippet: "
+ "
+ frame size: 8
+ parameter count: 2
+-bytecode array length: 125
++bytecode array length: 124
+ bytecodes: [
+                 B(Ldar), R(new_target),
+                 B(JumpIfUndefined), U8(21),
+@@ -805,15 +805,15 @@ bytecodes: [
+                 B(Star), R(5),
+                 B(LdaZero),
+                 B(TestEqualStrict), R(5), U8(0),
+-                B(JumpIfTrue), U8(26),
++                B(JumpIfTrue), U8(25),
+                 B(LdaSmi), U8(2),
+                 B(TestEqualStrict), R(5), U8(0),
+-                B(JumpIfTrue), U8(16),
++                B(JumpIfTrue), U8(15),
+                 B(Jump), U8(2),
+                 B(LdaTrue),
+                 B(Star), R(7),
+                 B(Mov), R(4), R(6),
+-                B(CallRuntime), U16(Runtime::k_CreateIterResultObject), R(6), U8(2),
++                B(InvokeIntrinsic), U8(Runtime::k_CreateIterResultObject), R(6), U8(2),
+   /*   19 S> */ B(Return),
+                 B(Ldar), R(4),
+   /*    0 E> */ B(Throw),
+@@ -833,7 +833,7 @@ snippet: "
+ "
+ frame size: 8
+ parameter count: 2
+-bytecode array length: 164
++bytecode array length: 163
+ bytecodes: [
+                 B(Ldar), R(new_target),
+                 B(JumpIfUndefined), U8(21),
+@@ -880,15 +880,15 @@ bytecodes: [
+                 B(Star), R(5),
+                 B(LdaZero),
+                 B(TestEqualStrict), R(5), U8(0),
+-                B(JumpIfTrue), U8(26),
++                B(JumpIfTrue), U8(25),
+                 B(LdaSmi), U8(2),
+                 B(TestEqualStrict), R(5), U8(0),
+-                B(JumpIfTrue), U8(16),
++                B(JumpIfTrue), U8(15),
+                 B(Jump), U8(2),
+                 B(LdaTrue),
+                 B(Star), R(7),
+                 B(Mov), R(4), R(6),
+-                B(CallRuntime), U16(Runtime::k_CreateIterResultObject), R(6), U8(2),
++                B(InvokeIntrinsic), U8(Runtime::k_CreateIterResultObject), R(6), U8(2),
+   /*   45 S> */ B(Return),
+                 B(Ldar), R(4),
+   /*    0 E> */ B(Throw),
+-- 
+2.35.1
+

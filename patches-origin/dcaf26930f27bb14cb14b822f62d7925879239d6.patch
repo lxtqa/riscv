@@ -1,0 +1,1983 @@
+From dcaf26930f27bb14cb14b822f62d7925879239d6 Mon Sep 17 00:00:00 2001
+From: Nikolaos Papaspyrou <nikolaos@chromium.org>
+Date: Wed, 9 Nov 2022 17:45:09 +0100
+Subject: [PATCH] [heap] Refactor saving the callee-saved registers on stack
+
+This CL refactors the trampoline that pushes the values of callee-saved
+registers on the stack, which used before stack scanning.
+
+At the low level, it defines simpler architecture-specific functions
+that save the values of these registers in a caller-supplied buffer of
+the appropriate size.
+
+The trampoline is now implemented using this mechanism. However, the
+low-level functions will be used in subsequent CLs for storing the
+registers without using a callback, when setting a stack marker for
+conservative stack scanning.
+
+Bug: v8:13257
+Change-Id: I86dae66e8613b839c694dc004747e04d1dfad7c2
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3989143
+Reviewed-by: Omer Katz <omerkatz@chromium.org>
+Commit-Queue: Nikolaos Papaspyrou <nikolaos@chromium.org>
+Reviewed-by: Anton Bikineev <bikineev@chromium.org>
+Reviewed-by: Michael Lippautz <mlippautz@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#84160}
+---
+ BUILD.bazel                                   |  20 ++--
+ BUILD.gn                                      |  24 ++--
+ src/heap/base/asm/arm/push_registers_asm.cc   |  39 -------
+ src/heap/base/asm/arm/save_registers_asm.cc   |  36 ++++++
+ src/heap/base/asm/arm64/push_registers_asm.cc |  62 ----------
+ src/heap/base/asm/arm64/push_registers_masm.S |  32 -----
+ src/heap/base/asm/arm64/save_registers_asm.cc |  50 ++++++++
+ src/heap/base/asm/arm64/save_registers_masm.S |  24 ++++
+ src/heap/base/asm/ia32/push_registers_asm.cc  |  53 ---------
+ .../base/asm/ia32/push_registers_masm.asm     |  48 --------
+ src/heap/base/asm/ia32/save_registers_asm.cc  |  48 ++++++++
+ .../base/asm/ia32/save_registers_masm.asm     |  36 ++++++
+ .../base/asm/loong64/push_registers_asm.cc    |  48 --------
+ .../base/asm/loong64/save_registers_asm.cc    |  40 +++++++
+ .../base/asm/mips64/push_registers_asm.cc     |  49 --------
+ .../base/asm/mips64/save_registers_asm.cc     |  41 +++++++
+ src/heap/base/asm/ppc/push_registers_asm.cc   |  94 ---------------
+ src/heap/base/asm/ppc/save_registers_asm.cc   | 110 ++++++++++++++++++
+ src/heap/base/asm/riscv/push_registers_asm.cc |  93 ---------------
+ src/heap/base/asm/riscv/save_registers_asm.cc |  68 +++++++++++
+ src/heap/base/asm/s390/push_registers_asm.cc  |  35 ------
+ src/heap/base/asm/s390/save_registers_asm.cc  |  32 +++++
+ src/heap/base/asm/x64/push_registers_asm.cc   | 106 -----------------
+ src/heap/base/asm/x64/push_registers_masm.asm |  57 ---------
+ src/heap/base/asm/x64/save_registers_asm.cc   |  94 +++++++++++++++
+ src/heap/base/asm/x64/save_registers_masm.asm |  43 +++++++
+ src/heap/base/stack.cc                        | 103 ++++++++++------
+ src/heap/base/stack.h                         |  68 ++++++++++-
+ src/heap/cppgc/marking-verifier.cc            |   3 +-
+ src/heap/heap.cc                              |   3 +-
+ 30 files changed, 779 insertions(+), 780 deletions(-)
+ delete mode 100644 src/heap/base/asm/arm/push_registers_asm.cc
+ create mode 100644 src/heap/base/asm/arm/save_registers_asm.cc
+ delete mode 100644 src/heap/base/asm/arm64/push_registers_asm.cc
+ delete mode 100644 src/heap/base/asm/arm64/push_registers_masm.S
+ create mode 100644 src/heap/base/asm/arm64/save_registers_asm.cc
+ create mode 100644 src/heap/base/asm/arm64/save_registers_masm.S
+ delete mode 100644 src/heap/base/asm/ia32/push_registers_asm.cc
+ delete mode 100644 src/heap/base/asm/ia32/push_registers_masm.asm
+ create mode 100644 src/heap/base/asm/ia32/save_registers_asm.cc
+ create mode 100644 src/heap/base/asm/ia32/save_registers_masm.asm
+ delete mode 100644 src/heap/base/asm/loong64/push_registers_asm.cc
+ create mode 100644 src/heap/base/asm/loong64/save_registers_asm.cc
+ delete mode 100644 src/heap/base/asm/mips64/push_registers_asm.cc
+ create mode 100644 src/heap/base/asm/mips64/save_registers_asm.cc
+ delete mode 100644 src/heap/base/asm/ppc/push_registers_asm.cc
+ create mode 100644 src/heap/base/asm/ppc/save_registers_asm.cc
+ delete mode 100644 src/heap/base/asm/riscv/push_registers_asm.cc
+ create mode 100644 src/heap/base/asm/riscv/save_registers_asm.cc
+ delete mode 100644 src/heap/base/asm/s390/push_registers_asm.cc
+ create mode 100644 src/heap/base/asm/s390/save_registers_asm.cc
+ delete mode 100644 src/heap/base/asm/x64/push_registers_asm.cc
+ delete mode 100644 src/heap/base/asm/x64/push_registers_masm.asm
+ create mode 100644 src/heap/base/asm/x64/save_registers_asm.cc
+ create mode 100644 src/heap/base/asm/x64/save_registers_masm.asm
+
+diff --git a/BUILD.bazel b/BUILD.bazel
+index efab2c84903..3be7da8f3bb 100644
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -3160,16 +3160,16 @@ filegroup(
+         # Note these cannot be v8_target_is_* selects because these contain
+         # inline assembly that runs inside the executable. Since these are
+         # linked directly into mksnapshot, they must use the actual target cpu.
+-        "@v8//bazel/config:is_inline_asm_ia32": ["src/heap/base/asm/ia32/push_registers_asm.cc"],
+-        "@v8//bazel/config:is_inline_asm_x64": ["src/heap/base/asm/x64/push_registers_asm.cc"],
+-        "@v8//bazel/config:is_inline_asm_arm": ["src/heap/base/asm/arm/push_registers_asm.cc"],
+-        "@v8//bazel/config:is_inline_asm_arm64": ["src/heap/base/asm/arm64/push_registers_asm.cc"],
+-        "@v8//bazel/config:is_inline_asm_s390x": ["src/heap/base/asm/s390/push_registers_asm.cc"],
+-        "@v8//bazel/config:is_inline_asm_riscv64": ["src/heap/base/asm/riscv64/push_registers_asm.cc"],
+-        "@v8//bazel/config:is_inline_asm_ppc64le": ["src/heap/base/asm/ppc/push_registers_asm.cc"],
+-        "@v8//bazel/config:is_msvc_asm_ia32": ["src/heap/base/asm/ia32/push_registers_masm.asm"],
+-        "@v8//bazel/config:is_msvc_asm_x64": ["src/heap/base/asm/x64/push_registers_masm.asm"],
+-        "@v8//bazel/config:is_msvc_asm_arm64": ["src/heap/base/asm/arm64/push_registers_masm.S"],
++        "@v8//bazel/config:is_inline_asm_ia32": ["src/heap/base/asm/ia32/save_registers_asm.cc"],
++        "@v8//bazel/config:is_inline_asm_x64": ["src/heap/base/asm/x64/save_registers_asm.cc"],
++        "@v8//bazel/config:is_inline_asm_arm": ["src/heap/base/asm/arm/save_registers_asm.cc"],
++        "@v8//bazel/config:is_inline_asm_arm64": ["src/heap/base/asm/arm64/save_registers_asm.cc"],
++        "@v8//bazel/config:is_inline_asm_s390x": ["src/heap/base/asm/s390/save_registers_asm.cc"],
++        "@v8//bazel/config:is_inline_asm_riscv64": ["src/heap/base/asm/riscv64/save_registers_asm.cc"],
++        "@v8//bazel/config:is_inline_asm_ppc64le": ["src/heap/base/asm/ppc/save_registers_asm.cc"],
++        "@v8//bazel/config:is_msvc_asm_ia32": ["src/heap/base/asm/ia32/save_registers_masm.asm"],
++        "@v8//bazel/config:is_msvc_asm_x64": ["src/heap/base/asm/x64/save_registers_masm.asm"],
++        "@v8//bazel/config:is_msvc_asm_arm64": ["src/heap/base/asm/arm64/save_registers_masm.S"],
+     }),
+ )
+ 
+diff --git a/BUILD.gn b/BUILD.gn
+index 0063c600b4d..78fd8cd2d38 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -5764,31 +5764,31 @@ v8_source_set("v8_heap_base") {
+ 
+   if (is_clang || !is_win) {
+     if (current_cpu == "x64") {
+-      sources += [ "src/heap/base/asm/x64/push_registers_asm.cc" ]
++      sources += [ "src/heap/base/asm/x64/save_registers_asm.cc" ]
+     } else if (current_cpu == "x86") {
+-      sources += [ "src/heap/base/asm/ia32/push_registers_asm.cc" ]
++      sources += [ "src/heap/base/asm/ia32/save_registers_asm.cc" ]
+     } else if (current_cpu == "arm") {
+-      sources += [ "src/heap/base/asm/arm/push_registers_asm.cc" ]
++      sources += [ "src/heap/base/asm/arm/save_registers_asm.cc" ]
+     } else if (current_cpu == "arm64") {
+-      sources += [ "src/heap/base/asm/arm64/push_registers_asm.cc" ]
++      sources += [ "src/heap/base/asm/arm64/save_registers_asm.cc" ]
+     } else if (current_cpu == "ppc64") {
+-      sources += [ "src/heap/base/asm/ppc/push_registers_asm.cc" ]
++      sources += [ "src/heap/base/asm/ppc/save_registers_asm.cc" ]
+     } else if (current_cpu == "s390x") {
+-      sources += [ "src/heap/base/asm/s390/push_registers_asm.cc" ]
++      sources += [ "src/heap/base/asm/s390/save_registers_asm.cc" ]
+     } else if (current_cpu == "mips64el") {
+-      sources += [ "src/heap/base/asm/mips64/push_registers_asm.cc" ]
++      sources += [ "src/heap/base/asm/mips64/save_registers_asm.cc" ]
+     } else if (current_cpu == "loong64") {
+-      sources += [ "src/heap/base/asm/loong64/push_registers_asm.cc" ]
++      sources += [ "src/heap/base/asm/loong64/save_registers_asm.cc" ]
+     } else if (current_cpu == "riscv64" || current_cpu == "riscv32") {
+-      sources += [ "src/heap/base/asm/riscv/push_registers_asm.cc" ]
++      sources += [ "src/heap/base/asm/riscv/save_registers_asm.cc" ]
+     }
+   } else if (is_win) {
+     if (current_cpu == "x64") {
+-      sources += [ "src/heap/base/asm/x64/push_registers_masm.asm" ]
++      sources += [ "src/heap/base/asm/x64/save_registers_masm.asm" ]
+     } else if (current_cpu == "x86") {
+-      sources += [ "src/heap/base/asm/ia32/push_registers_masm.asm" ]
++      sources += [ "src/heap/base/asm/ia32/save_registers_masm.asm" ]
+     } else if (current_cpu == "arm64") {
+-      sources += [ "src/heap/base/asm/arm64/push_registers_masm.S" ]
++      sources += [ "src/heap/base/asm/arm64/save_registers_masm.S" ]
+     }
+   }
+ 
+diff --git a/src/heap/base/asm/arm/push_registers_asm.cc b/src/heap/base/asm/arm/push_registers_asm.cc
+deleted file mode 100644
+index 5246c3f6c3e..00000000000
+--- a/src/heap/base/asm/arm/push_registers_asm.cc
++++ /dev/null
+@@ -1,39 +0,0 @@
+-// Copyright 2020 the V8 project authors. All rights reserved.
+-// Use of this source code is governed by a BSD-style license that can be
+-// found in the LICENSE file.
+-
+-// Push all callee-saved registers to get them on the stack for conservative
+-// stack scanning.
+-//
+-// See asm/x64/push_registers_clang.cc for why the function is not generated
+-// using clang.
+-//
+-// Do not depend on V8_TARGET_OS_* defines as some embedders may override the
+-// GN toolchain (e.g. ChromeOS) and not provide them.
+-
+-// We maintain 8-byte alignment at calls by pushing an additional
+-// non-callee-saved register (r3).
+-//
+-// Calling convention source:
+-// https://en.wikipedia.org/wiki/Calling_convention#ARM_(A32)
+-// http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.faqs/ka4127.html
+-asm(".globl PushAllRegistersAndIterateStack             \n"
+-    ".type PushAllRegistersAndIterateStack, %function   \n"
+-    ".hidden PushAllRegistersAndIterateStack            \n"
+-    "PushAllRegistersAndIterateStack:                   \n"
+-    // Push all callee-saved registers and save return address.
+-    // Only {r4-r11} are callee-saved registers. Push r3 in addition to align
+-    // the stack back to 8 bytes.
+-    "  push {r3-r11, lr}                                \n"
+-    // Pass 1st parameter (r0) unchanged (Stack*).
+-    // Pass 2nd parameter (r1) unchanged (StackVisitor*).
+-    // Save 3rd parameter (r2; IterateStackCallback).
+-    "  mov r3, r2                                       \n"
+-    // Pass 3rd parameter as sp (stack pointer).
+-    "  mov r2, sp                                       \n"
+-    // Call the callback.
+-    "  blx r3                                           \n"
+-    // Discard all the registers.
+-    "  add sp, sp, #36                                  \n"
+-    // Pop lr into pc which returns and switches mode if needed.
+-    "  pop {pc}                                         \n");
+diff --git a/src/heap/base/asm/arm/save_registers_asm.cc b/src/heap/base/asm/arm/save_registers_asm.cc
+new file mode 100644
+index 00000000000..e29babfce80
+--- /dev/null
++++ b/src/heap/base/asm/arm/save_registers_asm.cc
+@@ -0,0 +1,36 @@
++// Copyright 2020 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include <src/heap/base/stack.h>
++
++// Save all callee-saved registers in the specified buffer.
++// extern "C" void SaveCalleeSavedRegisters(intptr_t* buffer);
++
++// See asm/x64/save_registers_asm.cc for why the function is not generated
++// using clang.
++//
++// Do not depend on V8_TARGET_OS_* defines as some embedders may override the
++// GN toolchain (e.g. ChromeOS) and not provide them.
++//
++// We maintain 8-byte alignment at calls by pushing an additional
++// non-callee-saved register (r3).
++//
++// Calling convention source:
++// https://en.wikipedia.org/wiki/Calling_convention#ARM_(A32)
++// http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.faqs/ka4127.html
++
++// 8 32-bit registers = 8 intprt_t
++static_assert(heap::base::Stack::NumberOfCalleeSavedRegisters == 8,
++              "Mismatch in the number of callee-saved registers");
++static_assert(sizeof(intptr_t) == 4, "Mismatch in word size");
++
++asm(".globl SaveCalleeSavedRegisters             \n"
++    ".type SaveCalleeSavedRegisters, %function   \n"
++    ".hidden SaveCalleeSavedRegisters            \n"
++    "SaveCalleeSavedRegisters:                   \n"
++    // r0: [ intptr_t* buffer ]
++    // Save the callee-saved registers: {r4-r11}.
++    "  stm r0, {r4-r11}                          \n"
++    // Return.
++    "  bx lr                                     \n");
+diff --git a/src/heap/base/asm/arm64/push_registers_asm.cc b/src/heap/base/asm/arm64/push_registers_asm.cc
+deleted file mode 100644
+index 1efcc3430b3..00000000000
+--- a/src/heap/base/asm/arm64/push_registers_asm.cc
++++ /dev/null
+@@ -1,62 +0,0 @@
+-// Copyright 2020 the V8 project authors. All rights reserved.
+-// Use of this source code is governed by a BSD-style license that can be
+-// found in the LICENSE file.
+-
+-// Push all callee-saved registers to get them on the stack for conservative
+-// stack scanning.
+-//
+-// See asm/x64/push_registers_clang.cc for why the function is not generated
+-// using clang.
+-//
+-// Do not depend on V8_TARGET_OS_* defines as some embedders may override the
+-// GN toolchain (e.g. ChromeOS) and not provide them.
+-
+-// We maintain 16-byte alignment.
+-//
+-// Calling convention source:
+-// https://en.wikipedia.org/wiki/Calling_convention#ARM_(A64)
+-
+-asm(
+-#if defined(__APPLE__)
+-    ".globl _PushAllRegistersAndIterateStack            \n"
+-    ".private_extern _PushAllRegistersAndIterateStack   \n"
+-    ".p2align 2                                         \n"
+-    "_PushAllRegistersAndIterateStack:                  \n"
+-#else  // !defined(__APPLE__)
+-    ".globl PushAllRegistersAndIterateStack             \n"
+-#if !defined(_WIN64)
+-    ".type PushAllRegistersAndIterateStack, %function   \n"
+-    ".hidden PushAllRegistersAndIterateStack            \n"
+-#endif  // !defined(_WIN64)
+-    ".p2align 2                                         \n"
+-    "PushAllRegistersAndIterateStack:                   \n"
+-#endif  // !defined(__APPLE__)
+-    // x19-x29 are callee-saved.
+-    "  stp x19, x20, [sp, #-16]!                        \n"
+-    "  stp x21, x22, [sp, #-16]!                        \n"
+-    "  stp x23, x24, [sp, #-16]!                        \n"
+-    "  stp x25, x26, [sp, #-16]!                        \n"
+-    "  stp x27, x28, [sp, #-16]!                        \n"
+-#ifdef V8_ENABLE_CONTROL_FLOW_INTEGRITY
+-    // Sign return address.
+-    "  paciasp                                          \n"
+-#endif
+-    "  stp fp, lr,   [sp, #-16]!                        \n"
+-    // Maintain frame pointer.
+-    "  mov fp, sp                                       \n"
+-    // Pass 1st parameter (x0) unchanged (Stack*).
+-    // Pass 2nd parameter (x1) unchanged (StackVisitor*).
+-    // Save 3rd parameter (x2; IterateStackCallback)
+-    "  mov x7, x2                                       \n"
+-    // Pass 3rd parameter as sp (stack pointer).
+-    "  mov x2, sp                                       \n"
+-    "  blr x7                                           \n"
+-    // Load return address and frame pointer.
+-    "  ldp fp, lr, [sp], #16                            \n"
+-#ifdef V8_ENABLE_CONTROL_FLOW_INTEGRITY
+-    // Authenticate return address.
+-    "  autiasp                                          \n"
+-#endif
+-    // Drop all callee-saved registers.
+-    "  add sp, sp, #80                                  \n"
+-    "  ret                                              \n");
+diff --git a/src/heap/base/asm/arm64/push_registers_masm.S b/src/heap/base/asm/arm64/push_registers_masm.S
+deleted file mode 100644
+index 9773654ffcf..00000000000
+--- a/src/heap/base/asm/arm64/push_registers_masm.S
++++ /dev/null
+@@ -1,32 +0,0 @@
+-; Copyright 2020 the V8 project authors. All rights reserved.
+-; Use of this source code is governed by a BSD-style license that can be
+-; found in the LICENSE file.
+-
+-; This file is exactly the same as push_registers_asm.cc, just formatted for
+-; the Microsoft Arm Assembler.
+-
+-    AREA |.text|, CODE, ALIGN=4, READONLY
+-    EXPORT PushAllRegistersAndIterateStack
+-PushAllRegistersAndIterateStack
+-    ; x19-x29 are callee-saved
+-    STP x19, x20, [sp, #-16]!
+-    STP x21, x22, [sp, #-16]!
+-    STP x23, x24, [sp, #-16]!
+-    STP x25, x26, [sp, #-16]!
+-    STP x27, x28, [sp, #-16]!
+-    STP fp, lr, [sp, #-16]!
+-    ; Maintain frame pointer
+-    MOV fp, sp
+-    ; Pass 1st parameter (x0) unchanged (Stack*).
+-    ; Pass 2nd parameter (x1) unchanged (StackVisitor*).
+-    ; Save 3rd parameter (x2; IterateStackCallback)
+-    MOV x7, x2
+-    ; Pass 3rd parameter as sp (stack pointer)
+-    MOV x2, sp
+-    BLR x7
+-    ; Load return address
+-    LDR lr, [sp, #8]
+-    ; Restore frame pointer and pop all callee-saved registers.
+-    LDR fp, [sp], #96
+-    RET
+-    END
+\ No newline at end of file
+diff --git a/src/heap/base/asm/arm64/save_registers_asm.cc b/src/heap/base/asm/arm64/save_registers_asm.cc
+new file mode 100644
+index 00000000000..5bb9e23056a
+--- /dev/null
++++ b/src/heap/base/asm/arm64/save_registers_asm.cc
+@@ -0,0 +1,50 @@
++// Copyright 2020 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include <src/heap/base/stack.h>
++
++// Save all callee-saved registers in the specified buffer.
++// extern "C" void SaveCalleeSavedRegisters(intptr_t* buffer);
++
++// See asm/x64/save_registers_asm.cc for why the function is not generated
++// using clang.
++//
++// Do not depend on V8_TARGET_OS_* defines as some embedders may override the
++// GN toolchain (e.g. ChromeOS) and not provide them.
++//
++// We maintain 16-byte alignment.
++//
++// Calling convention source:
++// https://en.wikipedia.org/wiki/Calling_convention#ARM_(A64)
++
++// 11 64-bit registers = 11 intprt_t
++static_assert(heap::base::Stack::NumberOfCalleeSavedRegisters == 11,
++              "Mismatch in the number of callee-saved registers");
++static_assert(sizeof(intptr_t) == 8, "Mismatch in word size");
++
++asm(
++#if defined(__APPLE__)
++    ".globl _SaveCalleeSavedRegisters            \n"
++    ".private_extern _SaveCalleeSavedRegisters   \n"
++    ".p2align 2                                  \n"
++    "_SaveCalleeSavedRegisters:                  \n"
++#else  // !defined(__APPLE__)
++    ".globl SaveCalleeSavedRegisters             \n"
++#if !defined(_WIN64)
++    ".type SaveCalleeSavedRegisters, %function   \n"
++    ".hidden SaveCalleeSavedRegisters            \n"
++#endif  // !defined(_WIN64)
++    ".p2align 2                                  \n"
++    "SaveCalleeSavedRegisters:                   \n"
++#endif  // !defined(__APPLE__)
++    // $x0: [ intptr_t* buffer ]
++    // Save the callee-saved registers: x19-x29.
++    "  stp x19, x20, [x0], #16                   \n"
++    "  stp x21, x22, [x0], #16                   \n"
++    "  stp x23, x24, [x0], #16                   \n"
++    "  stp x25, x26, [x0], #16                   \n"
++    "  stp x27, x28, [x0], #16                   \n"
++    "  str x29, [x0]                             \n"
++    // Return.
++    "  ret                                       \n");
+diff --git a/src/heap/base/asm/arm64/save_registers_masm.S b/src/heap/base/asm/arm64/save_registers_masm.S
+new file mode 100644
+index 00000000000..ab79055250b
+--- /dev/null
++++ b/src/heap/base/asm/arm64/save_registers_masm.S
+@@ -0,0 +1,24 @@
++; Copyright 2020 the V8 project authors. All rights reserved.
++; Use of this source code is governed by a BSD-style license that can be
++; found in the LICENSE file.
++
++; This file is exactly the same as save_registers_asm.cc, just formatted for
++; the Microsoft Arm Assembler.
++
++; Save all callee-saved registers in the specified buffer.
++; extern "C" void SaveCalleeSavedRegisters(intptr_t* buffer);
++
++    AREA |.text|, CODE, ALIGN=4, READONLY
++    EXPORT SaveCalleeSavedRegisters
++SaveCalleeSavedRegisters
++    ; x0: [ intptr_t* buffer ]
++    ; x19-x29 are callee-saved
++    STP x19, x20, [x0], #16
++    STP x21, x22, [x0], #16
++    STP x23, x24, [x0], #16
++    STP x25, x26, [x0], #16
++    STP x27, x28, [x0], #16
++    STR x29, [x0]
++    ; Return.
++    RET
++    END
+diff --git a/src/heap/base/asm/ia32/push_registers_asm.cc b/src/heap/base/asm/ia32/push_registers_asm.cc
+deleted file mode 100644
+index ed9c14a50e9..00000000000
+--- a/src/heap/base/asm/ia32/push_registers_asm.cc
++++ /dev/null
+@@ -1,53 +0,0 @@
+-// Copyright 2020 the V8 project authors. All rights reserved.
+-// Use of this source code is governed by a BSD-style license that can be
+-// found in the LICENSE file.
+-
+-// Push all callee-saved registers to get them on the stack for conservative
+-// stack scanning.
+-//
+-// See asm/x64/push_registers_clang.cc for why the function is not generated
+-// using clang.
+-//
+-// Do not depend on V8_TARGET_OS_* defines as some embedders may override the
+-// GN toolchain (e.g. ChromeOS) and not provide them.
+-
+-// We maintain 16-byte alignment at calls. There is an 4-byte return address
+-// on the stack and we push 28 bytes which maintains 16-byte stack alignment
+-// at the call.
+-//
+-// The following assumes cdecl calling convention.
+-// Source: https://en.wikipedia.org/wiki/X86_calling_conventions#cdecl
+-asm(
+-#ifdef _WIN32
+-    ".globl _PushAllRegistersAndIterateStack            \n"
+-    "_PushAllRegistersAndIterateStack:                  \n"
+-#else   // !_WIN32
+-    ".globl PushAllRegistersAndIterateStack             \n"
+-    ".type PushAllRegistersAndIterateStack, %function   \n"
+-    ".hidden PushAllRegistersAndIterateStack            \n"
+-    "PushAllRegistersAndIterateStack:                   \n"
+-#endif  // !_WIN32
+-    // [ IterateStackCallback ]
+-    // [ StackVisitor*        ]
+-    // [ Stack*               ]
+-    // [ ret                  ]
+-    // ebp is callee-saved. Maintain proper frame pointer for debugging.
+-    "  push %ebp                                        \n"
+-    "  movl %esp, %ebp                                  \n"
+-    "  push %ebx                                        \n"
+-    "  push %esi                                        \n"
+-    "  push %edi                                        \n"
+-    // Save 3rd parameter (IterateStackCallback).
+-    "  movl 28(%esp), %ecx                              \n"
+-    // Pass 3rd parameter as esp (stack pointer).
+-    "  push %esp                                        \n"
+-    // Pass 2nd parameter (StackVisitor*).
+-    "  push 28(%esp)                                    \n"
+-    // Pass 1st parameter (Stack*).
+-    "  push 28(%esp)                                    \n"
+-    "  call *%ecx                                       \n"
+-    // Pop the callee-saved registers.
+-    "  addl $24, %esp                                   \n"
+-    // Restore rbp as it was used as frame pointer.
+-    "  pop %ebp                                         \n"
+-    "  ret                                              \n");
+diff --git a/src/heap/base/asm/ia32/push_registers_masm.asm b/src/heap/base/asm/ia32/push_registers_masm.asm
+deleted file mode 100644
+index a35fd6e527d..00000000000
+--- a/src/heap/base/asm/ia32/push_registers_masm.asm
++++ /dev/null
+@@ -1,48 +0,0 @@
+-;; Copyright 2020 the V8 project authors. All rights reserved.
+-;; Use of this source code is governed by a BSD-style license that can be
+-;; found in the LICENSE file.
+-
+-;; MASM syntax
+-;; https://docs.microsoft.com/en-us/cpp/assembler/masm/microsoft-macro-assembler-reference?view=vs-2019
+-
+-.model flat, C
+-
+-public PushAllRegistersAndIterateStack
+-
+-.code
+-PushAllRegistersAndIterateStack:
+-    ;; Push all callee-saved registers to get them on the stack for conservative
+-    ;; stack scanning.
+-    ;;
+-    ;; We maintain 16-byte alignment at calls. There is an 8-byte return address
+-    ;; on the stack and we push 72 bytes which maintains 16-byte stack alignment
+-    ;; at the call.
+-    ;;
+-    ;; The following assumes cdecl calling convention.
+-    ;; Source: https://docs.microsoft.com/en-us/cpp/cpp/cdecl?view=vs-2019
+-    ;;
+-    ;; [ IterateStackCallback ]
+-    ;; [ StackVisitor*        ]
+-    ;; [ Stack*               ]
+-    ;; [ ret                  ]
+-    push ebp
+-    mov ebp, esp
+-    push ebx
+-    push esi
+-    push edi
+-    ;; Save 3rd parameter (IterateStackCallback).
+-    mov ecx, [ esp + 28 ]
+-    ;; Pass 3rd parameter as esp (stack pointer).
+-    push esp
+-    ;; Pass 2nd parameter (StackVisitor*).
+-    push [ esp + 28 ]
+-    ;; Pass 1st parameter (Stack*).
+-    push [ esp + 28 ]
+-    call ecx
+-    ;; Pop the callee-saved registers.
+-    add esp, 24
+-    ;; Restore rbp as it was used as frame pointer.
+-    pop ebp
+-    ret
+-
+-end
+diff --git a/src/heap/base/asm/ia32/save_registers_asm.cc b/src/heap/base/asm/ia32/save_registers_asm.cc
+new file mode 100644
+index 00000000000..db8b0e98864
+--- /dev/null
++++ b/src/heap/base/asm/ia32/save_registers_asm.cc
+@@ -0,0 +1,48 @@
++// Copyright 2020 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include <src/heap/base/stack.h>
++
++// Save all callee-saved registers in the specified buffer.
++// extern "C" void SaveCalleeSavedRegisters(intptr_t* buffer);
++
++// See asm/x64/save_registers_asm.cc for why the function is not generated
++// using clang.
++//
++// Do not depend on V8_TARGET_OS_* defines as some embedders may override the
++// GN toolchain (e.g. ChromeOS) and not provide them.
++//
++// The following assumes cdecl calling convention.
++// Source: https://en.wikipedia.org/wiki/X86_calling_conventions#cdecl
++
++// 3 32-bit registers = 3 intprt_t
++static_assert(heap::base::Stack::NumberOfCalleeSavedRegisters == 3,
++              "Mismatch in the number of callee-saved registers");
++static_assert(sizeof(intptr_t) == 4, "Mismatch in word size");
++
++asm(
++#ifdef _WIN32
++    ".globl _SaveCalleeSavedRegisters            \n"
++    "_SaveCalleeSavedRegisters:                  \n"
++#else   // !_WIN32
++    ".globl SaveCalleeSavedRegisters             \n"
++    ".type SaveCalleeSavedRegisters, %function   \n"
++    ".hidden SaveCalleeSavedRegisters            \n"
++    "SaveCalleeSavedRegisters:                   \n"
++#endif  // !_WIN32
++    // 8: [ intptr_t* buffer ]
++    // 4: [ ret              ]
++    // 0: [ saved %ebp       ]
++    // %ebp is callee-saved. Maintain proper frame pointer for debugging.
++    "  push %ebp                                        \n"
++    "  movl %esp, %ebp                                  \n"
++    // Load the buffer's address in %ecx.
++    "  movl 8(%ebp), %ecx                               \n"
++    // Save the callee-saved registers.
++    "  movl %ebx, 0(%ecx)                               \n"
++    "  movl %esi, 4(%ecx)                               \n"
++    "  movl %edi, 8(%ecx)                               \n"
++    // Restore %ebp as it was used as frame pointer and return.
++    "  pop %ebp                                         \n"
++    "  ret                                              \n");
+diff --git a/src/heap/base/asm/ia32/save_registers_masm.asm b/src/heap/base/asm/ia32/save_registers_masm.asm
+new file mode 100644
+index 00000000000..0892b020465
+--- /dev/null
++++ b/src/heap/base/asm/ia32/save_registers_masm.asm
+@@ -0,0 +1,36 @@
++;; Copyright 2020 the V8 project authors. All rights reserved.
++;; Use of this source code is governed by a BSD-style license that can be
++;; found in the LICENSE file.
++
++;; MASM syntax
++;; https://docs.microsoft.com/en-us/cpp/assembler/masm/microsoft-macro-assembler-reference?view=vs-2019
++
++.model flat, C
++
++public SaveCalleeSavedRegisters
++
++.code
++    ;; Save all callee-saved registers in the specified buffer.
++    ;; extern "C" void SaveCalleeSavedRegisters(intptr_t* buffer);
++    ;;
++    ;; The following assumes cdecl calling convention.
++    ;; Source: https://docs.microsoft.com/en-us/cpp/cpp/cdecl?view=vs-2019
++
++SaveCalleeSavedRegisters:
++    ;; 8: [ intptr_t* buffer ]
++    ;; 4: [ ret              ]
++    ;; 0: [ saved %ebp       ]
++    ;; %ebp is callee-saved. Maintain proper frame pointer for debugging.
++    push ebp
++    mov ebp, esp
++    ;; Load the buffer's address in %ecx.
++    mov ecx, [ebp + 8]
++    ;; Save the callee-saved registers.
++    mov [ecx], ebx
++    mov [ecx + 4], esi
++    mov [ecx + 8], edi
++    ;; Restore %ebp as it was used as frame pointer and return.
++    pop ebp
++    ret
++
++end
+diff --git a/src/heap/base/asm/loong64/push_registers_asm.cc b/src/heap/base/asm/loong64/push_registers_asm.cc
+deleted file mode 100644
+index aa8dcd356bf..00000000000
+--- a/src/heap/base/asm/loong64/push_registers_asm.cc
++++ /dev/null
+@@ -1,48 +0,0 @@
+-// Copyright 2021 the V8 project authors. All rights reserved.
+-// Use of this source code is governed by a BSD-style license that can be
+-// found in the LICENSE file.
+-
+-// Push all callee-saved registers to get them on the stack for conservative
+-// stack scanning.
+-//
+-// See asm/x64/push_registers_clang.cc for why the function is not generated
+-// using clang.
+-//
+-// Do not depend on V8_TARGET_OS_* defines as some embedders may override the
+-// GN toolchain (e.g. ChromeOS) and not provide them.
+-asm(".text                                               \n"
+-    ".global PushAllRegistersAndIterateStack             \n"
+-    ".type PushAllRegistersAndIterateStack, %function    \n"
+-    ".hidden PushAllRegistersAndIterateStack             \n"
+-    "PushAllRegistersAndIterateStack:                    \n"
+-    // Push all callee-saved registers and save return address.
+-    "  addi.d $sp, $sp, -96                              \n"
+-    "  st.d $ra, $sp, 88                                 \n"
+-    "  st.d $s8, $sp, 80                                 \n"
+-    "  st.d $sp, $sp, 72                                 \n"
+-    "  st.d $fp, $sp, 64                                 \n"
+-    "  st.d $s7, $sp, 56                                 \n"
+-    "  st.d $s6, $sp, 48                                 \n"
+-    "  st.d $s5, $sp, 40                                 \n"
+-    "  st.d $s4, $sp, 32                                 \n"
+-    "  st.d $s3, $sp, 24                                 \n"
+-    "  st.d $s2, $sp, 16                                 \n"
+-    "  st.d $s1, $sp,  8                                 \n"
+-    "  st.d $s0, $sp,  0                                 \n"
+-    // Maintain frame pointer.
+-    "  addi.d $s8, $sp, 0                                \n"
+-    // Pass 1st parameter (a0) unchanged (Stack*).
+-    // Pass 2nd parameter (a1) unchanged (StackVisitor*).
+-    // Save 3rd parameter (a2; IterateStackCallback).
+-    "  addi.d $a3, $a2, 0                                \n"
+-    // Call the callback.
+-    // Pass 3rd parameter as sp (stack pointer).
+-    "  addi.d $a2, $sp, 0                                \n"
+-    "  jirl $ra, $a3, 0                                  \n"
+-    // Load return address.
+-    "  ld.d $ra, $sp, 88                                 \n"
+-    // Restore frame pointer.
+-    "  ld.d $s8, $sp, 80                                 \n"
+-    // Discard all callee-saved registers.
+-    "  addi.d $sp, $sp, 96                               \n"
+-    "  jirl $zero, $ra, 0                                \n");
+diff --git a/src/heap/base/asm/loong64/save_registers_asm.cc b/src/heap/base/asm/loong64/save_registers_asm.cc
+new file mode 100644
+index 00000000000..e01cd3eecc4
+--- /dev/null
++++ b/src/heap/base/asm/loong64/save_registers_asm.cc
+@@ -0,0 +1,40 @@
++// Copyright 2021 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include <src/heap/base/stack.h>
++
++// Save all callee-saved registers in the specified buffer.
++// extern "C" void SaveCalleeSavedRegisters(intptr_t* buffer);
++
++// See asm/x64/save_registers_asm.cc for why the function is not generated
++// using clang.
++//
++// Do not depend on V8_TARGET_OS_* defines as some embedders may override the
++// GN toolchain (e.g. ChromeOS) and not provide them.
++
++// 11 64-bit registers = 11 intprt_t
++static_assert(heap::base::Stack::NumberOfCalleeSavedRegisters == 11,
++              "Mismatch in the number of callee-saved registers");
++static_assert(sizeof(intptr_t) == 8, "Mismatch in word size");
++
++asm(".text                                        \n"
++    ".global SaveCalleeSavedRegisters             \n"
++    ".type SaveCalleeSavedRegisters, %function    \n"
++    ".hidden SaveCalleeSavedRegisters             \n"
++    "SaveCalleeSavedRegisters:                    \n"
++    // $a0: [ intptr_t* buffer ]
++    // Save the callee-saved registers.
++    "  st.d $s8, $a0, 0                           \n"
++    "  st.d $sp, $a0, 8                           \n"
++    "  st.d $fp, $a0, 16                          \n"
++    "  st.d $s7, $a0, 24                          \n"
++    "  st.d $s6, $a0, 32                          \n"
++    "  st.d $s5, $a0, 40                          \n"
++    "  st.d $s4, $a0, 48                          \n"
++    "  st.d $s3, $a0, 56                          \n"
++    "  st.d $s2, $a0, 64                          \n"
++    "  st.d $s1, $a0, 72                          \n"
++    "  st.d $s0, $a0, 80                          \n"
++    // Return.
++    "  jirl $zero, $ra, 0                         \n");
+diff --git a/src/heap/base/asm/mips64/push_registers_asm.cc b/src/heap/base/asm/mips64/push_registers_asm.cc
+deleted file mode 100644
+index 47779e07368..00000000000
+--- a/src/heap/base/asm/mips64/push_registers_asm.cc
++++ /dev/null
+@@ -1,49 +0,0 @@
+-// Copyright 2020 the V8 project authors. All rights reserved.
+-// Use of this source code is governed by a BSD-style license that can be
+-// found in the LICENSE file.
+-
+-// Push all callee-saved registers to get them on the stack for conservative
+-// stack scanning.
+-//
+-// See asm/x64/push_registers_clang.cc for why the function is not generated
+-// using clang.
+-//
+-// Do not depend on V8_TARGET_OS_* defines as some embedders may override the
+-// GN toolchain (e.g. ChromeOS) and not provide them.
+-asm(".text                                               \n"
+-    ".set noreorder                                      \n"
+-    ".global PushAllRegistersAndIterateStack             \n"
+-    ".type PushAllRegistersAndIterateStack, %function    \n"
+-    ".hidden PushAllRegistersAndIterateStack             \n"
+-    "PushAllRegistersAndIterateStack:                    \n"
+-    // Push all callee-saved registers and save return address.
+-    "  daddiu $sp, $sp, -96                              \n"
+-    "  sd $ra, 88($sp)                                   \n"
+-    "  sd $s8, 80($sp)                                   \n"
+-    "  sd $sp, 72($sp)                                   \n"
+-    "  sd $gp, 64($sp)                                   \n"
+-    "  sd $s7, 56($sp)                                   \n"
+-    "  sd $s6, 48($sp)                                   \n"
+-    "  sd $s5, 40($sp)                                   \n"
+-    "  sd $s4, 32($sp)                                   \n"
+-    "  sd $s3, 24($sp)                                   \n"
+-    "  sd $s2, 16($sp)                                   \n"
+-    "  sd $s1,  8($sp)                                   \n"
+-    "  sd $s0,  0($sp)                                   \n"
+-    // Maintain frame pointer.
+-    "  move $s8, $sp                                     \n"
+-    // Pass 1st parameter (a0) unchanged (Stack*).
+-    // Pass 2nd parameter (a1) unchanged (StackVisitor*).
+-    // Save 3rd parameter (a2; IterateStackCallback).
+-    "  move $a3, $a2                                     \n"
+-    // Call the callback.
+-    "  jalr $a3                                          \n"
+-    // Delay slot: Pass 3rd parameter as sp (stack pointer).
+-    "  move $a2, $sp                                     \n"
+-    // Load return address.
+-    "  ld $ra, 88($sp)                                   \n"
+-    // Restore frame pointer.
+-    "  ld $s8, 80($sp)                                   \n"
+-    "  jr $ra                                            \n"
+-    // Delay slot: Discard all callee-saved registers.
+-    "  daddiu $sp, $sp, 96                               \n");
+diff --git a/src/heap/base/asm/mips64/save_registers_asm.cc b/src/heap/base/asm/mips64/save_registers_asm.cc
+new file mode 100644
+index 00000000000..b454e181ab5
+--- /dev/null
++++ b/src/heap/base/asm/mips64/save_registers_asm.cc
+@@ -0,0 +1,41 @@
++// Copyright 2020 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include <src/heap/base/stack.h>
++
++// Save all callee-saved registers in the specified buffer.
++// extern "C" void SaveCalleeSavedRegisters(intptr_t* buffer);
++
++// See asm/x64/save_registers_asm.cc for why the function is not generated
++// using clang.
++//
++// Do not depend on V8_TARGET_OS_* defines as some embedders may override the
++// GN toolchain (e.g. ChromeOS) and not provide them.
++
++// 9 64-bit registers = 9 intprt_t
++static_assert(heap::base::Stack::NumberOfCalleeSavedRegisters == 9,
++              "Mismatch in the number of callee-saved registers");
++static_assert(sizeof(intptr_t) == 8, "Mismatch in word size");
++
++asm(".text                                        \n"
++    ".set noreorder                               \n"
++    ".global SaveCalleeSavedRegisters             \n"
++    ".type SaveCalleeSavedRegisters, %function    \n"
++    ".hidden SaveCalleeSavedRegisters             \n"
++    "SaveCalleeSavedRegisters:                    \n"
++    // $a0: [ intptr_t* buffer ]
++    // Save the callee-saved registers.
++    "  sd $gp, 64($a0)                            \n"
++    "  sd $s7, 56($a0)                            \n"
++    "  sd $s6, 48($a0)                            \n"
++    "  sd $s5, 40($a0)                            \n"
++    "  sd $s4, 32($a0)                            \n"
++    "  sd $s3, 24($a0)                            \n"
++    "  sd $s2, 16($a0)                            \n"
++    "  sd $s1,  8($a0)                            \n"
++    // ... one more in the delay slot!
++    // Return.
++    "  jr $ra                                     \n"
++    // Delay slot:
++    "  sd $s0,  0($a0)                            \n");
+diff --git a/src/heap/base/asm/ppc/push_registers_asm.cc b/src/heap/base/asm/ppc/push_registers_asm.cc
+deleted file mode 100644
+index 056d6f3015c..00000000000
+--- a/src/heap/base/asm/ppc/push_registers_asm.cc
++++ /dev/null
+@@ -1,94 +0,0 @@
+-// Copyright 2020 the V8 project authors. All rights reserved.
+-// Use of this source code is governed by a BSD-style license that can be
+-// found in the LICENSE file.
+-
+-// Push all callee-saved registers to get them on the stack for conservative
+-// stack scanning.
+-//
+-// See asm/x64/push_registers_clang.cc for why the function is not generated
+-// using clang.
+-
+-// Do not depend on V8_TARGET_OS_* defines as some embedders may override the
+-// GN toolchain (e.g. ChromeOS) and not provide them.
+-
+-// PPC ABI source:
+-// http://refspecs.linuxfoundation.org/ELF/ppc64/PPC-elf64abi.html
+-
+-// AIX Runtime process stack:
+-// https://www.ibm.com/support/knowledgecenter/ssw_aix_71/assembler/idalangref_runtime_process.html
+-asm(
+-#if defined(_AIX)
+-    ".globl .PushAllRegistersAndIterateStack, hidden    \n"
+-    ".csect .text[PR]                                   \n"
+-    ".PushAllRegistersAndIterateStack:                  \n"
+-#else
+-    ".globl PushAllRegistersAndIterateStack             \n"
+-    ".type PushAllRegistersAndIterateStack, %function   \n"
+-    ".hidden PushAllRegistersAndIterateStack            \n"
+-    "PushAllRegistersAndIterateStack:                   \n"
+-#endif
+-    // Push all callee-saved registers.
+-    // lr, TOC pointer, r16 to r31. 160 bytes.
+-    // The parameter save area shall be allocated by the caller. 112 bytes.
+-    // At anytime, SP (r1) needs to be multiple of 16 (i.e. 16-aligned).
+-    "  mflr 0                                          \n"
+-    "  std 0, 16(1)                                    \n"
+-#if defined(_AIX)
+-    "  std 2, 40(1)                                    \n"
+-#else
+-    "  std 2, 24(1)                                    \n"
+-#endif
+-    "  stdu 1, -256(1)                                 \n"
+-    "  std 14, 112(1)                                  \n"
+-    "  std 15, 120(1)                                  \n"
+-    "  std 16, 128(1)                                  \n"
+-    "  std 17, 136(1)                                  \n"
+-    "  std 18, 144(1)                                  \n"
+-    "  std 19, 152(1)                                  \n"
+-    "  std 20, 160(1)                                  \n"
+-    "  std 21, 168(1)                                  \n"
+-    "  std 22, 176(1)                                  \n"
+-    "  std 23, 184(1)                                  \n"
+-    "  std 24, 192(1)                                  \n"
+-    "  std 25, 200(1)                                  \n"
+-    "  std 26, 208(1)                                  \n"
+-    "  std 27, 216(1)                                  \n"
+-    "  std 28, 224(1)                                  \n"
+-    "  std 29, 232(1)                                  \n"
+-    "  std 30, 240(1)                                  \n"
+-    "  std 31, 248(1)                                  \n"
+-    // Pass 1st parameter (r3) unchanged (Stack*).
+-    // Pass 2nd parameter (r4) unchanged (StackVisitor*).
+-    // Save 3rd parameter (r5; IterateStackCallback).
+-    "  mr 6, 5                                         \n"
+-#if defined(_AIX)
+-    // Set up TOC for callee.
+-    "  ld 2,8(5)                                       \n"
+-    // AIX uses function descriptors, which means that
+-    // pointers to functions do not point to code, but
+-    // instead point to metadata about them, hence
+-    // need to deterrence.
+-    "  ld 6,0(6)                                       \n"
+-#endif
+-    // Pass 3rd parameter as sp (stack pointer).
+-    "  mr 5, 1                                         \n"
+-#if !defined(_AIX)
+-    // Set up r12 to be equal to the callee address (in order for TOC
+-    // relocation). Only needed on LE Linux.
+-    "  mr 12, 6                                        \n"
+-#endif
+-    // Call the callback.
+-    "  mtctr 6                                         \n"
+-    "  bctrl                                           \n"
+-    // Discard all the registers.
+-    "  addi 1, 1, 256                                  \n"
+-    // Restore lr.
+-    "  ld 0, 16(1)                                     \n"
+-    "  mtlr  0                                         \n"
+-#if defined(_AIX)
+-    // Restore TOC pointer.
+-    "  ld 2, 40(1)                                     \n"
+-#else
+-    "  ld 2, 24(1)                                     \n"
+-#endif
+-    "  blr                                             \n");
+diff --git a/src/heap/base/asm/ppc/save_registers_asm.cc b/src/heap/base/asm/ppc/save_registers_asm.cc
+new file mode 100644
+index 00000000000..4280c083a9e
+--- /dev/null
++++ b/src/heap/base/asm/ppc/save_registers_asm.cc
+@@ -0,0 +1,110 @@
++// Copyright 2020 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include <src/heap/base/stack.h>
++
++// Save all callee-saved registers in the specified buffer.
++// extern "C" void SaveCalleeSavedRegisters(intptr_t* buffer);
++
++// See asm/x64/save_registers_asm.cc for why the function is not generated
++// using clang.
++//
++// Do not depend on V8_TARGET_OS_* defines as some embedders may override the
++// GN toolchain (e.g. ChromeOS) and not provide them.
++//
++// PPC ABI source:
++// http://refspecs.linuxfoundation.org/ELF/ppc64/PPC-elf64abi.html
++
++// AIX Runtime process stack:
++// https://www.ibm.com/support/knowledgecenter/ssw_aix_71/assembler/idalangref_runtime_process.html
++
++#ifdef __PPC64__
++
++// 20 64-bit registers = 20 intprt_t
++static_assert(heap::base::Stack::NumberOfCalleeSavedRegisters == 20,
++              "Mismatch in the number of callee-saved registers");
++static_assert(sizeof(intptr_t) == 8, "Mismatch in word size");
++
++asm(
++#if defined(_AIX)
++    ".globl .SaveCalleeSavedRegisters, hidden    \n"
++    ".csect .text[PR]                            \n"
++    ".SaveCalleeSavedRegisters:                  \n"
++#else
++    ".globl SaveCalleeSavedRegisters             \n"
++    ".type SaveCalleeSavedRegisters, %function   \n"
++    ".hidden SaveCalleeSavedRegisters            \n"
++    "SaveCalleeSavedRegisters:                   \n"
++#endif
++    // r3: [ intptr_t* buffer ]
++    // Save the callee-saved registers: lr, TOC pointer (r2), r14-r31.
++    "  mflr 0                                    \n"
++    "  std 0, 8(3)                               \n"
++    "  std 2, 16(3)                              \n"
++    "  std 14, 24(3)                             \n"
++    "  std 15, 32(3)                             \n"
++    "  std 16, 40(3)                             \n"
++    "  std 17, 48(3)                             \n"
++    "  std 18, 56(3)                             \n"
++    "  std 19, 64(3)                             \n"
++    "  std 20, 72(3)                             \n"
++    "  std 21, 80(3)                             \n"
++    "  std 22, 88(3)                             \n"
++    "  std 23, 96(3)                             \n"
++    "  std 24, 104(3)                            \n"
++    "  std 25, 112(3)                            \n"
++    "  std 26, 120(3)                            \n"
++    "  std 27, 128(3)                            \n"
++    "  std 28, 136(3)                            \n"
++    "  std 29, 144(3)                            \n"
++    "  std 30, 152(3)                            \n"
++    "  std 31, 160(3)                            \n"
++    // Return.
++    "  blr                                       \n");
++
++#else  // !__PPC64__
++
++// 20 32-bit registers = 20 intprt_t
++static_assert(heap::base::Stack::NumberOfCalleeSavedRegisters == 20,
++              "Mismatch in the number of callee-saved registers");
++static_assert(sizeof(intptr_t) == 4, "Mismatch in word size");
++
++asm(
++#if defined(_AIX)
++    ".globl .SaveCalleeSavedRegisters, hidden    \n"
++    ".csect .text[PR]                            \n"
++    ".SaveCalleeSavedRegisters:                  \n"
++#else
++    ".globl SaveCalleeSavedRegisters             \n"
++    ".type SaveCalleeSavedRegisters, %function   \n"
++    ".hidden SaveCalleeSavedRegisters            \n"
++    "SaveCalleeSavedRegisters:                   \n"
++#endif
++    // r3: [ intptr_t* buffer ]
++    // Save the callee-saved registers: lr, TOC pointer (r2), r14-r31.
++    "  mflr 0                                    \n"
++    "  st 0, 4(3)                                \n"
++    "  st 2, 8(3)                                \n"
++    "  st 14, 12(3)                              \n"
++    "  st 15, 16(3)                              \n"
++    "  st 16, 20(3)                              \n"
++    "  st 17, 24(3)                              \n"
++    "  st 18, 28(3)                              \n"
++    "  st 19, 32(3)                              \n"
++    "  st 20, 36(3)                              \n"
++    "  st 21, 40(3)                              \n"
++    "  st 22, 44(3)                              \n"
++    "  st 23, 48(3)                              \n"
++    "  st 24, 52(3)                              \n"
++    "  st 25, 56(3)                              \n"
++    "  st 26, 60(3)                              \n"
++    "  st 27, 64(3)                              \n"
++    "  st 28, 68(3)                              \n"
++    "  st 29, 72(3)                              \n"
++    "  st 30, 76(3)                              \n"
++    "  st 31, 80(3)                              \n"
++    // Return.
++    "  blr                                       \n");
++
++#endif  // __PPC64__
+diff --git a/src/heap/base/asm/riscv/push_registers_asm.cc b/src/heap/base/asm/riscv/push_registers_asm.cc
+deleted file mode 100644
+index 7cc13ea3f36..00000000000
+--- a/src/heap/base/asm/riscv/push_registers_asm.cc
++++ /dev/null
+@@ -1,93 +0,0 @@
+-// Copyright 2020 the V8 project authors. All rights reserved.
+-// Use of this source code is governed by a BSD-style license that can be
+-// found in the LICENSE file.
+-
+-// Push all callee-saved registers to get them on the stack for conservative
+-// stack scanning.
+-//
+-// See asm/x64/push_registers_asm.cc for why the function is not generated
+-// using clang.
+-//
+-// Calling convention source:
+-// https://riscv.org/wp-content/uploads/2015/01/riscv-calling.pdf Table 18.2
+-#ifdef V8_TARGET_ARCH_RISCV64
+-asm(".global PushAllRegistersAndIterateStack             \n"
+-    ".type PushAllRegistersAndIterateStack, %function    \n"
+-    ".hidden PushAllRegistersAndIterateStack             \n"
+-    "PushAllRegistersAndIterateStack:                    \n"
+-    // Push all callee-saved registers and save return address.
+-    "  addi sp, sp, -112                                 \n"
+-    // Save return address.
+-    "  sd ra, 104(sp)                                    \n"
+-    // sp is callee-saved.
+-    "  sd sp, 96(sp)                                     \n"
+-    // s0-s11 are callee-saved.
+-    "  sd s11, 88(sp)                                    \n"
+-    "  sd s10, 80(sp)                                    \n"
+-    "  sd s9, 72(sp)                                     \n"
+-    "  sd s8, 64(sp)                                     \n"
+-    "  sd s7, 56(sp)                                     \n"
+-    "  sd s6, 48(sp)                                     \n"
+-    "  sd s5, 40(sp)                                     \n"
+-    "  sd s4, 32(sp)                                     \n"
+-    "  sd s3, 24(sp)                                     \n"
+-    "  sd s2, 16(sp)                                     \n"
+-    "  sd s1,  8(sp)                                     \n"
+-    "  sd s0,  0(sp)                                     \n"
+-    // Maintain frame pointer(fp is s0).
+-    "  mv s0, sp                                         \n"
+-    // Pass 1st parameter (a0) unchanged (Stack*).
+-    // Pass 2nd parameter (a1) unchanged (StackVisitor*).
+-    // Save 3rd parameter (a2; IterateStackCallback) to a3.
+-    "  mv a3, a2                                         \n"
+-    // Pass 3rd parameter as sp (stack pointer).
+-    "  mv a2, sp                                         \n"
+-    // Call the callback.
+-    "  jalr a3                                           \n"
+-    // Load return address.
+-    "  ld ra, 104(sp)                                    \n"
+-    // Restore frame pointer.
+-    "  ld s0, 0(sp)                                      \n"
+-    "  addi sp, sp, 112                                  \n"
+-    "  jr ra                                             \n");
+-#elif V8_TARGET_ARCH_RISCV32
+-asm(".global PushAllRegistersAndIterateStack             \n"
+-    ".type PushAllRegistersAndIterateStack, %function    \n"
+-    ".hidden PushAllRegistersAndIterateStack             \n"
+-    "PushAllRegistersAndIterateStack:                    \n"
+-    // Push all callee-saved registers and save return address.
+-    "  addi sp, sp, -56                                  \n"
+-    // Save return address.
+-    "  sw ra, 52(sp)                                     \n"
+-    // sp is callee-saved.
+-    "  sw sp, 48(sp)                                     \n"
+-    // s0-s11 are callee-saved.
+-    "  sw s11, 44(sp)                                    \n"
+-    "  sw s10, 40(sp)                                    \n"
+-    "  sw s9, 36(sp)                                     \n"
+-    "  sw s8, 32(sp)                                     \n"
+-    "  sw s7, 28(sp)                                     \n"
+-    "  sw s6, 24(sp)                                     \n"
+-    "  sw s5, 20(sp)                                     \n"
+-    "  sw s4, 16(sp)                                     \n"
+-    "  sw s3, 12(sp)                                     \n"
+-    "  sw s2, 8(sp)                                      \n"
+-    "  sw s1,  4(sp)                                     \n"
+-    "  sw s0,  0(sp)                                     \n"
+-    // Maintain frame pointer(fp is s0).
+-    "  mv s0, sp                                         \n"
+-    // Pass 1st parameter (a0) unchanged (Stack*).
+-    // Pass 2nd parameter (a1) unchanged (StackVisitor*).
+-    // Save 3rd parameter (a2; IterateStackCallback) to a3.
+-    "  mv a3, a2                                         \n"
+-    // Pass 3rd parameter as sp (stack pointer).
+-    "  mv a2, sp                                         \n"
+-    // Call the callback.
+-    "  jalr a3                                           \n"
+-    // Load return address.
+-    "  lw ra, 52(sp)                                     \n"
+-    // Restore frame pointer.
+-    "  lw s0, 0(sp)                                      \n"
+-    "  addi sp, sp, 56                                   \n"
+-    "  jr ra                                             \n");
+-#endif
+diff --git a/src/heap/base/asm/riscv/save_registers_asm.cc b/src/heap/base/asm/riscv/save_registers_asm.cc
+new file mode 100644
+index 00000000000..d46d8d7062a
+--- /dev/null
++++ b/src/heap/base/asm/riscv/save_registers_asm.cc
+@@ -0,0 +1,68 @@
++// Copyright 2020 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include <src/heap/base/stack.h>
++
++// Save all callee-saved registers in the specified buffer.
++// extern "C" void SaveCalleeSavedRegisters(intptr_t* buffer);
++
++// See asm/x64/save_registers_asm.cc for why the function is not generated
++// using clang.
++//
++// Calling convention source:
++// https://riscv.org/wp-content/uploads/2015/01/riscv-calling.pdf Table 18.2
++
++#if V8_HOST_ARCH_RISCV64
++// 12 64-bit registers = 12 intprt_t
++static_assert(heap::base::Stack::NumberOfCalleeSavedRegisters == 12,
++              "Mismatch in the number of callee-saved registers");
++static_assert(sizeof(intptr_t) == 8, "Mismatch in word size");
++
++asm(".global SaveCalleeSavedRegisters             \n"
++    ".type SaveCalleeSavedRegisters, %function    \n"
++    ".hidden SaveCalleeSavedRegisters             \n"
++    "SaveCalleeSavedRegisters:                    \n"
++    // a0: [ intptr_t* buffer ]
++    // Save the callee-saved registers: s0-s11.
++    "  sd s11, 88(a0)                             \n"
++    "  sd s10, 80(a0)                             \n"
++    "  sd s9, 72(a0)                              \n"
++    "  sd s8, 64(a0)                              \n"
++    "  sd s7, 56(a0)                              \n"
++    "  sd s6, 48(a0)                              \n"
++    "  sd s5, 40(a0)                              \n"
++    "  sd s4, 32(a0)                              \n"
++    "  sd s3, 24(a0)                              \n"
++    "  sd s2, 16(a0)                              \n"
++    "  sd s1,  8(a0)                              \n"
++    "  sd s0,  0(a0)                              \n"
++    // Return.
++    "  jr ra                                      \n");
++#elif V8_HOST_ARCH_RISCV32
++// 12 32-bit registers = 12 intprt_t
++static_assert(heap::base::Stack::NumberOfCalleeSavedRegisters == 12,
++              "Mismatch in the number of callee-saved registers");
++static_assert(sizeof(intptr_t) == 4, "Mismatch in word size");
++
++asm(".global SaveCalleeSavedRegisters             \n"
++    ".type SaveCalleeSavedRegisters, %function    \n"
++    ".hidden SaveCalleeSavedRegisters             \n"
++    "SaveCalleeSavedRegisters:                    \n"
++    // a0: [ intptr_t* buffer ]
++    // Save the callee-saved registers: s0-s11.
++    "  sw s11, 44(a0)                             \n"
++    "  sw s10, 40(a0)                             \n"
++    "  sw s9, 36(a0)                              \n"
++    "  sw s8, 32(a0)                              \n"
++    "  sw s7, 28(a0)                              \n"
++    "  sw s6, 24(a0)                              \n"
++    "  sw s5, 20(a0)                              \n"
++    "  sw s4, 16(a0)                              \n"
++    "  sw s3, 12(a0)                              \n"
++    "  sw s2,  8(a0)                              \n"
++    "  sw s1,  4(a0)                              \n"
++    "  sw s0,  0(a0)                              \n"
++    // Return.
++    "  jr ra                                      \n");
++#endif
+diff --git a/src/heap/base/asm/s390/push_registers_asm.cc b/src/heap/base/asm/s390/push_registers_asm.cc
+deleted file mode 100644
+index 6b9b2c08536..00000000000
+--- a/src/heap/base/asm/s390/push_registers_asm.cc
++++ /dev/null
+@@ -1,35 +0,0 @@
+-// Copyright 2020 the V8 project authors. All rights reserved.
+-// Use of this source code is governed by a BSD-style license that can be
+-// found in the LICENSE file.
+-
+-// Push all callee-saved registers to get them on the stack for conservative
+-// stack scanning.
+-
+-// See asm/x64/push_registers_clang.cc for why the function is not generated
+-// using clang.
+-
+-// Do not depend on V8_TARGET_OS_* defines as some embedders may override the
+-// GN toolchain (e.g. ChromeOS) and not provide them.
+-
+-// S390 ABI source:
+-// http://refspecs.linuxbase.org/ELF/zSeries/lzsabi0_zSeries.html
+-asm(".globl PushAllRegistersAndIterateStack             \n"
+-    ".type PushAllRegistersAndIterateStack, %function   \n"
+-    ".hidden PushAllRegistersAndIterateStack            \n"
+-    "PushAllRegistersAndIterateStack:                   \n"
+-    // Push all callee-saved registers.
+-    // r6-r13, r14 and sp(r15)
+-    "  stmg %r6, %sp, 48(%sp)                           \n"
+-    // Allocate frame.
+-    "  lay %sp, -160(%sp)                               \n"
+-    // Pass 1st parameter (r2) unchanged (Stack*).
+-    // Pass 2nd parameter (r3) unchanged (StackVisitor*).
+-    // Save 3rd parameter (r4; IterateStackCallback).
+-    "  lgr %r5, %r4                                     \n"
+-    // Pass sp as 3rd parameter. 160+48 to point
+-    // to callee saved region stored above.
+-    "  lay %r4, 208(%sp)                                \n"
+-    // Call the callback.
+-    "  basr %r14, %r5                                   \n"
+-    "  lmg %r14,%sp, 272(%sp)                           \n"
+-    "  br %r14                                          \n");
+diff --git a/src/heap/base/asm/s390/save_registers_asm.cc b/src/heap/base/asm/s390/save_registers_asm.cc
+new file mode 100644
+index 00000000000..57831883a52
+--- /dev/null
++++ b/src/heap/base/asm/s390/save_registers_asm.cc
+@@ -0,0 +1,32 @@
++// Copyright 2020 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include <src/heap/base/stack.h>
++
++// Save all callee-saved registers in the specified buffer.
++// extern "C" void SaveCalleeSavedRegisters(intptr_t* buffer);
++
++// See asm/x64/save_registers_asm.cc for why the function is not generated
++// using clang.
++//
++// Do not depend on V8_TARGET_OS_* defines as some embedders may override the
++// GN toolchain (e.g. ChromeOS) and not provide them.
++
++// S390 ABI source:
++// http://refspecs.linuxbase.org/ELF/zSeries/lzsabi0_zSeries.html
++
++// 10 64-bit registers = 10 intprt_t
++static_assert(heap::base::Stack::NumberOfCalleeSavedRegisters == 10,
++              "Mismatch in the number of callee-saved registers");
++static_assert(sizeof(intptr_t) == 8, "Mismatch in word size");
++
++asm(".globl SaveCalleeSavedRegisters             \n"
++    ".type SaveCalleeSavedRegisters, %function   \n"
++    ".hidden SaveCalleeSavedRegisters            \n"
++    "SaveCalleeSavedRegisters:                   \n"
++    // r2: [ intptr_t* buffer ]
++    // Save the callee-saved registers: r6-r13, r14 and sp(r15).
++    "  stmg %r6, %sp, 0(%r2)                     \n"
++    // Return.
++    "  br %r14                                   \n");
+diff --git a/src/heap/base/asm/x64/push_registers_asm.cc b/src/heap/base/asm/x64/push_registers_asm.cc
+deleted file mode 100644
+index 1781a5816a5..00000000000
+--- a/src/heap/base/asm/x64/push_registers_asm.cc
++++ /dev/null
+@@ -1,106 +0,0 @@
+-// Copyright 2020 the V8 project authors. All rights reserved.
+-// Use of this source code is governed by a BSD-style license that can be
+-// found in the LICENSE file.
+-
+-// Push all callee-saved registers to get them on the stack for conservative
+-// stack scanning.
+-//
+-// We cannot rely on clang generating the function and right symbol mangling
+-// as `__attribute__((naked))` does not prevent clang from generating TSAN
+-// function entry stubs (`__tsan_func_entry`). Even with
+-// `__attribute__((no_sanitize_thread)` annotation clang generates the entry
+-// stub.
+-// See https://bugs.llvm.org/show_bug.cgi?id=45400.
+-
+-// Do not depend on V8_TARGET_OS_* defines as some embedders may override the
+-// GN toolchain (e.g. ChromeOS) and not provide them.
+-// _WIN64 Defined as 1 when the compilation target is 64-bit ARM or x64.
+-// Otherwise, undefined.
+-#ifdef _WIN64
+-
+-// We maintain 16-byte alignment at calls. There is an 8-byte return address
+-// on the stack and we push 232 bytes which maintains 16-byte stack alignment
+-// at the call.
+-// Source: https://docs.microsoft.com/en-us/cpp/build/x64-calling-convention
+-asm(".globl PushAllRegistersAndIterateStack             \n"
+-    "PushAllRegistersAndIterateStack:                   \n"
+-    // rbp is callee-saved. Maintain proper frame pointer for debugging.
+-    "  push %rbp                                        \n"
+-    "  mov %rsp, %rbp                                   \n"
+-    // Dummy for alignment.
+-    "  push $0xCDCDCD                                   \n"
+-    "  push %rsi                                        \n"
+-    "  push %rdi                                        \n"
+-    "  push %rbx                                        \n"
+-    "  push %r12                                        \n"
+-    "  push %r13                                        \n"
+-    "  push %r14                                        \n"
+-    "  push %r15                                        \n"
+-    "  sub $160, %rsp                                   \n"
+-    // Use aligned instrs as we are certain that the stack is properly aligned.
+-    "  movdqa %xmm6, 144(%rsp)                          \n"
+-    "  movdqa %xmm7, 128(%rsp)                          \n"
+-    "  movdqa %xmm8, 112(%rsp)                          \n"
+-    "  movdqa %xmm9, 96(%rsp)                           \n"
+-    "  movdqa %xmm10, 80(%rsp)                          \n"
+-    "  movdqa %xmm11, 64(%rsp)                          \n"
+-    "  movdqa %xmm12, 48(%rsp)                          \n"
+-    "  movdqa %xmm13, 32(%rsp)                          \n"
+-    "  movdqa %xmm14, 16(%rsp)                          \n"
+-    "  movdqa %xmm15, (%rsp)                            \n"
+-    // Pass 1st parameter (rcx) unchanged (Stack*).
+-    // Pass 2nd parameter (rdx) unchanged (StackVisitor*).
+-    // Save 3rd parameter (r8; IterateStackCallback)
+-    "  mov %r8, %r9                                     \n"
+-    // Pass 3rd parameter as rsp (stack pointer).
+-    "  mov %rsp, %r8                                    \n"
+-    // Call the callback.
+-    "  call *%r9                                        \n"
+-    // Pop the callee-saved registers.
+-    "  add $224, %rsp                                   \n"
+-    // Restore rbp as it was used as frame pointer.
+-    "  pop %rbp                                         \n"
+-    "  ret                                              \n");
+-
+-#else  // !_WIN64
+-
+-// We maintain 16-byte alignment at calls. There is an 8-byte return address
+-// on the stack and we push 56 bytes which maintains 16-byte stack alignment
+-// at the call.
+-// Source: https://github.com/hjl-tools/x86-psABI/wiki/x86-64-psABI-1.0.pdf
+-asm(
+-#ifdef __APPLE__
+-    ".globl _PushAllRegistersAndIterateStack            \n"
+-    ".private_extern _PushAllRegistersAndIterateStack   \n"
+-    "_PushAllRegistersAndIterateStack:                  \n"
+-#else   // !__APPLE__
+-    ".globl PushAllRegistersAndIterateStack             \n"
+-    ".type PushAllRegistersAndIterateStack, %function   \n"
+-    ".hidden PushAllRegistersAndIterateStack            \n"
+-    "PushAllRegistersAndIterateStack:                   \n"
+-#endif  // !__APPLE__
+-    // rbp is callee-saved. Maintain proper frame pointer for debugging.
+-    "  push %rbp                                        \n"
+-    "  mov %rsp, %rbp                                   \n"
+-    // Dummy for alignment.
+-    "  push $0xCDCDCD                                   \n"
+-    "  push %rbx                                        \n"
+-    "  push %r12                                        \n"
+-    "  push %r13                                        \n"
+-    "  push %r14                                        \n"
+-    "  push %r15                                        \n"
+-    // Pass 1st parameter (rdi) unchanged (Stack*).
+-    // Pass 2nd parameter (rsi) unchanged (StackVisitor*).
+-    // Save 3rd parameter (rdx; IterateStackCallback)
+-    "  mov %rdx, %r8                                    \n"
+-    // Pass 3rd parameter as rsp (stack pointer).
+-    "  mov %rsp, %rdx                                   \n"
+-    // Call the callback.
+-    "  call *%r8                                        \n"
+-    // Pop the callee-saved registers.
+-    "  add $48, %rsp                                    \n"
+-    // Restore rbp as it was used as frame pointer.
+-    "  pop %rbp                                         \n"
+-    "  ret                                              \n");
+-
+-#endif  // !_WIN64
+diff --git a/src/heap/base/asm/x64/push_registers_masm.asm b/src/heap/base/asm/x64/push_registers_masm.asm
+deleted file mode 100644
+index a32e193c2f1..00000000000
+--- a/src/heap/base/asm/x64/push_registers_masm.asm
++++ /dev/null
+@@ -1,57 +0,0 @@
+-;; Copyright 2020 the V8 project authors. All rights reserved.
+-;; Use of this source code is governed by a BSD-style license that can be
+-;; found in the LICENSE file.
+-
+-;; MASM syntax
+-;; https://docs.microsoft.com/en-us/cpp/assembler/masm/microsoft-macro-assembler-reference?view=vs-2019
+-
+-public PushAllRegistersAndIterateStack
+-
+-.code
+-PushAllRegistersAndIterateStack:
+-    ;; Push all callee-saved registers to get them on the stack for conservative
+-    ;; stack scanning.
+-    ;;
+-    ;; We maintain 16-byte alignment at calls. There is an 8-byte return address
+-    ;; on the stack and we push 232 bytes which maintains 16-byte stack
+-    ;; alignment at the call.
+-    ;; Source: https://docs.microsoft.com/en-us/cpp/build/x64-calling-convention
+-    ;;
+-    ;; rbp is callee-saved. Maintain proper frame pointer for debugging.
+-    push rbp
+-    mov rbp, rsp
+-    push 0CDCDCDh  ;; Dummy for alignment.
+-    push rsi
+-    push rdi
+-    push rbx
+-    push r12
+-    push r13
+-    push r14
+-    push r15
+-    sub rsp, 160
+-    ;; Use aligned instrs as we are certain that the stack is properly aligned.
+-    movdqa  xmmword ptr [rsp + 144], xmm6
+-    movdqa  xmmword ptr [rsp + 128], xmm7
+-    movdqa  xmmword ptr [rsp + 112], xmm8
+-    movdqa  xmmword ptr [rsp + 96], xmm9
+-    movdqa  xmmword ptr [rsp + 80], xmm10
+-    movdqa  xmmword ptr [rsp + 64], xmm11
+-    movdqa  xmmword ptr [rsp + 48], xmm12
+-    movdqa  xmmword ptr [rsp + 32], xmm13
+-    movdqa  xmmword ptr [rsp + 16], xmm14
+-    movdqa  xmmword ptr [rsp], xmm15
+-    ;; Pass 1st parameter (rcx) unchanged (Stack*).
+-    ;; Pass 2nd parameter (rdx) unchanged (StackVisitor*).
+-    ;; Save 3rd parameter (r8; IterateStackCallback)
+-    mov r9, r8
+-    ;; Pass 3rd parameter as rsp (stack pointer).
+-    mov r8, rsp
+-    ;; Call the callback.
+-    call r9
+-    ;; Pop the callee-saved registers.
+-    add rsp, 224
+-    ;; Restore rbp as it was used as frame pointer.
+-    pop rbp
+-    ret
+-
+-end
+diff --git a/src/heap/base/asm/x64/save_registers_asm.cc b/src/heap/base/asm/x64/save_registers_asm.cc
+new file mode 100644
+index 00000000000..5ff39fccd39
+--- /dev/null
++++ b/src/heap/base/asm/x64/save_registers_asm.cc
+@@ -0,0 +1,94 @@
++// Copyright 2020 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include <src/heap/base/stack.h>
++
++// Save all callee-saved registers in the specified buffer.
++// extern "C" void SaveCalleeSavedRegisters(intptr_t* buffer);
++//
++// We cannot rely on clang generating the function and right symbol mangling
++// as `__attribute__((naked))` does not prevent clang from generating TSAN
++// function entry stubs (`__tsan_func_entry`). Even with
++// `__attribute__((no_sanitize_thread)` annotation clang generates the entry
++// stub.
++// See https://bugs.llvm.org/show_bug.cgi?id=45400.
++//
++// Do not depend on V8_TARGET_OS_* defines as some embedders may override the
++// GN toolchain (e.g. ChromeOS) and not provide them.
++// _WIN64 Defined as 1 when the compilation target is 64-bit ARM or x64.
++// Otherwise, undefined.
++
++#ifdef _WIN64
++// Source: https://docs.microsoft.com/en-us/cpp/build/x64-calling-convention
++
++// 7 64-bit registers + 1 for alignment purposes = 8 * 1 = 8 intprt_t
++// 10 128-bit registers = 10 * 2 = 20 intptr_t
++static_assert(heap::base::Stack::NumberOfCalleeSavedRegisters == 28,
++              "Mismatch in the number of callee-saved registers");
++static_assert(sizeof(intptr_t) == 8, "Mismatch in word size");
++
++asm(".globl SaveCalleeSavedRegisters             \n"
++    "SaveCalleeSavedRegisters:                   \n"
++    // %rcx: [ intptr_t* buffer ]
++    // %rbp is callee-saved. Maintain proper frame pointer for debugging.
++    "  push %rbp                                 \n"
++    "  mov %rsp, %rbp                            \n"
++    // Save the callee-saved registers.
++    "  mov %rsi, 0(%rcx)                         \n"
++    "  mov %rdi, 8(%rcx)                         \n"
++    "  mov %rbx, 16(%rcx)                        \n"
++    "  mov %r12, 24(%rcx)                        \n"
++    "  mov %r13, 32(%rcx)                        \n"
++    "  mov %r14, 40(%rcx)                        \n"
++    "  mov %r15, 48(%rcx)                        \n"
++    // Skip one slot to achieve proper alignment and use aligned instructions,
++    // as we are sure that the buffer is properly aligned.
++    "  movdqa %xmm6, 64(%rcx)                    \n"
++    "  movdqa %xmm7, 80(%rcx)                    \n"
++    "  movdqa %xmm8, 96(%rcx)                    \n"
++    "  movdqa %xmm9, 112(%rcx)                   \n"
++    "  movdqa %xmm10, 128(%rcx)                  \n"
++    "  movdqa %xmm11, 144(%rcx)                  \n"
++    "  movdqa %xmm12, 160(%rcx)                  \n"
++    "  movdqa %xmm13, 176(%rcx)                  \n"
++    "  movdqa %xmm14, 192(%rcx)                  \n"
++    "  movdqa %xmm15, 208(%rcx)                  \n"
++    // Return.
++    "  pop %rbp                                  \n"
++    "  ret                                       \n");
++
++#else  // !_WIN64
++// Source: https://github.com/hjl-tools/x86-psABI/wiki/x86-64-psABI-1.0.pdf
++
++// 5 64-bit registers = 5 intprt_t
++static_assert(heap::base::Stack::NumberOfCalleeSavedRegisters == 5,
++              "Mismatch in the number of callee-saved registers");
++static_assert(sizeof(intptr_t) == 8, "Mismatch in word size");
++
++asm(
++#ifdef __APPLE__
++    ".globl _SaveCalleeSavedRegisters            \n"
++    ".private_extern _SaveCalleeSavedRegisters   \n"
++    "_SaveCalleeSavedRegisters:                  \n"
++#else   // !__APPLE__
++    ".globl SaveCalleeSavedRegisters             \n"
++    ".type SaveCalleeSavedRegisters, %function   \n"
++    ".hidden SaveCalleeSavedRegisters            \n"
++    "SaveCalleeSavedRegisters:                   \n"
++#endif  // !__APPLE__
++    // %rdi: [ intptr_t* buffer ]
++    // %rbp is callee-saved. Maintain proper frame pointer for debugging.
++    "  push %rbp                                 \n"
++    "  mov %rsp, %rbp                            \n"
++    // Save the callee-saved registers.
++    "  mov %rbx, 0(%rdi)                         \n"
++    "  mov %r12, 8(%rdi)                         \n"
++    "  mov %r13, 16(%rdi)                        \n"
++    "  mov %r14, 24(%rdi)                        \n"
++    "  mov %r15, 32(%rdi)                        \n"
++    // Restore %rbp as it was used as frame pointer and return.
++    "  pop %rbp                                  \n"
++    "  ret                                       \n");
++
++#endif  // !_WIN64
+diff --git a/src/heap/base/asm/x64/save_registers_masm.asm b/src/heap/base/asm/x64/save_registers_masm.asm
+new file mode 100644
+index 00000000000..29946a47ac6
+--- /dev/null
++++ b/src/heap/base/asm/x64/save_registers_masm.asm
+@@ -0,0 +1,43 @@
++;; Copyright 2020 the V8 project authors. All rights reserved.
++;; Use of this source code is governed by a BSD-style license that can be
++;; found in the LICENSE file.
++
++;; MASM syntax
++;; https://docs.microsoft.com/en-us/cpp/assembler/masm/microsoft-macro-assembler-reference?view=vs-2019
++
++public SaveCalleeSavedRegisters
++
++.code
++    ;; Save all callee-saved registers in the specified buffer.
++    ;; extern "C" void SaveCalleeSavedRegisters(intptr_t* buffer);
++
++SaveCalleeSavedRegisters:
++    ;; %rcx: [ intptr_t* buffer ]
++    ;; %rbp is callee-saved. Maintain proper frame pointer for debugging.
++    push rbp
++    mov rbp, rsp
++    ;; Save the callee-saved registers.
++    mov qword ptr [rcx], rsi
++    mov qword ptr [rcx + 8], rdi
++    mov qword ptr [rcx + 16], rbx
++    mov qword ptr [rcx + 24], r12
++    mov qword ptr [rcx + 32], r13
++    mov qword ptr [rcx + 40], r14
++    mov qword ptr [rcx + 48], r15
++    ;; Skip one slot to achieve proper alignment and use aligned instructions,
++    ;; as we are sure that the buffer is properly aligned.
++    movdqa xmmword ptr [rcx + 64], xmm6
++    movdqa xmmword ptr [rcx + 80], xmm7
++    movdqa xmmword ptr [rcx + 96], xmm8
++    movdqa xmmword ptr [rcx + 112], xmm9
++    movdqa xmmword ptr [rcx + 128], xmm10
++    movdqa xmmword ptr [rcx + 144], xmm11
++    movdqa xmmword ptr [rcx + 160], xmm12
++    movdqa xmmword ptr [rcx + 176], xmm13
++    movdqa xmmword ptr [rcx + 192], xmm14
++    movdqa xmmword ptr [rcx + 208], xmm15
++    ;; Restore %rbp as it was used as frame pointer and return.
++    pop rbp
++    ret
++
++end
+diff --git a/src/heap/base/stack.cc b/src/heap/base/stack.cc
+index 26e48acf9a2..337206e817b 100644
+--- a/src/heap/base/stack.cc
++++ b/src/heap/base/stack.cc
+@@ -6,17 +6,11 @@
+ 
+ #include <limits>
+ 
+-#include "src/base/platform/platform.h"
+ #include "src/base/sanitizer/asan.h"
+ #include "src/base/sanitizer/msan.h"
+ #include "src/base/sanitizer/tsan.h"
+ 
+-namespace heap {
+-namespace base {
+-
+-using IterateStackCallback = void (*)(const Stack*, StackVisitor*, intptr_t*);
+-extern "C" void PushAllRegistersAndIterateStack(const Stack*, StackVisitor*,
+-                                                IterateStackCallback);
++namespace heap::base {
+ 
+ Stack::Stack(const void* stack_start) : stack_start_(stack_start) {}
+ 
+@@ -24,13 +18,12 @@ void Stack::SetStackStart(const void* stack_start) {
+   stack_start_ = stack_start;
+ }
+ 
+-bool Stack::IsOnStack(void* slot) const {
++bool Stack::IsOnStack(const void* slot) const {
+   DCHECK_NOT_NULL(stack_start_);
+ #ifdef V8_USE_ADDRESS_SANITIZER
+   // If the slot is part of a fake frame, then it is definitely on the stack.
+   if (__asan_addr_is_in_fake_stack(__asan_get_current_fake_stack(),
+-                                   reinterpret_cast<void*>(slot), nullptr,
+-                                   nullptr)) {
++                                   const_cast<void*>(slot), nullptr, nullptr)) {
+     return true;
+   }
+   // Fall through as there is still a regular stack present even when running
+@@ -60,9 +53,10 @@ DISABLE_ASAN
+ // other thread may use a lock to synchronize the access.
+ DISABLE_TSAN
+ void IterateAsanFakeFrameIfNecessary(StackVisitor* visitor,
+-                                     void* asan_fake_stack,
++                                     const void* asan_fake_stack,
+                                      const void* stack_start,
+-                                     const void* stack_end, void* address) {
++                                     const void* stack_end,
++                                     const void* address) {
+   // When using ASAN fake stack a pointer to the fake frame is kept on the
+   // native frame. In case |addr| points to a fake frame of the current stack
+   // iterate the fake frame. Frame layout see
+@@ -71,17 +65,19 @@ void IterateAsanFakeFrameIfNecessary(StackVisitor* visitor,
+     void* fake_frame_begin;
+     void* fake_frame_end;
+     void* real_stack_frame = __asan_addr_is_in_fake_stack(
+-        asan_fake_stack, address, &fake_frame_begin, &fake_frame_end);
++        const_cast<void*>(asan_fake_stack), const_cast<void*>(address),
++        &fake_frame_begin, &fake_frame_end);
+     if (real_stack_frame) {
+       // |address| points to a fake frame. Check that the fake frame is part
+       // of this stack.
+       if (stack_start >= real_stack_frame && real_stack_frame >= stack_end) {
+         // Iterate the fake frame.
+-        for (void** current = reinterpret_cast<void**>(fake_frame_begin);
++        for (const void* const* current =
++                 reinterpret_cast<const void* const*>(fake_frame_begin);
+              current < fake_frame_end; ++current) {
+-          void* addr = *current;
+-          if (addr == nullptr) continue;
+-          visitor->VisitPointer(addr);
++          const void* address = *current;
++          if (address == nullptr) continue;
++          visitor->VisitPointer(address);
+         }
+       }
+     }
+@@ -96,16 +92,17 @@ void IterateUnsafeStackIfNecessary(StackVisitor* visitor) {
+   // Source:
+   // https://github.com/llvm/llvm-project/blob/main/compiler-rt/lib/safestack/safestack.cpp
+   constexpr size_t kSafeStackAlignmentBytes = 16;
+-  void* stack_end = __builtin___get_unsafe_stack_ptr();
+-  void* stack_start = __builtin___get_unsafe_stack_top();
++  const void* stack_end = __builtin___get_unsafe_stack_ptr();
++  const void* stack_start = __builtin___get_unsafe_stack_top();
+   CHECK_GT(stack_start, stack_end);
+   CHECK_EQ(0u, reinterpret_cast<uintptr_t>(stack_end) &
+                    (kSafeStackAlignmentBytes - 1));
+   CHECK_EQ(0u, reinterpret_cast<uintptr_t>(stack_start) &
+                    (kSafeStackAlignmentBytes - 1));
+-  void** current = reinterpret_cast<void**>(stack_end);
+-  for (; current < stack_start; ++current) {
+-    void* address = *current;
++  for (const void* const* current =
++           reinterpret_cast<const void* const*>(stack_end);
++       current < stack_start; ++current) {
++    const void* address = *current;
+     if (address == nullptr) continue;
+     visitor->VisitPointer(address);
+   }
+@@ -123,26 +120,45 @@ DISABLE_ASAN
+ // thread, e.g., for interrupt handling. Atomic reads are not enough as the
+ // other thread may use a lock to synchronize the access.
+ DISABLE_TSAN
+-void IteratePointersImpl(const Stack* stack, StackVisitor* visitor,
+-                         intptr_t* stack_end) {
++void IteratePointersImpl(StackVisitor* visitor, const void* stack_start,
++                         const void* stack_end,
++                         const Stack::CalleeSavedRegisters* registers) {
++#ifdef V8_USE_ADDRESS_SANITIZER
++  const void* asan_fake_stack = __asan_get_current_fake_stack();
++#endif  // V8_USE_ADDRESS_SANITIZER
++
++  // Iterate through the registers.
++  if (registers != nullptr) {
++    for (intptr_t value : registers->buffer) {
++      const void* address = reinterpret_cast<const void*>(value);
++      MSAN_MEMORY_IS_INITIALIZED(&address, sizeof(address));
++      if (address == nullptr) continue;
++      visitor->VisitPointer(address);
+ #ifdef V8_USE_ADDRESS_SANITIZER
+-  void* asan_fake_stack = __asan_get_current_fake_stack();
++      IterateAsanFakeFrameIfNecessary(visitor, asan_fake_stack, stack_start,
++                                      stack_end, address);
+ #endif  // V8_USE_ADDRESS_SANITIZER
++    }
++  }
++
++  // Iterate through the stack.
+   // All supported platforms should have their stack aligned to at least
+   // sizeof(void*).
+   constexpr size_t kMinStackAlignment = sizeof(void*);
+-  void** current = reinterpret_cast<void**>(stack_end);
+-  CHECK_EQ(0u, reinterpret_cast<uintptr_t>(current) & (kMinStackAlignment - 1));
+-  for (; current < stack->stack_start(); ++current) {
++  CHECK_EQ(0u,
++           reinterpret_cast<uintptr_t>(stack_end) & (kMinStackAlignment - 1));
++  for (const void* const* current =
++           reinterpret_cast<const void* const*>(stack_end);
++       current < stack_start; ++current) {
+     // MSAN: Instead of unpoisoning the whole stack, the slot's value is copied
+     // into a local which is unpoisoned.
+-    void* address = *current;
++    const void* address = *current;
+     MSAN_MEMORY_IS_INITIALIZED(&address, sizeof(address));
+     if (address == nullptr) continue;
+     visitor->VisitPointer(address);
+ #ifdef V8_USE_ADDRESS_SANITIZER
+-    IterateAsanFakeFrameIfNecessary(visitor, asan_fake_stack,
+-                                    stack->stack_start(), stack_end, address);
++    IterateAsanFakeFrameIfNecessary(visitor, asan_fake_stack, stack_start,
++                                    stack_end, address);
+ #endif  // V8_USE_ADDRESS_SANITIZER
+   }
+ }
+@@ -151,7 +167,8 @@ void IteratePointersImpl(const Stack* stack, StackVisitor* visitor,
+ 
+ void Stack::IteratePointers(StackVisitor* visitor) const {
+   DCHECK_NOT_NULL(stack_start_);
+-  PushAllRegistersAndIterateStack(this, visitor, &IteratePointersImpl);
++  PushAllRegistersAndInvokeCallback(visitor, stack_start_,
++                                    &IteratePointersImpl);
+   // No need to deal with callee-saved registers as they will be kept alive by
+   // the regular conservative stack iteration.
+   // TODO(chromium:1056170): Add support for SIMD and/or filtering.
+@@ -159,8 +176,22 @@ void Stack::IteratePointers(StackVisitor* visitor) const {
+ }
+ 
+ void Stack::IteratePointersUnsafe(StackVisitor* visitor,
+-                                  uintptr_t stack_end) const {
+-  IteratePointersImpl(this, visitor, reinterpret_cast<intptr_t*>(stack_end));
++                                  const void* stack_end) const {
++  IteratePointersImpl(visitor, stack_start_, stack_end, nullptr);
++}
++
++namespace {
++// Function with architecture-specific implementation:
++// Saves all callee-saved registers in the specified buffer.
++extern "C" void SaveCalleeSavedRegisters(intptr_t* buffer);
++}  // namespace
++
++V8_NOINLINE void Stack::PushAllRegistersAndInvokeCallback(
++    StackVisitor* visitor, const void* stack_start, Callback callback) {
++  Stack::CalleeSavedRegisters registers;
++  SaveCalleeSavedRegisters(registers.buffer.data());
++  callback(visitor, stack_start, v8::base::Stack::GetCurrentStackPosition(),
++           &registers);
+ }
+ 
+ namespace {
+@@ -200,10 +231,8 @@ void Stack::clear_marker() {
+ }
+ 
+ const void* Stack::get_marker() const {
+-  DCHECK(IsOnCurrentStack(stack_start_));
+   DCHECK_NOT_NULL(stack_marker_);
+   return stack_marker_;
+ }
+ 
+-}  // namespace base
+-}  // namespace heap
++}  // namespace heap::base
+diff --git a/src/heap/base/stack.h b/src/heap/base/stack.h
+index d651a9f4c01..f8fca751539 100644
+--- a/src/heap/base/stack.h
++++ b/src/heap/base/stack.h
+@@ -6,6 +6,7 @@
+ #define V8_HEAP_BASE_STACK_H_
+ 
+ #include "src/base/macros.h"
++#include "src/base/platform/platform.h"
+ 
+ namespace heap::base {
+ 
+@@ -21,13 +22,59 @@ class StackVisitor {
+ // - SafeStack: https://releases.llvm.org/10.0.0/tools/clang/docs/SafeStack.html
+ class V8_EXPORT_PRIVATE Stack final {
+  public:
++  // The following constant is architecture-specific. The size of the buffer
++  // for storing the callee-saved registers is going to be equal to
++  // NumberOfCalleeSavedRegisters * sizeof(intptr_t).
++
++#if V8_HOST_ARCH_IA32
++  // Must be consistent with heap/base/asm/ia32/.
++  static constexpr int NumberOfCalleeSavedRegisters = 3;
++#elif V8_HOST_ARCH_X64
++#ifdef _WIN64
++  // Must be consistent with heap/base/asm/x64/.
++  static constexpr int NumberOfCalleeSavedRegisters = 28;
++#else   // !_WIN64
++  // Must be consistent with heap/base/asm/x64/.
++  static constexpr int NumberOfCalleeSavedRegisters = 5;
++#endif  // !_WIN64
++#elif V8_HOST_ARCH_ARM64
++  // Must be consistent with heap/base/asm/arm64/.
++  static constexpr int NumberOfCalleeSavedRegisters = 11;
++#elif V8_HOST_ARCH_ARM
++  // Must be consistent with heap/base/asm/arm/.
++  static constexpr int NumberOfCalleeSavedRegisters = 8;
++#elif V8_HOST_ARCH_PPC64
++  // Must be consistent with heap/base/asm/ppc/.
++  static constexpr int NumberOfCalleeSavedRegisters = 20;
++#elif V8_HOST_ARCH_PPC
++  // Must be consistent with heap/base/asm/ppc/.
++  static constexpr int NumberOfCalleeSavedRegisters = 20;
++#elif V8_HOST_ARCH_MIPS64
++  // Must be consistent with heap/base/asm/mips64el/.
++  static constexpr int NumberOfCalleeSavedRegisters = 9;
++#elif V8_HOST_ARCH_LOONG64
++  // Must be consistent with heap/base/asm/loong64/.
++  static constexpr int NumberOfCalleeSavedRegisters = 11;
++#elif V8_HOST_ARCH_S390
++  // Must be consistent with heap/base/asm/s390/.
++  static constexpr int NumberOfCalleeSavedRegisters = 10;
++#elif V8_HOST_ARCH_RISCV32
++  // Must be consistent with heap/base/asm/riscv/.
++  static constexpr int NumberOfCalleeSavedRegisters = 12;
++#elif V8_HOST_ARCH_RISCV64
++  // Must be consistent with heap/base/asm/riscv/.
++  static constexpr int NumberOfCalleeSavedRegisters = 12;
++#else
++#error Unknown architecture.
++#endif
++
+   explicit Stack(const void* stack_start = nullptr);
+ 
+   // Sets the start of the stack.
+   void SetStackStart(const void* stack_start);
+ 
+   // Returns true if |slot| is part of the stack and false otherwise.
+-  bool IsOnStack(void* slot) const;
++  bool IsOnStack(const void* slot) const;
+ 
+   // Word-aligned iteration of the stack. Callee-saved registers are pushed to
+   // the stack before iterating pointers. Slot values are passed on to
+@@ -41,7 +88,8 @@ class V8_EXPORT_PRIVATE Stack final {
+   // **Ignores:**
+   // - Callee-saved registers.
+   // - SafeStack.
+-  void IteratePointersUnsafe(StackVisitor* visitor, uintptr_t stack_end) const;
++  void IteratePointersUnsafe(StackVisitor* visitor,
++                             const void* stack_end) const;
+ 
+   // Returns the start of the stack.
+   const void* stack_start() const { return stack_start_; }
+@@ -51,6 +99,22 @@ class V8_EXPORT_PRIVATE Stack final {
+   void clear_marker();
+   const void* get_marker() const;
+ 
++  // Mechanism for saving the callee-saved registers, required for conservative
++  // stack scanning.
++
++  struct CalleeSavedRegisters {
++    // We always double-align this buffer, to support for longer registers,
++    // e.g., 128-bit registers in WIN64.
++    alignas(2 * sizeof(intptr_t))
++        std::array<intptr_t, NumberOfCalleeSavedRegisters> buffer;
++  };
++
++  using Callback = void (*)(StackVisitor*, const void*, const void*,
++                            const CalleeSavedRegisters* registers);
++
++  static V8_NOINLINE void PushAllRegistersAndInvokeCallback(
++      StackVisitor* visitor, const void* stack_start, Callback callback);
++
+  private:
+   const void* stack_start_;
+   const void* stack_marker_ = nullptr;
+diff --git a/src/heap/cppgc/marking-verifier.cc b/src/heap/cppgc/marking-verifier.cc
+index 666e715cd76..0b649c7d3fe 100644
+--- a/src/heap/cppgc/marking-verifier.cc
++++ b/src/heap/cppgc/marking-verifier.cc
+@@ -63,7 +63,8 @@ void MarkingVerifierBase::Run(
+ #if !defined(THREAD_SANITIZER) && !defined(CPPGC_POINTER_COMPRESSION)
+   if (stack_state == StackState::kMayContainHeapPointers) {
+     in_construction_objects_ = &in_construction_objects_stack_;
+-    heap_.stack()->IteratePointersUnsafe(this, stack_end);
++    heap_.stack()->IteratePointersUnsafe(
++        this, reinterpret_cast<const void*>(stack_end));
+     // The objects found through the unsafe iteration are only a subset of the
+     // regular iteration as they miss objects held alive only from callee-saved
+     // registers that are never pushed on the stack and SafeStack.
+diff --git a/src/heap/heap.cc b/src/heap/heap.cc
+index b777caa07c1..dd9bcd30b6c 100644
+--- a/src/heap/heap.cc
++++ b/src/heap/heap.cc
+@@ -4882,8 +4882,7 @@ void Heap::IterateStackRoots(RootVisitor* v, ScanStackMode mode) {
+     }
+     case ScanStackMode::kFromMarker: {
+       ConservativeStackVisitor stack_visitor(isolate(), v);
+-      stack().IteratePointersUnsafe(
+-          &stack_visitor, reinterpret_cast<intptr_t>(stack().get_marker()));
++      stack().IteratePointersUnsafe(&stack_visitor, stack().get_marker());
+       break;
+     }
+   }
+-- 
+2.35.1
+

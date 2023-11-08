@@ -1,0 +1,94 @@
+From d47a930d71378c9a20db513719cc8f85163273b4 Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Fri, 23 Jul 2021 12:38:29 +0800
+Subject: [PATCH] [riscv64] Fix cross build failed for riscv64.
+
+  When buid with "is_component_build=true" will failed.
+  Add lib atomic into lib in v8_libplatform.
+  Move func body into cc file
+
+Bug: v8:11975
+Change-Id: Ifb844a82360310aba444504f7012fa0c543a49e9
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3046980
+Auto-Submit: Yahan Lu <yahan@iscas.ac.cn>
+Reviewed-by: Michael Achenbach <machenbach@chromium.org>
+Reviewed-by: Brice Dobry <brice.dobry@futurewei.com>
+Reviewed-by: Ji Qiu <qiuji@iscas.ac.cn>
+Commit-Queue: Brice Dobry <brice.dobry@futurewei.com>
+Cr-Commit-Position: refs/heads/master@{#75919}
+---
+ BUILD.gn                                 | 12 ++++++++++++
+ src/codegen/riscv64/assembler-riscv64.cc |  3 +++
+ src/codegen/riscv64/assembler-riscv64.h  |  5 ++---
+ 3 files changed, 17 insertions(+), 3 deletions(-)
+
+diff --git a/BUILD.gn b/BUILD.gn
+index d3e7c8378c5..ee9c15e54b2 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -552,6 +552,10 @@ config("internal_config") {
+   if (is_component_build) {
+     defines += [ "BUILDING_V8_SHARED" ]
+   }
++
++  if (v8_current_cpu == "riscv64") {
++    libs = [ "atomic" ]
++  }
+ }
+ 
+ # Should be applied to all targets that write trace events.
+@@ -620,6 +624,10 @@ config("external_config") {
+   if (is_component_build) {
+     defines += [ "USING_V8_SHARED" ]
+   }
++
++  if(current_cpu == "riscv64") {
++    libs = [ "atomic"]
++  }
+ }
+ 
+ # This config should only be applied to code that needs to be explicitly
+@@ -4960,6 +4968,10 @@ v8_component("v8_libplatform") {
+       sources += [ "src/libplatform/tracing/recorder-win.cc" ]
+     }
+   }
++
++  if (v8_current_cpu == "riscv64") {
++    libs = [ "atomic" ]
++  }
+ }
+ 
+ v8_source_set("fuzzer_support") {
+diff --git a/src/codegen/riscv64/assembler-riscv64.cc b/src/codegen/riscv64/assembler-riscv64.cc
+index b713b92e900..e83f0620677 100644
+--- a/src/codegen/riscv64/assembler-riscv64.cc
++++ b/src/codegen/riscv64/assembler-riscv64.cc
+@@ -227,6 +227,9 @@ Assembler::Assembler(const AssemblerOptions& options,
+   block_buffer_growth_ = false;
+ }
+ 
++void Assembler::AbortedCodeGeneration() { constpool_.Clear(); }
++Assembler::~Assembler() { CHECK(constpool_.IsEmpty()); }
++
+ void Assembler::GetCode(Isolate* isolate, CodeDesc* desc,
+                         SafepointTableBuilder* safepoint_table_builder,
+                         int handler_table_offset) {
+diff --git a/src/codegen/riscv64/assembler-riscv64.h b/src/codegen/riscv64/assembler-riscv64.h
+index 709490ca017..a38428e3101 100644
+--- a/src/codegen/riscv64/assembler-riscv64.h
++++ b/src/codegen/riscv64/assembler-riscv64.h
+@@ -158,9 +158,8 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   explicit Assembler(const AssemblerOptions&,
+                      std::unique_ptr<AssemblerBuffer> = {});
+ 
+-  virtual ~Assembler() { CHECK(constpool_.IsEmpty()); }
+-
+-  void AbortedCodeGeneration() { constpool_.Clear(); }
++  virtual ~Assembler();
++  void AbortedCodeGeneration();
+   // GetCode emits any pending (non-emitted) code and fills the descriptor desc.
+   static constexpr int kNoHandlerTable = 0;
+   static constexpr SafepointTableBuilder* kNoSafepointTable = nullptr;
+-- 
+2.35.1
+

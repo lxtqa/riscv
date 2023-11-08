@@ -1,0 +1,169 @@
+From b833ec2335794b16dfef5fe00a3f87cd78a28b2d Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Wed, 27 Sep 2023 18:33:58 +0800
+Subject: [PATCH] [riscv][interpreter] Cache FBV in the stack frame
+
+Port commit 92a83637738290b867b9d0db999104952afee341
+
+Bug: v8:14328
+
+Change-Id: I8aea2dcb6f0e419447e2b04d1b75c98bc62b3882
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4895850
+Reviewed-by: Ji Qiu <qiuji@iscas.ac.cn>
+Auto-Submit: Yahan Lu <yahan@iscas.ac.cn>
+Commit-Queue: Ji Qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#90159}
+---
+ src/builtins/riscv/builtins-riscv.cc       | 46 +++++++---------------
+ src/codegen/riscv/macro-assembler-riscv.cc | 19 +++++++++
+ src/codegen/riscv/macro-assembler-riscv.h  |  3 ++
+ 3 files changed, 36 insertions(+), 32 deletions(-)
+
+diff --git a/src/builtins/riscv/builtins-riscv.cc b/src/builtins/riscv/builtins-riscv.cc
+index 638001f9054..1bedf731b58 100644
+--- a/src/builtins/riscv/builtins-riscv.cc
++++ b/src/builtins/riscv/builtins-riscv.cc
+@@ -959,7 +959,7 @@ void Builtins::Generate_BaselineOutOfLinePrologueDeopt(MacroAssembler* masm) {
+ 
+   // Drop bytecode offset (was the feedback vector but got replaced during
+   // deopt) and bytecode array.
+-  __ AddWord(sp, sp, Operand(2 * kSystemPointerSize));
++  __ AddWord(sp, sp, Operand(3 * kSystemPointerSize));
+ 
+   // Context, closure, argc.
+   __ Pop(kContextRegister, kJavaScriptCallTargetRegister,
+@@ -1047,13 +1047,8 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+       Register type = temps.Acquire();
+       __ AssertFeedbackVector(feedback_vector, type);
+     }
+-    // Our stack is currently aligned. We have have to push something along with
+-    // the feedback vector to keep it that way -- we may as well start
+-    // initialising the register frame.
+-    // TODO(v8:11429,leszeks): Consider guaranteeing that this call leaves
+-    // `undefined` in the accumulator register, to skip the load in the baseline
+-    // code.
+-    __ Push(feedback_vector);
++    // TODO(victorgomes): The first push should actually be a free slot.
++    __ Push(feedback_vector, feedback_vector);
+   }
+ 
+   Label call_stack_guard;
+@@ -1141,23 +1136,13 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+   __ GetObjectType(kInterpreterBytecodeArrayRegister, kScratchReg, kScratchReg);
+   __ Branch(&compile_lazy, ne, kScratchReg, Operand(BYTECODE_ARRAY_TYPE));
+ 
+-#ifndef V8_JITLESS
++  Label push_stack_frame;
+   Register feedback_vector = a2;
+-  // Load the feedback vector from the closure.
+-  __ LoadTaggedField(feedback_vector,
+-                     FieldMemOperand(closure, JSFunction::kFeedbackCellOffset));
+-  __ LoadTaggedField(
+-      feedback_vector,
+-      FieldMemOperand(feedback_vector, FeedbackCell::kValueOffset));
++  __ LoadFeedbackVector(feedback_vector, closure, a4, &push_stack_frame);
+ 
+-  Label push_stack_frame;
+-  // Check if feedback vector is valid. If valid, check for optimized code
+-  // and update invocation count. Otherwise, setup the stack frame.
+-  __ LoadTaggedField(a4,
+-                     FieldMemOperand(feedback_vector, HeapObject::kMapOffset));
+-  __ Lhu(a4, FieldMemOperand(a4, Map::kInstanceTypeOffset));
+-  __ Branch(&push_stack_frame, ne, a4, Operand(FEEDBACK_VECTOR_TYPE),
+-            Label::Distance::kNear);
++#ifndef V8_JITLESS
++  // If feedback vector is valid, check for optimized code and update invocation
++  // count.
+ 
+   // Check the tiering state.
+   Label flags_need_processing;
+@@ -1165,12 +1150,7 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+   __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
+       flags, feedback_vector, CodeKind::INTERPRETED_FUNCTION,
+       &flags_need_processing);
+-  {
+-    UseScratchRegisterScope temps(masm);
+-    ResetFeedbackVectorOsrUrgency(masm, feedback_vector, temps.Acquire());
+-  }
+-  Label not_optimized;
+-  __ bind(&not_optimized);
++  ResetFeedbackVectorOsrUrgency(masm, feedback_vector, a4);
+ 
+   // Increment invocation count for the function.
+   __ Lw(a4, FieldMemOperand(feedback_vector,
+@@ -1182,13 +1162,14 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+   // Open a frame scope to indicate that there is a frame on the stack.  The
+   // MANUAL indicates that the scope shouldn't actually generate code to set up
+   // the frame (that is done below).
+-  __ bind(&push_stack_frame);
+ #else
+   // Note: By omitting the above code in jitless mode we also disable:
+   // - kFlagsLogNextExecution: only used for logging/profiling; and
+   // - kInvocationCountOffset: only used for tiering heuristics and code
+   //   coverage.
+ #endif  // !V8_JITLESS
++
++  __ bind(&push_stack_frame);
+   FrameScope frame_scope(masm, StackFrame::MANUAL);
+   __ PushStandardFrame(closure);
+ 
+@@ -1196,9 +1177,10 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+   __ li(kInterpreterBytecodeOffsetRegister,
+         Operand(BytecodeArray::kHeaderSize - kHeapObjectTag));
+ 
+-  // Push bytecode array and Smi tagged bytecode array offset.
++  // Push bytecode array, Smi tagged bytecode array offset, and the feedback
++  // vector.
+   __ SmiTag(a4, kInterpreterBytecodeOffsetRegister);
+-  __ Push(kInterpreterBytecodeArrayRegister, a4);
++  __ Push(kInterpreterBytecodeArrayRegister, a4, feedback_vector);
+ 
+   // Allocate the local and temporary register file on the stack.
+   Label stack_overflow;
+diff --git a/src/codegen/riscv/macro-assembler-riscv.cc b/src/codegen/riscv/macro-assembler-riscv.cc
+index e0fb13d48c6..cd0dcfb6876 100644
+--- a/src/codegen/riscv/macro-assembler-riscv.cc
++++ b/src/codegen/riscv/macro-assembler-riscv.cc
+@@ -6793,6 +6793,25 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
+   }
+ }
+ 
++void MacroAssembler::LoadFeedbackVector(Register dst, Register closure,
++                                        Register scratch, Label* fbv_undef) {
++  Label done;
++  // Load the feedback vector from the closure.
++  LoadWord(dst, FieldMemOperand(closure, JSFunction::kFeedbackCellOffset));
++  LoadWord(dst, FieldMemOperand(dst, FeedbackCell::kValueOffset));
++
++  // Check if feedback vector is valid.
++  LoadWord(scratch, FieldMemOperand(dst, HeapObject::kMapOffset));
++  Lhu(scratch, FieldMemOperand(scratch, Map::kInstanceTypeOffset));
++  Branch(&done, eq, scratch, Operand(FEEDBACK_VECTOR_TYPE));
++
++  // Not valid, load undefined.
++  LoadRoot(dst, RootIndex::kUndefinedValue);
++  Branch(fbv_undef);
++
++  bind(&done);
++}
++
+ #undef __
+ }  // namespace internal
+ }  // namespace v8
+diff --git a/src/codegen/riscv/macro-assembler-riscv.h b/src/codegen/riscv/macro-assembler-riscv.h
+index 206ee07fb88..7c86beea122 100644
+--- a/src/codegen/riscv/macro-assembler-riscv.h
++++ b/src/codegen/riscv/macro-assembler-riscv.h
+@@ -956,6 +956,9 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
+   void LoadTaggedRoot(Register destination, RootIndex index);
+ 
+   void LoadMap(Register destination, Register object);
++
++  void LoadFeedbackVector(Register dst, Register closure, Register scratch,
++                          Label* fbv_undef);
+   void LoadCompressedMap(Register dst, Register object);
+ 
+   // If the value is a NaN, canonicalize the value else, do nothing.
+-- 
+2.35.1
+

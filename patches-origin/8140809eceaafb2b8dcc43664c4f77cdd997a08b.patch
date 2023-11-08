@@ -1,0 +1,168 @@
+From 8140809eceaafb2b8dcc43664c4f77cdd997a08b Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Thu, 11 Aug 2022 06:53:44 +0800
+Subject: [PATCH] [riscv] Fix wasm/generic-wrapper test failed
+
+Enable test-gc/RunWasmLiftoff_WasmArrayCop test-gc/RunWasmLiftoff_CastsBenchmark
+
+Change-Id: I4d67ce0ead382c2e96951098b0fdd53766e5921f
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3822761
+Auto-Submit: Yahan Lu <yahan@iscas.ac.cn>
+Reviewed-by: Jakob Linke <jgruber@chromium.org>
+Reviewed-by: Clemens Backes <clemensb@chromium.org>
+Commit-Queue: Jakob Linke <jgruber@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#82472}
+---
+ src/compiler/c-linkage.cc                     |  1 +
+ src/wasm/baseline/liftoff-assembler-defs.h    | 19 +++------------
+ .../riscv/liftoff-assembler-riscv32.h         | 23 ++++++++++++++++---
+ src/wasm/wasm-linkage.h                       |  2 +-
+ test/cctest/cctest.status                     |  7 ------
+ test/mjsunit/mjsunit.status                   |  2 --
+ 6 files changed, 25 insertions(+), 29 deletions(-)
+
+diff --git a/src/compiler/c-linkage.cc b/src/compiler/c-linkage.cc
+index 9e34b26a68a..f55155cb460 100644
+--- a/src/compiler/c-linkage.cc
++++ b/src/compiler/c-linkage.cc
+@@ -126,6 +126,7 @@ namespace {
+ // == riscv64 =================================================================
+ // ===========================================================================
+ #define PARAM_REGISTERS a0, a1, a2, a3, a4, a5, a6, a7
++#define FP_PARAM_REGISTERS fa0, fa1, fa2, fa3, fa4, fa5, fa6, fa7
+ // fp is not part of CALLEE_SAVE_REGISTERS (similar to how MIPS64 or PPC defines
+ // it)
+ #define CALLEE_SAVE_REGISTERS s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11
+diff --git a/src/wasm/baseline/liftoff-assembler-defs.h b/src/wasm/baseline/liftoff-assembler-defs.h
+index 8ceb686307d..8942054b89a 100644
+--- a/src/wasm/baseline/liftoff-assembler-defs.h
++++ b/src/wasm/baseline/liftoff-assembler-defs.h
+@@ -100,27 +100,14 @@ constexpr RegList kLiftoffAssemblerGpCacheRegs = {r3, r4, r5,  r6,  r7,
+ constexpr DoubleRegList kLiftoffAssemblerFpCacheRegs = {
+     d0, d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11, d12};
+ 
+-#elif V8_TARGET_ARCH_RISCV64
+-
+-// Any change of kLiftoffAssemblerGpCacheRegs also need to update
+-// kPushedGpRegs in frame-constants-riscv64.h
+-constexpr RegList kLiftoffAssemblerGpCacheRegs = {a0, a1, a2, a3, a4, a5,
+-                                                  a6, a7, t0, t1, t2, s7};
+-
+-// Any change of kLiftoffAssemblerGpCacheRegs also need to update
+-// kPushedFpRegs in frame-constants-riscv64.h
+-constexpr DoubleRegList kLiftoffAssemblerFpCacheRegs = {
+-    ft1, ft2, ft3, ft4, ft5, ft6, ft7, fa0,  fa1, fa2,
+-    fa3, fa4, fa5, fa6, fa7, ft8, ft9, ft10, ft11};
+-#elif V8_TARGET_ARCH_RISCV32
+-
++#elif V8_TARGET_ARCH_RISCV32 || V8_TARGET_ARCH_RISCV64
+ // Any change of kLiftoffAssemblerGpCacheRegs also need to update
+-// kPushedGpRegs in frame-constants-riscv64.h
++// kPushedGpRegs in frame-constants-riscv.h
+ constexpr RegList kLiftoffAssemblerGpCacheRegs = {a0, a1, a2, a3, a4, a5,
+                                                   a6, a7, t0, t1, t2, s7};
+ 
+ // Any change of kLiftoffAssemblerGpCacheRegs also need to update
+-// kPushedFpRegs in frame-constants-riscv64.h
++// kPushedFpRegs in frame-constants-riscv.h
+ constexpr DoubleRegList kLiftoffAssemblerFpCacheRegs = {
+     ft1, ft2, ft3, ft4, ft5, ft6, ft7, fa0,  fa1, fa2,
+     fa3, fa4, fa5, fa6, fa7, ft8, ft9, ft10, ft11};
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h
+index 9625f4ae7c2..b307d714a25 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h
+@@ -2043,6 +2043,7 @@ void LiftoffAssembler::CallC(const ValueKindSig* sig,
+ }
+ 
+ void LiftoffStackSlots::Construct(int param_slots) {
++  ASM_CODE_COMMENT(asm_);
+   DCHECK_LT(0, slots_.size());
+   SortInPushOrder();
+   int last_stack_slot = param_slots;
+@@ -2053,8 +2054,17 @@ void LiftoffStackSlots::Construct(int param_slots) {
+     last_stack_slot = stack_slot;
+     const LiftoffAssembler::VarState& src = slot.src_;
+     switch (src.loc()) {
+-      case LiftoffAssembler::VarState::kStack:
+-        if (src.kind() != kS128) {
++      case LiftoffAssembler::VarState::kStack: {
++        if (src.kind() == kF64) {
++          asm_->AllocateStackSpace(stack_decrement - kDoubleSize);
++          DCHECK_EQ(kLowWord, slot.half_);
++          asm_->Lw(kScratchReg,
++                   liftoff::GetHalfStackSlot(slot.src_offset_, kHighWord));
++          asm_->push(kScratchReg);
++          asm_->Lw(kScratchReg,
++                   liftoff::GetHalfStackSlot(slot.src_offset_, kLowWord));
++          asm_->push(kScratchReg);
++        } else if (src.kind() != kS128) {
+           asm_->AllocateStackSpace(stack_decrement - kSystemPointerSize);
+           asm_->Lw(kScratchReg, liftoff::GetStackSlot(slot.src_offset_));
+           asm_->push(kScratchReg);
+@@ -2066,10 +2076,17 @@ void LiftoffStackSlots::Construct(int param_slots) {
+           asm_->push(kScratchReg);
+         }
+         break;
++      }
+       case LiftoffAssembler::VarState::kRegister: {
+         int pushed_bytes = SlotSizeInBytes(slot);
+         asm_->AllocateStackSpace(stack_decrement - pushed_bytes);
+-        liftoff::push(asm_, src.reg(), src.kind());
++        if (src.kind() == kI64) {
++          liftoff::push(
++              asm_, slot.half_ == kLowWord ? src.reg().low() : src.reg().high(),
++              kI32);
++        } else {
++          liftoff::push(asm_, src.reg(), src.kind());
++        }
+         break;
+       }
+       case LiftoffAssembler::VarState::kIntConst: {
+diff --git a/src/wasm/wasm-linkage.h b/src/wasm/wasm-linkage.h
+index d15a3c13c68..521056847f4 100644
+--- a/src/wasm/wasm-linkage.h
++++ b/src/wasm/wasm-linkage.h
+@@ -124,7 +124,7 @@ constexpr DoubleRegister kFpReturnRegisters[] = {d0, d2};
+ constexpr Register kGpParamRegisters[] = {a0, a2, a3, a4, a5, a6, a7};
+ constexpr Register kGpReturnRegisters[] = {a0, a1};
+ constexpr DoubleRegister kFpParamRegisters[] = {fa0, fa1, fa2, fa3,
+-                                                fa4, fa5, fa6};
++                                                fa4, fa5, fa6, fa7};
+ constexpr DoubleRegister kFpReturnRegisters[] = {fa0, fa1};
+ 
+ #else
+diff --git a/test/cctest/cctest.status b/test/cctest/cctest.status
+index 508b4f40d2c..38ff12c401f 100644
+--- a/test/cctest/cctest.status
++++ b/test/cctest/cctest.status
+@@ -440,13 +440,6 @@
+ }],  # 'arch == riscv64 and simulator_run'
+ 
+ 
+-##############################################################################
+-
+-['arch == riscv32', {
+-  'test-gc/RunWasmLiftoff_CastsBenchmark': ['variant == stress_incremental_marking', SKIP],
+-  'test-gc/RunWasmLiftoff_WasmArrayCopy': ['variant == stress_incremental_marking', SKIP],
+-}], # 'arch == riscv32'
+-
+ ##############################################################################
+ ['arch == loong64', {
+   # The instruction scheduler is disabled on loong64.
+diff --git a/test/mjsunit/mjsunit.status b/test/mjsunit/mjsunit.status
+index ba8dddd97fb..4ca298a8f70 100644
+--- a/test/mjsunit/mjsunit.status
++++ b/test/mjsunit/mjsunit.status
+@@ -923,8 +923,6 @@
+ }],  # 'arch == riscv64 or arch == riscv32'
+ 
+ [ 'arch == riscv32' , {
+-'wasm/generic-wrapper':[SKIP],
+-'wasm/many-parameters':[SKIP],
+ 'wasm/compare-exchange64-stress':[SKIP],
+ }], # 'arch == riscv32'
+ 
+-- 
+2.35.1
+

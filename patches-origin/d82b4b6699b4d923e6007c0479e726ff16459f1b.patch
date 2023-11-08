@@ -1,0 +1,364 @@
+From d82b4b6699b4d923e6007c0479e726ff16459f1b Mon Sep 17 00:00:00 2001
+From: Piotr Sikora <piotrsikora@google.com>
+Date: Mon, 10 Jan 2022 13:23:25 -0800
+Subject: [PATCH] [bazel] Cleanup style with Buildifier.
+
+Signed-off-by: Piotr Sikora <piotrsikora@google.com>
+Change-Id: I5b924b02b56c66c186518cbfa372a82b960f1242
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3379226
+Reviewed-by: Victor Gomes <victorgomes@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#78559}
+---
+ BUILD.bazel              |  4 +--
+ WORKSPACE                | 11 +++++---
+ bazel/BUILD.icu          | 54 ++++++++++++++++++++--------------------
+ bazel/BUILD.zlib         |  2 +-
+ bazel/config/BUILD.bazel | 52 ++++++++++++++++++++++++++++++--------
+ bazel/defs.bzl           |  4 ++-
+ 6 files changed, 81 insertions(+), 46 deletions(-)
+
+diff --git a/BUILD.bazel b/BUILD.bazel
+index 7d09243ee98..65a1dbcfbe4 100644
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -3348,7 +3348,7 @@ cc_library(
+         ":torque_base_files",
+     ],
+     copts = select({
+-        "@v8//bazel/config:is_posix": [ "-fexceptions" ],
++        "@v8//bazel/config:is_posix": ["-fexceptions"],
+         "//conditions:default": [],
+     }),
+     features = ["-use_header_modules"],
+@@ -3462,7 +3462,7 @@ v8_binary(
+         ":torque_base_files",
+     ],
+     copts = select({
+-        "@v8//bazel/config:is_posix": [ "-fexceptions" ],
++        "@v8//bazel/config:is_posix": ["-fexceptions"],
+         "//conditions:default": [],
+     }),
+     features = ["-use_header_modules"],
+diff --git a/WORKSPACE b/WORKSPACE
+index 5496df12751..490e973a762 100644
+--- a/WORKSPACE
++++ b/WORKSPACE
+@@ -5,15 +5,18 @@
+ workspace(name = "v8")
+ 
+ load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
++
+ http_archive(
+     name = "bazel_skylib",
++    sha256 = "1c531376ac7e5a180e0237938a2536de0c54d93f5c278634818e0efc952dd56c",
+     urls = [
+         "https://github.com/bazelbuild/bazel-skylib/releases/download/1.0.3/bazel-skylib-1.0.3.tar.gz",
+         "https://mirror.bazel.build/github.com/bazelbuild/bazel-skylib/releases/download/1.0.3/bazel-skylib-1.0.3.tar.gz",
+     ],
+-    sha256 = "1c531376ac7e5a180e0237938a2536de0c54d93f5c278634818e0efc952dd56c",
+ )
++
+ load("@bazel_skylib//:workspace.bzl", "bazel_skylib_workspace")
++
+ bazel_skylib_workspace()
+ 
+ http_archive(
+@@ -33,8 +36,8 @@ pip_install(
+ 
+ new_local_repository(
+     name = "com_googlesource_chromium_zlib",
+-    path = "third_party/zlib",
+     build_file = "bazel/BUILD.zlib",
++    path = "third_party/zlib",
+ )
+ 
+ bind(
+@@ -49,8 +52,8 @@ bind(
+ 
+ new_local_repository(
+     name = "com_googlesource_chromium_icu",
+-    path = "third_party/icu",
+     build_file = "bazel/BUILD.icu",
++    path = "third_party/icu",
+ )
+ 
+ bind(
+@@ -60,8 +63,8 @@ bind(
+ 
+ new_local_repository(
+     name = "com_googlesource_chromium_base_trace_event_common",
+-    path = "base/trace_event/common",
+     build_file = "bazel/BUILD.trace_event_common",
++    path = "base/trace_event/common",
+ )
+ 
+ bind(
+diff --git a/bazel/BUILD.icu b/bazel/BUILD.icu
+index 662e11ec03a..2ae79a5784f 100644
+--- a/bazel/BUILD.icu
++++ b/bazel/BUILD.icu
+@@ -4,15 +4,31 @@
+ 
+ filegroup(
+     name = "icudata",
+-    srcs = [ "common/icudtl.dat" ]
++    srcs = ["common/icudtl.dat"],
+ )
+ 
+ cc_library(
+     name = "icuuc",
+-    srcs =  glob([
++    srcs = glob([
+         "source/common/**/*.h",
+-        "source/common/**/*.cpp"
++        "source/common/**/*.cpp",
+     ]),
++    copts = select({
++        "@platforms//os:windows": [
++            "/wd4005",  # Macro redefinition.
++            "/wd4068",  # Unknown pragmas.
++            "/wd4267",  # Conversion from size_t on 64-bits.
++            "/utf-8",  # ICU source files are in UTF-8.
++        ],
++        "//conditions:default": [
++            "-Wno-unused-function",
++            "-Wno-parentheses",
++            "-Wno-unused-function",
++            "-Wno-unused-variable",
++            "-Wno-deprecated-declarations",
++        ],
++    }),
++    data = [":icudata"],
+     defines = [
+         "U_COMMON_IMPLEMENTATION",
+         "U_ICUDATAENTRY_IN_COMMON",
+@@ -34,35 +50,19 @@ cc_library(
+         ],
+         "//conditions:default": [],
+     }),
+-    copts = select({
+-        "@platforms//os:windows": [
+-            "/wd4005",  # Macro redefinition.
+-            "/wd4068",  # Unknown pragmas.
+-            "/wd4267",  # Conversion from size_t on 64-bits.
+-            "/utf-8",  # ICU source files are in UTF-8.
+-        ],
+-        "//conditions:default": [
+-            "-Wno-unused-function",
+-            "-Wno-parentheses",
+-            "-Wno-unused-function",
+-            "-Wno-unused-variable",
+-            "-Wno-deprecated-declarations",
+-        ],
+-    }),
+     includes = [
+         "source/common",
+         "source/i18n",
+     ],
+     tags = ["requires-rtti"],
+-    data = [ ":icudata" ],
+     alwayslink = 1,
+ )
+ 
+ cc_library(
+     name = "icui18n",
+-    srcs =  glob([
++    srcs = glob([
+         "source/i18n/**/*.h",
+-        "source/i18n/**/*.cpp"
++        "source/i18n/**/*.cpp",
+     ]),
+     copts = select({
+         "@platforms//os:windows": [
+@@ -83,19 +83,19 @@ cc_library(
+         ],
+         "//conditions:default": [],
+     }),
+-    deps = [ ":icuuc" ],
++    deps = [":icuuc"],
+     alwayslink = 1,
+ )
+ 
+ cc_library(
+     name = "icu",
++    srcs = [
++        "source/stubdata/stubdata.cpp",
++    ],
+     hdrs = glob([
+         "source/common/unicode/*.h",
+         "source/i18n/unicode/*.h",
+     ]),
+-    srcs = [
+-        "source/stubdata/stubdata.cpp",
+-    ],
+     copts = select({
+         "@platforms//os:windows": [
+             "/wd4005",  # Macro redefinition.
+@@ -116,10 +116,10 @@ cc_library(
+         "//conditions:default": [],
+     }),
+     include_prefix = "third_party/icu",
++    visibility = ["//visibility:public"],
+     deps = [
++        ":icui18n",
+         ":icuuc",
+-        ":icui18n"
+     ],
+-    visibility = ["//visibility:public"],
+     alwayslink = 1,
+ )
+diff --git a/bazel/BUILD.zlib b/bazel/BUILD.zlib
+index b5ca572c9d4..25a2c35313b 100644
+--- a/bazel/BUILD.zlib
++++ b/bazel/BUILD.zlib
+@@ -40,7 +40,6 @@ cc_library(
+     hdrs = [
+         "zlib.h",
+     ],
+-    include_prefix = "third_party/zlib",
+     defines = [
+         "CHROMIUM_ZLIB_NO_CHROMECONF",
+         "CPU_NO_SIMD",
+@@ -50,6 +49,7 @@ cc_library(
+             "HAVE_HIDDEN",
+         ],
+     }),
++    include_prefix = "third_party/zlib",
+     visibility = ["//visibility:public"],
+ )
+ 
+diff --git a/bazel/config/BUILD.bazel b/bazel/config/BUILD.bazel
+index 1ed946ed7cb..62ea95c669c 100644
+--- a/bazel/config/BUILD.bazel
++++ b/bazel/config/BUILD.bazel
+@@ -182,57 +182,87 @@ selects.config_setting_group(
+     match_all = [
+         ":is_posix",
+         ":is_x64",
+-    ]
++    ],
+ )
+ 
+ selects.config_setting_group(
+     name = "is_inline_asm_x64",
+-    match_all = [":is_posix", ":is_x64"],
++    match_all = [
++        ":is_posix",
++        ":is_x64",
++    ],
+ )
+ 
+ selects.config_setting_group(
+     name = "is_inline_asm_ia32",
+-    match_all = [":is_posix", ":is_ia32"],
++    match_all = [
++        ":is_posix",
++        ":is_ia32",
++    ],
+ )
+ 
+ selects.config_setting_group(
+     name = "is_inline_asm_arm64",
+-    match_all = [":is_posix", ":is_arm64"],
++    match_all = [
++        ":is_posix",
++        ":is_arm64",
++    ],
+ )
+ 
+ selects.config_setting_group(
+     name = "is_inline_asm_arm",
+-    match_all = [":is_posix", ":is_arm"],
++    match_all = [
++        ":is_posix",
++        ":is_arm",
++    ],
+ )
+ 
+ selects.config_setting_group(
+     name = "is_inline_asm_s390x",
+-    match_all = [":is_posix", ":is_s390x"],
++    match_all = [
++        ":is_posix",
++        ":is_s390x",
++    ],
+ )
+ 
+ selects.config_setting_group(
+     name = "is_inline_asm_riscv64",
+-    match_all = [":is_posix", ":is_riscv64"],
++    match_all = [
++        ":is_posix",
++        ":is_riscv64",
++    ],
+ )
+ 
+ selects.config_setting_group(
+     name = "is_inline_asm_ppc64le",
+-    match_all = [":is_posix", ":is_ppc64le"],
++    match_all = [
++        ":is_posix",
++        ":is_ppc64le",
++    ],
+ )
+ 
+ selects.config_setting_group(
+     name = "is_msvc_asm_x64",
+-    match_all = [":is_windows", ":is_x64"],
++    match_all = [
++        ":is_windows",
++        ":is_x64",
++    ],
+ )
+ 
+ selects.config_setting_group(
+     name = "is_msvc_asm_ia32",
+-    match_all = [":is_windows", ":is_ia32"],
++    match_all = [
++        ":is_windows",
++        ":is_ia32",
++    ],
+ )
+ 
+ selects.config_setting_group(
+     name = "is_msvc_asm_arm64",
+-    match_all = [":is_windows", ":is_arm64"],
++    match_all = [
++        ":is_windows",
++        ":is_arm64",
++    ],
+ )
+ 
+ config_setting(
+diff --git a/bazel/defs.bzl b/bazel/defs.bzl
+index f162149f0a6..0e9559a65f1 100644
+--- a/bazel/defs.bzl
++++ b/bazel/defs.bzl
+@@ -93,7 +93,7 @@ def _default_args():
+                 "UNICODE",
+                 "_UNICODE",
+                 "_CRT_RAND_S",
+-                "_WIN32_WINNT=0x0602", # Override bazel default to Windows 8
++                "_WIN32_WINNT=0x0602",  # Override bazel default to Windows 8
+             ],
+             "//conditions:default": [],
+         }),
+@@ -248,6 +248,7 @@ def v8_library(
+             linkstatic = 1,
+             **kwargs
+         )
++
+         # Alias target used because of cc_library bug in bazel on windows
+         # https://github.com/bazelbuild/bazel/issues/14237
+         # TODO(victorgomes): Remove alias once bug is fixed
+@@ -266,6 +267,7 @@ def v8_library(
+             linkstatic = 1,
+             **kwargs
+         )
++
+         # Alias target used because of cc_library bug in bazel on windows
+         # https://github.com/bazelbuild/bazel/issues/14237
+         # TODO(victorgomes): Remove alias once bug is fixed
+-- 
+2.35.1
+

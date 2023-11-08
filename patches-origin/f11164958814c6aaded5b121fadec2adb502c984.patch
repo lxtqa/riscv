@@ -1,0 +1,221 @@
+From f11164958814c6aaded5b121fadec2adb502c984 Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Sun, 11 Jun 2023 19:08:22 +0800
+Subject: [PATCH] [riscv][builtins] Port HandleApiCall to CSA
+
+Port commit 7b42c0bfde1efbf03baf8a819671efdb3d09853f
+
+Bug: v8:13825
+
+Change-Id: I5bf2ffefe542b90b392353bd8742e92ffa0e20e8
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4606688
+Commit-Queue: Ji Qiu <qiuji@iscas.ac.cn>
+Reviewed-by: Ji Qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#88156}
+---
+ src/builtins/riscv/builtins-riscv.cc       | 42 +++++++++++---
+ src/codegen/riscv/macro-assembler-riscv.cc | 67 +++++++++++++++++++++-
+ src/codegen/riscv/macro-assembler-riscv.h  | 19 +++++-
+ 3 files changed, 118 insertions(+), 10 deletions(-)
+
+diff --git a/src/builtins/riscv/builtins-riscv.cc b/src/builtins/riscv/builtins-riscv.cc
+index b435492e175..d066a0d4925 100644
+--- a/src/builtins/riscv/builtins-riscv.cc
++++ b/src/builtins/riscv/builtins-riscv.cc
+@@ -3378,10 +3378,6 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+           scratch2, FieldMemOperand(callback, CallHandlerInfo::kDataOffset));
+       __ StoreWord(scratch2,
+                    MemOperand(sp, FCA::kDataIndex * kSystemPointerSize));
+-      __ LoadWord(
+-          api_function_address,
+-          FieldMemOperand(callback,
+-                          CallHandlerInfo::kMaybeRedirectedCallbackOffset));
+       break;
+ 
+     case CallApiCallbackMode::kNoSideEffects:
+@@ -3408,9 +3404,38 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+   static_assert(FCI::kImplicitArgsOffset == 0);
+   static_assert(FCI::kValuesOffset == 1 * kSystemPointerSize);
+   static_assert(FCI::kLengthOffset == 2 * kSystemPointerSize);
++  const int exit_frame_params_size =
++      mode == CallApiCallbackMode::kGeneric ? 2 : 0;
+ 
+   FrameScope frame_scope(masm, StackFrame::MANUAL);
+-  __ EnterExitFrame(kApiStackSpace);
++  if (mode == CallApiCallbackMode::kGeneric) {
++    ASM_CODE_COMMENT_STRING(masm, "Push API_CALLBACK_EXIT frame arguments");
++    __ AllocateStackSpace(exit_frame_params_size * kSystemPointerSize);
++
++    // Argc parameter as a Smi.
++    static_assert(ApiCallbackExitFrameConstants::kArgcOffset ==
++                  3 * kSystemPointerSize);
++    __ SmiTag(scratch, argc);
++    __ StoreWord(scratch, MemOperand(sp, 1 * kSystemPointerSize));
++
++    // Target parameter.
++    static_assert(ApiCallbackExitFrameConstants::kTargetOffset ==
++                  2 * kSystemPointerSize);
++    __ LoadTaggedField(
++        scratch,
++        FieldMemOperand(callback, CallHandlerInfo::kOwnerTemplateOffset));
++    __ StoreWord(scratch, MemOperand(sp, 0 * kSystemPointerSize));
++
++    __ LoadExternalPointerField(
++        api_function_address,
++        FieldMemOperand(callback,
++                        CallHandlerInfo::kMaybeRedirectedCallbackOffset),
++        kCallHandlerInfoCallbackTag);
++
++    __ EnterExitFrame(kApiStackSpace, StackFrame::API_CALLBACK_EXIT);
++  } else {
++    __ EnterExitFrame(kApiStackSpace, StackFrame::EXIT);
++  }
+ 
+   // EnterExitFrame may align the sp.
+   {
+@@ -3436,7 +3461,8 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+   // drop, not the number of bytes.
+   MemOperand stack_space_operand =
+       ExitFrameStackSlotOperand(FCI::kLengthOffset + kSlotsToDropOnStackSize);
+-  __ AddWord(scratch, argc, Operand(FCA::kArgsLengthWithReceiver));
++  __ AddWord(scratch, argc,
++             Operand(FCA::kArgsLengthWithReceiver + exit_frame_params_size));
+   __ StoreWord(scratch, stack_space_operand);
+ 
+   __ RecordComment("v8::FunctionCallback's argument.");
+@@ -3448,8 +3474,8 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+   ExternalReference thunk_ref =
+       ExternalReference::invoke_function_callback(mode);
+ 
+-  MemOperand return_value_operand =
+-      ExitFrameCallerStackSlotOperand(FCA::kReturnValueIndex);
++  MemOperand return_value_operand = ExitFrameCallerStackSlotOperand(
++      FCA::kReturnValueIndex + exit_frame_params_size);
+ 
+   // Pass api function address to thunk wrapper in case profiler or side-effect
+   // checking is enabled.
+diff --git a/src/codegen/riscv/macro-assembler-riscv.cc b/src/codegen/riscv/macro-assembler-riscv.cc
+index 7c3c6a14b83..6baa857fa7e 100644
+--- a/src/codegen/riscv/macro-assembler-riscv.cc
++++ b/src/codegen/riscv/macro-assembler-riscv.cc
+@@ -336,6 +336,70 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
+   bind(&done);
+ }
+ 
++void MacroAssembler::DecodeSandboxedPointer(Register value) {
++  ASM_CODE_COMMENT(this);
++#ifdef V8_ENABLE_SANDBOX
++  srli(value, value, kSandboxedPointerShift);
++  AddWord(value, value, kPtrComprCageBaseRegister);
++#else
++  UNREACHABLE();
++#endif
++}
++
++void MacroAssembler::LoadSandboxedPointerField(
++    Register destination, const MemOperand& field_operand) {
++#ifdef V8_ENABLE_SANDBOX
++  ASM_CODE_COMMENT(this);
++  LoadWord(destination, field_operand);
++  DecodeSandboxedPointer(destination);
++#else
++  UNREACHABLE();
++#endif
++}
++
++void MacroAssembler::StoreSandboxedPointerField(
++    Register value, const MemOperand& dst_field_operand) {
++#ifdef V8_ENABLE_SANDBOX
++  ASM_CODE_COMMENT(this);
++  UseScratchRegisterScope temps(this);
++  Register scratch = temps.Acquire();
++  SubWord(scratch, value, kPtrComprCageBaseRegister);
++  slli(scratch, scratch, kSandboxedPointerShift);
++  StoreWord(scratch, dst_field_operand);
++#else
++  UNREACHABLE();
++#endif
++}
++
++void MacroAssembler::LoadExternalPointerField(Register destination,
++                                              MemOperand field_operand,
++                                              ExternalPointerTag tag,
++                                              Register isolate_root) {
++  DCHECK(!AreAliased(destination, isolate_root));
++  ASM_CODE_COMMENT(this);
++#ifdef V8_ENABLE_SANDBOX
++  DCHECK_NE(tag, kExternalPointerNullTag);
++  DCHECK(!IsSharedExternalPointerType(tag));
++  UseScratchRegisterScope temps(this);
++  Register external_table = temps.Acquire();
++  if (isolate_root == no_reg) {
++    DCHECK(root_array_available_);
++    isolate_root = kRootRegister;
++  }
++  LoadWord(external_table,
++           MemOperand(isolate_root,
++                      IsolateData::external_pointer_table_offset() +
++                          Internals::kExternalPointerTableBufferOffset));
++  lwu(destination, field_operand);
++  srli(destination, destination, kExternalPointerIndexShift);
++  slli(destination, destination, kExternalPointerTableEntrySizeLog2);
++  LoadWord(destination, MemOperand(external_table, destination));
++  And(destination, destination, Operand(~tag));
++#else
++  LoadWord(destination, field_operand);
++#endif  // V8_ENABLE_SANDBOX
++}
++
+ void MacroAssembler::MaybeSaveRegisters(RegList registers) {
+   if (registers.is_empty()) return;
+   MultiPush(registers);
+@@ -5679,7 +5743,8 @@ void MacroAssembler::EnterExitFrame(int stack_space,
+                                     StackFrame::Type frame_type) {
+   ASM_CODE_COMMENT(this);
+   DCHECK(frame_type == StackFrame::EXIT ||
+-         frame_type == StackFrame::BUILTIN_EXIT);
++         frame_type == StackFrame::BUILTIN_EXIT ||
++         frame_type == StackFrame::API_CALLBACK_EXIT);
+ 
+   // Set up the frame structure on the stack.
+   static_assert(2 * kSystemPointerSize ==
+diff --git a/src/codegen/riscv/macro-assembler-riscv.h b/src/codegen/riscv/macro-assembler-riscv.h
+index 62700b1ad9b..426d32a607f 100644
+--- a/src/codegen/riscv/macro-assembler-riscv.h
++++ b/src/codegen/riscv/macro-assembler-riscv.h
+@@ -1481,6 +1481,24 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
+     DecodeField<Field>(reg, reg);
+   }
+ 
++  // ---------------------------------------------------------------------------
++  // V8 Sandbox support
++
++  // Transform a SandboxedPointer from/to its encoded form, which is used when
++  // the pointer is stored on the heap and ensures that the pointer will always
++  // point into the sandbox.
++  void DecodeSandboxedPointer(Register value);
++  void LoadSandboxedPointerField(Register destination,
++                                 const MemOperand& field_operand);
++  void StoreSandboxedPointerField(Register value,
++                                  const MemOperand& dst_field_operand);
++
++  // Loads a field containing off-heap pointer and does necessary decoding
++  // if sandboxed external pointers are enabled.
++  void LoadExternalPointerField(Register destination, MemOperand field_operand,
++                                ExternalPointerTag tag,
++                                Register isolate_root = no_reg);
++
+  protected:
+   inline Register GetRtAsRegisterHelper(const Operand& rt, Register scratch);
+   inline int32_t GetOffset(int32_t offset, Label* L, OffsetSize bits);
+@@ -1488,7 +1506,6 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
+  private:
+   bool has_double_zero_reg_set_ = false;
+   bool has_single_zero_reg_set_ = false;
+-
+   // Performs a truncating conversion of a floating point number as used by
+   // the JS bitwise operations. See ECMA-262 9.5: ToInt32. Goes to 'done' if it
+   // succeeds, otherwise falls through if result is saturated. On return
+-- 
+2.35.1
+

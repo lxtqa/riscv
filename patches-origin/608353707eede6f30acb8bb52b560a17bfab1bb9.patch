@@ -1,0 +1,277 @@
+From 608353707eede6f30acb8bb52b560a17bfab1bb9 Mon Sep 17 00:00:00 2001
+From: Jakob Kummerow <jkummerow@chromium.org>
+Date: Wed, 10 May 2023 15:25:56 +0200
+Subject: [PATCH] [wasm] Take FP regs into account for OOL spill space
+
+When registering the spill space used by calls in OOL code in a
+safepoint, we should count both GP regs and FP regs. While only
+the former can be tagged, the latter still matter for the stack
+walker for determining where the spill slots end and outgoing
+stack parameters start.
+
+Bug: v8:13977
+Change-Id: Ife83cf651db3ca99b855e7c071e66a766fb102fb
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4519267
+Auto-Submit: Jakob Kummerow <jkummerow@chromium.org>
+Reviewed-by: Andreas Haas <ahaas@chromium.org>
+Commit-Queue: Jakob Kummerow <jkummerow@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#87606}
+---
+ src/wasm/baseline/arm/liftoff-assembler-arm.h        | 10 ++++++----
+ src/wasm/baseline/arm64/liftoff-assembler-arm64.h    | 12 +++++++-----
+ src/wasm/baseline/ia32/liftoff-assembler-ia32.h      | 10 ++++++----
+ src/wasm/baseline/liftoff-compiler.cc                |  3 +--
+ .../baseline/loong64/liftoff-assembler-loong64.h     | 10 ++++++----
+ src/wasm/baseline/mips64/liftoff-assembler-mips64.h  | 10 ++++++----
+ src/wasm/baseline/ppc/liftoff-assembler-ppc.h        | 10 ++++++----
+ src/wasm/baseline/riscv/liftoff-assembler-riscv.h    | 10 ++++++----
+ src/wasm/baseline/s390/liftoff-assembler-s390.h      | 10 ++++++----
+ src/wasm/baseline/x64/liftoff-assembler-x64.h        | 10 ++++++----
+ 10 files changed, 56 insertions(+), 39 deletions(-)
+
+diff --git a/src/wasm/baseline/arm/liftoff-assembler-arm.h b/src/wasm/baseline/arm/liftoff-assembler-arm.h
+index f918c9e1448..cacae32b5a9 100644
+--- a/src/wasm/baseline/arm/liftoff-assembler-arm.h
++++ b/src/wasm/baseline/arm/liftoff-assembler-arm.h
+@@ -4342,13 +4342,15 @@ void LiftoffAssembler::PopRegisters(LiftoffRegList regs) {
+ void LiftoffAssembler::RecordSpillsInSafepoint(
+     SafepointTableBuilder::Safepoint& safepoint, LiftoffRegList all_spills,
+     LiftoffRegList ref_spills, int spill_offset) {
+-  int spill_space_size = 0;
+-  while (!all_spills.is_empty()) {
+-    LiftoffRegister reg = all_spills.GetLastRegSet();
++  LiftoffRegList fp_spills = all_spills & kFpCacheRegList;
++  int spill_space_size = fp_spills.GetNumRegsSet() * kSimd128Size;
++  LiftoffRegList gp_spills = all_spills & kGpCacheRegList;
++  while (!gp_spills.is_empty()) {
++    LiftoffRegister reg = gp_spills.GetLastRegSet();
+     if (ref_spills.has(reg)) {
+       safepoint.DefineTaggedStackSlot(spill_offset);
+     }
+-    all_spills.clear(reg);
++    gp_spills.clear(reg);
+     ++spill_offset;
+     spill_space_size += kSystemPointerSize;
+   }
+diff --git a/src/wasm/baseline/arm64/liftoff-assembler-arm64.h b/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
+index 3028f4956e6..9dde831a26c 100644
+--- a/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
++++ b/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
+@@ -3444,18 +3444,20 @@ void LiftoffAssembler::PopRegisters(LiftoffRegList regs) {
+ void LiftoffAssembler::RecordSpillsInSafepoint(
+     SafepointTableBuilder::Safepoint& safepoint, LiftoffRegList all_spills,
+     LiftoffRegList ref_spills, int spill_offset) {
+-  int spill_space_size = 0;
+-  bool needs_padding = (all_spills.GetGpList().Count() & 1) != 0;
++  LiftoffRegList fp_spills = all_spills & kFpCacheRegList;
++  int spill_space_size = fp_spills.GetNumRegsSet() * kSimd128Size;
++  LiftoffRegList gp_spills = all_spills & kGpCacheRegList;
++  bool needs_padding = (gp_spills.GetNumRegsSet() & 1) != 0;
+   if (needs_padding) {
+     spill_space_size += kSystemPointerSize;
+     ++spill_offset;
+   }
+-  while (!all_spills.is_empty()) {
+-    LiftoffRegister reg = all_spills.GetLastRegSet();
++  while (!gp_spills.is_empty()) {
++    LiftoffRegister reg = gp_spills.GetLastRegSet();
+     if (ref_spills.has(reg)) {
+       safepoint.DefineTaggedStackSlot(spill_offset);
+     }
+-    all_spills.clear(reg);
++    gp_spills.clear(reg);
+     ++spill_offset;
+     spill_space_size += kSystemPointerSize;
+   }
+diff --git a/src/wasm/baseline/ia32/liftoff-assembler-ia32.h b/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
+index bd761b2890f..2eba321e33f 100644
+--- a/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
++++ b/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
+@@ -4635,13 +4635,15 @@ void LiftoffAssembler::PopRegisters(LiftoffRegList regs) {
+ void LiftoffAssembler::RecordSpillsInSafepoint(
+     SafepointTableBuilder::Safepoint& safepoint, LiftoffRegList all_spills,
+     LiftoffRegList ref_spills, int spill_offset) {
+-  int spill_space_size = 0;
+-  while (!all_spills.is_empty()) {
+-    LiftoffRegister reg = all_spills.GetFirstRegSet();
++  LiftoffRegList fp_spills = all_spills & kFpCacheRegList;
++  int spill_space_size = fp_spills.GetNumRegsSet() * kSimd128Size;
++  LiftoffRegList gp_spills = all_spills & kGpCacheRegList;
++  while (!gp_spills.is_empty()) {
++    LiftoffRegister reg = gp_spills.GetFirstRegSet();
+     if (ref_spills.has(reg)) {
+       safepoint.DefineTaggedStackSlot(spill_offset);
+     }
+-    all_spills.clear(reg);
++    gp_spills.clear(reg);
+     ++spill_offset;
+     spill_space_size += kSystemPointerSize;
+   }
+diff --git a/src/wasm/baseline/liftoff-compiler.cc b/src/wasm/baseline/liftoff-compiler.cc
+index a83e4162a16..b5ec2a88221 100644
+--- a/src/wasm/baseline/liftoff-compiler.cc
++++ b/src/wasm/baseline/liftoff-compiler.cc
+@@ -1031,7 +1031,6 @@ class LiftoffCompiler {
+       }
+ 
+       int total_frame_size = __ GetTotalFrameSize();
+-      LiftoffRegList gp_regs = ool->regs_to_save & kGpCacheRegList;
+       // {total_frame_size} is the highest offset from the FP that is used to
+       // store a value. The offset of the first spill slot should therefore be
+       // {(total_frame_size / kSystemPointerSize) + 1}. However, spill slots
+@@ -1040,7 +1039,7 @@ class LiftoffCompiler {
+       // index of the first spill slot.
+       int index = (total_frame_size / kSystemPointerSize) + 2;
+ 
+-      __ RecordSpillsInSafepoint(safepoint, gp_regs,
++      __ RecordSpillsInSafepoint(safepoint, ool->regs_to_save,
+                                  ool->safepoint_info->spills, index);
+     }
+ 
+diff --git a/src/wasm/baseline/loong64/liftoff-assembler-loong64.h b/src/wasm/baseline/loong64/liftoff-assembler-loong64.h
+index dbc2b35df45..5f6bb617732 100644
+--- a/src/wasm/baseline/loong64/liftoff-assembler-loong64.h
++++ b/src/wasm/baseline/loong64/liftoff-assembler-loong64.h
+@@ -3089,13 +3089,15 @@ void LiftoffAssembler::PopRegisters(LiftoffRegList regs) {
+ void LiftoffAssembler::RecordSpillsInSafepoint(
+     SafepointTableBuilder::Safepoint& safepoint, LiftoffRegList all_spills,
+     LiftoffRegList ref_spills, int spill_offset) {
+-  int spill_space_size = 0;
+-  while (!all_spills.is_empty()) {
+-    LiftoffRegister reg = all_spills.GetFirstRegSet();
++  LiftoffRegList fp_spills = all_spills & kFpCacheRegList;
++  int spill_space_size = fp_spills.GetNumRegsSet() * kSimd128Size;
++  LiftoffRegList gp_spills = all_spills & kGpCacheRegList;
++  while (!gp_spills.is_empty()) {
++    LiftoffRegister reg = gp_spills.GetFirstRegSet();
+     if (ref_spills.has(reg)) {
+       safepoint.DefineTaggedStackSlot(spill_offset);
+     }
+-    all_spills.clear(reg);
++    gp_spills.clear(reg);
+     ++spill_offset;
+     spill_space_size += kSystemPointerSize;
+   }
+diff --git a/src/wasm/baseline/mips64/liftoff-assembler-mips64.h b/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
+index 96cba24c9d6..6ca11e5ee25 100644
+--- a/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
++++ b/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
+@@ -3630,13 +3630,15 @@ void LiftoffAssembler::PopRegisters(LiftoffRegList regs) {
+ void LiftoffAssembler::RecordSpillsInSafepoint(
+     SafepointTableBuilder::Safepoint& safepoint, LiftoffRegList all_spills,
+     LiftoffRegList ref_spills, int spill_offset) {
+-  int spill_space_size = 0;
+-  while (!all_spills.is_empty()) {
+-    LiftoffRegister reg = all_spills.GetFirstRegSet();
++  LiftoffRegList fp_spills = all_spills & kFpCacheRegList;
++  int spill_space_size = fp_spills.GetNumRegsSet() * kSimd128Size;
++  LiftoffRegList gp_spills = all_spills & kGpCacheRegList;
++  while (!gp_spills.is_empty()) {
++    LiftoffRegister reg = gp_spills.GetFirstRegSet();
+     if (ref_spills.has(reg)) {
+       safepoint.DefineTaggedStackSlot(spill_offset);
+     }
+-    all_spills.clear(reg);
++    gp_spills.clear(reg);
+     ++spill_offset;
+     spill_space_size += kSystemPointerSize;
+   }
+diff --git a/src/wasm/baseline/ppc/liftoff-assembler-ppc.h b/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
+index 819854bbd04..dd5612a7f75 100644
+--- a/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
++++ b/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
+@@ -2502,13 +2502,15 @@ void LiftoffAssembler::PopRegisters(LiftoffRegList regs) {
+ void LiftoffAssembler::RecordSpillsInSafepoint(
+     SafepointTableBuilder::Safepoint& safepoint, LiftoffRegList all_spills,
+     LiftoffRegList ref_spills, int spill_offset) {
+-  int spill_space_size = 0;
+-  while (!all_spills.is_empty()) {
+-    LiftoffRegister reg = all_spills.GetLastRegSet();
++  LiftoffRegList fp_spills = all_spills & kFpCacheRegList;
++  int spill_space_size = fp_spills.GetNumRegsSet() * kSimd128Size;
++  LiftoffRegList gp_spills = all_spills & kGpCacheRegList;
++  while (!gp_spills.is_empty()) {
++    LiftoffRegister reg = gp_spills.GetLastRegSet();
+     if (ref_spills.has(reg)) {
+       safepoint.DefineTaggedStackSlot(spill_offset);
+     }
+-    all_spills.clear(reg);
++    gp_spills.clear(reg);
+     ++spill_offset;
+     spill_space_size += kSystemPointerSize;
+   }
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv.h
+index 52a024cd72c..e7f15bfe482 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv.h
+@@ -2211,13 +2211,15 @@ void LiftoffAssembler::PopRegisters(LiftoffRegList regs) {
+ void LiftoffAssembler::RecordSpillsInSafepoint(
+     SafepointTableBuilder::Safepoint& safepoint, LiftoffRegList all_spills,
+     LiftoffRegList ref_spills, int spill_offset) {
+-  int spill_space_size = 0;
+-  while (!all_spills.is_empty()) {
+-    LiftoffRegister reg = all_spills.GetFirstRegSet();
++  LiftoffRegList fp_spills = all_spills & kFpCacheRegList;
++  int spill_space_size = fp_spills.GetNumRegsSet() * kSimd128Size;
++  LiftoffRegList gp_spills = all_spills & kGpCacheRegList;
++  while (!gp_spills.is_empty()) {
++    LiftoffRegister reg = gp_spills.GetFirstRegSet();
+     if (ref_spills.has(reg)) {
+       safepoint.DefineTaggedStackSlot(spill_offset);
+     }
+-    all_spills.clear(reg);
++    gp_spills.clear(reg);
+     ++spill_offset;
+     spill_space_size += kSystemPointerSize;
+   }
+diff --git a/src/wasm/baseline/s390/liftoff-assembler-s390.h b/src/wasm/baseline/s390/liftoff-assembler-s390.h
+index 3a68e21996d..e5acb4f1967 100644
+--- a/src/wasm/baseline/s390/liftoff-assembler-s390.h
++++ b/src/wasm/baseline/s390/liftoff-assembler-s390.h
+@@ -2933,13 +2933,15 @@ void LiftoffAssembler::PopRegisters(LiftoffRegList regs) {
+ void LiftoffAssembler::RecordSpillsInSafepoint(
+     SafepointTableBuilder::Safepoint& safepoint, LiftoffRegList all_spills,
+     LiftoffRegList ref_spills, int spill_offset) {
+-  int spill_space_size = 0;
+-  while (!all_spills.is_empty()) {
+-    LiftoffRegister reg = all_spills.GetLastRegSet();
++  LiftoffRegList fp_spills = all_spills & kFpCacheRegList;
++  int spill_space_size = fp_spills.GetNumRegsSet() * kSimd128Size;
++  LiftoffRegList gp_spills = all_spills & kGpCacheRegList;
++  while (!gp_spills.is_empty()) {
++    LiftoffRegister reg = gp_spills.GetLastRegSet();
+     if (ref_spills.has(reg)) {
+       safepoint.DefineTaggedStackSlot(spill_offset);
+     }
+-    all_spills.clear(reg);
++    gp_spills.clear(reg);
+     ++spill_offset;
+     spill_space_size += kSystemPointerSize;
+   }
+diff --git a/src/wasm/baseline/x64/liftoff-assembler-x64.h b/src/wasm/baseline/x64/liftoff-assembler-x64.h
+index 18d94fd8a66..1fa9a163b2c 100644
+--- a/src/wasm/baseline/x64/liftoff-assembler-x64.h
++++ b/src/wasm/baseline/x64/liftoff-assembler-x64.h
+@@ -4202,13 +4202,15 @@ void LiftoffAssembler::PopRegisters(LiftoffRegList regs) {
+ void LiftoffAssembler::RecordSpillsInSafepoint(
+     SafepointTableBuilder::Safepoint& safepoint, LiftoffRegList all_spills,
+     LiftoffRegList ref_spills, int spill_offset) {
+-  int spill_space_size = 0;
+-  while (!all_spills.is_empty()) {
+-    LiftoffRegister reg = all_spills.GetFirstRegSet();
++  LiftoffRegList fp_spills = all_spills & kFpCacheRegList;
++  int spill_space_size = fp_spills.GetNumRegsSet() * kSimd128Size;
++  LiftoffRegList gp_spills = all_spills & kGpCacheRegList;
++  while (!gp_spills.is_empty()) {
++    LiftoffRegister reg = gp_spills.GetFirstRegSet();
+     if (ref_spills.has(reg)) {
+       safepoint.DefineTaggedStackSlot(spill_offset);
+     }
+-    all_spills.clear(reg);
++    gp_spills.clear(reg);
+     ++spill_offset;
+     spill_space_size += kSystemPointerSize;
+   }
+-- 
+2.35.1
+

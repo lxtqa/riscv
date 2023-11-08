@@ -1,0 +1,113 @@
+From 109b457fe70b1be6c6d9fb3da25ca56c661bacb3 Mon Sep 17 00:00:00 2001
+From: McKnight22 <tao.wang.2261@gmail.com>
+Date: Mon, 22 May 2023 22:32:59 +0800
+Subject: [PATCH] [riscv64][android] disable linking libatomic
+
+Since Android uses Clang as default and the __atomic_* APIs are
+now in libclang_rt.builtins-*.a, linking single libatomic is no
+need and there is no standalone libatomic provided from LLVM.
+So, disable it. Otherwise, it causes error:
+ld.lld: error: unable to find library -latomic
+
+co-authors: McKnight22 <tao.wang.2261@gmail.com>
+            Wang Chen <wangchen20@iscas.ac.cn>
+
+Bug: chromium:1445904
+Change-Id: I0f0c697ae3664e58cd3410ea42fbab0b3bfd920f
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4550590
+Commit-Queue: Yahan Lu <yahan@iscas.ac.cn>
+Reviewed-by: Michael Achenbach <machenbach@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#87817}
+---
+ BUILD.gn                | 24 ++++++++++++++++++------
+ test/unittests/BUILD.gn |  4 +++-
+ 2 files changed, 21 insertions(+), 7 deletions(-)
+
+diff --git a/BUILD.gn b/BUILD.gn
+index 155dee46feb..49c85f968ee 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -715,7 +715,9 @@ config("internal_config") {
+   }
+ 
+   if (v8_current_cpu == "riscv64" || v8_current_cpu == "riscv32") {
+-    libs = [ "atomic" ]
++    if (!is_clang) {
++      libs = [ "atomic" ]
++    }
+   }
+ }
+ 
+@@ -787,7 +789,9 @@ config("external_config") {
+   }
+ 
+   if (current_cpu == "riscv64" || current_cpu == "riscv32") {
+-    libs = [ "atomic" ]
++    if (!is_clang) {
++      libs = [ "atomic" ]
++    }
+   }
+ }
+ 
+@@ -5568,7 +5572,9 @@ v8_source_set("v8_base_without_compiler") {
+       v8_current_cpu == "ppc" || v8_current_cpu == "ppc64" ||
+       v8_current_cpu == "s390" || v8_current_cpu == "s390x" ||
+       v8_current_cpu == "riscv64" || v8_current_cpu == "riscv32") {
+-    libs += [ "atomic" ]
++    if (!is_clang) {
++      libs += [ "atomic" ]
++    }
+   }
+ 
+   if (v8_enable_vtunetracemark && (is_linux || is_chromeos || is_win)) {
+@@ -5968,7 +5974,9 @@ v8_component("v8_libbase") {
+   }
+ 
+   if (v8_current_cpu == "riscv64" || v8_current_cpu == "riscv32") {
+-    libs += [ "atomic" ]
++    if (!is_clang) {
++      libs += [ "atomic" ]
++    }
+   }
+ 
+   if (is_tsan && !build_with_chromium) {
+@@ -6078,7 +6086,9 @@ v8_component("v8_libplatform") {
+   }
+ 
+   if (v8_current_cpu == "riscv64" || v8_current_cpu == "riscv32") {
+-    libs = [ "atomic" ]
++    if (!is_clang) {
++      libs = [ "atomic" ]
++    }
+   }
+ }
+ 
+@@ -7017,7 +7027,9 @@ v8_executable("cppgc_hello_world") {
+   sources = [ "samples/cppgc/hello-world.cc" ]
+ 
+   if (v8_current_cpu == "riscv64" || v8_current_cpu == "riscv32") {
+-    libs = [ "atomic" ]
++    if (!is_clang) {
++      libs = [ "atomic" ]
++    }
+   }
+ 
+   configs = [
+diff --git a/test/unittests/BUILD.gn b/test/unittests/BUILD.gn
+index 890e3032fc8..29822fc2e83 100644
+--- a/test/unittests/BUILD.gn
++++ b/test/unittests/BUILD.gn
+@@ -94,7 +94,9 @@ if (cppgc_is_standalone) {
+   v8_executable("cppgc_unittests") {
+     testonly = true
+     if (v8_current_cpu == "riscv64" || v8_current_cpu == "riscv32") {
+-      libs = [ "atomic" ]
++      if (!is_clang) {
++        libs = [ "atomic" ]
++      }
+     }
+ 
+     configs = [
+-- 
+2.35.1
+

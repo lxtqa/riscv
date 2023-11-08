@@ -1,0 +1,85 @@
+From 1989aea6c4ccc35c52f89c7a5e21ed0685cb1bed Mon Sep 17 00:00:00 2001
+From: JiQiu <qiuji@iscas.ac.cn>
+Date: Tue, 29 Aug 2023 12:49:27 +0800
+Subject: [PATCH] [riscv] fix and reopen the skipped cctest cases
+
+Change-Id: Id8177dbe510ca916e49cfbdecee377c78fc53a87
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4815001
+Commit-Queue: Ji Qiu <qiuji@iscas.ac.cn>
+Auto-Submit: Ji Qiu <qiuji@iscas.ac.cn>
+Reviewed-by: Andreas Haas <ahaas@chromium.org>
+Reviewed-by: Yahan Lu <yahan@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#89665}
+---
+ .../riscv/instruction-selector-riscv64.cc        |  2 +-
+ test/cctest/cctest.status                        | 16 +++++-----------
+ .../instruction-selector-riscv64-unittest.cc     |  2 +-
+ 3 files changed, 7 insertions(+), 13 deletions(-)
+
+diff --git a/src/compiler/backend/riscv/instruction-selector-riscv64.cc b/src/compiler/backend/riscv/instruction-selector-riscv64.cc
+index 54883adb454..81ec489d3e7 100644
+--- a/src/compiler/backend/riscv/instruction-selector-riscv64.cc
++++ b/src/compiler/backend/riscv/instruction-selector-riscv64.cc
+@@ -306,7 +306,7 @@ void InstructionSelectorT<Adapter>::VisitLoad(node_t node) {
+         opcode = load_rep.IsUnsigned() ? kRiscvLhu : kRiscvLh;
+         break;
+       case MachineRepresentation::kWord32:
+-        opcode = kRiscvLw;
++        opcode = load_rep.IsUnsigned() ? kRiscvLwu : kRiscvLw;
+         break;
+ #ifdef V8_COMPRESS_POINTERS
+       case MachineRepresentation::kTaggedSigned:
+diff --git a/test/cctest/cctest.status b/test/cctest/cctest.status
+index 78730b04c8e..0cbe99a7a35 100644
+--- a/test/cctest/cctest.status
++++ b/test/cctest/cctest.status
+@@ -366,28 +366,22 @@
+   # this test is unstable, sometimes fail when running w/ other tests.
+   'test-cpu-profiler/CrossScriptInliningCallerLineNumbers2': [SKIP],
+ 
+-  # SIMD not fully implemented yet.
+-  'test-gc/RunWasmLiftoff_RefTrivialCasts': [SKIP],
+-  'test-gc/RunWasmTurbofan_RefTrivialCasts': [SKIP],
+ 
+   # Some wasm functionality is not implemented yet.
+-  'test-run-wasm-64/*': [SKIP],
+-  'test-run-wasm/RunWasmTurbofan_Select_s128_parameters': [SKIP],
+-  'test-run-wasm/RunWasmLiftoff_Select_s128_parameters': [SKIP],
+   'test-liftoff-for-fuzzing/NondeterminismUnopF64x2AllNaN': [SKIP],
+   'test-liftoff-for-fuzzing/NondeterminismUnopF64x2OneNaN': [SKIP],
+   'test-liftoff-for-fuzzing/NondeterminismUnopF32x4AllNaN': [SKIP],
+   'test-liftoff-for-fuzzing/NondeterminismUnopF32x4OneNaN': [SKIP],
+ 
+-  # riscv64 sign extend on uint32.
+-  'test-run-load-store/RunUnalignedLoadStoreZeroExtend64': [SKIP],
+-  'test-run-load-store/RunLoadStoreZeroExtend64': [SKIP],
+-
+   # According to riscv's NaN generation and propagation scheme, the payload
+   # is not guaranteed. So the test fails when src bits has payload.
+   'test-run-wasm/RunWasmLiftoff_F32ReinterpretI32': [SKIP],
+   'test-run-wasm/RunWasmTurbofan_F32ReinterpretI32': [SKIP],
+-}],  # 'arch == riscv64'
++}],  # 'arch == riscv64 or (arch == riscv32)'
++['arch == riscv32', {
++  # Some wasm functionality is not implemented yet.
++  'test-run-wasm-64/*': [SKIP],
++}],  # 'arch == riscv32'
+ 
+ ##############################################################################
+ ['((arch == riscv64) or (arch == riscv32)) and simulator_run', {
+diff --git a/test/unittests/compiler/riscv64/instruction-selector-riscv64-unittest.cc b/test/unittests/compiler/riscv64/instruction-selector-riscv64-unittest.cc
+index a89533d6cff..bd6e3da6040 100644
+--- a/test/unittests/compiler/riscv64/instruction-selector-riscv64-unittest.cc
++++ b/test/unittests/compiler/riscv64/instruction-selector-riscv64-unittest.cc
+@@ -1000,7 +1000,7 @@ TEST_F(InstructionSelectorTest, ChangeUint32ToUint64AfterLoad) {
+     EXPECT_EQ(kMode_None, s[0]->addressing_mode());
+     EXPECT_EQ(2U, s[0]->InputCount());
+     EXPECT_EQ(1U, s[0]->OutputCount());
+-    EXPECT_EQ(kRiscvLw, s[1]->arch_opcode());
++    EXPECT_EQ(kRiscvLwu, s[1]->arch_opcode());
+     EXPECT_EQ(kMode_MRI, s[1]->addressing_mode());
+     EXPECT_EQ(kRiscvZeroExtendWord, s[2]->arch_opcode());
+     EXPECT_EQ(2U, s[1]->InputCount());
+-- 
+2.35.1
+

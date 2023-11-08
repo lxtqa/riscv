@@ -1,0 +1,361 @@
+From d90be52e983635ac7efecda282f9f4c044ea3a0e Mon Sep 17 00:00:00 2001
+From: Patrick Thier <pthier@chromium.org>
+Date: Fri, 16 Apr 2021 08:11:21 +0000
+Subject: [PATCH] [interpreter][cleanup] Rename interpreter entry trampolines
+
+Rename
+ - InterpreterEnterBytecodeDispatch to InterpreterEnterAtBytecode
+ - InterpreterEnterBytecodeAdvance to InterpreterEnterAtNextBytecode.
+
+The reason for renaming is consistency with baseline trampolines that
+have similar functionality, but the old names didn't fit for baseline
+very well.
+
+Change-Id: I35897972fdd71f3bb0db74820db2b9034144a3c8
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/2830794
+Reviewed-by: Ross McIlroy <rmcilroy@chromium.org>
+Reviewed-by: Jakob Gruber <jgruber@chromium.org>
+Commit-Queue: Jakob Gruber <jgruber@chromium.org>
+Auto-Submit: Patrick Thier <pthier@chromium.org>
+Cr-Commit-Position: refs/heads/master@{#74027}
+---
+ src/builtins/arm/builtins-arm.cc            | 4 ++--
+ src/builtins/arm64/builtins-arm64.cc        | 6 +++---
+ src/builtins/builtins-definitions.h         | 4 ++--
+ src/builtins/ia32/builtins-ia32.cc          | 4 ++--
+ src/builtins/mips/builtins-mips.cc          | 4 ++--
+ src/builtins/mips64/builtins-mips64.cc      | 4 ++--
+ src/builtins/ppc/builtins-ppc.cc            | 4 ++--
+ src/builtins/riscv64/builtins-riscv64.cc    | 4 ++--
+ src/builtins/s390/builtins-s390.cc          | 4 ++--
+ src/builtins/x64/builtins-x64.cc            | 4 ++--
+ src/debug/debug.cc                          | 2 +-
+ src/deoptimizer/deoptimizer-cfi-builtins.cc | 8 ++++----
+ src/deoptimizer/deoptimizer.cc              | 4 ++--
+ src/execution/frames.cc                     | 4 ++--
+ src/execution/isolate.cc                    | 2 +-
+ src/objects/code-inl.h                      | 4 ++--
+ 16 files changed, 33 insertions(+), 33 deletions(-)
+
+diff --git a/src/builtins/arm/builtins-arm.cc b/src/builtins/arm/builtins-arm.cc
+index 33627dc656a..142dc043b69 100644
+--- a/src/builtins/arm/builtins-arm.cc
++++ b/src/builtins/arm/builtins-arm.cc
+@@ -1647,7 +1647,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+   __ Jump(kJavaScriptCallCodeStartRegister);
+ }
+ 
+-void Builtins::Generate_InterpreterEnterBytecodeAdvance(MacroAssembler* masm) {
++void Builtins::Generate_InterpreterEnterAtNextBytecode(MacroAssembler* masm) {
+   // Get bytecode array and bytecode offset from the stack frame.
+   __ ldr(kInterpreterBytecodeArrayRegister,
+          MemOperand(fp, InterpreterFrameConstants::kBytecodeArrayFromFp));
+@@ -1692,7 +1692,7 @@ void Builtins::Generate_InterpreterEnterBytecodeAdvance(MacroAssembler* masm) {
+   __ Abort(AbortReason::kInvalidBytecodeAdvance);
+ }
+ 
+-void Builtins::Generate_InterpreterEnterBytecodeDispatch(MacroAssembler* masm) {
++void Builtins::Generate_InterpreterEnterAtBytecode(MacroAssembler* masm) {
+   Generate_InterpreterEnterBytecode(masm);
+ }
+ 
+diff --git a/src/builtins/arm64/builtins-arm64.cc b/src/builtins/arm64/builtins-arm64.cc
+index 8856b6d0d29..d6c9920a3a7 100644
+--- a/src/builtins/arm64/builtins-arm64.cc
++++ b/src/builtins/arm64/builtins-arm64.cc
+@@ -1861,7 +1861,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+   __ Br(x17);
+ }
+ 
+-void Builtins::Generate_InterpreterEnterBytecodeAdvance(MacroAssembler* masm) {
++void Builtins::Generate_InterpreterEnterAtNextBytecode(MacroAssembler* masm) {
+   // Get bytecode array and bytecode offset from the stack frame.
+   __ ldr(kInterpreterBytecodeArrayRegister,
+          MemOperand(fp, InterpreterFrameConstants::kBytecodeArrayFromFp));
+@@ -1905,7 +1905,7 @@ void Builtins::Generate_InterpreterEnterBytecodeAdvance(MacroAssembler* masm) {
+   __ Abort(AbortReason::kInvalidBytecodeAdvance);
+ }
+ 
+-void Builtins::Generate_InterpreterEnterBytecodeDispatch(MacroAssembler* masm) {
++void Builtins::Generate_InterpreterEnterAtBytecode(MacroAssembler* masm) {
+   Generate_InterpreterEnterBytecode(masm);
+ }
+ 
+@@ -3255,7 +3255,7 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
+ 
+   // Compute the handler entry address and jump to it. We use x17 here for the
+   // jump target, as this jump can occasionally end up at the start of
+-  // InterpreterEnterBytecodeDispatch, which when CFI is enabled starts with
++  // InterpreterEnterAtBytecode, which when CFI is enabled starts with
+   // a "BTI c".
+   UseScratchRegisterScope temps(masm);
+   temps.Exclude(x17);
+diff --git a/src/builtins/builtins-definitions.h b/src/builtins/builtins-definitions.h
+index 0d90c3a9937..c03ab8f2983 100644
+--- a/src/builtins/builtins-definitions.h
++++ b/src/builtins/builtins-definitions.h
+@@ -133,8 +133,8 @@ namespace internal {
+       InterpreterPushArgsThenConstruct)                                        \
+   ASM(InterpreterPushArgsThenConstructWithFinalSpread,                         \
+       InterpreterPushArgsThenConstruct)                                        \
+-  ASM(InterpreterEnterBytecodeAdvance, Dummy)                                  \
+-  ASM(InterpreterEnterBytecodeDispatch, Dummy)                                 \
++  ASM(InterpreterEnterAtBytecode, Dummy)                                       \
++  ASM(InterpreterEnterAtNextBytecode, Dummy)                                   \
+   ASM(InterpreterOnStackReplacement, ContextOnly)                              \
+                                                                                \
+   /* Baseline Compiler */                                                      \
+diff --git a/src/builtins/ia32/builtins-ia32.cc b/src/builtins/ia32/builtins-ia32.cc
+index 30fa3ebcc73..8c076cf067a 100644
+--- a/src/builtins/ia32/builtins-ia32.cc
++++ b/src/builtins/ia32/builtins-ia32.cc
+@@ -1592,7 +1592,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+   __ jmp(kJavaScriptCallCodeStartRegister);
+ }
+ 
+-void Builtins::Generate_InterpreterEnterBytecodeAdvance(MacroAssembler* masm) {
++void Builtins::Generate_InterpreterEnterAtNextBytecode(MacroAssembler* masm) {
+   // Get bytecode array and bytecode offset from the stack frame.
+   __ mov(kInterpreterBytecodeArrayRegister,
+          Operand(ebp, InterpreterFrameConstants::kBytecodeArrayFromFp));
+@@ -1637,7 +1637,7 @@ void Builtins::Generate_InterpreterEnterBytecodeAdvance(MacroAssembler* masm) {
+   __ Abort(AbortReason::kInvalidBytecodeAdvance);
+ }
+ 
+-void Builtins::Generate_InterpreterEnterBytecodeDispatch(MacroAssembler* masm) {
++void Builtins::Generate_InterpreterEnterAtBytecode(MacroAssembler* masm) {
+   Generate_InterpreterEnterBytecode(masm);
+ }
+ // static
+diff --git a/src/builtins/mips/builtins-mips.cc b/src/builtins/mips/builtins-mips.cc
+index 13508e3a8d1..37ff8e73d39 100644
+--- a/src/builtins/mips/builtins-mips.cc
++++ b/src/builtins/mips/builtins-mips.cc
+@@ -1406,7 +1406,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+   __ Jump(kJavaScriptCallCodeStartRegister);
+ }
+ 
+-void Builtins::Generate_InterpreterEnterBytecodeAdvance(MacroAssembler* masm) {
++void Builtins::Generate_InterpreterEnterAtNextBytecode(MacroAssembler* masm) {
+   // Advance the current bytecode offset stored within the given interpreter
+   // stack frame. This simulates what all bytecode handlers do upon completion
+   // of the underlying operation.
+@@ -1453,7 +1453,7 @@ void Builtins::Generate_InterpreterEnterBytecodeAdvance(MacroAssembler* masm) {
+   __ Abort(AbortReason::kInvalidBytecodeAdvance);
+ }
+ 
+-void Builtins::Generate_InterpreterEnterBytecodeDispatch(MacroAssembler* masm) {
++void Builtins::Generate_InterpreterEnterAtBytecode(MacroAssembler* masm) {
+   Generate_InterpreterEnterBytecode(masm);
+ }
+ 
+diff --git a/src/builtins/mips64/builtins-mips64.cc b/src/builtins/mips64/builtins-mips64.cc
+index 8842d0173b3..d78c3d818aa 100644
+--- a/src/builtins/mips64/builtins-mips64.cc
++++ b/src/builtins/mips64/builtins-mips64.cc
+@@ -1424,7 +1424,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+   __ Jump(kJavaScriptCallCodeStartRegister);
+ }
+ 
+-void Builtins::Generate_InterpreterEnterBytecodeAdvance(MacroAssembler* masm) {
++void Builtins::Generate_InterpreterEnterAtNextBytecode(MacroAssembler* masm) {
+   // Advance the current bytecode offset stored within the given interpreter
+   // stack frame. This simulates what all bytecode handlers do upon completion
+   // of the underlying operation.
+@@ -1471,7 +1471,7 @@ void Builtins::Generate_InterpreterEnterBytecodeAdvance(MacroAssembler* masm) {
+   __ Abort(AbortReason::kInvalidBytecodeAdvance);
+ }
+ 
+-void Builtins::Generate_InterpreterEnterBytecodeDispatch(MacroAssembler* masm) {
++void Builtins::Generate_InterpreterEnterAtBytecode(MacroAssembler* masm) {
+   Generate_InterpreterEnterBytecode(masm);
+ }
+ 
+diff --git a/src/builtins/ppc/builtins-ppc.cc b/src/builtins/ppc/builtins-ppc.cc
+index 130e8d20857..2231cfd2d8a 100644
+--- a/src/builtins/ppc/builtins-ppc.cc
++++ b/src/builtins/ppc/builtins-ppc.cc
+@@ -1478,7 +1478,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+   __ Jump(kJavaScriptCallCodeStartRegister);
+ }
+ 
+-void Builtins::Generate_InterpreterEnterBytecodeAdvance(MacroAssembler* masm) {
++void Builtins::Generate_InterpreterEnterAtNextBytecode(MacroAssembler* masm) {
+   // Get bytecode array and bytecode offset from the stack frame.
+   __ LoadP(kInterpreterBytecodeArrayRegister,
+            MemOperand(fp, InterpreterFrameConstants::kBytecodeArrayFromFp));
+@@ -1524,7 +1524,7 @@ void Builtins::Generate_InterpreterEnterBytecodeAdvance(MacroAssembler* masm) {
+   __ Abort(AbortReason::kInvalidBytecodeAdvance);
+ }
+ 
+-void Builtins::Generate_InterpreterEnterBytecodeDispatch(MacroAssembler* masm) {
++void Builtins::Generate_InterpreterEnterAtBytecode(MacroAssembler* masm) {
+   Generate_InterpreterEnterBytecode(masm);
+ }
+ 
+diff --git a/src/builtins/riscv64/builtins-riscv64.cc b/src/builtins/riscv64/builtins-riscv64.cc
+index 5c3dfb36817..5ad7d42d25c 100644
+--- a/src/builtins/riscv64/builtins-riscv64.cc
++++ b/src/builtins/riscv64/builtins-riscv64.cc
+@@ -1630,7 +1630,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+   __ Jump(kJavaScriptCallCodeStartRegister);
+ }
+ 
+-void Builtins::Generate_InterpreterEnterBytecodeAdvance(MacroAssembler* masm) {
++void Builtins::Generate_InterpreterEnterAtNextBytecode(MacroAssembler* masm) {
+   // Advance the current bytecode offset stored within the given interpreter
+   // stack frame. This simulates what all bytecode handlers do upon completion
+   // of the underlying operation.
+@@ -1677,7 +1677,7 @@ void Builtins::Generate_InterpreterEnterBytecodeAdvance(MacroAssembler* masm) {
+   __ Abort(AbortReason::kInvalidBytecodeAdvance);
+ }
+ 
+-void Builtins::Generate_InterpreterEnterBytecodeDispatch(MacroAssembler* masm) {
++void Builtins::Generate_InterpreterEnterAtBytecode(MacroAssembler* masm) {
+   Generate_InterpreterEnterBytecode(masm);
+ }
+ 
+diff --git a/src/builtins/s390/builtins-s390.cc b/src/builtins/s390/builtins-s390.cc
+index ff1bd52be8c..b93ccc6b7e1 100644
+--- a/src/builtins/s390/builtins-s390.cc
++++ b/src/builtins/s390/builtins-s390.cc
+@@ -1527,7 +1527,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+   __ Jump(kJavaScriptCallCodeStartRegister);
+ }
+ 
+-void Builtins::Generate_InterpreterEnterBytecodeAdvance(MacroAssembler* masm) {
++void Builtins::Generate_InterpreterEnterAtNextBytecode(MacroAssembler* masm) {
+   // Get bytecode array and bytecode offset from the stack frame.
+   __ LoadU64(kInterpreterBytecodeArrayRegister,
+              MemOperand(fp, InterpreterFrameConstants::kBytecodeArrayFromFp));
+@@ -1573,7 +1573,7 @@ void Builtins::Generate_InterpreterEnterBytecodeAdvance(MacroAssembler* masm) {
+   __ Abort(AbortReason::kInvalidBytecodeAdvance);
+ }
+ 
+-void Builtins::Generate_InterpreterEnterBytecodeDispatch(MacroAssembler* masm) {
++void Builtins::Generate_InterpreterEnterAtBytecode(MacroAssembler* masm) {
+   Generate_InterpreterEnterBytecode(masm);
+ }
+ 
+diff --git a/src/builtins/x64/builtins-x64.cc b/src/builtins/x64/builtins-x64.cc
+index d2dff202d2b..b1a78c5f912 100644
+--- a/src/builtins/x64/builtins-x64.cc
++++ b/src/builtins/x64/builtins-x64.cc
+@@ -1568,7 +1568,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+   __ jmp(kJavaScriptCallCodeStartRegister);
+ }
+ 
+-void Builtins::Generate_InterpreterEnterBytecodeAdvance(MacroAssembler* masm) {
++void Builtins::Generate_InterpreterEnterAtNextBytecode(MacroAssembler* masm) {
+   // Get bytecode array and bytecode offset from the stack frame.
+   __ movq(kInterpreterBytecodeArrayRegister,
+           Operand(rbp, InterpreterFrameConstants::kBytecodeArrayFromFp));
+@@ -1613,7 +1613,7 @@ void Builtins::Generate_InterpreterEnterBytecodeAdvance(MacroAssembler* masm) {
+   __ Abort(AbortReason::kInvalidBytecodeAdvance);
+ }
+ 
+-void Builtins::Generate_InterpreterEnterBytecodeDispatch(MacroAssembler* masm) {
++void Builtins::Generate_InterpreterEnterAtBytecode(MacroAssembler* masm) {
+   Generate_InterpreterEnterBytecode(masm);
+ }
+ 
+diff --git a/src/debug/debug.cc b/src/debug/debug.cc
+index be38de2a779..c9778f62066 100644
+--- a/src/debug/debug.cc
++++ b/src/debug/debug.cc
+@@ -1244,7 +1244,7 @@ class DiscardBaselineCodeVisitor : public ThreadVisitor {
+         if (!deopt_all && frame->function().shared() != shared_) continue;
+         int bytecode_offset = frame->GetBytecodeOffset();
+         Address* pc_addr = frame->pc_address();
+-        Address advance = BUILTIN_CODE(isolate, InterpreterEnterBytecodeAdvance)
++        Address advance = BUILTIN_CODE(isolate, InterpreterEnterAtNextBytecode)
+                               ->InstructionStart();
+         PointerAuthentication::ReplacePC(pc_addr, advance, kSystemPointerSize);
+         InterpretedFrame::cast(it.Reframe())
+diff --git a/src/deoptimizer/deoptimizer-cfi-builtins.cc b/src/deoptimizer/deoptimizer-cfi-builtins.cc
+index 0b7472dbea6..bbeacc561dc 100644
+--- a/src/deoptimizer/deoptimizer-cfi-builtins.cc
++++ b/src/deoptimizer/deoptimizer-cfi-builtins.cc
+@@ -6,8 +6,8 @@
+ #include "src/deoptimizer/deoptimizer.h"
+ 
+ extern "C" {
+-void Builtins_InterpreterEnterBytecodeAdvance();
+-void Builtins_InterpreterEnterBytecodeDispatch();
++void Builtins_InterpreterEnterAtBytecode();
++void Builtins_InterpreterEnterAtNextBytecode();
+ void Builtins_ContinueToCodeStubBuiltinWithResult();
+ void Builtins_ContinueToCodeStubBuiltin();
+ void Builtins_ContinueToJavaScriptBuiltinWithResult();
+@@ -24,8 +24,8 @@ namespace internal {
+ 
+ // List of allowed builtin addresses that we can return to in the deoptimizer.
+ constexpr function_ptr builtins[] = {
+-    &Builtins_InterpreterEnterBytecodeAdvance,
+-    &Builtins_InterpreterEnterBytecodeDispatch,
++    &Builtins_InterpreterEnterAtBytecode,
++    &Builtins_InterpreterEnterAtNextBytecode,
+     &Builtins_ContinueToCodeStubBuiltinWithResult,
+     &Builtins_ContinueToCodeStubBuiltin,
+     &Builtins_ContinueToJavaScriptBuiltinWithResult,
+diff --git a/src/deoptimizer/deoptimizer.cc b/src/deoptimizer/deoptimizer.cc
+index d37f0466ac5..eabd9ebb41c 100644
+--- a/src/deoptimizer/deoptimizer.cc
++++ b/src/deoptimizer/deoptimizer.cc
+@@ -996,8 +996,8 @@ Builtins::Name DispatchBuiltinFor(bool is_baseline, bool advance_bc) {
+     return advance_bc ? Builtins::kBaselineEnterAtNextBytecode
+                       : Builtins::kBaselineEnterAtBytecode;
+   } else {
+-    return advance_bc ? Builtins::kInterpreterEnterBytecodeAdvance
+-                      : Builtins::kInterpreterEnterBytecodeDispatch;
++    return advance_bc ? Builtins::kInterpreterEnterAtNextBytecode
++                      : Builtins::kInterpreterEnterAtBytecode;
+   }
+ }
+ 
+diff --git a/src/execution/frames.cc b/src/execution/frames.cc
+index 6388c8e06a1..982fac8391a 100644
+--- a/src/execution/frames.cc
++++ b/src/execution/frames.cc
+@@ -228,8 +228,8 @@ bool IsInterpreterFramePc(Isolate* isolate, Address pc,
+   Builtins::Name builtin_index = InstructionStream::TryLookupCode(isolate, pc);
+   if (builtin_index != Builtins::kNoBuiltinId &&
+       (builtin_index == Builtins::kInterpreterEntryTrampoline ||
+-       builtin_index == Builtins::kInterpreterEnterBytecodeAdvance ||
+-       builtin_index == Builtins::kInterpreterEnterBytecodeDispatch ||
++       builtin_index == Builtins::kInterpreterEnterAtBytecode ||
++       builtin_index == Builtins::kInterpreterEnterAtNextBytecode ||
+        builtin_index == Builtins::kBaselineEnterAtBytecode ||
+        builtin_index == Builtins::kBaselineEnterAtNextBytecode)) {
+     return true;
+diff --git a/src/execution/isolate.cc b/src/execution/isolate.cc
+index b4298a5e70d..846d1dfc9a4 100644
+--- a/src/execution/isolate.cc
++++ b/src/execution/isolate.cc
+@@ -1910,7 +1910,7 @@ Object Isolate::UnwindAndFindHandler() {
+               static_cast<int>(offset));
+ 
+           Code code =
+-              builtins()->builtin(Builtins::kInterpreterEnterBytecodeDispatch);
++              builtins()->builtin(Builtins::kInterpreterEnterAtBytecode);
+           return FoundHandler(context, code.InstructionStart(), 0,
+                               code.constant_pool(), return_sp, frame->fp());
+         }
+diff --git a/src/objects/code-inl.h b/src/objects/code-inl.h
+index 6fd3355a42f..b1373c02937 100644
+--- a/src/objects/code-inl.h
++++ b/src/objects/code-inl.h
+@@ -450,8 +450,8 @@ inline bool Code::is_interpreter_trampoline_builtin() const {
+   const int index = builtin_index();
+   return index != Builtins::kNoBuiltinId &&
+          (index == Builtins::kInterpreterEntryTrampoline ||
+-          index == Builtins::kInterpreterEnterBytecodeAdvance ||
+-          index == Builtins::kInterpreterEnterBytecodeDispatch);
++          index == Builtins::kInterpreterEnterAtBytecode ||
++          index == Builtins::kInterpreterEnterAtNextBytecode);
+ }
+ 
+ inline bool Code::is_baseline_trampoline_builtin() const {
+-- 
+2.35.1
+

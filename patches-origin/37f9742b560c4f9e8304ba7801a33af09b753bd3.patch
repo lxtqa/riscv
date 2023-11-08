@@ -1,0 +1,1524 @@
+From 37f9742b560c4f9e8304ba7801a33af09b753bd3 Mon Sep 17 00:00:00 2001
+From: Bill Budge <bbudge@chromium.org>
+Date: Fri, 5 Mar 2021 15:43:45 -0800
+Subject: [PATCH] [compiler] Refactor CallDescriptor methods
+
+- Renames StackParameterCount to ParameterSlotCount, to avoid
+  confusion between slots and parameters, which are not in general
+  equivalent.
+- Similarly, renames StackReturnCount to ReturnSlotCount.
+- Adjusts the result of GetFirstUnusedStackSlot to return one more
+  than the last slot of the argument area, not including padding.
+- Renames GetFirstUnusedStackSlot to GetOffsetToFirstUnusedStackSlot
+  to reflect that the result is an offset from callee to caller
+  frames.
+- GetReturnsOffset is a little clearer, with adjustment for the
+  different semantics of GetFirstUnusedStackSlot.
+- Renames 'optional_padding_slot' and 'first_unused_stack_slot'
+  variables in Tailcall codegen to reflect that these are offsets.
+
+Bug: v8:9198
+
+Change-Id: Ib73c52710dc1f3ead640d488a6fdeb605b7b665e
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/2700099
+Commit-Queue: Bill Budge <bbudge@chromium.org>
+Reviewed-by: Georg Neis <neis@chromium.org>
+Cr-Commit-Position: refs/heads/master@{#73242}
+---
+ .../backend/arm/code-generator-arm.cc         | 41 ++++++++--------
+ .../backend/arm64/code-generator-arm64.cc     | 46 ++++++++---------
+ .../backend/ia32/code-generator-ia32.cc       | 37 +++++++-------
+ src/compiler/backend/instruction-selector.cc  | 20 ++++----
+ .../backend/mips/code-generator-mips.cc       | 33 ++++++-------
+ .../backend/mips64/code-generator-mips64.cc   | 33 ++++++-------
+ .../backend/ppc/code-generator-ppc.cc         | 41 ++++++++--------
+ .../backend/riscv64/code-generator-riscv64.cc | 33 ++++++-------
+ .../backend/s390/code-generator-s390.cc       | 41 ++++++++--------
+ .../backend/x64/code-generator-x64.cc         | 37 +++++++-------
+ src/compiler/linkage.cc                       | 49 ++++++++++---------
+ src/compiler/linkage.h                        | 34 +++++++------
+ src/compiler/raw-machine-assembler.cc         |  2 +-
+ src/wasm/baseline/liftoff-assembler.cc        |  6 +--
+ src/wasm/baseline/liftoff-compiler.cc         | 12 ++---
+ test/cctest/compiler/test-linkage.cc          |  4 +-
+ test/cctest/compiler/test-run-retpoline.cc    | 33 ++++++-------
+ test/cctest/compiler/test-run-tail-calls.cc   | 31 ++++++------
+ 18 files changed, 264 insertions(+), 269 deletions(-)
+
+diff --git a/src/compiler/backend/arm/code-generator-arm.cc b/src/compiler/backend/arm/code-generator-arm.cc
+index bd30979c12c..d5eba520fdf 100644
+--- a/src/compiler/backend/arm/code-generator-arm.cc
++++ b/src/compiler/backend/arm/code-generator-arm.cc
+@@ -622,13 +622,13 @@ bool VerifyOutputOfAtomicPairInstr(ArmOperandConverter* converter,
+ }  // namespace
+ 
+ void CodeGenerator::AssembleTailCallBeforeGap(Instruction* instr,
+-                                              int first_unused_stack_slot) {
++                                              int first_unused_slot_offset) {
+   ZoneVector<MoveOperands*> pushes(zone());
+   GetPushCompatibleMoves(instr, kRegisterPush, &pushes);
+ 
+   if (!pushes.empty() &&
+       (LocationOperand::cast(pushes.back()->destination()).index() + 1 ==
+-       first_unused_stack_slot)) {
++       first_unused_slot_offset)) {
+     ArmOperandConverter g(this, instr);
+     ZoneVector<Register> pending_pushes(zone());
+     for (auto move : pushes) {
+@@ -654,13 +654,13 @@ void CodeGenerator::AssembleTailCallBeforeGap(Instruction* instr,
+     FlushPendingPushRegisters(tasm(), frame_access_state(), &pending_pushes);
+   }
+   AdjustStackPointerForTailCall(tasm(), frame_access_state(),
+-                                first_unused_stack_slot, nullptr, false);
++                                first_unused_slot_offset, nullptr, false);
+ }
+ 
+ void CodeGenerator::AssembleTailCallAfterGap(Instruction* instr,
+-                                             int first_unused_stack_slot) {
++                                             int first_unused_slot_offset) {
+   AdjustStackPointerForTailCall(tasm(), frame_access_state(),
+-                                first_unused_stack_slot);
++                                first_unused_slot_offset);
+ }
+ 
+ // Check that {kJavaScriptCallCodeStartRegister} is correct.
+@@ -3637,8 +3637,7 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
+             ExternalReference::wasm_call_trap_callback_for_testing(), 0);
+         __ LeaveFrame(StackFrame::WASM);
+         auto call_descriptor = gen_->linkage()->GetIncomingDescriptor();
+-        int pop_count =
+-            static_cast<int>(call_descriptor->StackParameterCount());
++        int pop_count = static_cast<int>(call_descriptor->ParameterSlotCount());
+         __ Drop(pop_count);
+         __ Ret();
+       } else {
+@@ -3892,12 +3891,12 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+   // We might need r3 for scratch.
+   DCHECK_EQ(0u, call_descriptor->CalleeSavedRegisters() & r3.bit());
+   ArmOperandConverter g(this, nullptr);
+-  const int parameter_count =
+-      static_cast<int>(call_descriptor->StackParameterCount());
++  const int parameter_slots =
++      static_cast<int>(call_descriptor->ParameterSlotCount());
+ 
+-  // {additional_pop_count} is only greater than zero if {parameter_count = 0}.
++  // {additional_pop_count} is only greater than zero if {parameter_slots = 0}.
+   // Check RawMachineAssembler::PopAndReturn.
+-  if (parameter_count != 0) {
++  if (parameter_slots != 0) {
+     if (additional_pop_count->IsImmediate()) {
+       DCHECK_EQ(g.ToConstant(additional_pop_count).ToInt32(), 0);
+     } else if (__ emit_debug_code()) {
+@@ -3908,12 +3907,12 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+ 
+   Register argc_reg = r3;
+   // Functions with JS linkage have at least one parameter (the receiver).
+-  // If {parameter_count} == 0, it means it is a builtin with
++  // If {parameter_slots} == 0, it means it is a builtin with
+   // kDontAdaptArgumentsSentinel, which takes care of JS arguments popping
+   // itself.
+   const bool drop_jsargs = frame_access_state()->has_frame() &&
+                            call_descriptor->IsJSFunctionCall() &&
+-                           parameter_count != 0;
++                           parameter_slots != 0;
+   if (call_descriptor->IsCFunctionCall()) {
+     AssembleDeconstructFrame();
+   } else if (frame_access_state()->has_frame()) {
+@@ -3937,23 +3936,23 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+ 
+   if (drop_jsargs) {
+     // We must pop all arguments from the stack (including the receiver). This
+-    // number of arguments is given by max(1 + argc_reg, parameter_count).
++    // number of arguments is given by max(1 + argc_reg, parameter_slots).
+     __ add(argc_reg, argc_reg, Operand(1));  // Also pop the receiver.
+-    if (parameter_count > 1) {
+-      __ cmp(argc_reg, Operand(parameter_count));
+-      __ mov(argc_reg, Operand(parameter_count), LeaveCC, lt);
++    if (parameter_slots > 1) {
++      __ cmp(argc_reg, Operand(parameter_slots));
++      __ mov(argc_reg, Operand(parameter_slots), LeaveCC, lt);
+     }
+     __ Drop(argc_reg);
+   } else if (additional_pop_count->IsImmediate()) {
+     DCHECK_EQ(Constant::kInt32, g.ToConstant(additional_pop_count).type());
+     int additional_count = g.ToConstant(additional_pop_count).ToInt32();
+-    __ Drop(parameter_count + additional_count);
+-  } else if (parameter_count == 0) {
++    __ Drop(parameter_slots + additional_count);
++  } else if (parameter_slots == 0) {
+     __ Drop(g.ToRegister(additional_pop_count));
+   } else {
+-    // {additional_pop_count} is guaranteed to be zero if {parameter_count !=
++    // {additional_pop_count} is guaranteed to be zero if {parameter_slots !=
+     // 0}. Check RawMachineAssembler::PopAndReturn.
+-    __ Drop(parameter_count);
++    __ Drop(parameter_slots);
+   }
+   __ Ret();
+ }
+diff --git a/src/compiler/backend/arm64/code-generator-arm64.cc b/src/compiler/backend/arm64/code-generator-arm64.cc
+index 70ae7ee950b..080dd641376 100644
+--- a/src/compiler/backend/arm64/code-generator-arm64.cc
++++ b/src/compiler/backend/arm64/code-generator-arm64.cc
+@@ -412,7 +412,7 @@ class WasmOutOfLineTrap : public OutOfLineCode {
+                        0);
+       __ LeaveFrame(StackFrame::WASM);
+       auto call_descriptor = gen_->linkage()->GetIncomingDescriptor();
+-      int pop_count = static_cast<int>(call_descriptor->StackParameterCount());
++      int pop_count = static_cast<int>(call_descriptor->ParameterSlotCount());
+       pop_count += (pop_count & 1);  // align
+       __ Drop(pop_count);
+       __ Ret();
+@@ -665,21 +665,21 @@ void AdjustStackPointerForTailCall(TurboAssembler* tasm,
+ }  // namespace
+ 
+ void CodeGenerator::AssembleTailCallBeforeGap(Instruction* instr,
+-                                              int first_unused_stack_slot) {
++                                              int first_unused_slot_offset) {
+   AdjustStackPointerForTailCall(tasm(), frame_access_state(),
+-                                first_unused_stack_slot, false);
++                                first_unused_slot_offset, false);
+ }
+ 
+ void CodeGenerator::AssembleTailCallAfterGap(Instruction* instr,
+-                                             int first_unused_stack_slot) {
+-  DCHECK_EQ(first_unused_stack_slot % 2, 0);
++                                             int first_unused_slot_offset) {
++  DCHECK_EQ(first_unused_slot_offset % 2, 0);
+   AdjustStackPointerForTailCall(tasm(), frame_access_state(),
+-                                first_unused_stack_slot);
++                                first_unused_slot_offset);
+   DCHECK(instr->IsTailCall());
+   InstructionOperandConverter g(this, instr);
+-  int optional_padding_slot = g.InputInt32(instr->InputCount() - 2);
+-  if (optional_padding_slot % 2) {
+-    __ Poke(padreg, optional_padding_slot * kSystemPointerSize);
++  int optional_padding_offset = g.InputInt32(instr->InputCount() - 2);
++  if (optional_padding_offset % 2) {
++    __ Poke(padreg, optional_padding_offset * kSystemPointerSize);
+   }
+ }
+ 
+@@ -3242,13 +3242,13 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+ 
+   // We might need x3 for scratch.
+   DCHECK_EQ(0u, call_descriptor->CalleeSavedRegisters() & x3.bit());
+-  const int parameter_count =
+-      static_cast<int>(call_descriptor->StackParameterCount());
++  const int parameter_slots =
++      static_cast<int>(call_descriptor->ParameterSlotCount());
+   Arm64OperandConverter g(this, nullptr);
+ 
+-  // {aditional_pop_count} is only greater than zero if {parameter_count = 0}.
++  // {aditional_pop_count} is only greater than zero if {parameter_slots = 0}.
+   // Check RawMachineAssembler::PopAndReturn.
+-  if (parameter_count != 0) {
++  if (parameter_slots != 0) {
+     if (additional_pop_count->IsImmediate()) {
+       DCHECK_EQ(g.ToConstant(additional_pop_count).ToInt32(), 0);
+     } else if (__ emit_debug_code()) {
+@@ -3259,12 +3259,12 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+ 
+   Register argc_reg = x3;
+   // Functions with JS linkage have at least one parameter (the receiver).
+-  // If {parameter_count} == 0, it means it is a builtin with
++  // If {parameter_slots} == 0, it means it is a builtin with
+   // kDontAdaptArgumentsSentinel, which takes care of JS arguments popping
+   // itself.
+   const bool drop_jsargs = frame_access_state()->has_frame() &&
+                            call_descriptor->IsJSFunctionCall() &&
+-                           parameter_count != 0;
++                           parameter_slots != 0;
+   if (call_descriptor->IsCFunctionCall()) {
+     AssembleDeconstructFrame();
+   } else if (frame_access_state()->has_frame()) {
+@@ -3288,25 +3288,25 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+ 
+   if (drop_jsargs) {
+     // We must pop all arguments from the stack (including the receiver). This
+-    // number of arguments is given by max(1 + argc_reg, parameter_count).
++    // number of arguments is given by max(1 + argc_reg, parameter_slots).
+     Label argc_reg_has_final_count;
+     __ Add(argc_reg, argc_reg, 1);  // Consider the receiver.
+-    if (parameter_count > 1) {
+-      __ Cmp(argc_reg, Operand(parameter_count));
++    if (parameter_slots > 1) {
++      __ Cmp(argc_reg, Operand(parameter_slots));
+       __ B(&argc_reg_has_final_count, ge);
+-      __ Mov(argc_reg, Operand(parameter_count));
++      __ Mov(argc_reg, Operand(parameter_slots));
+       __ Bind(&argc_reg_has_final_count);
+     }
+     __ DropArguments(argc_reg);
+   } else if (additional_pop_count->IsImmediate()) {
+     int additional_count = g.ToConstant(additional_pop_count).ToInt32();
+-    __ DropArguments(parameter_count + additional_count);
+-  } else if (parameter_count == 0) {
++    __ DropArguments(parameter_slots + additional_count);
++  } else if (parameter_slots == 0) {
+     __ DropArguments(g.ToRegister(additional_pop_count));
+   } else {
+-    // {additional_pop_count} is guaranteed to be zero if {parameter_count !=
++    // {additional_pop_count} is guaranteed to be zero if {parameter_slots !=
+     // 0}. Check RawMachineAssembler::PopAndReturn.
+-    __ DropArguments(parameter_count);
++    __ DropArguments(parameter_slots);
+   }
+   __ AssertSpAligned();
+   __ Ret();
+diff --git a/src/compiler/backend/ia32/code-generator-ia32.cc b/src/compiler/backend/ia32/code-generator-ia32.cc
+index 60d89287284..cdac75dd012 100644
+--- a/src/compiler/backend/ia32/code-generator-ia32.cc
++++ b/src/compiler/backend/ia32/code-generator-ia32.cc
+@@ -611,14 +611,14 @@ bool VerifyOutputOfAtomicPairInstr(IA32OperandConverter* converter,
+ }  // namespace
+ 
+ void CodeGenerator::AssembleTailCallBeforeGap(Instruction* instr,
+-                                              int first_unused_stack_slot) {
++                                              int first_unused_slot_offset) {
+   CodeGenerator::PushTypeFlags flags(kImmediatePush | kScalarPush);
+   ZoneVector<MoveOperands*> pushes(zone());
+   GetPushCompatibleMoves(instr, flags, &pushes);
+ 
+   if (!pushes.empty() &&
+       (LocationOperand::cast(pushes.back()->destination()).index() + 1 ==
+-       first_unused_stack_slot)) {
++       first_unused_slot_offset)) {
+     IA32OperandConverter g(this, instr);
+     for (auto move : pushes) {
+       LocationOperand destination_location(
+@@ -643,13 +643,13 @@ void CodeGenerator::AssembleTailCallBeforeGap(Instruction* instr,
+     }
+   }
+   AdjustStackPointerForTailCall(tasm(), frame_access_state(),
+-                                first_unused_stack_slot, false);
++                                first_unused_slot_offset, false);
+ }
+ 
+ void CodeGenerator::AssembleTailCallAfterGap(Instruction* instr,
+-                                             int first_unused_stack_slot) {
++                                             int first_unused_slot_offset) {
+   AdjustStackPointerForTailCall(tasm(), frame_access_state(),
+-                                first_unused_stack_slot);
++                                first_unused_slot_offset);
+ }
+ 
+ // Check that {kJavaScriptCallCodeStartRegister} is correct.
+@@ -4365,7 +4365,7 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
+         __ LeaveFrame(StackFrame::WASM);
+         auto call_descriptor = gen_->linkage()->GetIncomingDescriptor();
+         size_t pop_size =
+-            call_descriptor->StackParameterCount() * kSystemPointerSize;
++            call_descriptor->ParameterSlotCount() * kSystemPointerSize;
+         // Use ecx as a scratch register, we return anyways immediately.
+         __ Ret(static_cast<int>(pop_size), ecx);
+       } else {
+@@ -4736,12 +4736,11 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+   DCHECK_EQ(0u, call_descriptor->CalleeSavedRegisters() & edx.bit());
+   DCHECK_EQ(0u, call_descriptor->CalleeSavedRegisters() & ecx.bit());
+   IA32OperandConverter g(this, nullptr);
+-  int parameter_count =
+-      static_cast<int>(call_descriptor->StackParameterCount());
++  int parameter_slots = static_cast<int>(call_descriptor->ParameterSlotCount());
+ 
+-  // {aditional_pop_count} is only greater than zero if {parameter_count = 0}.
++  // {aditional_pop_count} is only greater than zero if {parameter_slots = 0}.
+   // Check RawMachineAssembler::PopAndReturn.
+-  if (parameter_count != 0) {
++  if (parameter_slots != 0) {
+     if (additional_pop_count->IsImmediate()) {
+       DCHECK_EQ(g.ToConstant(additional_pop_count).ToInt32(), 0);
+     } else if (__ emit_debug_code()) {
+@@ -4752,12 +4751,12 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+ 
+   Register argc_reg = ecx;
+   // Functions with JS linkage have at least one parameter (the receiver).
+-  // If {parameter_count} == 0, it means it is a builtin with
++  // If {parameter_slots} == 0, it means it is a builtin with
+   // kDontAdaptArgumentsSentinel, which takes care of JS arguments popping
+   // itself.
+   const bool drop_jsargs = frame_access_state()->has_frame() &&
+                            call_descriptor->IsJSFunctionCall() &&
+-                           parameter_count != 0;
++                           parameter_slots != 0;
+   if (call_descriptor->IsCFunctionCall()) {
+     AssembleDeconstructFrame();
+   } else if (frame_access_state()->has_frame()) {
+@@ -4781,16 +4780,16 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+ 
+   if (drop_jsargs) {
+     // We must pop all arguments from the stack (including the receiver). This
+-    // number of arguments is given by max(1 + argc_reg, parameter_count).
+-    int parameter_count_without_receiver =
+-        parameter_count - 1;  // Exclude the receiver to simplify the
++    // number of arguments is given by max(1 + argc_reg, parameter_slots).
++    int parameter_slots_without_receiver =
++        parameter_slots - 1;  // Exclude the receiver to simplify the
+                               // computation. We'll account for it at the end.
+     Label mismatch_return;
+     Register scratch_reg = edx;
+     DCHECK_NE(argc_reg, scratch_reg);
+-    __ cmp(argc_reg, Immediate(parameter_count_without_receiver));
++    __ cmp(argc_reg, Immediate(parameter_slots_without_receiver));
+     __ j(greater, &mismatch_return, Label::kNear);
+-    __ Ret(parameter_count * kSystemPointerSize, scratch_reg);
++    __ Ret(parameter_slots * kSystemPointerSize, scratch_reg);
+     __ bind(&mismatch_return);
+     __ PopReturnAddressTo(scratch_reg);
+     __ lea(esp, Operand(esp, argc_reg, times_system_pointer_size,
+@@ -4801,13 +4800,13 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+   } else if (additional_pop_count->IsImmediate()) {
+     Register scratch_reg = ecx;
+     int additional_count = g.ToConstant(additional_pop_count).ToInt32();
+-    size_t pop_size = (parameter_count + additional_count) * kSystemPointerSize;
++    size_t pop_size = (parameter_slots + additional_count) * kSystemPointerSize;
+     CHECK_LE(pop_size, static_cast<size_t>(std::numeric_limits<int>::max()));
+     __ Ret(static_cast<int>(pop_size), scratch_reg);
+   } else {
+     Register pop_reg = g.ToRegister(additional_pop_count);
+     Register scratch_reg = pop_reg == ecx ? edx : ecx;
+-    int pop_size = static_cast<int>(parameter_count * kSystemPointerSize);
++    int pop_size = static_cast<int>(parameter_slots * kSystemPointerSize);
+     __ PopReturnAddressTo(scratch_reg);
+     __ lea(esp, Operand(esp, pop_reg, times_system_pointer_size,
+                         static_cast<int>(pop_size)));
+diff --git a/src/compiler/backend/instruction-selector.cc b/src/compiler/backend/instruction-selector.cc
+index e075a14af76..8f58806e890 100644
+--- a/src/compiler/backend/instruction-selector.cc
++++ b/src/compiler/backend/instruction-selector.cc
+@@ -917,7 +917,7 @@ void InstructionSelector::InitializeCallBuffer(Node* call, CallBuffer* buffer,
+       }
+ 
+       frame_->EnsureReturnSlots(
+-          static_cast<int>(buffer->descriptor->StackReturnCount()));
++          static_cast<int>(buffer->descriptor->ReturnSlotCount()));
+     }
+ 
+     // Filter out the outputs that aren't live because no projection uses them.
+@@ -2997,17 +2997,17 @@ void InstructionSelector::VisitTailCall(Node* node) {
+ 
+   Emit(kArchPrepareTailCall, g.NoOutput());
+ 
+-  // Add an immediate operand that represents the first slot that is unused
+-  // with respect to the stack pointer that has been updated for the tail call
+-  // instruction. This is used by backends that need to pad arguments for stack
+-  // alignment, in order to store an optional slot of padding above the
+-  // arguments.
+-  const int optional_padding_slot = callee->GetFirstUnusedStackSlot();
+-  buffer.instruction_args.push_back(g.TempImmediate(optional_padding_slot));
++  // Add an immediate operand that represents the offset to the first slot that
++  // is unused with respect to the stack pointer that has been updated for the
++  // tail call instruction. Backends that pad arguments can write the padding
++  // value at this offset from the stack.
++  const int optional_padding_offset =
++      callee->GetOffsetToFirstUnusedStackSlot() - 1;
++  buffer.instruction_args.push_back(g.TempImmediate(optional_padding_offset));
+ 
+-  const int first_unused_stack_slot =
++  const int first_unused_slot_offset =
+       kReturnAddressStackSlotCount + stack_param_delta;
+-  buffer.instruction_args.push_back(g.TempImmediate(first_unused_stack_slot));
++  buffer.instruction_args.push_back(g.TempImmediate(first_unused_slot_offset));
+ 
+   // Emit the tailcall instruction.
+   Emit(opcode, 0, nullptr, buffer.instruction_args.size(),
+diff --git a/src/compiler/backend/mips/code-generator-mips.cc b/src/compiler/backend/mips/code-generator-mips.cc
+index ce51ba0fdd6..4c6cffb11ca 100644
+--- a/src/compiler/backend/mips/code-generator-mips.cc
++++ b/src/compiler/backend/mips/code-generator-mips.cc
+@@ -566,15 +566,15 @@ void AdjustStackPointerForTailCall(TurboAssembler* tasm,
+ }  // namespace
+ 
+ void CodeGenerator::AssembleTailCallBeforeGap(Instruction* instr,
+-                                              int first_unused_stack_slot) {
++                                              int first_unused_slot_offset) {
+   AdjustStackPointerForTailCall(tasm(), frame_access_state(),
+-                                first_unused_stack_slot, false);
++                                first_unused_slot_offset, false);
+ }
+ 
+ void CodeGenerator::AssembleTailCallAfterGap(Instruction* instr,
+-                                             int first_unused_stack_slot) {
++                                             int first_unused_slot_offset) {
+   AdjustStackPointerForTailCall(tasm(), frame_access_state(),
+-                                first_unused_stack_slot);
++                                first_unused_slot_offset);
+ }
+ 
+ // Check that {kJavaScriptCallCodeStartRegister} is correct.
+@@ -3831,8 +3831,7 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
+             ExternalReference::wasm_call_trap_callback_for_testing(), 0);
+         __ LeaveFrame(StackFrame::WASM);
+         auto call_descriptor = gen_->linkage()->GetIncomingDescriptor();
+-        int pop_count =
+-            static_cast<int>(call_descriptor->StackParameterCount());
++        int pop_count = static_cast<int>(call_descriptor->ParameterSlotCount());
+         __ Drop(pop_count);
+         __ Ret();
+       } else {
+@@ -4190,12 +4189,12 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+   }
+ 
+   MipsOperandConverter g(this, nullptr);
+-  const int parameter_count =
+-      static_cast<int>(call_descriptor->StackParameterCount());
++  const int parameter_slots =
++      static_cast<int>(call_descriptor->ParameterSlotCount());
+ 
+-  // {aditional_pop_count} is only greater than zero if {parameter_count = 0}.
++  // {aditional_pop_count} is only greater than zero if {parameter_slots = 0}.
+   // Check RawMachineAssembler::PopAndReturn.
+-  if (parameter_count != 0) {
++  if (parameter_slots != 0) {
+     if (additional_pop_count->IsImmediate()) {
+       DCHECK_EQ(g.ToConstant(additional_pop_count).ToInt32(), 0);
+     } else if (__ emit_debug_code()) {
+@@ -4205,12 +4204,12 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+     }
+   }
+   // Functions with JS linkage have at least one parameter (the receiver).
+-  // If {parameter_count} == 0, it means it is a builtin with
++  // If {parameter_slots} == 0, it means it is a builtin with
+   // kDontAdaptArgumentsSentinel, which takes care of JS arguments popping
+   // itself.
+   const bool drop_jsargs = frame_access_state()->has_frame() &&
+                            call_descriptor->IsJSFunctionCall() &&
+-                           parameter_count != 0;
++                           parameter_slots != 0;
+ 
+   if (call_descriptor->IsCFunctionCall()) {
+     AssembleDeconstructFrame();
+@@ -4235,10 +4234,10 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+ 
+   if (drop_jsargs) {
+     // We must pop all arguments from the stack (including the receiver). This
+-    // number of arguments is given by max(1 + argc_reg, parameter_count).
++    // number of arguments is given by max(1 + argc_reg, parameter_slots).
+     __ Addu(t0, t0, Operand(1));  // Also pop the receiver.
+-    if (parameter_count > 1) {
+-      __ li(kScratchReg, parameter_count);
++    if (parameter_slots > 1) {
++      __ li(kScratchReg, parameter_slots);
+       __ slt(kScratchReg2, t0, kScratchReg);
+       __ movn(t0, kScratchReg, kScratchReg2);
+     }
+@@ -4247,10 +4246,10 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+   } else if (additional_pop_count->IsImmediate()) {
+     DCHECK_EQ(Constant::kInt32, g.ToConstant(additional_pop_count).type());
+     int additional_count = g.ToConstant(additional_pop_count).ToInt32();
+-    __ Drop(parameter_count + additional_count);
++    __ Drop(parameter_slots + additional_count);
+   } else {
+     Register pop_reg = g.ToRegister(additional_pop_count);
+-    __ Drop(parameter_count);
++    __ Drop(parameter_slots);
+     __ sll(pop_reg, pop_reg, kSystemPointerSizeLog2);
+     __ Addu(sp, sp, pop_reg);
+   }
+diff --git a/src/compiler/backend/mips64/code-generator-mips64.cc b/src/compiler/backend/mips64/code-generator-mips64.cc
+index 9012cebddc8..0d2789b0a49 100644
+--- a/src/compiler/backend/mips64/code-generator-mips64.cc
++++ b/src/compiler/backend/mips64/code-generator-mips64.cc
+@@ -529,15 +529,15 @@ void AdjustStackPointerForTailCall(TurboAssembler* tasm,
+ }  // namespace
+ 
+ void CodeGenerator::AssembleTailCallBeforeGap(Instruction* instr,
+-                                              int first_unused_stack_slot) {
++                                              int first_unused_slot_offset) {
+   AdjustStackPointerForTailCall(tasm(), frame_access_state(),
+-                                first_unused_stack_slot, false);
++                                first_unused_slot_offset, false);
+ }
+ 
+ void CodeGenerator::AssembleTailCallAfterGap(Instruction* instr,
+-                                             int first_unused_stack_slot) {
++                                             int first_unused_slot_offset) {
+   AdjustStackPointerForTailCall(tasm(), frame_access_state(),
+-                                first_unused_stack_slot);
++                                first_unused_slot_offset);
+ }
+ 
+ // Check that {kJavaScriptCallCodeStartRegister} is correct.
+@@ -4032,8 +4032,7 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
+             ExternalReference::wasm_call_trap_callback_for_testing(), 0);
+         __ LeaveFrame(StackFrame::WASM);
+         auto call_descriptor = gen_->linkage()->GetIncomingDescriptor();
+-        int pop_count =
+-            static_cast<int>(call_descriptor->StackParameterCount());
++        int pop_count = static_cast<int>(call_descriptor->ParameterSlotCount());
+         pop_count += (pop_count & 1);  // align
+         __ Drop(pop_count);
+         __ Ret();
+@@ -4406,12 +4405,12 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+ 
+   MipsOperandConverter g(this, nullptr);
+ 
+-  const int parameter_count =
+-      static_cast<int>(call_descriptor->StackParameterCount());
++  const int parameter_slots =
++      static_cast<int>(call_descriptor->ParameterSlotCount());
+ 
+-  // {aditional_pop_count} is only greater than zero if {parameter_count = 0}.
++  // {aditional_pop_count} is only greater than zero if {parameter_slots = 0}.
+   // Check RawMachineAssembler::PopAndReturn.
+-  if (parameter_count != 0) {
++  if (parameter_slots != 0) {
+     if (additional_pop_count->IsImmediate()) {
+       DCHECK_EQ(g.ToConstant(additional_pop_count).ToInt32(), 0);
+     } else if (__ emit_debug_code()) {
+@@ -4422,12 +4421,12 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+   }
+ 
+   // Functions with JS linkage have at least one parameter (the receiver).
+-  // If {parameter_count} == 0, it means it is a builtin with
++  // If {parameter_slots} == 0, it means it is a builtin with
+   // kDontAdaptArgumentsSentinel, which takes care of JS arguments popping
+   // itself.
+   const bool drop_jsargs = frame_access_state()->has_frame() &&
+                            call_descriptor->IsJSFunctionCall() &&
+-                           parameter_count != 0;
++                           parameter_slots != 0;
+ 
+   if (call_descriptor->IsCFunctionCall()) {
+     AssembleDeconstructFrame();
+@@ -4451,10 +4450,10 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+   }
+   if (drop_jsargs) {
+     // We must pop all arguments from the stack (including the receiver). This
+-    // number of arguments is given by max(1 + argc_reg, parameter_count).
++    // number of arguments is given by max(1 + argc_reg, parameter_slots).
+     __ Daddu(t0, t0, Operand(1));  // Also pop the receiver.
+-    if (parameter_count > 1) {
+-      __ li(kScratchReg, parameter_count);
++    if (parameter_slots > 1) {
++      __ li(kScratchReg, parameter_slots);
+       __ slt(kScratchReg2, t0, kScratchReg);
+       __ movn(t0, kScratchReg, kScratchReg2);
+     }
+@@ -4462,10 +4461,10 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+     __ Daddu(sp, sp, t0);
+   } else if (additional_pop_count->IsImmediate()) {
+     int additional_count = g.ToConstant(additional_pop_count).ToInt32();
+-    __ Drop(parameter_count + additional_count);
++    __ Drop(parameter_slots + additional_count);
+   } else {
+     Register pop_reg = g.ToRegister(additional_pop_count);
+-    __ Drop(parameter_count);
++    __ Drop(parameter_slots);
+     __ dsll(pop_reg, pop_reg, kSystemPointerSizeLog2);
+     __ Daddu(sp, sp, pop_reg);
+   }
+diff --git a/src/compiler/backend/ppc/code-generator-ppc.cc b/src/compiler/backend/ppc/code-generator-ppc.cc
+index 0dd7b071457..c559d8f6c7c 100644
+--- a/src/compiler/backend/ppc/code-generator-ppc.cc
++++ b/src/compiler/backend/ppc/code-generator-ppc.cc
+@@ -756,13 +756,13 @@ void AdjustStackPointerForTailCall(
+ }  // namespace
+ 
+ void CodeGenerator::AssembleTailCallBeforeGap(Instruction* instr,
+-                                              int first_unused_stack_slot) {
++                                              int first_unused_slot_offset) {
+   ZoneVector<MoveOperands*> pushes(zone());
+   GetPushCompatibleMoves(instr, kRegisterPush, &pushes);
+ 
+   if (!pushes.empty() &&
+       (LocationOperand::cast(pushes.back()->destination()).index() + 1 ==
+-       first_unused_stack_slot)) {
++       first_unused_slot_offset)) {
+     PPCOperandConverter g(this, instr);
+     ZoneVector<Register> pending_pushes(zone());
+     for (auto move : pushes) {
+@@ -788,13 +788,13 @@ void CodeGenerator::AssembleTailCallBeforeGap(Instruction* instr,
+     FlushPendingPushRegisters(tasm(), frame_access_state(), &pending_pushes);
+   }
+   AdjustStackPointerForTailCall(tasm(), frame_access_state(),
+-                                first_unused_stack_slot, nullptr, false);
++                                first_unused_slot_offset, nullptr, false);
+ }
+ 
+ void CodeGenerator::AssembleTailCallAfterGap(Instruction* instr,
+-                                             int first_unused_stack_slot) {
++                                             int first_unused_slot_offset) {
+   AdjustStackPointerForTailCall(tasm(), frame_access_state(),
+-                                first_unused_stack_slot);
++                                first_unused_slot_offset);
+ }
+ 
+ // Check that {kJavaScriptCallCodeStartRegister} is correct.
+@@ -3787,8 +3787,7 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
+             ExternalReference::wasm_call_trap_callback_for_testing(), 0);
+         __ LeaveFrame(StackFrame::WASM);
+         auto call_descriptor = gen_->linkage()->GetIncomingDescriptor();
+-        int pop_count =
+-            static_cast<int>(call_descriptor->StackParameterCount());
++        int pop_count = static_cast<int>(call_descriptor->ParameterSlotCount());
+         __ Drop(pop_count);
+         __ Ret();
+       } else {
+@@ -4112,12 +4111,12 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+   // We might need r6 for scratch.
+   DCHECK_EQ(0u, call_descriptor->CalleeSavedRegisters() & r6.bit());
+   PPCOperandConverter g(this, nullptr);
+-  const int parameter_count =
+-      static_cast<int>(call_descriptor->StackParameterCount());
++  const int parameter_slots =
++      static_cast<int>(call_descriptor->ParameterSlotCount());
+ 
+-  // {aditional_pop_count} is only greater than zero if {parameter_count = 0}.
++  // {aditional_pop_count} is only greater than zero if {parameter_slots = 0}.
+   // Check RawMachineAssembler::PopAndReturn.
+-  if (parameter_count != 0) {
++  if (parameter_slots != 0) {
+     if (additional_pop_count->IsImmediate()) {
+       DCHECK_EQ(g.ToConstant(additional_pop_count).ToInt32(), 0);
+     } else if (__ emit_debug_code()) {
+@@ -4128,12 +4127,12 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+ 
+   Register argc_reg = r6;
+   // Functions with JS linkage have at least one parameter (the receiver).
+-  // If {parameter_count} == 0, it means it is a builtin with
++  // If {parameter_slots} == 0, it means it is a builtin with
+   // kDontAdaptArgumentsSentinel, which takes care of JS arguments popping
+   // itself.
+   const bool drop_jsargs = frame_access_state()->has_frame() &&
+                            call_descriptor->IsJSFunctionCall() &&
+-                           parameter_count != 0;
++                           parameter_slots != 0;
+ 
+   if (call_descriptor->IsCFunctionCall()) {
+     AssembleDeconstructFrame();
+@@ -4159,25 +4158,25 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+   ConstantPoolUnavailableScope constant_pool_unavailable(tasm());
+   if (drop_jsargs) {
+     // We must pop all arguments from the stack (including the receiver). This
+-    // number of arguments is given by max(1 + argc_reg, parameter_count).
++    // number of arguments is given by max(1 + argc_reg, parameter_slots).
+     __ addi(argc_reg, argc_reg, Operand(1));  // Also pop the receiver.
+-    if (parameter_count > 1) {
++    if (parameter_slots > 1) {
+       Label skip;
+-      __ cmpi(argc_reg, Operand(parameter_count));
++      __ cmpi(argc_reg, Operand(parameter_slots));
+       __ bgt(&skip);
+-      __ mov(argc_reg, Operand(parameter_count));
++      __ mov(argc_reg, Operand(parameter_slots));
+       __ bind(&skip);
+     }
+     __ Drop(argc_reg);
+   } else if (additional_pop_count->IsImmediate()) {
+     int additional_count = g.ToConstant(additional_pop_count).ToInt32();
+-    __ Drop(parameter_count + additional_count);
+-  } else if (parameter_count == 0) {
++    __ Drop(parameter_slots + additional_count);
++  } else if (parameter_slots == 0) {
+     __ Drop(g.ToRegister(additional_pop_count));
+   } else {
+-    // {additional_pop_count} is guaranteed to be zero if {parameter_count !=
++    // {additional_pop_count} is guaranteed to be zero if {parameter_slots !=
+     // 0}. Check RawMachineAssembler::PopAndReturn.
+-    __ Drop(parameter_count);
++    __ Drop(parameter_slots);
+   }
+   __ Ret();
+ }
+diff --git a/src/compiler/backend/riscv64/code-generator-riscv64.cc b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+index cc83f22c657..f01941883ed 100644
+--- a/src/compiler/backend/riscv64/code-generator-riscv64.cc
++++ b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+@@ -509,15 +509,15 @@ void AdjustStackPointerForTailCall(TurboAssembler* tasm,
+ }  // namespace
+ 
+ void CodeGenerator::AssembleTailCallBeforeGap(Instruction* instr,
+-                                              int first_unused_stack_slot) {
++                                              int first_unused_slot_offset) {
+   AdjustStackPointerForTailCall(tasm(), frame_access_state(),
+-                                first_unused_stack_slot, false);
++                                first_unused_slot_offset, false);
+ }
+ 
+ void CodeGenerator::AssembleTailCallAfterGap(Instruction* instr,
+-                                             int first_unused_stack_slot) {
++                                             int first_unused_slot_offset) {
+   AdjustStackPointerForTailCall(tasm(), frame_access_state(),
+-                                first_unused_stack_slot);
++                                first_unused_slot_offset);
+ }
+ 
+ // Check that {kJavaScriptCallCodeStartRegister} is correct.
+@@ -2074,8 +2074,7 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
+             ExternalReference::wasm_call_trap_callback_for_testing(), 0);
+         __ LeaveFrame(StackFrame::WASM);
+         auto call_descriptor = gen_->linkage()->GetIncomingDescriptor();
+-        int pop_count =
+-            static_cast<int>(call_descriptor->StackParameterCount());
++        int pop_count = static_cast<int>(call_descriptor->ParameterSlotCount());
+         pop_count += (pop_count & 1);  // align
+         __ Drop(pop_count);
+         __ Ret();
+@@ -2441,12 +2440,12 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+ 
+   RiscvOperandConverter g(this, nullptr);
+ 
+-  const int parameter_count =
+-      static_cast<int>(call_descriptor->StackParameterCount());
++  const int parameter_slots =
++      static_cast<int>(call_descriptor->ParameterSlotCount());
+ 
+-  // {aditional_pop_count} is only greater than zero if {parameter_count = 0}.
++  // {aditional_pop_count} is only greater than zero if {parameter_slots = 0}.
+   // Check RawMachineAssembler::PopAndReturn.
+-  if (parameter_count != 0) {
++  if (parameter_slots != 0) {
+     if (additional_pop_count->IsImmediate()) {
+       DCHECK_EQ(g.ToConstant(additional_pop_count).ToInt32(), 0);
+     } else if (__ emit_debug_code()) {
+@@ -2457,12 +2456,12 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+   }
+ 
+   // Functions with JS linkage have at least one parameter (the receiver).
+-  // If {parameter_count} == 0, it means it is a builtin with
++  // If {parameter_slots} == 0, it means it is a builtin with
+   // kDontAdaptArgumentsSentinel, which takes care of JS arguments popping
+   // itself.
+   const bool drop_jsargs = frame_access_state()->has_frame() &&
+                            call_descriptor->IsJSFunctionCall() &&
+-                           parameter_count != 0;
++                           parameter_slots != 0;
+ 
+   if (call_descriptor->IsCFunctionCall()) {
+     AssembleDeconstructFrame();
+@@ -2486,11 +2485,11 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+   }
+   if (drop_jsargs) {
+     // We must pop all arguments from the stack (including the receiver). This
+-    // number of arguments is given by max(1 + argc_reg, parameter_count).
++    // number of arguments is given by max(1 + argc_reg, parameter_slots).
+     __ Add64(t0, t0, Operand(1));  // Also pop the receiver.
+-    if (parameter_count > 1) {
++    if (parameter_slots > 1) {
+       Label done;
+-      __ li(kScratchReg, parameter_count);
++      __ li(kScratchReg, parameter_slots);
+       __ Branch(&done, ge, t0, Operand(kScratchReg));
+       __ Move(t0, kScratchReg);
+       __ bind(&done);
+@@ -2501,10 +2500,10 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+     // it should be a kInt32 or a kInt64
+     DCHECK_LE(g.ToConstant(additional_pop_count).type(), Constant::kInt64);
+     int additional_count = g.ToConstant(additional_pop_count).ToInt32();
+-    __ Drop(parameter_count + additional_count);
++    __ Drop(parameter_slots + additional_count);
+   } else {
+     Register pop_reg = g.ToRegister(additional_pop_count);
+-    __ Drop(parameter_count);
++    __ Drop(parameter_slots);
+     __ Sll64(pop_reg, pop_reg, kSystemPointerSizeLog2);
+     __ Add64(sp, sp, pop_reg);
+   }
+diff --git a/src/compiler/backend/s390/code-generator-s390.cc b/src/compiler/backend/s390/code-generator-s390.cc
+index 79833145488..01cad86717d 100644
+--- a/src/compiler/backend/s390/code-generator-s390.cc
++++ b/src/compiler/backend/s390/code-generator-s390.cc
+@@ -1073,13 +1073,13 @@ void EmitWordLoadPoisoningIfNeeded(CodeGenerator* codegen, Instruction* instr,
+ }  // namespace
+ 
+ void CodeGenerator::AssembleTailCallBeforeGap(Instruction* instr,
+-                                              int first_unused_stack_slot) {
++                                              int first_unused_slot_offset) {
+   ZoneVector<MoveOperands*> pushes(zone());
+   GetPushCompatibleMoves(instr, kRegisterPush, &pushes);
+ 
+   if (!pushes.empty() &&
+       (LocationOperand::cast(pushes.back()->destination()).index() + 1 ==
+-       first_unused_stack_slot)) {
++       first_unused_slot_offset)) {
+     S390OperandConverter g(this, instr);
+     ZoneVector<Register> pending_pushes(zone());
+     for (auto move : pushes) {
+@@ -1105,13 +1105,13 @@ void CodeGenerator::AssembleTailCallBeforeGap(Instruction* instr,
+     FlushPendingPushRegisters(tasm(), frame_access_state(), &pending_pushes);
+   }
+   AdjustStackPointerForTailCall(tasm(), frame_access_state(),
+-                                first_unused_stack_slot, nullptr, false);
++                                first_unused_slot_offset, nullptr, false);
+ }
+ 
+ void CodeGenerator::AssembleTailCallAfterGap(Instruction* instr,
+-                                             int first_unused_stack_slot) {
++                                             int first_unused_slot_offset) {
+   AdjustStackPointerForTailCall(tasm(), frame_access_state(),
+-                                first_unused_stack_slot);
++                                first_unused_slot_offset);
+ }
+ 
+ // Check that {kJavaScriptCallCodeStartRegister} is correct.
+@@ -4148,8 +4148,7 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
+             ExternalReference::wasm_call_trap_callback_for_testing(), 0);
+         __ LeaveFrame(StackFrame::WASM);
+         auto call_descriptor = gen_->linkage()->GetIncomingDescriptor();
+-        int pop_count =
+-            static_cast<int>(call_descriptor->StackParameterCount());
++        int pop_count = static_cast<int>(call_descriptor->ParameterSlotCount());
+         __ Drop(pop_count);
+         __ Ret();
+       } else {
+@@ -4430,12 +4429,12 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+   // We might need r3 for scratch.
+   DCHECK_EQ(0u, call_descriptor->CalleeSavedRegisters() & r5.bit());
+   S390OperandConverter g(this, nullptr);
+-  const int parameter_count =
+-      static_cast<int>(call_descriptor->StackParameterCount());
++  const int parameter_slots =
++      static_cast<int>(call_descriptor->ParameterSlotCount());
+ 
+-  // {aditional_pop_count} is only greater than zero if {parameter_count = 0}.
++  // {aditional_pop_count} is only greater than zero if {parameter_slots = 0}.
+   // Check RawMachineAssembler::PopAndReturn.
+-  if (parameter_count != 0) {
++  if (parameter_slots != 0) {
+     if (additional_pop_count->IsImmediate()) {
+       DCHECK_EQ(g.ToConstant(additional_pop_count).ToInt32(), 0);
+     } else if (__ emit_debug_code()) {
+@@ -4446,12 +4445,12 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+ 
+   Register argc_reg = r5;
+   // Functions with JS linkage have at least one parameter (the receiver).
+-  // If {parameter_count} == 0, it means it is a builtin with
++  // If {parameter_slots} == 0, it means it is a builtin with
+   // kDontAdaptArgumentsSentinel, which takes care of JS arguments popping
+   // itself.
+   const bool drop_jsargs = frame_access_state()->has_frame() &&
+                            call_descriptor->IsJSFunctionCall() &&
+-                           parameter_count != 0;
++                           parameter_slots != 0;
+ 
+   if (call_descriptor->IsCFunctionCall()) {
+     AssembleDeconstructFrame();
+@@ -4476,25 +4475,25 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+ 
+   if (drop_jsargs) {
+     // We must pop all arguments from the stack (including the receiver). This
+-    // number of arguments is given by max(1 + argc_reg, parameter_count).
++    // number of arguments is given by max(1 + argc_reg, parameter_slots).
+     __ AddS64(argc_reg, argc_reg, Operand(1));  // Also pop the receiver.
+-    if (parameter_count > 1) {
++    if (parameter_slots > 1) {
+       Label skip;
+-      __ CmpS64(argc_reg, Operand(parameter_count));
++      __ CmpS64(argc_reg, Operand(parameter_slots));
+       __ bgt(&skip);
+-      __ mov(argc_reg, Operand(parameter_count));
++      __ mov(argc_reg, Operand(parameter_slots));
+       __ bind(&skip);
+     }
+     __ Drop(argc_reg);
+   } else if (additional_pop_count->IsImmediate()) {
+     int additional_count = g.ToConstant(additional_pop_count).ToInt32();
+-    __ Drop(parameter_count + additional_count);
+-  } else if (parameter_count == 0) {
++    __ Drop(parameter_slots + additional_count);
++  } else if (parameter_slots == 0) {
+     __ Drop(g.ToRegister(additional_pop_count));
+   } else {
+-    // {additional_pop_count} is guaranteed to be zero if {parameter_count !=
++    // {additional_pop_count} is guaranteed to be zero if {parameter_slots !=
+     // 0}. Check RawMachineAssembler::PopAndReturn.
+-    __ Drop(parameter_count);
++    __ Drop(parameter_slots);
+   }
+   __ Ret();
+ }
+diff --git a/src/compiler/backend/x64/code-generator-x64.cc b/src/compiler/backend/x64/code-generator-x64.cc
+index 1a26ab78345..09c3a2f97b1 100644
+--- a/src/compiler/backend/x64/code-generator-x64.cc
++++ b/src/compiler/backend/x64/code-generator-x64.cc
+@@ -350,7 +350,7 @@ class WasmOutOfLineTrap : public OutOfLineCode {
+       __ LeaveFrame(StackFrame::WASM);
+       auto call_descriptor = gen_->linkage()->GetIncomingDescriptor();
+       size_t pop_size =
+-          call_descriptor->StackParameterCount() * kSystemPointerSize;
++          call_descriptor->ParameterSlotCount() * kSystemPointerSize;
+       // Use rcx as a scratch register, we return anyways immediately.
+       __ Ret(static_cast<int>(pop_size), rcx);
+     } else {
+@@ -783,14 +783,14 @@ void SetupSimdImmediateInRegister(TurboAssembler* assembler, uint32_t* imms,
+ }  // namespace
+ 
+ void CodeGenerator::AssembleTailCallBeforeGap(Instruction* instr,
+-                                              int first_unused_stack_slot) {
++                                              int first_unused_slot_offset) {
+   CodeGenerator::PushTypeFlags flags(kImmediatePush | kScalarPush);
+   ZoneVector<MoveOperands*> pushes(zone());
+   GetPushCompatibleMoves(instr, flags, &pushes);
+ 
+   if (!pushes.empty() &&
+       (LocationOperand::cast(pushes.back()->destination()).index() + 1 ==
+-       first_unused_stack_slot)) {
++       first_unused_slot_offset)) {
+     DCHECK(!instr->HasCallDescriptorFlag(CallDescriptor::kIsTailCallForTierUp));
+     X64OperandConverter g(this, instr);
+     for (auto move : pushes) {
+@@ -817,14 +817,14 @@ void CodeGenerator::AssembleTailCallBeforeGap(Instruction* instr,
+     }
+   }
+   AdjustStackPointerForTailCall(instr, tasm(), linkage(), info(),
+-                                frame_access_state(), first_unused_stack_slot,
++                                frame_access_state(), first_unused_slot_offset,
+                                 false);
+ }
+ 
+ void CodeGenerator::AssembleTailCallAfterGap(Instruction* instr,
+-                                             int first_unused_stack_slot) {
++                                             int first_unused_slot_offset) {
+   AdjustStackPointerForTailCall(instr, tasm(), linkage(), info(),
+-                                frame_access_state(), first_unused_stack_slot);
++                                frame_access_state(), first_unused_slot_offset);
+ }
+ 
+ // Check that {kJavaScriptCallCodeStartRegister} is correct.
+@@ -4639,12 +4639,11 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+   DCHECK_EQ(0u, call_descriptor->CalleeSavedRegisters() & rcx.bit());
+   DCHECK_EQ(0u, call_descriptor->CalleeSavedRegisters() & r10.bit());
+   X64OperandConverter g(this, nullptr);
+-  int parameter_count =
+-      static_cast<int>(call_descriptor->StackParameterCount());
++  int parameter_slots = static_cast<int>(call_descriptor->ParameterSlotCount());
+ 
+-  // {aditional_pop_count} is only greater than zero if {parameter_count = 0}.
++  // {aditional_pop_count} is only greater than zero if {parameter_slots = 0}.
+   // Check RawMachineAssembler::PopAndReturn.
+-  if (parameter_count != 0) {
++  if (parameter_slots != 0) {
+     if (additional_pop_count->IsImmediate()) {
+       DCHECK_EQ(g.ToConstant(additional_pop_count).ToInt32(), 0);
+     } else if (__ emit_debug_code()) {
+@@ -4655,12 +4654,12 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+ 
+   Register argc_reg = rcx;
+   // Functions with JS linkage have at least one parameter (the receiver).
+-  // If {parameter_count} == 0, it means it is a builtin with
++  // If {parameter_slots} == 0, it means it is a builtin with
+   // kDontAdaptArgumentsSentinel, which takes care of JS arguments popping
+   // itself.
+   const bool drop_jsargs = frame_access_state()->has_frame() &&
+                            call_descriptor->IsJSFunctionCall() &&
+-                           parameter_count != 0;
++                           parameter_slots != 0;
+   if (call_descriptor->IsCFunctionCall()) {
+     AssembleDeconstructFrame();
+   } else if (frame_access_state()->has_frame()) {
+@@ -4683,16 +4682,16 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+ 
+   if (drop_jsargs) {
+     // We must pop all arguments from the stack (including the receiver). This
+-    // number of arguments is given by max(1 + argc_reg, parameter_count).
+-    int parameter_count_without_receiver =
+-        parameter_count - 1;  // Exclude the receiver to simplify the
++    // number of arguments is given by max(1 + argc_reg, parameter_slots).
++    int parameter_slots_without_receiver =
++        parameter_slots - 1;  // Exclude the receiver to simplify the
+                               // computation. We'll account for it at the end.
+     Label mismatch_return;
+     Register scratch_reg = r10;
+     DCHECK_NE(argc_reg, scratch_reg);
+-    __ cmpq(argc_reg, Immediate(parameter_count_without_receiver));
++    __ cmpq(argc_reg, Immediate(parameter_slots_without_receiver));
+     __ j(greater, &mismatch_return, Label::kNear);
+-    __ Ret(parameter_count * kSystemPointerSize, scratch_reg);
++    __ Ret(parameter_slots * kSystemPointerSize, scratch_reg);
+     __ bind(&mismatch_return);
+     __ PopReturnAddressTo(scratch_reg);
+     __ leaq(rsp, Operand(rsp, argc_reg, times_system_pointer_size,
+@@ -4703,13 +4702,13 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+   } else if (additional_pop_count->IsImmediate()) {
+     Register scratch_reg = r10;
+     int additional_count = g.ToConstant(additional_pop_count).ToInt32();
+-    size_t pop_size = (parameter_count + additional_count) * kSystemPointerSize;
++    size_t pop_size = (parameter_slots + additional_count) * kSystemPointerSize;
+     CHECK_LE(pop_size, static_cast<size_t>(std::numeric_limits<int>::max()));
+     __ Ret(static_cast<int>(pop_size), scratch_reg);
+   } else {
+     Register pop_reg = g.ToRegister(additional_pop_count);
+     Register scratch_reg = pop_reg == r10 ? rcx : r10;
+-    int pop_size = static_cast<int>(parameter_count * kSystemPointerSize);
++    int pop_size = static_cast<int>(parameter_slots * kSystemPointerSize);
+     __ PopReturnAddressTo(scratch_reg);
+     __ leaq(rsp, Operand(rsp, pop_reg, times_system_pointer_size,
+                          static_cast<int>(pop_size)));
+diff --git a/src/compiler/linkage.cc b/src/compiler/linkage.cc
+index 8b0371cb853..f53845d3d20 100644
+--- a/src/compiler/linkage.cc
++++ b/src/compiler/linkage.cc
+@@ -17,6 +17,10 @@ namespace compiler {
+ 
+ namespace {
+ 
++// Offsets from callee to caller frame, in slots.
++constexpr int kFirstCallerSlotOffset = 1;
++constexpr int kNoCallerSlotOffset = 0;
++
+ inline LinkageLocation regloc(Register reg, MachineType type) {
+   return LinkageLocation::ForRegister(reg.code(), type);
+ }
+@@ -59,7 +63,7 @@ std::ostream& operator<<(std::ostream& os, const CallDescriptor::Kind& k) {
+ std::ostream& operator<<(std::ostream& os, const CallDescriptor& d) {
+   // TODO(svenpanne) Output properties etc. and be less cryptic.
+   return os << d.kind() << ":" << d.debug_name() << ":r" << d.ReturnCount()
+-            << "s" << d.StackParameterCount() << "i" << d.InputCount() << "f"
++            << "s" << d.ParameterSlotCount() << "i" << d.InputCount() << "f"
+             << d.FrameStateCount();
+ }
+ 
+@@ -94,43 +98,42 @@ int CallDescriptor::GetStackParameterDelta(
+   return stack_param_delta;
+ }
+ 
+-int CallDescriptor::GetFirstUnusedStackSlot() const {
+-  int start_of_args = 0;
++int CallDescriptor::GetOffsetToFirstUnusedStackSlot() const {
++  int offset = kFirstCallerSlotOffset;
+   for (size_t i = 0; i < InputCount(); ++i) {
+     LinkageLocation operand = GetInputLocation(i);
+     if (!operand.IsRegister()) {
+-      // Reverse, since arguments have negative offsets in the frame.
+-      int reverse_location =
+-          -operand.GetLocation() + operand.GetSizeInPointers() - 1;
+-      DCHECK_GE(reverse_location, 0);
+-      start_of_args = std::max(start_of_args, reverse_location);
++      DCHECK(operand.IsCallerFrameSlot());
++      int slot_offset = -operand.GetLocation();
++      offset = std::max(offset, slot_offset + operand.GetSizeInPointers());
+     }
+   }
+-  return start_of_args;
++  return offset;
+ }
+ 
+ int CallDescriptor::GetOffsetToReturns() const {
+-  // If there are return stack slots, return the first slot of the last one.
+-  constexpr int kNoReturnSlot = std::numeric_limits<int>::max();
+-  int end_of_returns = kNoReturnSlot;
++  // Find the return slot with the least offset relative to the callee.
++  int offset = kNoCallerSlotOffset;
+   for (size_t i = 0; i < ReturnCount(); ++i) {
+     LinkageLocation operand = GetReturnLocation(i);
+     if (!operand.IsRegister()) {
+-      // Reverse, since returns have negative offsets in the frame.
+-      int reverse_location = -operand.GetLocation() - 1;
+-      DCHECK_GE(reverse_location, 0);
+-      end_of_returns = std::min(end_of_returns, reverse_location);
++      DCHECK(operand.IsCallerFrameSlot());
++      int slot_offset = -operand.GetLocation();
++      offset = std::min(offset, slot_offset);
+     }
+   }
+-  if (end_of_returns != kNoReturnSlot) return end_of_returns;
++  // If there was a return slot, return the offset minus 1 slot.
++  if (offset != kNoCallerSlotOffset) {
++    return offset - 1;
++  }
+ 
+-  // Otherwise, return the first unused slot before the parameters, with any
+-  // additional padding slot if it exists.
+-  end_of_returns = GetFirstUnusedStackSlot();
+-  end_of_returns += ArgumentPaddingSlots(end_of_returns);
++  // Otherwise, return the first slot after the parameters area, including
++  // optional padding slots.
++  int last_argument_slot = GetOffsetToFirstUnusedStackSlot() - 1;
++  offset = AddArgumentPaddingSlots(last_argument_slot);
+ 
+-  DCHECK_EQ(end_of_returns == 0, StackParameterCount() == 0);
+-  return end_of_returns;
++  DCHECK_IMPLIES(offset == 0, ParameterSlotCount() == 0);
++  return offset;
+ }
+ 
+ int CallDescriptor::GetTaggedParameterSlots() const {
+diff --git a/src/compiler/linkage.h b/src/compiler/linkage.h
+index 4aecb7c3a85..2f8c2127969 100644
+--- a/src/compiler/linkage.h
++++ b/src/compiler/linkage.h
+@@ -254,20 +254,20 @@ class V8_EXPORT_PRIVATE CallDescriptor final
+   using Flags = base::Flags<Flag>;
+ 
+   CallDescriptor(Kind kind, MachineType target_type, LinkageLocation target_loc,
+-                 LocationSignature* location_sig, size_t stack_param_count,
++                 LocationSignature* location_sig, size_t param_slot_count,
+                  Operator::Properties properties,
+                  RegList callee_saved_registers,
+                  RegList callee_saved_fp_registers, Flags flags,
+                  const char* debug_name = "",
+                  StackArgumentOrder stack_order = StackArgumentOrder::kDefault,
+                  const RegList allocatable_registers = 0,
+-                 size_t stack_return_count = 0)
++                 size_t return_slot_count = 0)
+       : kind_(kind),
+         target_type_(target_type),
+         target_loc_(target_loc),
+         location_sig_(location_sig),
+-        stack_param_count_(stack_param_count),
+-        stack_return_count_(stack_return_count),
++        param_slot_count_(param_slot_count),
++        return_slot_count_(return_slot_count),
+         properties_(properties),
+         callee_saved_registers_(callee_saved_registers),
+         callee_saved_fp_registers_(callee_saved_fp_registers),
+@@ -308,15 +308,15 @@ class V8_EXPORT_PRIVATE CallDescriptor final
+   size_t ParameterCount() const { return location_sig_->parameter_count(); }
+ 
+   // The number of stack parameter slots to the call.
+-  size_t StackParameterCount() const { return stack_param_count_; }
++  size_t ParameterSlotCount() const { return param_slot_count_; }
+ 
+   // The number of stack return value slots from the call.
+-  size_t StackReturnCount() const { return stack_return_count_; }
++  size_t ReturnSlotCount() const { return return_slot_count_; }
+ 
+   // The number of parameters to the JS function call.
+   size_t JSParameterCount() const {
+     DCHECK(IsJSFunctionCall());
+-    return stack_param_count_;
++    return param_slot_count_;
+   }
+ 
+   int GetStackIndexFromSlot(int slot_index) const {
+@@ -324,7 +324,7 @@ class V8_EXPORT_PRIVATE CallDescriptor final
+       case StackArgumentOrder::kDefault:
+         return -slot_index - 1;
+       case StackArgumentOrder::kJS:
+-        return slot_index + static_cast<int>(StackParameterCount());
++        return slot_index + static_cast<int>(ParameterSlotCount());
+     }
+   }
+ 
+@@ -391,13 +391,15 @@ class V8_EXPORT_PRIVATE CallDescriptor final
+ 
+   int GetStackParameterDelta(const CallDescriptor* tail_caller) const;
+ 
+-  // Returns the first stack slot that is not used by the stack parameters,
+-  // which is the return slot area, or a padding slot for frame alignment.
+-  int GetFirstUnusedStackSlot() const;
++  // Returns the offset to the area below the parameter slots on the stack,
++  // relative to callee slot 0, the return address. If there are no parameter
++  // slots, returns +1.
++  int GetOffsetToFirstUnusedStackSlot() const;
+ 
+-  // If there are return stack slots, returns the first slot of the last one.
+-  // Otherwise, return the first unused slot before the parameters. This is the
+-  // slot where returns would go if there were any.
++  // Returns the offset to the area above the return slots on the stack,
++  // relative to callee slot 0, the return address. If there are no return
++  // slots, returns the offset to the lowest slot of the parameter area.
++  // If there are no parameter slots, returns 0.
+   int GetOffsetToReturns() const;
+ 
+   int GetTaggedParameterSlots() const;
+@@ -426,8 +428,8 @@ class V8_EXPORT_PRIVATE CallDescriptor final
+   const MachineType target_type_;
+   const LinkageLocation target_loc_;
+   const LocationSignature* const location_sig_;
+-  const size_t stack_param_count_;
+-  const size_t stack_return_count_;
++  const size_t param_slot_count_;
++  const size_t return_slot_count_;
+   const Operator::Properties properties_;
+   const RegList callee_saved_registers_;
+   const RegList callee_saved_fp_registers_;
+diff --git a/src/compiler/raw-machine-assembler.cc b/src/compiler/raw-machine-assembler.cc
+index df12030c31d..f79776bad99 100644
+--- a/src/compiler/raw-machine-assembler.cc
++++ b/src/compiler/raw-machine-assembler.cc
+@@ -648,7 +648,7 @@ void RawMachineAssembler::PopAndReturn(Node* pop, Node* value) {
+   //    be dropped in ADDITION to the 'pop' number of arguments).
+   // Additionally, in order to simplify assembly code, PopAndReturn is also
+   // not allowed in builtins with stub linkage and parameters on stack.
+-  CHECK_EQ(call_descriptor()->StackParameterCount(), 0);
++  CHECK_EQ(call_descriptor()->ParameterSlotCount(), 0);
+   Node* values[] = {pop, value};
+   Node* ret = MakeNode(common()->Return(1), 2, values);
+   schedule()->AddReturn(CurrentBlock(), ret);
+diff --git a/src/wasm/baseline/liftoff-assembler.cc b/src/wasm/baseline/liftoff-assembler.cc
+index 35c34f1f693..fa6bf24a724 100644
+--- a/src/wasm/baseline/liftoff-assembler.cc
++++ b/src/wasm/baseline/liftoff-assembler.cc
+@@ -838,7 +838,7 @@ void LiftoffAssembler::PrepareBuiltinCall(
+   PrepareStackTransfers(sig, call_descriptor, params.begin(), &stack_slots,
+                         &stack_transfers, &param_regs);
+   SpillAllRegisters();
+-  int param_slots = static_cast<int>(call_descriptor->StackParameterCount());
++  int param_slots = static_cast<int>(call_descriptor->ParameterSlotCount());
+   if (param_slots > 0) {
+     stack_slots.Construct(param_slots);
+   }
+@@ -884,7 +884,7 @@ void LiftoffAssembler::PrepareCall(const ValueKindSig* sig,
+                                  LiftoffRegister(*target_instance), kIntPtr);
+   }
+ 
+-  int param_slots = static_cast<int>(call_descriptor->StackParameterCount());
++  int param_slots = static_cast<int>(call_descriptor->ParameterSlotCount());
+   if (num_params) {
+     uint32_t param_base = cache_state_.stack_height() - num_params;
+     PrepareStackTransfers(sig, call_descriptor,
+@@ -968,7 +968,7 @@ void LiftoffAssembler::FinishCall(const ValueKindSig* sig,
+                                                          reg_pair[1].gp()));
+     }
+   }
+-  int return_slots = static_cast<int>(call_descriptor->StackReturnCount());
++  int return_slots = static_cast<int>(call_descriptor->ReturnSlotCount());
+   RecordUsedSpillOffset(TopSpillOffset() + return_slots * kSystemPointerSize);
+ }
+ 
+diff --git a/src/wasm/baseline/liftoff-compiler.cc b/src/wasm/baseline/liftoff-compiler.cc
+index 68826f4036f..6994588c912 100644
+--- a/src/wasm/baseline/liftoff-compiler.cc
++++ b/src/wasm/baseline/liftoff-compiler.cc
+@@ -839,7 +839,7 @@ class LiftoffCompiler {
+       DEBUG_CODE_COMMENT("leave frame");
+       __ LeaveFrame(StackFrame::WASM);
+       __ DropStackSlotsAndRet(
+-          static_cast<uint32_t>(descriptor_->StackParameterCount()));
++          static_cast<uint32_t>(descriptor_->ParameterSlotCount()));
+       return;
+     }
+ 
+@@ -1911,7 +1911,7 @@ class LiftoffCompiler {
+     DEBUG_CODE_COMMENT("leave frame");
+     __ LeaveFrame(StackFrame::WASM);
+     __ DropStackSlotsAndRet(
+-        static_cast<uint32_t>(descriptor_->StackParameterCount()));
++        static_cast<uint32_t>(descriptor_->ParameterSlotCount()));
+   }
+ 
+   void LocalGet(FullDecoder* decoder, Value* result,
+@@ -5129,7 +5129,7 @@ class LiftoffCompiler {
+       __ PrepareCall(sig, call_descriptor, &target, explicit_instance);
+       if (call_kind == kReturnCall) {
+         __ PrepareTailCall(
+-            static_cast<int>(call_descriptor->StackParameterCount()),
++            static_cast<int>(call_descriptor->ParameterSlotCount()),
+             static_cast<int>(
+                 call_descriptor->GetStackParameterDelta(descriptor_)));
+         __ TailCallIndirect(target);
+@@ -5147,7 +5147,7 @@ class LiftoffCompiler {
+       if (call_kind == kReturnCall) {
+         DCHECK(descriptor_->CanTailCall(call_descriptor));
+         __ PrepareTailCall(
+-            static_cast<int>(call_descriptor->StackParameterCount()),
++            static_cast<int>(call_descriptor->ParameterSlotCount()),
+             static_cast<int>(
+                 call_descriptor->GetStackParameterDelta(descriptor_)));
+         __ TailCallNativeWasmCode(addr);
+@@ -5319,7 +5319,7 @@ class LiftoffCompiler {
+     __ PrepareCall(sig, call_descriptor, &target, explicit_instance);
+     if (call_kind == kReturnCall) {
+       __ PrepareTailCall(
+-          static_cast<int>(call_descriptor->StackParameterCount()),
++          static_cast<int>(call_descriptor->ParameterSlotCount()),
+           static_cast<int>(
+               call_descriptor->GetStackParameterDelta(descriptor_)));
+       __ TailCallIndirect(target);
+@@ -5530,7 +5530,7 @@ class LiftoffCompiler {
+     __ PrepareCall(sig, call_descriptor, &target_reg, &instance_reg);
+     if (call_kind == kReturnCall) {
+       __ PrepareTailCall(
+-          static_cast<int>(call_descriptor->StackParameterCount()),
++          static_cast<int>(call_descriptor->ParameterSlotCount()),
+           static_cast<int>(
+               call_descriptor->GetStackParameterDelta(descriptor_)));
+       __ TailCallIndirect(target_reg);
+diff --git a/test/cctest/compiler/test-linkage.cc b/test/cctest/compiler/test-linkage.cc
+index 73aa8064790..ec540202688 100644
+--- a/test/cctest/compiler/test-linkage.cc
++++ b/test/cctest/compiler/test-linkage.cc
+@@ -114,7 +114,7 @@ TEST(TestLinkageStubCall) {
+       &zone, callable.descriptor(), 0, CallDescriptor::kNoFlags,
+       Operator::kNoProperties);
+   CHECK(call_descriptor);
+-  CHECK_EQ(0, static_cast<int>(call_descriptor->StackParameterCount()));
++  CHECK_EQ(0, static_cast<int>(call_descriptor->ParameterSlotCount()));
+   CHECK_EQ(1, static_cast<int>(call_descriptor->ReturnCount()));
+   CHECK_EQ(Operator::kNoProperties, call_descriptor->properties());
+   CHECK_EQ(false, call_descriptor->IsJSFunctionCall());
+@@ -135,7 +135,7 @@ TEST(TestFPLinkageStubCall) {
+       &zone, callable.descriptor(), 0, CallDescriptor::kNoFlags,
+       Operator::kNoProperties);
+   CHECK(call_descriptor);
+-  CHECK_EQ(0, static_cast<int>(call_descriptor->StackParameterCount()));
++  CHECK_EQ(0, static_cast<int>(call_descriptor->ParameterSlotCount()));
+   CHECK_EQ(1, static_cast<int>(call_descriptor->ParameterCount()));
+   CHECK_EQ(1, static_cast<int>(call_descriptor->ReturnCount()));
+   CHECK_EQ(Operator::kNoProperties, call_descriptor->properties());
+diff --git a/test/cctest/compiler/test-run-retpoline.cc b/test/cctest/compiler/test-run-retpoline.cc
+index c0a8324286a..090351bc389 100644
+--- a/test/cctest/compiler/test-run-retpoline.cc
++++ b/test/cctest/compiler/test-run-retpoline.cc
+@@ -24,9 +24,9 @@ namespace {
+ Handle<Code> BuildCallee(Isolate* isolate, CallDescriptor* call_descriptor) {
+   CodeAssemblerTester tester(isolate, call_descriptor, "callee");
+   CodeStubAssembler assembler(tester.state());
+-  int param_count = static_cast<int>(call_descriptor->StackParameterCount());
++  int param_slots = static_cast<int>(call_descriptor->ParameterSlotCount());
+   TNode<IntPtrT> sum = __ IntPtrConstant(0);
+-  for (int i = 0; i < param_count; ++i) {
++  for (int i = 0; i < param_slots; ++i) {
+     TNode<IntPtrT> product = __ Signed(__ IntPtrMul(
+         __ UncheckedParameter<IntPtrT>(i), __ IntPtrConstant(i + 1)));
+     sum = __ IntPtrAdd(sum, product);
+@@ -58,17 +58,17 @@ Handle<Code> BuildCaller(Isolate* isolate, CallDescriptor* call_descriptor,
+   __ BIND(&end);
+   params.push_back(target_var.value());
+ 
+-  int param_count = static_cast<int>(callee_descriptor->StackParameterCount());
+-  for (int i = 0; i < param_count; ++i) {
++  int param_slots = static_cast<int>(callee_descriptor->ParameterSlotCount());
++  for (int i = 0; i < param_slots; ++i) {
+     params.push_back(__ IntPtrConstant(i));
+   }
+-  DCHECK_EQ(param_count + 1, params.size());
++  DCHECK_EQ(param_slots + 1, params.size());
+   if (tail) {
+     tester.raw_assembler_for_testing()->TailCallN(
+-        callee_descriptor, param_count + 1, params.data());
++        callee_descriptor, param_slots + 1, params.data());
+   } else {
+     Node* result = tester.raw_assembler_for_testing()->CallN(
+-        callee_descriptor, param_count + 1, params.data());
++        callee_descriptor, param_slots + 1, params.data());
+     __ Return(__ UncheckedCast<IntPtrT>(result));
+   }
+   return tester.GenerateCodeCloseAndEscape();
+@@ -85,31 +85,30 @@ Handle<Code> BuildSetupFunction(Isolate* isolate,
+   params.push_back(__ HeapConstant(
+       BuildCaller(isolate, caller_descriptor, callee_descriptor, tail)));
+   // Set up arguments for "Caller".
+-  int param_count = static_cast<int>(caller_descriptor->StackParameterCount());
+-  for (int i = 0; i < param_count; ++i) {
++  int param_slots = static_cast<int>(caller_descriptor->ParameterSlotCount());
++  for (int i = 0; i < param_slots; ++i) {
+     // Use values that are different from the ones we will pass to this
+     // function's callee later.
+     params.push_back(__ IntPtrConstant(i + 42));
+   }
+-  DCHECK_EQ(param_count + 1, params.size());
++  DCHECK_EQ(param_slots + 1, params.size());
+   TNode<IntPtrT> intptr_result =
+       __ UncheckedCast<IntPtrT>(tester.raw_assembler_for_testing()->CallN(
+-          caller_descriptor, param_count + 1, params.data()));
++          caller_descriptor, param_slots + 1, params.data()));
+   __ Return(__ SmiTag(intptr_result));
+   return tester.GenerateCodeCloseAndEscape();
+ }
+ 
+-CallDescriptor* CreateDescriptorForStackArguments(Zone* zone,
+-                                                  int stack_param_count) {
++CallDescriptor* CreateDescriptorForStackArguments(Zone* zone, int param_slots) {
+   LocationSignature::Builder locations(zone, 1,
+-                                       static_cast<size_t>(stack_param_count));
++                                       static_cast<size_t>(param_slots));
+ 
+   locations.AddReturn(LinkageLocation::ForRegister(kReturnRegister0.code(),
+                                                    MachineType::IntPtr()));
+ 
+-  for (int i = 0; i < stack_param_count; ++i) {
++  for (int i = 0; i < param_slots; ++i) {
+     locations.AddParam(LinkageLocation::ForCallerFrameSlot(
+-        i - stack_param_count, MachineType::IntPtr()));
++        i - param_slots, MachineType::IntPtr()));
+   }
+ 
+   return zone->New<CallDescriptor>(
+@@ -118,7 +117,7 @@ CallDescriptor* CreateDescriptorForStackArguments(Zone* zone,
+       LinkageLocation::ForAnyRegister(
+           MachineType::AnyTagged()),  // target location
+       locations.Build(),              // location_sig
+-      stack_param_count,              // stack_parameter_count
++      param_slots,                    // stack parameter slots
+       Operator::kNoProperties,        // properties
+       kNoCalleeSaved,                 // callee-saved registers
+       kNoCalleeSaved,                 // callee-saved fp
+diff --git a/test/cctest/compiler/test-run-tail-calls.cc b/test/cctest/compiler/test-run-tail-calls.cc
+index 0601c161c1c..06b2529ad69 100644
+--- a/test/cctest/compiler/test-run-tail-calls.cc
++++ b/test/cctest/compiler/test-run-tail-calls.cc
+@@ -25,9 +25,9 @@ namespace {
+ Handle<Code> BuildCallee(Isolate* isolate, CallDescriptor* call_descriptor) {
+   CodeAssemblerTester tester(isolate, call_descriptor, "callee");
+   CodeStubAssembler assembler(tester.state());
+-  int param_count = static_cast<int>(call_descriptor->StackParameterCount());
++  int param_slots = static_cast<int>(call_descriptor->ParameterSlotCount());
+   TNode<IntPtrT> sum = __ IntPtrConstant(0);
+-  for (int i = 0; i < param_count; ++i) {
++  for (int i = 0; i < param_slots; ++i) {
+     TNode<WordT> product = __ IntPtrMul(__ UncheckedParameter<IntPtrT>(i),
+                                         __ IntPtrConstant(i + 1));
+     sum = __ Signed(__ IntPtrAdd(sum, product));
+@@ -45,13 +45,13 @@ Handle<Code> BuildCaller(Isolate* isolate, CallDescriptor* call_descriptor,
+   std::vector<Node*> params;
+   // The first parameter is always the callee.
+   params.push_back(__ HeapConstant(BuildCallee(isolate, callee_descriptor)));
+-  int param_count = static_cast<int>(callee_descriptor->StackParameterCount());
+-  for (int i = 0; i < param_count; ++i) {
++  int param_slots = static_cast<int>(callee_descriptor->ParameterSlotCount());
++  for (int i = 0; i < param_slots; ++i) {
+     params.push_back(__ IntPtrConstant(i));
+   }
+-  DCHECK_EQ(param_count + 1, params.size());
++  DCHECK_EQ(param_slots + 1, params.size());
+   tester.raw_assembler_for_testing()->TailCallN(callee_descriptor,
+-                                                param_count + 1, params.data());
++                                                param_slots + 1, params.data());
+   return tester.GenerateCodeCloseAndEscape();
+ }
+ 
+@@ -66,31 +66,30 @@ Handle<Code> BuildSetupFunction(Isolate* isolate,
+   params.push_back(__ HeapConstant(
+       BuildCaller(isolate, caller_descriptor, callee_descriptor)));
+   // Set up arguments for "Caller".
+-  int param_count = static_cast<int>(caller_descriptor->StackParameterCount());
+-  for (int i = 0; i < param_count; ++i) {
++  int param_slots = static_cast<int>(caller_descriptor->ParameterSlotCount());
++  for (int i = 0; i < param_slots; ++i) {
+     // Use values that are different from the ones we will pass to this
+     // function's callee later.
+     params.push_back(__ IntPtrConstant(i + 42));
+   }
+-  DCHECK_EQ(param_count + 1, params.size());
++  DCHECK_EQ(param_slots + 1, params.size());
+   TNode<IntPtrT> intptr_result =
+       __ UncheckedCast<IntPtrT>(tester.raw_assembler_for_testing()->CallN(
+-          caller_descriptor, param_count + 1, params.data()));
++          caller_descriptor, param_slots + 1, params.data()));
+   __ Return(__ SmiTag(intptr_result));
+   return tester.GenerateCodeCloseAndEscape();
+ }
+ 
+-CallDescriptor* CreateDescriptorForStackArguments(Zone* zone,
+-                                                  int stack_param_count) {
++CallDescriptor* CreateDescriptorForStackArguments(Zone* zone, int param_slots) {
+   LocationSignature::Builder locations(zone, 1,
+-                                       static_cast<size_t>(stack_param_count));
++                                       static_cast<size_t>(param_slots));
+ 
+   locations.AddReturn(LinkageLocation::ForRegister(kReturnRegister0.code(),
+                                                    MachineType::IntPtr()));
+ 
+-  for (int i = 0; i < stack_param_count; ++i) {
++  for (int i = 0; i < param_slots; ++i) {
+     locations.AddParam(LinkageLocation::ForCallerFrameSlot(
+-        i - stack_param_count, MachineType::IntPtr()));
++        i - param_slots, MachineType::IntPtr()));
+   }
+ 
+   return zone->New<CallDescriptor>(
+@@ -99,7 +98,7 @@ CallDescriptor* CreateDescriptorForStackArguments(Zone* zone,
+       LinkageLocation::ForAnyRegister(
+           MachineType::AnyTagged()),  // target location
+       locations.Build(),              // location_sig
+-      stack_param_count,              // stack_parameter_count
++      param_slots,                    // stack parameter slots
+       Operator::kNoProperties,        // properties
+       kNoCalleeSaved,                 // callee-saved registers
+       kNoCalleeSaved,                 // callee-saved fp
+-- 
+2.35.1
+

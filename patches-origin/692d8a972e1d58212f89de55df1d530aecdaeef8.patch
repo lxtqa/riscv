@@ -1,0 +1,1023 @@
+From 692d8a972e1d58212f89de55df1d530aecdaeef8 Mon Sep 17 00:00:00 2001
+From: Jakob Kummerow <jkummerow@chromium.org>
+Date: Tue, 14 Mar 2023 21:07:09 +0100
+Subject: [PATCH] [wasm-gc] Make GC and inlining configurable by Origin Trial
+
+By making all code check "enabled_features" instead of "v8_flags".
+
+Bug: v8:7748, v8:13809, v8:13810
+Change-Id: I6acca058e71ed821c525f2fe670a3f2f860ab00d
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4336327
+Reviewed-by: Adam Klein <adamk@chromium.org>
+Commit-Queue: Adam Klein <adamk@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#86428}
+---
+ src/compiler/js-inlining.cc                   |  8 +++----
+ src/compiler/pipeline.cc                      | 19 ++++++++--------
+ src/compiler/wasm-compiler.cc                 | 22 +++++++++----------
+ src/compiler/wasm-compiler.h                  | 13 +++++++----
+ src/compiler/wasm-inlining.cc                 |  4 ++--
+ src/execution/frames.cc                       |  2 +-
+ src/execution/isolate.cc                      | 13 +++++++++++
+ src/execution/isolate.h                       |  1 +
+ src/flags/flag-definitions.h                  |  4 ++++
+ src/runtime/runtime-wasm.cc                   |  9 +++++---
+ src/wasm/baseline/arm/liftoff-assembler-arm.h |  5 +++--
+ .../baseline/arm64/liftoff-assembler-arm64.h  |  5 +++--
+ .../baseline/ia32/liftoff-assembler-ia32.h    |  5 +++--
+ src/wasm/baseline/liftoff-assembler.h         |  3 ++-
+ src/wasm/baseline/liftoff-compiler.cc         | 19 ++++++++--------
+ .../loong64/liftoff-assembler-loong64.h       |  5 +++--
+ .../mips64/liftoff-assembler-mips64.h         |  5 +++--
+ src/wasm/baseline/ppc/liftoff-assembler-ppc.h |  5 +++--
+ .../baseline/riscv/liftoff-assembler-riscv.h  |  5 +++--
+ .../baseline/s390/liftoff-assembler-s390.h    |  5 +++--
+ src/wasm/baseline/x64/liftoff-assembler-x64.h |  5 +++--
+ src/wasm/function-compiler.cc                 |  5 ++++-
+ src/wasm/function-compiler.h                  |  1 +
+ src/wasm/graph-builder-interface.cc           | 12 +++++-----
+ src/wasm/module-compiler.cc                   |  6 ++---
+ src/wasm/module-instantiate.cc                |  4 ++--
+ src/wasm/wasm-code-manager.cc                 | 18 ++++++++-------
+ src/wasm/wasm-code-manager.h                  | 14 +++++++++---
+ src/wasm/wasm-feature-flags.h                 |  3 +++
+ src/wasm/wasm-features.cc                     |  7 ++++--
+ src/wasm/wasm-js.cc                           |  2 ++
+ src/wasm/wasm-module.cc                       |  1 -
+ src/wasm/wasm-subtyping.cc                    |  5 ++---
+ .../cctest/wasm/test-streaming-compilation.cc |  3 ++-
+ 34 files changed, 151 insertions(+), 92 deletions(-)
+
+diff --git a/src/compiler/js-inlining.cc b/src/compiler/js-inlining.cc
+index 79169bfac69..f0377c030d3 100644
+--- a/src/compiler/js-inlining.cc
++++ b/src/compiler/js-inlining.cc
+@@ -399,14 +399,14 @@ Reduction JSInliner::ReduceJSWasmCall(Node* node) {
+   // TODO(7748): It would be useful to also support inlining of wasm functions
+   // if they are surrounded by a try block which requires further work, so that
+   // the wasm trap gets forwarded to the corresponding catch block.
+-  if (v8_flags.experimental_wasm_gc && v8_flags.experimental_wasm_js_inlining &&
+-      fct_index != -1 && native_module &&
+-      native_module->module() == wasm_module_ &&
++  if (native_module->enabled_features().has_gc() &&
++      v8_flags.experimental_wasm_js_inlining && fct_index != -1 &&
++      native_module && native_module->module() == wasm_module_ &&
+       !NodeProperties::IsExceptionalCall(node)) {
+     Graph::SubgraphScope graph_scope(graph());
+     WasmGraphBuilder builder(nullptr, zone(), jsgraph(), sig, source_positions_,
+                              WasmGraphBuilder::kNoSpecialParameterMode,
+-                             isolate());
++                             isolate(), native_module->enabled_features());
+     can_inline_body = builder.TryWasmInlining(fct_index, native_module);
+     inlinee_body_start = graph()->start();
+     inlinee_body_end = graph()->end();
+diff --git a/src/compiler/pipeline.cc b/src/compiler/pipeline.cc
+index 5db2da1feb2..9a39db07f55 100644
+--- a/src/compiler/pipeline.cc
++++ b/src/compiler/pipeline.cc
+@@ -2196,12 +2196,13 @@ struct WasmOptimizationPhase {
+ 
+   void Run(PipelineData* data, Zone* temp_zone,
+            MachineOperatorReducer::SignallingNanPropagation
+-               signalling_nan_propagation) {
++               signalling_nan_propagation,
++           wasm::WasmFeatures features) {
+     // Run optimizations in two rounds: First one around load elimination and
+     // then one around branch elimination. This is because those two
+     // optimizations sometimes display quadratic complexity when run together.
+     // We only need load elimination for managed objects.
+-    if (v8_flags.experimental_wasm_gc) {
++    if (features.has_gc()) {
+       GraphReducer graph_reducer(temp_zone, data->graph(),
+                                  &data->info()->tick_counter(), data->broker(),
+                                  data->jsgraph()->Dead(),
+@@ -3437,6 +3438,7 @@ void Pipeline::GenerateCodeForWasmFunction(
+     ZoneVector<WasmInliningPosition>* inlining_positions) {
+   auto* wasm_engine = wasm::GetWasmEngine();
+   const wasm::WasmModule* module = env->module;
++  wasm::WasmFeatures features = env->enabled_features;
+   base::TimeTicks start_time;
+   if (V8_UNLIKELY(v8_flags.trace_wasm_compilation_times)) {
+     start_time = base::TimeTicks::Now();
+@@ -3470,7 +3472,7 @@ void Pipeline::GenerateCodeForWasmFunction(
+ #endif  // V8_ENABLE_WASM_SIMD256_REVEC
+ 
+   data.BeginPhaseKind("V8.WasmOptimization");
+-  if (v8_flags.wasm_inlining) {
++  if (features.has_inlining()) {
+     pipeline.Run<WasmInliningPhase>(env, compilation_data, inlining_positions);
+     pipeline.RunPrintAndVerify(WasmInliningPhase::phase_name(), true);
+   }
+@@ -3487,7 +3489,7 @@ void Pipeline::GenerateCodeForWasmFunction(
+       is_asm_js ? MachineOperatorReducer::kPropagateSignallingNan
+                 : MachineOperatorReducer::kSilenceSignallingNan;
+ 
+-  if (v8_flags.experimental_wasm_gc || v8_flags.experimental_wasm_stringref) {
++  if (features.has_gc() || features.has_stringref()) {
+     pipeline.Run<WasmTypingPhase>(compilation_data.func_index);
+     pipeline.RunPrintAndVerify(WasmTypingPhase::phase_name(), true);
+     if (v8_flags.wasm_opt) {
+@@ -3497,9 +3499,8 @@ void Pipeline::GenerateCodeForWasmFunction(
+   }
+ 
+   // These proposals use gc nodes.
+-  if (v8_flags.experimental_wasm_gc ||
+-      v8_flags.experimental_wasm_typed_funcref ||
+-      v8_flags.experimental_wasm_stringref) {
++  if (features.has_gc() || features.has_typed_funcref() ||
++      features.has_stringref()) {
+     pipeline.Run<WasmGCLoweringPhase>(module);
+     pipeline.RunPrintAndVerify(WasmGCLoweringPhase::phase_name(), true);
+   }
+@@ -3512,7 +3513,7 @@ void Pipeline::GenerateCodeForWasmFunction(
+              pipeline);
+ 
+   if (v8_flags.wasm_opt || is_asm_js) {
+-    pipeline.Run<WasmOptimizationPhase>(signalling_nan_propagation);
++    pipeline.Run<WasmOptimizationPhase>(signalling_nan_propagation, features);
+     pipeline.RunPrintAndVerify(WasmOptimizationPhase::phase_name(), true);
+   } else {
+     pipeline.Run<WasmBaseOptimizationPhase>();
+@@ -3522,7 +3523,7 @@ void Pipeline::GenerateCodeForWasmFunction(
+   pipeline.Run<MemoryOptimizationPhase>();
+   pipeline.RunPrintAndVerify(MemoryOptimizationPhase::phase_name(), true);
+ 
+-  if (v8_flags.experimental_wasm_gc && v8_flags.wasm_opt) {
++  if (features.has_gc() && v8_flags.wasm_opt) {
+     // Run value numbering and machine operator reducer to optimize load/store
+     // address computation (in particular, reuse the address computation
+     // whenever possible).
+diff --git a/src/compiler/wasm-compiler.cc b/src/compiler/wasm-compiler.cc
+index 8e1e7007439..0ff6428073b 100644
+--- a/src/compiler/wasm-compiler.cc
++++ b/src/compiler/wasm-compiler.cc
+@@ -132,11 +132,13 @@ WasmGraphBuilder::WasmGraphBuilder(
+     wasm::CompilationEnv* env, Zone* zone, MachineGraph* mcgraph,
+     const wasm::FunctionSig* sig,
+     compiler::SourcePositionTable* source_position_table,
+-    Parameter0Mode parameter_mode, Isolate* isolate)
++    Parameter0Mode parameter_mode, Isolate* isolate,
++    wasm::WasmFeatures enabled_features)
+     : gasm_(std::make_unique<WasmGraphAssembler>(mcgraph, zone)),
+       zone_(zone),
+       mcgraph_(mcgraph),
+       env_(env),
++      enabled_features_(enabled_features),
+       has_simd_(ContainsSimd(sig)),
+       sig_(sig),
+       source_position_table_(source_position_table),
+@@ -159,7 +161,7 @@ WasmGraphBuilder::~WasmGraphBuilder() = default;
+ bool WasmGraphBuilder::TryWasmInlining(int fct_index,
+                                        wasm::NativeModule* native_module) {
+   DCHECK(v8_flags.experimental_wasm_js_inlining);
+-  DCHECK(v8_flags.experimental_wasm_gc);
++  DCHECK(native_module->enabled_features().has_gc());
+   DCHECK(native_module->HasWireBytes());
+   const wasm::WasmModule* module = native_module->module();
+   const wasm::WasmFunction& inlinee = module->functions[fct_index];
+@@ -179,7 +181,7 @@ bool WasmGraphBuilder::TryWasmInlining(int fct_index,
+   // If the inlinee was not validated before, do that now.
+   if (V8_UNLIKELY(!module->function_was_validated(fct_index))) {
+     wasm::WasmFeatures unused_detected_features;
+-    if (ValidateFunctionBody(env_->enabled_features, module,
++    if (ValidateFunctionBody(enabled_features_, module,
+                              &unused_detected_features, inlinee_body)
+             .failed()) {
+       // At this point we cannot easily raise a compilation error any more.
+@@ -329,7 +331,7 @@ Node* WasmGraphBuilder::EffectPhi(unsigned count, Node** effects_and_control) {
+ }
+ 
+ Node* WasmGraphBuilder::RefNull(wasm::ValueType type) {
+-  return (v8_flags.experimental_wasm_gc && parameter_mode_ == kInstanceMode)
++  return (enabled_features_.has_gc() && parameter_mode_ == kInstanceMode)
+              ? gasm_->Null(type)
+          : (type == wasm::kWasmExternRef || type == wasm::kWasmNullExternRef)
+              ? LOAD_ROOT(NullValue, null_value)
+@@ -2649,7 +2651,7 @@ Node* WasmGraphBuilder::BuildDiv64Call(Node* left, Node* right,
+ }
+ 
+ Node* WasmGraphBuilder::IsNull(Node* object, wasm::ValueType type) {
+-  return (v8_flags.experimental_wasm_gc && parameter_mode_ == kInstanceMode)
++  return (enabled_features_.has_gc() && parameter_mode_ == kInstanceMode)
+              ? gasm_->IsNull(object, type)
+              : gasm_->TaggedEqual(object, RefNull(type));
+ }
+@@ -2918,7 +2920,7 @@ Node* WasmGraphBuilder::BuildIndirectCall(uint32_t table_index,
+                                              int32_scaled_key);
+     Node* sig_match = gasm_->Word32Equal(loaded_sig, expected_sig_id);
+ 
+-    if (v8_flags.experimental_wasm_gc &&
++    if (enabled_features_.has_gc() &&
+         !env_->module->types[sig_index].is_final) {
+       // Do a full subtyping check.
+       auto end_label = gasm_->MakeLabel();
+@@ -6531,10 +6533,9 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
+                           compiler::SourcePositionTable* spt,
+                           StubCallMode stub_mode, wasm::WasmFeatures features)
+       : WasmGraphBuilder(nullptr, zone, mcgraph, sig, spt, parameter_mode,
+-                         isolate),
++                         isolate, features),
+         module_(module),
+-        stub_mode_(stub_mode),
+-        enabled_features_(features) {}
++        stub_mode_(stub_mode) {}
+ 
+   CallDescriptor* GetBigIntToI64CallDescriptor(bool needs_frame_state) {
+     return wasm::GetWasmEngine()->call_descriptors()->GetBigIntToI64Descriptor(
+@@ -7958,7 +7959,6 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
+   SetOncePointer<const Operator> float32_to_number_operator_;
+   SetOncePointer<const Operator> float64_to_number_operator_;
+   SetOncePointer<const Operator> tagged_to_float64_operator_;
+-  wasm::WasmFeatures enabled_features_;
+ };
+ 
+ }  // namespace
+@@ -8764,7 +8764,7 @@ wasm::WasmCompilationResult ExecuteTurbofanWasmCompilation(
+     info.set_wasm_runtime_exception_support();
+   }
+ 
+-  if (v8_flags.experimental_wasm_gc) info.set_allocation_folding();
++  if (env->enabled_features.has_gc()) info.set_allocation_folding();
+ 
+   if (info.trace_turbo_json()) {
+     TurboCfgFile tcf;
+diff --git a/src/compiler/wasm-compiler.h b/src/compiler/wasm-compiler.h
+index d4a7ed52c84..fb690022a44 100644
+--- a/src/compiler/wasm-compiler.h
++++ b/src/compiler/wasm-compiler.h
+@@ -19,6 +19,7 @@
+ #include "src/runtime/runtime.h"
+ #include "src/wasm/function-body-decoder.h"
+ #include "src/wasm/function-compiler.h"
++#include "src/wasm/wasm-features.h"
+ #include "src/wasm/wasm-module.h"
+ #include "src/wasm/wasm-opcodes.h"
+ #include "src/wasm/wasm-result.h"
+@@ -53,7 +54,6 @@ namespace wasm {
+ class AssemblerBufferCache;
+ struct DecodeStruct;
+ class WasmCode;
+-class WasmFeatures;
+ class WireBytesStorage;
+ enum class LoadTransformationKind : uint8_t;
+ enum Suspend : bool;
+@@ -241,15 +241,16 @@ class WasmGraphBuilder {
+       wasm::CompilationEnv* env, Zone* zone, MachineGraph* mcgraph,
+       const wasm::FunctionSig* sig,
+       compiler::SourcePositionTable* spt = nullptr)
+-      : WasmGraphBuilder(env, zone, mcgraph, sig, spt, kInstanceMode, nullptr) {
+-  }
++      : WasmGraphBuilder(env, zone, mcgraph, sig, spt, kInstanceMode, nullptr,
++                         env->enabled_features) {}
+ 
+   V8_EXPORT_PRIVATE WasmGraphBuilder(wasm::CompilationEnv* env, Zone* zone,
+                                      MachineGraph* mcgraph,
+                                      const wasm::FunctionSig* sig,
+                                      compiler::SourcePositionTable* spt,
+                                      Parameter0Mode parameter_mode,
+-                                     Isolate* isolate);
++                                     Isolate* isolate,
++                                     wasm::WasmFeatures enabled_features);
+ 
+   V8_EXPORT_PRIVATE ~WasmGraphBuilder();
+ 
+@@ -876,6 +877,10 @@ class WasmGraphBuilder {
+   Zone* const zone_;
+   MachineGraph* const mcgraph_;
+   wasm::CompilationEnv* const env_;
++  // For the main WasmGraphBuilder class, this is identical to the features
++  // field in {env_}, but the WasmWrapperGraphBuilder subclass doesn't have
++  // that, so common code should use this field instead.
++  wasm::WasmFeatures enabled_features_;
+ 
+   Node** parameters_;
+ 
+diff --git a/src/compiler/wasm-inlining.cc b/src/compiler/wasm-inlining.cc
+index c4875439226..ee8e15247e1 100644
+--- a/src/compiler/wasm-inlining.cc
++++ b/src/compiler/wasm-inlining.cc
+@@ -37,7 +37,7 @@ void WasmInliner::Trace(Node* call, int inlinee, const char* decision) {
+ }
+ 
+ int WasmInliner::GetCallCount(Node* call) {
+-  if (!v8_flags.wasm_speculative_inlining) return 0;
++  if (!env_->enabled_features.has_inlining()) return 0;
+   return mcgraph()->GetCallCount(call->id());
+ }
+ 
+@@ -98,7 +98,7 @@ Reduction WasmInliner::ReduceCall(Node* call) {
+ 
+   // If liftoff ran and collected call counts, only inline calls that have been
+   // invoked often, except for truly tiny functions.
+-  if (v8_flags.liftoff && v8_flags.wasm_speculative_inlining &&
++  if (v8_flags.liftoff && env_->enabled_features.has_inlining() &&
+       wire_byte_size >= 12 && call_count < min_count_for_inlining) {
+     Trace(call, inlinee_index, "not called often enough");
+     return NoChange();
+diff --git a/src/execution/frames.cc b/src/execution/frames.cc
+index 1c30844f650..22a648fc3d6 100644
+--- a/src/execution/frames.cc
++++ b/src/execution/frames.cc
+@@ -1294,7 +1294,7 @@ void WasmFrame::Iterate(RootVisitor* v) const {
+                 "WasmExitFrame has one slot more than WasmFrame");
+ 
+   int frame_header_size = WasmFrameConstants::kFixedFrameSizeFromFp;
+-  if (wasm_code->is_liftoff() && v8_flags.wasm_speculative_inlining) {
++  if (wasm_code->is_liftoff() && wasm_code->for_inlining()) {
+     // Frame has Wasm feedback slot.
+     frame_header_size += kSystemPointerSize;
+   }
+diff --git a/src/execution/isolate.cc b/src/execution/isolate.cc
+index 51129f21acc..02ea8653f23 100644
+--- a/src/execution/isolate.cc
++++ b/src/execution/isolate.cc
+@@ -2956,6 +2956,19 @@ bool Isolate::IsWasmStringRefEnabled(Handle<Context> context) {
+ #endif
+ }
+ 
++bool Isolate::IsWasmInliningEnabled(Handle<Context> context) {
++  // If Wasm GC is explicitly enabled via a callback, also enable inlining.
++#ifdef V8_ENABLE_WEBASSEMBLY
++  if (wasm_gc_enabled_callback()) {
++    v8::Local<v8::Context> api_context = v8::Utils::ToLocal(context);
++    return wasm_gc_enabled_callback()(api_context);
++  }
++  return v8_flags.experimental_wasm_inlining;
++#else
++  return false;
++#endif
++}
++
+ Handle<Context> Isolate::GetIncumbentContext() {
+   JavaScriptStackFrameIterator it(this);
+ 
+diff --git a/src/execution/isolate.h b/src/execution/isolate.h
+index b6746d78fc2..36a1eb0fa46 100644
+--- a/src/execution/isolate.h
++++ b/src/execution/isolate.h
+@@ -770,6 +770,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+ 
+   bool IsWasmGCEnabled(Handle<Context> context);
+   bool IsWasmStringRefEnabled(Handle<Context> context);
++  bool IsWasmInliningEnabled(Handle<Context> context);
+ 
+   THREAD_LOCAL_TOP_ADDRESS(Context, pending_handler_context)
+   THREAD_LOCAL_TOP_ADDRESS(Address, pending_handler_entrypoint)
+diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
+index 1e4fe5c60f9..0820ced07b6 100644
+--- a/src/flags/flag-definitions.h
++++ b/src/flags/flag-definitions.h
+@@ -1224,6 +1224,10 @@ DEFINE_BOOL(wasm_final_types, false,
+             "enable final types as default for wasm-gc")
+ DEFINE_IMPLICATION(wasm_speculative_inlining, wasm_inlining)
+ DEFINE_WEAK_IMPLICATION(experimental_wasm_gc, wasm_speculative_inlining)
++// For historical reasons, both --wasm-inlining and --wasm-speculative-inlining
++// are aliases for --experimental-wasm-inlining.
++DEFINE_IMPLICATION(wasm_inlining, experimental_wasm_inlining)
++DEFINE_IMPLICATION(wasm_speculative_inlining, experimental_wasm_inlining)
+ 
+ DEFINE_BOOL(wasm_loop_unrolling, true,
+             "enable loop unrolling for wasm functions")
+diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
+index 6b70e8630be..e87c6771d72 100644
+--- a/src/runtime/runtime-wasm.cc
++++ b/src/runtime/runtime-wasm.cc
+@@ -265,9 +265,9 @@ RUNTIME_FUNCTION(Runtime_WasmCompileLazy) {
+ 
+ RUNTIME_FUNCTION(Runtime_WasmAllocateFeedbackVector) {
+   ClearThreadInWasmScope wasm_flag(isolate);
+-  DCHECK(v8_flags.wasm_speculative_inlining);
+   HandleScope scope(isolate);
+   DCHECK_EQ(3, args.length());
++  DCHECK(wasm::WasmFeatures::FromIsolate(isolate).has_inlining());
+   Handle<WasmInstanceObject> instance(WasmInstanceObject::cast(args[0]),
+                                       isolate);
+   int declared_func_index = args.smi_value_at(1);
+@@ -283,8 +283,11 @@ RUNTIME_FUNCTION(Runtime_WasmAllocateFeedbackVector) {
+ 
+   const wasm::WasmModule* module = native_module->module();
+   int func_index = declared_func_index + module->num_imported_functions;
+-  Handle<FixedArray> vector = isolate->factory()->NewFixedArrayWithZeroes(
+-      NumFeedbackSlots(module, func_index));
++  int num_slots = native_module->enabled_features().has_inlining()
++                      ? NumFeedbackSlots(module, func_index)
++                      : 0;
++  Handle<FixedArray> vector =
++      isolate->factory()->NewFixedArrayWithZeroes(num_slots);
+   DCHECK_EQ(instance->feedback_vectors().get(declared_func_index), Smi::zero());
+   instance->feedback_vectors().set(declared_func_index, *vector);
+   return *vector;
+diff --git a/src/wasm/baseline/arm/liftoff-assembler-arm.h b/src/wasm/baseline/arm/liftoff-assembler-arm.h
+index 68cdeb41445..c0feba5069f 100644
+--- a/src/wasm/baseline/arm/liftoff-assembler-arm.h
++++ b/src/wasm/baseline/arm/liftoff-assembler-arm.h
+@@ -483,13 +483,14 @@ void LiftoffAssembler::PrepareTailCall(int num_callee_stack_params,
+ void LiftoffAssembler::AlignFrameSize() {}
+ 
+ void LiftoffAssembler::PatchPrepareStackFrame(
+-    int offset, SafepointTableBuilder* safepoint_table_builder) {
++    int offset, SafepointTableBuilder* safepoint_table_builder,
++    bool feedback_vector_slot) {
+   // The frame_size includes the frame marker and the instance slot. Both are
+   // pushed as part of frame construction, so we don't need to allocate memory
+   // for them anymore.
+   int frame_size = GetTotalFrameSize() - 2 * kSystemPointerSize;
+   // The frame setup builtin also pushes the feedback vector.
+-  if (v8_flags.wasm_speculative_inlining) {
++  if (feedback_vector_slot) {
+     frame_size -= kSystemPointerSize;
+   }
+ 
+diff --git a/src/wasm/baseline/arm64/liftoff-assembler-arm64.h b/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
+index b620a307510..b53083e0abb 100644
+--- a/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
++++ b/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
+@@ -289,14 +289,15 @@ void LiftoffAssembler::AlignFrameSize() {
+ }
+ 
+ void LiftoffAssembler::PatchPrepareStackFrame(
+-    int offset, SafepointTableBuilder* safepoint_table_builder) {
++    int offset, SafepointTableBuilder* safepoint_table_builder,
++    bool feedback_vector_slot) {
+   // The frame_size includes the frame marker and the instance slot. Both are
+   // pushed as part of frame construction, so we don't need to allocate memory
+   // for them anymore.
+   int frame_size = GetTotalFrameSize() - 2 * kSystemPointerSize;
+   // The frame setup builtin also pushes the feedback vector, and an unused
+   // slot for alignment.
+-  if (v8_flags.wasm_speculative_inlining) {
++  if (feedback_vector_slot) {
+     frame_size = std::max(frame_size - 2 * kSystemPointerSize, 0);
+   }
+ 
+diff --git a/src/wasm/baseline/ia32/liftoff-assembler-ia32.h b/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
+index 31432d6e59b..c3ecfcaab70 100644
+--- a/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
++++ b/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
+@@ -216,13 +216,14 @@ void LiftoffAssembler::PrepareTailCall(int num_callee_stack_params,
+ void LiftoffAssembler::AlignFrameSize() {}
+ 
+ void LiftoffAssembler::PatchPrepareStackFrame(
+-    int offset, SafepointTableBuilder* safepoint_table_builder) {
++    int offset, SafepointTableBuilder* safepoint_table_builder,
++    bool feedback_vector_slot) {
+   // The frame_size includes the frame marker and the instance slot. Both are
+   // pushed as part of frame construction, so we don't need to allocate memory
+   // for them anymore.
+   int frame_size = GetTotalFrameSize() - 2 * kSystemPointerSize;
+   // The frame setup builtin also pushes the feedback vector.
+-  if (v8_flags.wasm_speculative_inlining) {
++  if (feedback_vector_slot) {
+     frame_size -= kSystemPointerSize;
+   }
+   DCHECK_EQ(0, frame_size % kSystemPointerSize);
+diff --git a/src/wasm/baseline/liftoff-assembler.h b/src/wasm/baseline/liftoff-assembler.h
+index 2e17ee53f63..d6dec0a9c3a 100644
+--- a/src/wasm/baseline/liftoff-assembler.h
++++ b/src/wasm/baseline/liftoff-assembler.h
+@@ -769,7 +769,8 @@ class LiftoffAssembler : public MacroAssembler {
+   inline void PrepareTailCall(int num_callee_stack_params,
+                               int stack_param_delta);
+   inline void AlignFrameSize();
+-  inline void PatchPrepareStackFrame(int offset, SafepointTableBuilder*);
++  inline void PatchPrepareStackFrame(int offset, SafepointTableBuilder*,
++                                     bool feedback_vector_slot);
+   inline void FinishCode();
+   inline void AbortCompilation();
+   inline static constexpr int StaticStackFrameSize();
+diff --git a/src/wasm/baseline/liftoff-compiler.cc b/src/wasm/baseline/liftoff-compiler.cc
+index bf61ebc696d..9aefb40a0b8 100644
+--- a/src/wasm/baseline/liftoff-compiler.cc
++++ b/src/wasm/baseline/liftoff-compiler.cc
+@@ -873,7 +873,7 @@ class LiftoffCompiler {
+ 
+     __ CodeEntry();
+ 
+-    if (v8_flags.wasm_speculative_inlining) {
++    if (decoder->enabled_.has_inlining()) {
+       CODE_COMMENT("frame setup");
+       int declared_func_index =
+           func_index_ - env_->module->num_imported_functions;
+@@ -1079,7 +1079,8 @@ class LiftoffCompiler {
+     }
+     DCHECK_EQ(frame_size, __ GetTotalFrameSize());
+     __ PatchPrepareStackFrame(pc_offset_stack_frame_construction_,
+-                              &safepoint_table_builder_);
++                              &safepoint_table_builder_,
++                              decoder->enabled_.has_inlining());
+     __ FinishCode();
+     safepoint_table_builder_.Emit(&asm_, __ GetTotalFrameSlotCountForGC());
+     // Emit the handler table.
+@@ -1095,7 +1096,7 @@ class LiftoffCompiler {
+     DidAssemblerBailout(decoder);
+     DCHECK_EQ(num_exceptions_, 0);
+ 
+-    if (v8_flags.wasm_speculative_inlining &&
++    if (decoder->enabled_.has_inlining() &&
+         !encountered_call_instructions_.empty()) {
+       // Update the call targets stored in the WasmModule.
+       TypeFeedbackStorage& type_feedback = env_->module->type_feedback;
+@@ -7432,7 +7433,7 @@ class LiftoffCompiler {
+     // One slot would be enough for call_direct, but would make index
+     // computations much more complicated.
+     size_t vector_slot = encountered_call_instructions_.size() * 2;
+-    if (v8_flags.wasm_speculative_inlining) {
++    if (decoder->enabled_.has_inlining()) {
+       encountered_call_instructions_.push_back(imm.index);
+     }
+ 
+@@ -7475,7 +7476,7 @@ class LiftoffCompiler {
+     } else {
+       // Inlining direct calls isn't speculative, but existence of the
+       // feedback vector currently depends on this flag.
+-      if (v8_flags.wasm_speculative_inlining) {
++      if (decoder->enabled_.has_inlining()) {
+         LiftoffRegister vector = __ GetUnusedRegister(kGpReg, {});
+         __ Fill(vector, liftoff::kFeedbackVectorOffset, kIntPtrKind);
+         __ IncrementSmi(vector,
+@@ -7588,7 +7589,7 @@ class LiftoffCompiler {
+           AddOutOfLineTrap(decoder, WasmCode::kThrowWasmTrapFuncSigMismatch);
+       __ DropValues(1);
+ 
+-      if (v8_flags.experimental_wasm_gc &&
++      if (decoder->enabled_.has_gc() &&
+           !decoder->module_->types[imm.sig_imm.index].is_final) {
+         Label success_label;
+         FREEZE_STATE(frozen);
+@@ -7746,7 +7747,7 @@ class LiftoffCompiler {
+ 
+     Register target_reg = no_reg, instance_reg = no_reg;
+ 
+-    if (v8_flags.wasm_speculative_inlining) {
++    if (decoder->enabled_.has_inlining()) {
+       LiftoffRegList pinned;
+       LiftoffRegister func_ref = pinned.set(__ PopToRegister(pinned));
+       LiftoffRegister vector = pinned.set(__ GetUnusedRegister(kGpReg, pinned));
+@@ -7773,7 +7774,7 @@ class LiftoffCompiler {
+       target_reg = LiftoffRegister(kReturnRegister0).gp();
+       instance_reg = LiftoffRegister(kReturnRegister1).gp();
+ 
+-    } else {  // v8_flags.wasm_speculative_inlining
++    } else {  // decoder->enabled_.has_inlining()
+       // Non-feedback-collecting version.
+       // Executing a write barrier needs temp registers; doing this on a
+       // conditional branch confuses the LiftoffAssembler's register management.
+@@ -7828,7 +7829,7 @@ class LiftoffCompiler {
+       // is in {instance}.
+       target_reg = target.gp();
+       instance_reg = instance.gp();
+-    }  // v8_flags.wasm_speculative_inlining
++    }  // decoder->enabled_.has_inlining()
+ 
+     __ PrepareCall(&sig, call_descriptor, &target_reg, &instance_reg);
+     if (tail_call) {
+diff --git a/src/wasm/baseline/loong64/liftoff-assembler-loong64.h b/src/wasm/baseline/loong64/liftoff-assembler-loong64.h
+index 67cbbf0e577..3a1ccd6eb87 100644
+--- a/src/wasm/baseline/loong64/liftoff-assembler-loong64.h
++++ b/src/wasm/baseline/loong64/liftoff-assembler-loong64.h
+@@ -209,13 +209,14 @@ void LiftoffAssembler::PrepareTailCall(int num_callee_stack_params,
+ void LiftoffAssembler::AlignFrameSize() {}
+ 
+ void LiftoffAssembler::PatchPrepareStackFrame(
+-    int offset, SafepointTableBuilder* safepoint_table_builder) {
++    int offset, SafepointTableBuilder* safepoint_table_builder,
++    bool feedback_vector_slot) {
+   // The frame_size includes the frame marker and the instance slot. Both are
+   // pushed as part of frame construction, so we don't need to allocate memory
+   // for them anymore.
+   int frame_size = GetTotalFrameSize() - 2 * kSystemPointerSize;
+   // The frame setup builtin also pushes the feedback vector.
+-  if (v8_flags.wasm_speculative_inlining) {
++  if (v8_flags.feedback_vector_slot) {
+     frame_size -= kSystemPointerSize;
+   }
+ 
+diff --git a/src/wasm/baseline/mips64/liftoff-assembler-mips64.h b/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
+index bcf3eceb0f6..96cba24c9d6 100644
+--- a/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
++++ b/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
+@@ -327,13 +327,14 @@ void LiftoffAssembler::PrepareTailCall(int num_callee_stack_params,
+ void LiftoffAssembler::AlignFrameSize() {}
+ 
+ void LiftoffAssembler::PatchPrepareStackFrame(
+-    int offset, SafepointTableBuilder* safepoint_table_builder) {
++    int offset, SafepointTableBuilder* safepoint_table_builder,
++    bool feedback_vector_slot) {
+   // The frame_size includes the frame marker and the instance slot. Both are
+   // pushed as part of frame construction, so we don't need to allocate memory
+   // for them anymore.
+   int frame_size = GetTotalFrameSize() - 2 * kSystemPointerSize;
+   // The frame setup builtin also pushes the feedback vector.
+-  if (v8_flags.wasm_speculative_inlining) {
++  if (feedback_vector_slot) {
+     frame_size -= kSystemPointerSize;
+   }
+ 
+diff --git a/src/wasm/baseline/ppc/liftoff-assembler-ppc.h b/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
+index 47a8eaad704..57120c49811 100644
+--- a/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
++++ b/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
+@@ -111,12 +111,13 @@ void LiftoffAssembler::PrepareTailCall(int num_callee_stack_params,
+ void LiftoffAssembler::AlignFrameSize() {}
+ 
+ void LiftoffAssembler::PatchPrepareStackFrame(
+-    int offset, SafepointTableBuilder* safepoint_table_builder) {
++    int offset, SafepointTableBuilder* safepoint_table_builder,
++    bool feedback_vector_slot) {
+   int frame_size =
+       GetTotalFrameSize() -
+       (V8_EMBEDDED_CONSTANT_POOL_BOOL ? 3 : 2) * kSystemPointerSize;
+   // The frame setup builtin also pushes the feedback vector.
+-  if (v8_flags.wasm_speculative_inlining) {
++  if (feedback_vector_slot) {
+     frame_size -= kSystemPointerSize;
+   }
+ 
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv.h
+index dda83e53b42..52a024cd72c 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv.h
+@@ -61,13 +61,14 @@ void LiftoffAssembler::PrepareTailCall(int num_callee_stack_params,
+ void LiftoffAssembler::AlignFrameSize() {}
+ 
+ void LiftoffAssembler::PatchPrepareStackFrame(
+-    int offset, SafepointTableBuilder* safepoint_table_builder) {
++    int offset, SafepointTableBuilder* safepoint_table_builder,
++    bool feedback_vector_slot) {
+   // The frame_size includes the frame marker and the instance slot. Both are
+   // pushed as part of frame construction, so we don't need to allocate memory
+   // for them anymore.
+   int frame_size = GetTotalFrameSize() - 2 * kSystemPointerSize;
+   // The frame setup builtin also pushes the feedback vector.
+-  if (v8_flags.wasm_speculative_inlining) {
++  if (feedback_vector_slot) {
+     frame_size -= kSystemPointerSize;
+   }
+   // We can't run out of space, just pass anything big enough to not cause the
+diff --git a/src/wasm/baseline/s390/liftoff-assembler-s390.h b/src/wasm/baseline/s390/liftoff-assembler-s390.h
+index 740262d4959..c24f5485706 100644
+--- a/src/wasm/baseline/s390/liftoff-assembler-s390.h
++++ b/src/wasm/baseline/s390/liftoff-assembler-s390.h
+@@ -101,10 +101,11 @@ void LiftoffAssembler::PrepareTailCall(int num_callee_stack_params,
+ void LiftoffAssembler::AlignFrameSize() {}
+ 
+ void LiftoffAssembler::PatchPrepareStackFrame(
+-    int offset, SafepointTableBuilder* safepoint_table_builder) {
++    int offset, SafepointTableBuilder* safepoint_table_builder,
++    bool feedback_vector_slot) {
+   int frame_size = GetTotalFrameSize() - 2 * kSystemPointerSize;
+   // The frame setup builtin also pushes the feedback vector.
+-  if (v8_flags.wasm_speculative_inlining) {
++  if (feedback_vector_slot) {
+     frame_size -= kSystemPointerSize;
+   }
+ 
+diff --git a/src/wasm/baseline/x64/liftoff-assembler-x64.h b/src/wasm/baseline/x64/liftoff-assembler-x64.h
+index b843e4a81a7..d5106c0401f 100644
+--- a/src/wasm/baseline/x64/liftoff-assembler-x64.h
++++ b/src/wasm/baseline/x64/liftoff-assembler-x64.h
+@@ -202,13 +202,14 @@ void LiftoffAssembler::AlignFrameSize() {
+ }
+ 
+ void LiftoffAssembler::PatchPrepareStackFrame(
+-    int offset, SafepointTableBuilder* safepoint_table_builder) {
++    int offset, SafepointTableBuilder* safepoint_table_builder,
++    bool feedback_vector_slot) {
+   // The frame_size includes the frame marker and the instance slot. Both are
+   // pushed as part of frame construction, so we don't need to allocate memory
+   // for them anymore.
+   int frame_size = GetTotalFrameSize() - 2 * kSystemPointerSize;
+   // The frame setup builtin also pushes the feedback vector.
+-  if (v8_flags.wasm_speculative_inlining) {
++  if (feedback_vector_slot) {
+     frame_size -= kSystemPointerSize;
+   }
+   DCHECK_EQ(0, frame_size % kSystemPointerSize);
+diff --git a/src/wasm/function-compiler.cc b/src/wasm/function-compiler.cc
+index 67c69f9759a..c8d2088d064 100644
+--- a/src/wasm/function-compiler.cc
++++ b/src/wasm/function-compiler.cc
+@@ -136,7 +136,10 @@ WasmCompilationResult WasmCompilationUnit::ExecuteFunctionCompilation(
+                 .set_detected_features(detected)
+                 .set_assembler_buffer_cache(buffer_cache)
+                 .set_debug_sidetable(debug_sidetable_ptr));
+-        if (result.succeeded()) break;
++        if (result.succeeded()) {
++          result.for_inlining = env->enabled_features.has_inlining();
++          break;
++        }
+       }
+ 
+       // If --liftoff-only, do not fall back to turbofan, even if compilation
+diff --git a/src/wasm/function-compiler.h b/src/wasm/function-compiler.h
+index e6f38e50110..a3d82b85a6c 100644
+--- a/src/wasm/function-compiler.h
++++ b/src/wasm/function-compiler.h
+@@ -58,6 +58,7 @@ struct WasmCompilationResult {
+   ExecutionTier result_tier;
+   Kind kind = kFunction;
+   ForDebugging for_debugging = kNotForDebugging;
++  bool for_inlining = false;
+ };
+ 
+ class V8_EXPORT_PRIVATE WasmCompilationUnit final {
+diff --git a/src/wasm/graph-builder-interface.cc b/src/wasm/graph-builder-interface.cc
+index f4eaf43314b..48b6e189424 100644
+--- a/src/wasm/graph-builder-interface.cc
++++ b/src/wasm/graph-builder-interface.cc
+@@ -264,8 +264,8 @@ class WasmGraphBuildingInterface {
+ 
+   void StartFunctionBody(FullDecoder* decoder, Control* block) {}
+ 
+-  void FinishFunction(FullDecoder*) {
+-    if (v8_flags.wasm_speculative_inlining) {
++  void FinishFunction(FullDecoder* decoder) {
++    if (decoder->enabled_.has_inlining()) {
+       DCHECK_EQ(feedback_instruction_index_, type_feedback_.size());
+     }
+     if (inlined_status_ == kRegularFunction) {
+@@ -726,7 +726,7 @@ class WasmGraphBuildingInterface {
+   void CallDirect(FullDecoder* decoder, const CallFunctionImmediate& imm,
+                   const Value args[], Value returns[]) {
+     int maybe_call_count = -1;
+-    if (v8_flags.wasm_speculative_inlining && type_feedback_.size() > 0) {
++    if (decoder->enabled_.has_inlining() && type_feedback_.size() > 0) {
+       const CallSiteFeedback& feedback = next_call_feedback();
+       DCHECK_EQ(feedback.num_cases(), 1);
+       maybe_call_count = feedback.call_count(0);
+@@ -738,7 +738,7 @@ class WasmGraphBuildingInterface {
+   void ReturnCall(FullDecoder* decoder, const CallFunctionImmediate& imm,
+                   const Value args[]) {
+     int maybe_call_count = -1;
+-    if (v8_flags.wasm_speculative_inlining && type_feedback_.size() > 0) {
++    if (decoder->enabled_.has_inlining() && type_feedback_.size() > 0) {
+       const CallSiteFeedback& feedback = next_call_feedback();
+       DCHECK_EQ(feedback.num_cases(), 1);
+       maybe_call_count = feedback.call_count(0);
+@@ -769,7 +769,7 @@ class WasmGraphBuildingInterface {
+                const FunctionSig* sig, uint32_t sig_index, const Value args[],
+                Value returns[]) {
+     const CallSiteFeedback* feedback = nullptr;
+-    if (v8_flags.wasm_speculative_inlining && type_feedback_.size() > 0) {
++    if (decoder->enabled_.has_inlining() && type_feedback_.size() > 0) {
+       feedback = &next_call_feedback();
+     }
+     if (feedback == nullptr || feedback->num_cases() == 0) {
+@@ -866,7 +866,7 @@ class WasmGraphBuildingInterface {
+                      const FunctionSig* sig, uint32_t sig_index,
+                      const Value args[]) {
+     const CallSiteFeedback* feedback = nullptr;
+-    if (v8_flags.wasm_speculative_inlining && type_feedback_.size() > 0) {
++    if (decoder->enabled_.has_inlining() && type_feedback_.size() > 0) {
+       feedback = &next_call_feedback();
+     }
+     if (feedback == nullptr || feedback->num_cases() == 0) {
+diff --git a/src/wasm/module-compiler.cc b/src/wasm/module-compiler.cc
+index aa8dd5666cc..cc924de37a8 100644
+--- a/src/wasm/module-compiler.cc
++++ b/src/wasm/module-compiler.cc
+@@ -1426,7 +1426,7 @@ void TriggerTierUp(WasmInstanceObject instance, int func_index) {
+ 
+   // Before adding the tier-up unit or increasing priority, do process type
+   // feedback for best code generation.
+-  if (v8_flags.wasm_speculative_inlining) {
++  if (native_module->enabled_features().has_inlining()) {
+     // TODO(jkummerow): we could have collisions here if different instances
+     // of the same module have collected different feedback. If that ever
+     // becomes a problem, figure out a solution.
+@@ -1438,10 +1438,10 @@ void TriggerTierUp(WasmInstanceObject instance, int func_index) {
+ 
+ void TierUpNowForTesting(Isolate* isolate, WasmInstanceObject instance,
+                          int func_index) {
+-  if (v8_flags.wasm_speculative_inlining) {
++  NativeModule* native_module = instance.module_object().native_module();
++  if (native_module->enabled_features().has_inlining()) {
+     TransitiveTypeFeedbackProcessor::Process(instance, func_index);
+   }
+-  auto* native_module = instance.module_object().native_module();
+   wasm::GetWasmEngine()->CompileFunction(isolate->counters(), native_module,
+                                          func_index,
+                                          wasm::ExecutionTier::kTurbofan);
+diff --git a/src/wasm/module-instantiate.cc b/src/wasm/module-instantiate.cc
+index 3a517740682..06552cea1b2 100644
+--- a/src/wasm/module-instantiate.cc
++++ b/src/wasm/module-instantiate.cc
+@@ -737,7 +737,7 @@ MaybeHandle<WasmInstanceObject> InstanceBuilder::Build() {
+   //--------------------------------------------------------------------------
+   // Allocate the array that will hold type feedback vectors.
+   //--------------------------------------------------------------------------
+-  if (v8_flags.wasm_speculative_inlining) {
++  if (enabled_.has_inlining()) {
+     int num_functions = static_cast<int>(module_->num_declared_functions);
+     // Zero-fill the array so we can do a quick Smi-check to test if a given
+     // slot was initialized.
+@@ -775,7 +775,7 @@ MaybeHandle<WasmInstanceObject> InstanceBuilder::Build() {
+   //--------------------------------------------------------------------------
+   // Initialize non-defaultable tables.
+   //--------------------------------------------------------------------------
+-  if (v8_flags.experimental_wasm_typed_funcref) {
++  if (enabled_.has_typed_funcref()) {
+     SetTableInitialValues(instance);
+   }
+ 
+diff --git a/src/wasm/wasm-code-manager.cc b/src/wasm/wasm-code-manager.cc
+index 5a1b03d9462..1bdb98f167f 100644
+--- a/src/wasm/wasm-code-manager.cc
++++ b/src/wasm/wasm-code-manager.cc
+@@ -1064,10 +1064,11 @@ std::unique_ptr<WasmCode> NativeModule::AddCode(
+     jump_table_ref =
+         FindJumpTablesForRegionLocked(base::AddressRegionOf(code_space));
+   }
+-  return AddCodeWithCodeSpace(index, desc, stack_slots, tagged_parameter_slots,
+-                              protected_instructions_data,
+-                              source_position_table, inlining_positions, kind,
+-                              tier, for_debugging, code_space, jump_table_ref);
++  bool for_inlining = false;  // This path isn't used for Liftoff code.
++  return AddCodeWithCodeSpace(
++      index, desc, stack_slots, tagged_parameter_slots,
++      protected_instructions_data, source_position_table, inlining_positions,
++      kind, tier, for_debugging, for_inlining, code_space, jump_table_ref);
+ }
+ 
+ std::unique_ptr<WasmCode> NativeModule::AddCodeWithCodeSpace(
+@@ -1076,7 +1077,7 @@ std::unique_ptr<WasmCode> NativeModule::AddCodeWithCodeSpace(
+     base::Vector<const byte> protected_instructions_data,
+     base::Vector<const byte> source_position_table,
+     base::Vector<const byte> inlining_positions, WasmCode::Kind kind,
+-    ExecutionTier tier, ForDebugging for_debugging,
++    ExecutionTier tier, ForDebugging for_debugging, bool for_inlining,
+     base::Vector<uint8_t> dst_code_bytes, const JumpTablesRef& jump_tables) {
+   base::Vector<byte> reloc_info{
+       desc.buffer + desc.buffer_size - desc.reloc_size,
+@@ -1133,7 +1134,8 @@ std::unique_ptr<WasmCode> NativeModule::AddCodeWithCodeSpace(
+       this, index, dst_code_bytes, stack_slots, tagged_parameter_slots,
+       safepoint_table_offset, handler_table_offset, constant_pool_offset,
+       code_comments_offset, instr_size, protected_instructions_data, reloc_info,
+-      source_position_table, inlining_positions, kind, tier, for_debugging}};
++      source_position_table, inlining_positions, kind, tier, for_debugging,
++      for_inlining}};
+ 
+   code->MaybePrint();
+   code->Validate();
+@@ -2248,8 +2250,8 @@ std::vector<std::unique_ptr<WasmCode>> NativeModule::AddCompiledCode(
+         result.protected_instructions_data.as_vector(),
+         result.source_positions.as_vector(),
+         result.inlining_positions.as_vector(), GetCodeKind(result),
+-        result.result_tier, result.for_debugging, this_code_space,
+-        jump_tables));
++        result.result_tier, result.for_debugging, result.for_inlining,
++        this_code_space, jump_tables));
+   }
+   DCHECK_EQ(0, code_space.size());
+ 
+diff --git a/src/wasm/wasm-code-manager.h b/src/wasm/wasm-code-manager.h
+index cdf27d5f5b3..7705dfd5a00 100644
+--- a/src/wasm/wasm-code-manager.h
++++ b/src/wasm/wasm-code-manager.h
+@@ -405,6 +405,11 @@ class V8_EXPORT_PRIVATE WasmCode final {
+     return ForDebuggingField::decode(flags_);
+   }
+ 
++  // Returns {true} for Liftoff code that includes call count tracking for
++  // later (in Turbofan) inlining purposes.
++  // TODO(jkummerow): This can be dropped when we ship Wasm inlining.
++  bool for_inlining() const { return ForInliningField::decode(flags_); }
++
+   enum FlushICache : bool { kFlushICache = true, kNoFlushICache = false };
+ 
+  private:
+@@ -419,7 +424,8 @@ class V8_EXPORT_PRIVATE WasmCode final {
+            base::Vector<const byte> reloc_info,
+            base::Vector<const byte> source_position_table,
+            base::Vector<const byte> inlining_positions, Kind kind,
+-           ExecutionTier tier, ForDebugging for_debugging)
++           ExecutionTier tier, ForDebugging for_debugging,
++           bool for_inlining = false)
+       : native_module_(native_module),
+         instructions_(instructions.begin()),
+         meta_data_(
+@@ -439,7 +445,8 @@ class V8_EXPORT_PRIVATE WasmCode final {
+         code_comments_offset_(code_comments_offset),
+         unpadded_binary_size_(unpadded_binary_size),
+         flags_(KindField::encode(kind) | ExecutionTierField::encode(tier) |
+-               ForDebuggingField::encode(for_debugging)) {
++               ForDebuggingField::encode(for_debugging) |
++               ForInliningField::encode(for_inlining)) {
+     DCHECK_LE(safepoint_table_offset, unpadded_binary_size);
+     DCHECK_LE(handler_table_offset, unpadded_binary_size);
+     DCHECK_LE(code_comments_offset, unpadded_binary_size);
+@@ -507,6 +514,7 @@ class V8_EXPORT_PRIVATE WasmCode final {
+   using KindField = base::BitField8<Kind, 0, 2>;
+   using ExecutionTierField = KindField::Next<ExecutionTier, 2>;
+   using ForDebuggingField = ExecutionTierField::Next<ForDebugging, 2>;
++  using ForInliningField = ForDebuggingField::Next<bool, 1>;
+ 
+   // WasmCode is ref counted. Counters are held by:
+   //   1) The jump table / code table.
+@@ -866,7 +874,7 @@ class V8_EXPORT_PRIVATE NativeModule final {
+       base::Vector<const byte> protected_instructions_data,
+       base::Vector<const byte> source_position_table,
+       base::Vector<const byte> inlining_positions, WasmCode::Kind kind,
+-      ExecutionTier tier, ForDebugging for_debugging,
++      ExecutionTier tier, ForDebugging for_debugging, bool for_inlining,
+       base::Vector<uint8_t> code_space, const JumpTablesRef& jump_tables_ref);
+ 
+   WasmCode* CreateEmptyJumpTableLocked(int jump_table_size);
+diff --git a/src/wasm/wasm-feature-flags.h b/src/wasm/wasm-feature-flags.h
+index b016522f7cc..b1c00748550 100644
+--- a/src/wasm/wasm-feature-flags.h
++++ b/src/wasm/wasm-feature-flags.h
+@@ -45,6 +45,9 @@
+     false)                                                                     \
+   V(skip_bounds_checks, "skip array bounds checks (unsafe)", false)            \
+                                                                                \
++  /* Not user-visible, defined here so an OT can control it. */                \
++  V(inlining, "enable wasm-into-wasm inlining", false)                         \
++                                                                               \
+   /* Typed function references proposal. */                                    \
+   /* Official proposal: https://github.com/WebAssembly/function-references */  \
+   /* V8 side owner: manoskouk */                                               \
+diff --git a/src/wasm/wasm-features.cc b/src/wasm/wasm-features.cc
+index 793416d791d..b11b0ae8096 100644
+--- a/src/wasm/wasm-features.cc
++++ b/src/wasm/wasm-features.cc
+@@ -33,15 +33,18 @@ WasmFeatures WasmFeatures::FromIsolate(Isolate* isolate) {
+ WasmFeatures WasmFeatures::FromContext(Isolate* isolate,
+                                        Handle<Context> context) {
+   WasmFeatures features = WasmFeatures::FromFlags();
+-  if (isolate->IsWasmGCEnabled(handle(isolate->context(), isolate))) {
++  if (isolate->IsWasmGCEnabled(context)) {
+     features.Add(kFeature_gc);
+     // Also enable typed function references, since the commandline flag
+     // implication won't do that for us in this case.
+     features.Add(kFeature_typed_funcref);
+   }
+-  if (isolate->IsWasmStringRefEnabled(handle(isolate->context(), isolate))) {
++  if (isolate->IsWasmStringRefEnabled(context)) {
+     features.Add(kFeature_stringref);
+   }
++  if (isolate->IsWasmInliningEnabled(context)) {
++    features.Add(kFeature_inlining);
++  }
+   // This space intentionally left blank for future Wasm origin trials.
+   return features;
+ }
+diff --git a/src/wasm/wasm-js.cc b/src/wasm/wasm-js.cc
+index d206334afc5..ba12cf19c98 100644
+--- a/src/wasm/wasm-js.cc
++++ b/src/wasm/wasm-js.cc
+@@ -2949,6 +2949,8 @@ void WasmJs::Install(Isolate* isolate, bool exposed_on_global_object) {
+   // TODO(7748): These built-ins should not be shipped with wasm GC.
+   // Either a new flag will be needed or the built-ins have to be deleted prior
+   // to shipping.
++  // TODO(13810): We should install these later, when we can query the
++  // isolate's wasm_gc_enabled_callback, to take the Origin Trial into account.
+   if (v8_flags.experimental_wasm_gc) {
+     SimpleInstallFunction(
+         isolate, webassembly, "experimentalConvertArrayToString",
+diff --git a/src/wasm/wasm-module.cc b/src/wasm/wasm-module.cc
+index fc27ec2ac9d..068764edb96 100644
+--- a/src/wasm/wasm-module.cc
++++ b/src/wasm/wasm-module.cc
+@@ -666,7 +666,6 @@ size_t GetWireBytesHash(base::Vector<const uint8_t> wire_bytes) {
+ }
+ 
+ int NumFeedbackSlots(const WasmModule* module, int func_index) {
+-  if (!v8_flags.wasm_speculative_inlining) return 0;
+   // TODO(clemensb): Avoid the mutex once this ships, or at least switch to a
+   // shared mutex.
+   base::MutexGuard type_feedback_guard{&module->type_feedback.mutex};
+diff --git a/src/wasm/wasm-subtyping.cc b/src/wasm/wasm-subtyping.cc
+index 4e69f52c911..5a2b8f6a909 100644
+--- a/src/wasm/wasm-subtyping.cc
++++ b/src/wasm/wasm-subtyping.cc
+@@ -218,9 +218,8 @@ V8_NOINLINE V8_EXPORT_PRIVATE bool IsHeapSubtypeOfImpl(
+       return super_heap == sub_heap || super_heap == HeapType::kEq ||
+              super_heap == HeapType::kAny;
+     case HeapType::kString:
+-      // stringref is a subtype of anyref under wasm-gc.
+-      return sub_heap == super_heap ||
+-             (v8_flags.experimental_wasm_gc && super_heap == HeapType::kAny);
++      // stringref is a subtype of anyref.
++      return sub_heap == super_heap || super_heap == HeapType::kAny;
+     case HeapType::kStringViewWtf8:
+     case HeapType::kStringViewWtf16:
+     case HeapType::kStringViewIter:
+diff --git a/test/cctest/wasm/test-streaming-compilation.cc b/test/cctest/wasm/test-streaming-compilation.cc
+index b81ccf28d6a..2825d961bca 100644
+--- a/test/cctest/wasm/test-streaming-compilation.cc
++++ b/test/cctest/wasm/test-streaming-compilation.cc
+@@ -195,8 +195,9 @@ class StreamTester {
+     Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
+     v8::Local<v8::Context> context = isolate->GetCurrentContext();
+ 
++    WasmFeatures features = WasmFeatures::FromIsolate(i_isolate);
+     stream_ = GetWasmEngine()->StartStreamingCompilation(
+-        i_isolate, WasmFeatures::All(), v8::Utils::OpenHandle(*context),
++        i_isolate, features, v8::Utils::OpenHandle(*context),
+         "WebAssembly.compileStreaming()",
+         std::make_shared<TestResolver>(i_isolate, &state_, &error_message_,
+                                        &module_object_));
+-- 
+2.35.1
+

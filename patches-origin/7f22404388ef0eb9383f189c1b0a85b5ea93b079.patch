@@ -1,0 +1,220 @@
+From 7f22404388ef0eb9383f189c1b0a85b5ea93b079 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=9D=A8=E6=96=87=E6=98=8E?= <yangwenming@bytedance.com>
+Date: Sun, 16 Jul 2023 17:49:05 +0800
+Subject: [PATCH] [wasm, atomic] support atomic binary operations for i64 on
+ riscv32.
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Bug: v8:14118
+Change-Id: I32da7f6a80c207aff7606aeb2f8b4136ff4d7552
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4663419
+Commit-Queue: Thibaud Michaud <thibaudm@chromium.org>
+Auto-Submit: 杨文明 <yangwenming@bytedance.com>
+Reviewed-by: Thibaud Michaud <thibaudm@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#89005}
+---
+ .../riscv/liftoff-assembler-riscv32.h         | 71 +++++++++++++++++--
+ test/mjsunit/regress/wasm/regress-14118.js    | 58 +++++++++++++++
+ 2 files changed, 122 insertions(+), 7 deletions(-)
+ create mode 100644 test/mjsunit/regress/wasm/regress-14118.js
+
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h
+index ee124d9c239..fd89398c09b 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h
+@@ -410,6 +410,52 @@ inline Register CalculateActualAddress(LiftoffAssembler* lasm,
+ }
+ 
+ enum class Binop { kAdd, kSub, kAnd, kOr, kXor, kExchange };
++inline void AtomicBinop64(LiftoffAssembler* lasm, Register dst_addr,
++                          Register offset_reg, uintptr_t offset_imm,
++                          LiftoffRegister value, LiftoffRegister result,
++                          StoreType type, Binop op) {
++  FrameScope scope(lasm, StackFrame::MANUAL);
++  RegList c_params = {arg_reg_1, arg_reg_2, arg_reg_3};
++  RegList result_list = {result.low_gp(), result.high_gp()};
++
++  // Result registers does not need to be pushed.
++  __ MultiPush(c_params - result_list);
++  liftoff::CalculateActualAddress(lasm, dst_addr, offset_reg, offset_imm,
++                                  arg_reg_1);
++  __ Mv(arg_reg_2, value.low_gp());
++  __ Mv(arg_reg_3, value.high_gp());
++  __ MultiPush(kJSCallerSaved - c_params - result_list);
++  __ PrepareCallCFunction(3, 0, kScratchReg);
++  ExternalReference extern_func_ref;
++  switch (op) {
++    case Binop::kAdd:
++      extern_func_ref = ExternalReference::atomic_pair_add_function();
++      break;
++    case Binop::kSub:
++      extern_func_ref = ExternalReference::atomic_pair_sub_function();
++      break;
++    case Binop::kAnd:
++      extern_func_ref = ExternalReference::atomic_pair_and_function();
++      break;
++    case Binop::kOr:
++      extern_func_ref = ExternalReference::atomic_pair_or_function();
++      break;
++    case Binop::kXor:
++      extern_func_ref = ExternalReference::atomic_pair_xor_function();
++      break;
++    case Binop::kExchange:
++      extern_func_ref = ExternalReference::atomic_pair_exchange_function();
++      break;
++    default:
++      UNREACHABLE();
++  }
++  __ CallCFunction(extern_func_ref, 3, 0);
++  __ MultiPop(kJSCallerSaved - c_params - result_list);
++  __ Mv(result.low_gp(), kReturnRegister0);
++  __ Mv(result.high_gp(), kReturnRegister1);
++  __ MultiPop(c_params - result_list);
++  return;
++}
+ 
+ inline void AtomicBinop(LiftoffAssembler* lasm, Register dst_addr,
+                         Register offset_reg, uintptr_t offset_imm,
+@@ -646,7 +692,9 @@ void LiftoffAssembler::AtomicAdd(Register dst_addr, Register offset_reg,
+                                  LiftoffRegister result, StoreType type,
+                                  bool i64_offset) {
+   if (type.value() == StoreType::kI64Store) {
+-    bailout(kAtomics, "Atomic64");
++    liftoff::AtomicBinop64(this, dst_addr, offset_reg, offset_imm, value,
++                           result, type, liftoff::Binop::kAdd);
++    return;
+   }
+   if (type.value() == StoreType::kI32Store ||
+       type.value() == StoreType::kI64Store32) {
+@@ -670,7 +718,9 @@ void LiftoffAssembler::AtomicSub(Register dst_addr, Register offset_reg,
+                                  LiftoffRegister result, StoreType type,
+                                  bool i64_offset) {
+   if (type.value() == StoreType::kI64Store) {
+-    bailout(kAtomics, "Atomic64");
++    liftoff::AtomicBinop64(this, dst_addr, offset_reg, offset_imm, value,
++                           result, type, liftoff::Binop::kSub);
++    return;
+   }
+   if (type.value() == StoreType::kI32Store ||
+       type.value() == StoreType::kI64Store32) {
+@@ -694,7 +744,9 @@ void LiftoffAssembler::AtomicAnd(Register dst_addr, Register offset_reg,
+                                  LiftoffRegister result, StoreType type,
+                                  bool i64_offset) {
+   if (type.value() == StoreType::kI64Store) {
+-    bailout(kAtomics, "Atomic64");
++    liftoff::AtomicBinop64(this, dst_addr, offset_reg, offset_imm, value,
++                           result, type, liftoff::Binop::kAnd);
++    return;
+   }
+   if (type.value() == StoreType::kI32Store ||
+       type.value() == StoreType::kI64Store32) {
+@@ -717,7 +769,9 @@ void LiftoffAssembler::AtomicOr(Register dst_addr, Register offset_reg,
+                                 LiftoffRegister result, StoreType type,
+                                 bool i64_offset) {
+   if (type.value() == StoreType::kI64Store) {
+-    bailout(kAtomics, "Atomic64");
++    liftoff::AtomicBinop64(this, dst_addr, offset_reg, offset_imm, value,
++                           result, type, liftoff::Binop::kOr);
++    return;
+   }
+   if (type.value() == StoreType::kI32Store ||
+       type.value() == StoreType::kI64Store32) {
+@@ -740,7 +794,9 @@ void LiftoffAssembler::AtomicXor(Register dst_addr, Register offset_reg,
+                                  LiftoffRegister result, StoreType type,
+                                  bool i64_offset) {
+   if (type.value() == StoreType::kI64Store) {
+-    bailout(kAtomics, "Atomic64");
++    liftoff::AtomicBinop64(this, dst_addr, offset_reg, offset_imm, value,
++                           result, type, liftoff::Binop::kXor);
++    return;
+   }
+   if (type.value() == StoreType::kI32Store ||
+       type.value() == StoreType::kI64Store32) {
+@@ -764,7 +820,9 @@ void LiftoffAssembler::AtomicExchange(Register dst_addr, Register offset_reg,
+                                       LiftoffRegister result, StoreType type,
+                                       bool i64_offset) {
+   if (type.value() == StoreType::kI64Store) {
+-    bailout(kAtomics, "Atomic64");
++    liftoff::AtomicBinop64(this, dst_addr, offset_reg, offset_imm, value,
++                           result, type, liftoff::Binop::kExchange);
++    return;
+   }
+   if (type.value() == StoreType::kI32Store ||
+       type.value() == StoreType::kI64Store32) {
+@@ -803,7 +861,6 @@ void LiftoffAssembler::AtomicCompareExchange(
+     Mv(result.high_gp(), a1);
+     return;
+   }
+-
+   // Make sure that {result} is unique.
+   switch (type.value()) {
+     case StoreType::kI64Store8:
+diff --git a/test/mjsunit/regress/wasm/regress-14118.js b/test/mjsunit/regress/wasm/regress-14118.js
+new file mode 100644
+index 00000000000..65c1c4f186b
+--- /dev/null
++++ b/test/mjsunit/regress/wasm/regress-14118.js
+@@ -0,0 +1,58 @@
++// Copyright 2023 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Flags: --liftoff --no-wasm-tier-up
++
++d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
++
++const I64AtomicOps = [
++  kExprI64AtomicAdd,
++  kExprI64AtomicSub,
++  kExprI64AtomicAnd,
++  kExprI64AtomicOr,
++  kExprI64AtomicXor,
++  kExprI64AtomicExchange,
++];
++
++const Inputs = [
++  [0x1ffffffffn, 1n, 0x200000000n],
++  [0x200000000n, 1n, 0x1ffffffffn],
++  [0x1ffffffffn, 1n, 0x1n],
++  [0x1ffffffffn, 1n, 0x1ffffffffn],
++  [0x1ffffffffn, 0x10ffffffffn, 0x1100000000n],
++  [0x1ffffffffn, 0x10ffffffffn, 0x10ffffffffn],
++];
++
++function TestBinOp64(index, memory) {
++  const Op = I64AtomicOps[index];
++  const sample = Inputs[index];
++
++  const builder = new WasmModuleBuilder();
++  builder.addImportedMemory("imports", "mem", 1);
++  builder.addType(makeSig([kWasmI32, kWasmI64], [kWasmI64]));
++  // Generate function 1 (out of 1).
++  builder.addFunction(undefined, 0 /* sig */).addBodyWithEnd([
++    kExprLocalGet, 0,
++    kExprLocalGet, 1,
++    kAtomicPrefix, Op, 0x03, 0x00,
++    kExprEnd
++  ]);
++  builder.addExport('run', 0);
++  const instance = builder.instantiate({ imports: { mem: memory } });
++
++  let i64arr = new BigUint64Array(memory.buffer);
++  new DataView(memory.buffer).setBigUint64(index * 8, sample[0], true);
++  assertEquals(sample[0], instance.exports.run(index * 8, sample[1]));
++  assertEquals(sample[2], i64arr[index]);
++}
++
++(function () {
++  var mem = new WebAssembly.Memory({ initial: 1 });
++  TestBinOp64(0, mem, "i64.atomic.rmw.add");
++  TestBinOp64(1, mem, "i64.atomic.rmw.sub");
++  TestBinOp64(2, mem, "i64.atomic.rmw.and");
++  TestBinOp64(3, mem, "i64.atomic.rmw.or");
++  TestBinOp64(4, mem, "i64.atomic.rmw.xor");
++  TestBinOp64(5, mem, "i64.atomic.rmw.xchg");
++})();
+-- 
+2.35.1
+

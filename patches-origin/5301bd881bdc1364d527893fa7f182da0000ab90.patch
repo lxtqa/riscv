@@ -1,0 +1,689 @@
+From 5301bd881bdc1364d527893fa7f182da0000ab90 Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Fri, 18 Aug 2023 10:55:24 +0800
+Subject: [PATCH] [riscv] Reduce riscv Vector arch code(Part 6)
+
+Change-Id: I35648e94fb075bb8f3df437320bbc3e977aa9c62
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4787659
+Reviewed-by: Ji Qiu <qiuji@iscas.ac.cn>
+Commit-Queue: Ji Qiu <qiuji@iscas.ac.cn>
+Auto-Submit: Yahan Lu <yahan@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#89551}
+---
+ src/codegen/riscv/extension-riscv-v.h         |  12 ++
+ .../backend/riscv/code-generator-riscv.cc     | 192 +++++-------------
+ .../backend/riscv/instruction-codes-riscv.h   |  26 +--
+ .../riscv/instruction-scheduler-riscv.cc      |  24 +--
+ .../riscv/instruction-selector-riscv.h        | 111 +++++-----
+ 5 files changed, 141 insertions(+), 224 deletions(-)
+
+diff --git a/src/codegen/riscv/extension-riscv-v.h b/src/codegen/riscv/extension-riscv-v.h
+index 5932034b111..920a3d0fe16 100644
+--- a/src/codegen/riscv/extension-riscv-v.h
++++ b/src/codegen/riscv/extension-riscv-v.h
+@@ -405,6 +405,18 @@ class AssemblerRISCVV : public AssemblerRiscvBase {
+ 
+   void vcpop_m(Register rd, VRegister vs2, MaskType mask = NoMask);
+ 
++  void vmslt_vi(VRegister vd, VRegister vs1, int8_t imm5,
++                MaskType mask = NoMask) {
++    DCHECK(imm5 >= -15 && imm5 <= 16);
++    vmsle_vi(vd, vs1, imm5 - 1, mask);
++  }
++
++  void vmsltu_vi(VRegister vd, VRegister vs1, int8_t imm5,
++                 MaskType mask = NoMask) {
++    DCHECK(imm5 >= 1 && imm5 <= 16);
++    vmsleu_vi(vd, vs1, imm5 - 1, mask);
++  }
++
+  protected:
+   void vsetvli(Register rd, Register rs1, VSew vsew, Vlmul vlmul,
+                TailAgnosticType tail = tu, MaskAgnosticType mask = mu);
+diff --git a/src/compiler/backend/riscv/code-generator-riscv.cc b/src/compiler/backend/riscv/code-generator-riscv.cc
+index 833b22e622e..9845e3734e4 100644
+--- a/src/compiler/backend/riscv/code-generator-riscv.cc
++++ b/src/compiler/backend/riscv/code-generator-riscv.cc
+@@ -2381,7 +2381,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+                 kSimd128ScratchReg2);
+       break;
+     }
+-    case kRiscvS128Not: {
++    case kRiscvVnot: {
+       (__ VU).set(kScratchReg, VSew::E8, Vlmul::m1);
+       __ vnot_vv(i.OutputSimd128Register(), i.InputSimd128Register(0));
+       break;
+@@ -2441,19 +2441,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       }
+       break;
+     }
+-    case kRiscvI16x8RoundingAverageU: {
+-      __ VU.set(kScratchReg2, E16, m1);
+-      __ vwaddu_vv(kSimd128ScratchReg, i.InputSimd128Register(0),
+-                   i.InputSimd128Register(1));
+-      __ li(kScratchReg, 1);
+-      __ vwaddu_wx(kSimd128ScratchReg3, kSimd128ScratchReg, kScratchReg);
+-      __ li(kScratchReg, 2);
+-      __ VU.set(kScratchReg2, E32, m2);
+-      __ vdivu_vx(kSimd128ScratchReg3, kSimd128ScratchReg3, kScratchReg);
+-      __ VU.set(kScratchReg2, E16, m1);
+-      __ vnclipu_vi(i.OutputSimd128Register(), kSimd128ScratchReg3, 0);
+-      break;
+-    }
+     case kRiscvI8x16ExtractLaneU: {
+       __ VU.set(kScratchReg, E8, m1);
+       __ vslidedown_vi(kSimd128ScratchReg, i.InputSimd128Register(0),
+@@ -2621,38 +2608,10 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+                             i.InputInt8(1), E32, m1);
+       break;
+     }
+-    case kRiscvI32x4Abs: {
+-      __ VU.set(kScratchReg, E32, m1);
+-      __ vmv_vv(i.OutputSimd128Register(), i.InputSimd128Register(0));
+-      __ vmv_vx(kSimd128RegZero, zero_reg);
+-      __ vmslt_vv(v0, i.InputSimd128Register(0), kSimd128RegZero);
+-      __ vneg_vv(i.OutputSimd128Register(), i.InputSimd128Register(0),
+-                 MaskType::Mask);
+-      break;
+-    }
+-    case kRiscvI16x8Abs: {
+-      __ VU.set(kScratchReg, E16, m1);
+-      __ vmv_vv(i.OutputSimd128Register(), i.InputSimd128Register(0));
+-      __ vmv_vx(kSimd128RegZero, zero_reg);
+-      __ vmslt_vv(v0, i.InputSimd128Register(0), kSimd128RegZero);
+-      __ vneg_vv(i.OutputSimd128Register(), i.InputSimd128Register(0),
+-                 MaskType::Mask);
+-      break;
+-    }
+-    case kRiscvI8x16Abs: {
+-      __ VU.set(kScratchReg, E8, m1);
+-      __ vmv_vx(kSimd128RegZero, zero_reg);
+-      __ vmv_vv(i.OutputSimd128Register(), i.InputSimd128Register(0));
+-      __ vmslt_vv(v0, i.InputSimd128Register(0), kSimd128RegZero);
+-      __ vneg_vv(i.OutputSimd128Register(), i.InputSimd128Register(0),
+-                 MaskType::Mask);
+-      break;
+-    }
+-    case kRiscvI64x2Abs: {
+-      __ VU.set(kScratchReg, E64, m1);
++    case kRiscvVAbs: {
++      __ VU.set(kScratchReg, i.InputInt8(1), i.InputInt8(2));
+       __ vmv_vv(i.OutputSimd128Register(), i.InputSimd128Register(0));
+-      __ vmv_vx(kSimd128RegZero, zero_reg);
+-      __ vmslt_vv(v0, i.InputSimd128Register(0), kSimd128RegZero);
++      __ vmslt_vx(v0, i.InputSimd128Register(0), zero_reg);
+       __ vneg_vv(i.OutputSimd128Register(), i.InputSimd128Register(0),
+                  MaskType::Mask);
+       break;
+@@ -2785,49 +2744,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       __ vmerge_vx(dst, i.InputRegister(2), src);
+       break;
+     }
+-    case kRiscvI8x16BitMask: {
+-      Register dst = i.OutputRegister();
+-      Simd128Register src = i.InputSimd128Register(0);
+-      __ VU.set(kScratchReg, E8, m1);
+-      __ vmv_vx(kSimd128RegZero, zero_reg);
+-      __ vmv_vx(kSimd128ScratchReg, zero_reg);
+-      __ vmslt_vv(kSimd128ScratchReg, src, kSimd128RegZero);
+-      __ VU.set(kScratchReg, E32, m1);
+-      __ vmv_xs(dst, kSimd128ScratchReg);
+-      break;
+-    }
+-    case kRiscvI16x8BitMask: {
+-      Register dst = i.OutputRegister();
+-      Simd128Register src = i.InputSimd128Register(0);
+-      __ VU.set(kScratchReg, E16, m1);
+-      __ vmv_vx(kSimd128RegZero, zero_reg);
+-      __ vmv_vx(kSimd128ScratchReg, zero_reg);
+-      __ vmslt_vv(kSimd128ScratchReg, src, kSimd128RegZero);
+-      __ VU.set(kScratchReg, E32, m1);
+-      __ vmv_xs(dst, kSimd128ScratchReg);
+-      break;
+-    }
+-    case kRiscvI32x4BitMask: {
+-      Register dst = i.OutputRegister();
+-      Simd128Register src = i.InputSimd128Register(0);
+-      __ VU.set(kScratchReg, E32, m1);
+-      __ vmv_vx(kSimd128RegZero, zero_reg);
+-      __ vmv_vx(kSimd128ScratchReg, zero_reg);
+-      __ vmslt_vv(kSimd128ScratchReg, src, kSimd128RegZero);
+-      __ vmv_xs(dst, kSimd128ScratchReg);
+-      break;
+-    }
+-    case kRiscvI64x2BitMask: {
+-      Register dst = i.OutputRegister();
+-      Simd128Register src = i.InputSimd128Register(0);
+-      __ VU.set(kScratchReg, E64, m1);
+-      __ vmv_vx(kSimd128RegZero, zero_reg);
+-      __ vmv_vx(kSimd128ScratchReg, zero_reg);
+-      __ vmslt_vv(kSimd128ScratchReg, src, kSimd128RegZero);
+-      __ VU.set(kScratchReg, E32, m1);
+-      __ vmv_xs(dst, kSimd128ScratchReg);
+-      break;
+-    }
+     case kRiscvV128AnyTrue: {
+       __ VU.set(kScratchReg, E8, m1);
+       Register dst = i.OutputRegister();
+@@ -2841,48 +2757,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       __ bind(&t);
+       break;
+     }
+-    case kRiscvI64x2AllTrue: {
+-      __ VU.set(kScratchReg, E64, m1);
+-      Register dst = i.OutputRegister();
+-      Label notalltrue;
+-      __ vmv_vi(kSimd128ScratchReg, -1);
+-      __ vredminu_vs(kSimd128ScratchReg, i.InputSimd128Register(0),
+-                     kSimd128ScratchReg);
+-      __ vmv_xs(dst, kSimd128ScratchReg);
+-      __ beqz(dst, &notalltrue);
+-      __ li(dst, 1);
+-      __ bind(&notalltrue);
+-      break;
+-    }
+-    case kRiscvI32x4AllTrue: {
+-      __ VU.set(kScratchReg, E32, m1);
+-      Register dst = i.OutputRegister();
+-      Label all_true;
+-      __ li(kScratchReg, -1);
+-      __ vmv_sx(kSimd128ScratchReg, kScratchReg);
+-      __ vredminu_vs(kSimd128ScratchReg, i.InputSimd128Register(0),
+-                     kSimd128ScratchReg);
+-      __ vmv_xs(dst, kSimd128ScratchReg);
+-      __ beqz(dst, &all_true);
+-      __ li(dst, 1);
+-      __ bind(&all_true);
+-      break;
+-    }
+-    case kRiscvI16x8AllTrue: {
+-      __ VU.set(kScratchReg, E16, m1);
+-      Register dst = i.OutputRegister();
+-      Label notalltrue;
+-      __ vmv_vi(kSimd128ScratchReg, -1);
+-      __ vredminu_vs(kSimd128ScratchReg, i.InputSimd128Register(0),
+-                     kSimd128ScratchReg);
+-      __ vmv_xs(dst, kSimd128ScratchReg);
+-      __ beqz(dst, &notalltrue);
+-      __ li(dst, 1);
+-      __ bind(&notalltrue);
+-      break;
+-    }
+-    case kRiscvI8x16AllTrue: {
+-      __ VU.set(kScratchReg, E8, m1);
++    case kRiscvVAllTrue: {
++      __ VU.set(kScratchReg, i.InputInt8(1), i.InputInt8(2));
+       Register dst = i.OutputRegister();
+       Label notalltrue;
+       __ vmv_vi(kSimd128ScratchReg, -1);
+@@ -3257,19 +3133,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       __ vsext_vf2(i.OutputSimd128Register(), kSimd128ScratchReg);
+       break;
+     }
+-    case kRiscvI16x8UConvertI8x16Low: {
+-      __ VU.set(kScratchReg, E16, m1);
+-      __ vmv_vv(kSimd128ScratchReg, i.InputSimd128Register(0));
+-      __ vzext_vf2(i.OutputSimd128Register(), kSimd128ScratchReg);
+-      break;
+-    }
+-    case kRiscvI16x8UConvertI8x16High: {
+-      __ VU.set(kScratchReg, E8, m1);
+-      __ vslidedown_vi(kSimd128ScratchReg, i.InputSimd128Register(0), 8);
+-      __ VU.set(kScratchReg, E16, m1);
+-      __ vzext_vf2(i.OutputSimd128Register(), kSimd128ScratchReg);
+-      break;
+-    }
+ #if V8_TARGET_ARCH_RISCV32
+     case kRiscvI64x2SplatI32Pair: {
+       __ VU.set(kScratchReg, E32, m1);
+@@ -3364,7 +3227,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       break;
+     }
+     case kRiscvVmvSx: {
+-      __ VU.set(kScratchReg, i.InputInt8(2), i.InputInt8(3));
++      __ VU.set(kScratchReg, i.InputInt8(1), i.InputInt8(2));
+       if (instr->InputAt(0)->IsRegister()) {
+         __ vmv_sx(i.OutputSimd128Register(), i.InputRegister(0));
+       } else {
+@@ -3374,6 +3237,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       }
+       break;
+     }
++    case kRiscvVmvXs: {
++      __ VU.set(kScratchReg, i.InputInt8(1), i.InputInt8(2));
++      __ vmv_xs(i.OutputRegister(), i.InputSimd128Register(0));
++      break;
++    }
+     case kRiscvVcompress: {
+       __ VU.set(kScratchReg, i.InputInt8(2), i.InputInt8(3));
+       if (instr->InputAt(1)->IsSimd128Register()) {
+@@ -3409,6 +3277,27 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       }
+       break;
+     }
++    case kRiscvVmslt: {
++      __ VU.set(kScratchReg, i.InputInt8(2), i.InputInt8(3));
++      if (instr->InputAt(1)->IsRegister()) {
++        __ vmslt_vx(i.OutputSimd128Register(), i.InputSimd128Register(0),
++                    i.InputRegister(1));
++      } else if (instr->InputAt(1)->IsSimd128Register()) {
++        __ vmslt_vv(i.OutputSimd128Register(), i.InputSimd128Register(0),
++                    i.InputSimd128Register(1));
++      } else {
++        DCHECK(instr->InputAt(1)->IsImmediate());
++        if (is_int5(i.InputInt64(1))) {
++          __ vmslt_vi(i.OutputSimd128Register(), i.InputSimd128Register(0),
++                      i.InputInt8(1));
++        } else {
++          __ li(kScratchReg, i.InputInt64(1));
++          __ vmslt_vx(i.OutputSimd128Register(), i.InputSimd128Register(0),
++                      kScratchReg);
++        }
++      }
++      break;
++    }
+     case kRiscvVaddVv: {
+       __ VU.set(kScratchReg, i.InputInt8(2), i.InputInt8(3));
+       __ vadd_vv(i.OutputSimd128Register(), i.InputSimd128Register(0),
+@@ -3655,6 +3544,21 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+                   i.InputSimd128Register(1));
+       break;
+     }
++    case kRiscvVredminuVs: {
++      __ vredminu_vs(i.OutputSimd128Register(), i.InputSimd128Register(0),
++                     i.InputSimd128Register(1));
++      break;
++    }
++    case kRiscvVzextVf2: {
++      __ VU.set(kScratchReg, i.InputInt8(1), i.InputInt8(2));
++      __ vzext_vf2(i.OutputSimd128Register(), i.InputSimd128Register(0));
++      break;
++    }
++    case kRiscvVsextVf2: {
++      __ VU.set(kScratchReg, i.InputInt8(1), i.InputInt8(2));
++      __ vsext_vf2(i.OutputSimd128Register(), i.InputSimd128Register(0));
++      break;
++    }
+     default:
+ #ifdef DEBUG
+       switch (arch_opcode) {
+diff --git a/src/compiler/backend/riscv/instruction-codes-riscv.h b/src/compiler/backend/riscv/instruction-codes-riscv.h
+index 7836e382f92..d70840e0678 100644
+--- a/src/compiler/backend/riscv/instruction-codes-riscv.h
++++ b/src/compiler/backend/riscv/instruction-codes-riscv.h
+@@ -244,11 +244,9 @@ namespace compiler {
+   V(RiscvI64x2ExtractLane)                \
+   V(RiscvI64x2ReplaceLane)                \
+   V(RiscvI64x2ReplaceLaneI32Pair)         \
+-  V(RiscvI64x2Abs)                        \
+   V(RiscvI64x2Shl)                        \
+   V(RiscvI64x2ShrS)                       \
+   V(RiscvI64x2ShrU)                       \
+-  V(RiscvI64x2BitMask)                    \
+   V(RiscvF32x4Abs)                        \
+   V(RiscvF32x4Sqrt)                       \
+   V(RiscvF32x4Qfma)                       \
+@@ -264,8 +262,6 @@ namespace compiler {
+   V(RiscvF32x4NearestInt)                 \
+   V(RiscvI32x4SConvertF32x4)              \
+   V(RiscvI32x4UConvertF32x4)              \
+-  V(RiscvI32x4Abs)                        \
+-  V(RiscvI32x4BitMask)                    \
+   V(RiscvI32x4TruncSatF64x2SZero)         \
+   V(RiscvI32x4TruncSatF64x2UZero)         \
+   V(RiscvI16x8ExtractLaneU)               \
+@@ -274,8 +270,6 @@ namespace compiler {
+   V(RiscvI16x8Shl)                        \
+   V(RiscvI16x8ShrS)                       \
+   V(RiscvI16x8ShrU)                       \
+-  V(RiscvI16x8Abs)                        \
+-  V(RiscvI16x8BitMask)                    \
+   V(RiscvI8x16ExtractLaneU)               \
+   V(RiscvI8x16ExtractLaneS)               \
+   V(RiscvI8x16ReplaceLane)                \
+@@ -283,18 +277,12 @@ namespace compiler {
+   V(RiscvI8x16ShrS)                       \
+   V(RiscvI8x16ShrU)                       \
+   V(RiscvI8x16RoundingAverageU)           \
+-  V(RiscvI8x16Abs)                        \
+-  V(RiscvI8x16BitMask)                    \
+   V(RiscvI8x16Popcnt)                     \
+-  V(RiscvS128Not)                         \
++  V(RiscvVnot)                            \
+   V(RiscvS128Select)                      \
+   V(RiscvS128Load64Zero)                  \
+   V(RiscvS128Load32Zero)                  \
+-  V(RiscvI32x4AllTrue)                    \
+-  V(RiscvI16x8AllTrue)                    \
+   V(RiscvV128AnyTrue)                     \
+-  V(RiscvI8x16AllTrue)                    \
+-  V(RiscvI64x2AllTrue)                    \
+   V(RiscvS32x4InterleaveRight)            \
+   V(RiscvS32x4InterleaveLeft)             \
+   V(RiscvS32x4PackEven)                   \
+@@ -334,9 +322,6 @@ namespace compiler {
+   V(RiscvI32x4UConvertI16x8High)          \
+   V(RiscvI16x8SConvertI8x16Low)           \
+   V(RiscvI16x8SConvertI8x16High)          \
+-  V(RiscvI16x8UConvertI8x16Low)           \
+-  V(RiscvI16x8UConvertI8x16High)          \
+-  V(RiscvI16x8RoundingAverageU)           \
+   V(RiscvVmv)                             \
+   V(RiscvVandVv)                          \
+   V(RiscvVnotVv)                          \
+@@ -345,6 +330,7 @@ namespace compiler {
+   V(RiscvVwmul)                           \
+   V(RiscvVwmulu)                          \
+   V(RiscvVmvSx)                           \
++  V(RiscvVmvXs)                           \
+   V(RiscvVcompress)                       \
+   V(RiscvVaddVv)                          \
+   V(RiscvVsubVv)                          \
+@@ -353,6 +339,7 @@ namespace compiler {
+   V(RiscvVwadduWx)                        \
+   V(RiscvVrgather)                        \
+   V(RiscvVslidedown)                      \
++  V(RiscvVAbs)                            \
+   V(RiscvVsll)                            \
+   V(RiscvVfmvVf)                          \
+   V(RiscvVnegVv)                          \
+@@ -363,6 +350,7 @@ namespace compiler {
+   V(RiscvVminsVv)                         \
+   V(RiscvVmulVv)                          \
+   V(RiscvVdivu)                           \
++  V(RiscvVmslt)                           \
+   V(RiscvVgtsVv)                          \
+   V(RiscvVgesVv)                          \
+   V(RiscvVgeuVv)                          \
+@@ -386,7 +374,11 @@ namespace compiler {
+   V(RiscvVmergeVx)                        \
+   V(RiscvVsmulVv)                         \
+   V(RiscvVnclipu)                         \
+-  V(RiscvVnclip)
++  V(RiscvVnclip)                          \
++  V(RiscvVredminuVs)                      \
++  V(RiscvVAllTrue)                        \
++  V(RiscvVzextVf2)                        \
++  V(RiscvVsextVf2)
+ 
+ #define TARGET_ARCH_OPCODE_LIST(V)  \
+   TARGET_ARCH_OPCODE_LIST_COMMON(V) \
+diff --git a/src/compiler/backend/riscv/instruction-scheduler-riscv.cc b/src/compiler/backend/riscv/instruction-scheduler-riscv.cc
+index 8d2e841234b..7a091f57f2a 100644
+--- a/src/compiler/backend/riscv/instruction-scheduler-riscv.cc
++++ b/src/compiler/backend/riscv/instruction-scheduler-riscv.cc
+@@ -115,11 +115,9 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kRiscvI64x2ExtractLane:
+     case kRiscvI64x2ReplaceLane:
+     case kRiscvI64x2ReplaceLaneI32Pair:
+-    case kRiscvI64x2Abs:
+     case kRiscvI64x2Shl:
+     case kRiscvI64x2ShrS:
+     case kRiscvI64x2ShrU:
+-    case kRiscvI64x2BitMask:
+     case kRiscvF32x4Abs:
+     case kRiscvF32x4ExtractLane:
+     case kRiscvF32x4Sqrt:
+@@ -168,11 +166,6 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kRiscvI16x8ShrU:
+     case kRiscvI32x4TruncSatF64x2SZero:
+     case kRiscvI32x4TruncSatF64x2UZero:
+-    case kRiscvI16x8UConvertI8x16High:
+-    case kRiscvI16x8UConvertI8x16Low:
+-    case kRiscvI16x8RoundingAverageU:
+-    case kRiscvI16x8Abs:
+-    case kRiscvI16x8BitMask:
+     case kRiscvI32x4ExtractLane:
+     case kRiscvI32x4ReplaceLane:
+     case kRiscvI32x4SConvertF32x4:
+@@ -184,8 +177,6 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kRiscvI32x4UConvertF32x4:
+     case kRiscvI32x4UConvertI16x8High:
+     case kRiscvI32x4UConvertI16x8Low:
+-    case kRiscvI32x4Abs:
+-    case kRiscvI32x4BitMask:
+     case kRiscvI8x16ExtractLaneU:
+     case kRiscvI8x16ExtractLaneS:
+     case kRiscvI8x16ReplaceLane:
+@@ -193,8 +184,6 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kRiscvI8x16ShrS:
+     case kRiscvI8x16ShrU:
+     case kRiscvI8x16RoundingAverageU:
+-    case kRiscvI8x16Abs:
+-    case kRiscvI8x16BitMask:
+     case kRiscvI8x16Popcnt:
+     case kRiscvMaxD:
+     case kRiscvMaxS:
+@@ -218,7 +207,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kRiscvRor32:
+     case kRiscvRoundWD:
+     case kRiscvRoundWS:
+-    case kRiscvS128Not:
++    case kRiscvVnot:
+     case kRiscvS128Select:
+     case kRiscvS128Const:
+     case kRiscvS128Zero:
+@@ -233,11 +222,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kRiscvS16x8PackOdd:
+     case kRiscvS16x2Reverse:
+     case kRiscvS16x4Reverse:
+-    case kRiscvI8x16AllTrue:
+-    case kRiscvI32x4AllTrue:
+-    case kRiscvI16x8AllTrue:
+     case kRiscvV128AnyTrue:
+-    case kRiscvI64x2AllTrue:
+     case kRiscvS32x4InterleaveEven:
+     case kRiscvS32x4InterleaveOdd:
+     case kRiscvS32x4InterleaveLeft:
+@@ -264,6 +249,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kRiscvVnotVv:
+     case kRiscvVxorVv:
+     case kRiscvVmvSx:
++    case kRiscvVmvXs:
+     case kRiscvVfmvVf:
+     case kRiscvVcompress:
+     case kRiscvVaddVv:
+@@ -280,18 +266,22 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kRiscvVmulVv:
+     case kRiscvVdivu:
+     case kRiscvVsmulVv:
++    case kRiscvVmslt:
+     case kRiscvVgtsVv:
+     case kRiscvVgesVv:
+     case kRiscvVgeuVv:
+     case kRiscvVgtuVv:
+     case kRiscvVeqVv:
+     case kRiscvVneVv:
++    case kRiscvVAbs:
+     case kRiscvVaddSatUVv:
+     case kRiscvVaddSatSVv:
+     case kRiscvVsubSatUVv:
+     case kRiscvVsubSatSVv:
+     case kRiscvVrgather:
+     case kRiscvVslidedown:
++    case kRiscvVredminuVs:
++    case kRiscvVAllTrue:
+     case kRiscvVnclipu:
+     case kRiscvVnclip:
+     case kRiscvVsll:
+@@ -306,6 +296,8 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kRiscvVmfltVv:
+     case kRiscvVmfleVv:
+     case kRiscvVmergeVx:
++    case kRiscvVzextVf2:
++    case kRiscvVsextVf2:
+     case kRiscvSar32:
+     case kRiscvSignExtendByte:
+     case kRiscvSignExtendShort:
+diff --git a/src/compiler/backend/riscv/instruction-selector-riscv.h b/src/compiler/backend/riscv/instruction-selector-riscv.h
+index 9dd0c14b46b..f1fe1fc61ac 100644
+--- a/src/compiler/backend/riscv/instruction-selector-riscv.h
++++ b/src/compiler/backend/riscv/instruction-selector-riscv.h
+@@ -1059,6 +1059,12 @@ void InstructionSelectorT<Adapter>::VisitI16x8ExtAddPairwiseI8x16U(Node* node) {
+        g.UseImmediate(int8_t(E8)), g.UseImmediate(int8_t(mf2)));
+ }
+ 
++#define SIMD_INT_TYPE_LIST(V) \
++  V(I64x2, E64, m1)           \
++  V(I32x4, E32, m1)           \
++  V(I16x8, E16, m1)           \
++  V(I8x16, E8, m1)
++
+ #define SIMD_TYPE_LIST(V) \
+   V(F32x4)                \
+   V(I64x2)                \
+@@ -1066,19 +1072,27 @@ void InstructionSelectorT<Adapter>::VisitI16x8ExtAddPairwiseI8x16U(Node* node) {
+   V(I16x8)                \
+   V(I8x16)
+ 
+-#define SIMD_UNOP_LIST2(V)             \
+-  V(F32x4Splat, kRiscvVfmvVf, E32, m1) \
+-  V(I8x16Neg, kRiscvVnegVv, E8, m1)    \
+-  V(I16x8Neg, kRiscvVnegVv, E16, m1)   \
+-  V(I32x4Neg, kRiscvVnegVv, E32, m1)   \
+-  V(I64x2Neg, kRiscvVnegVv, E64, m1)   \
+-  V(I8x16Splat, kRiscvVmv, E8, m1)     \
+-  V(I16x8Splat, kRiscvVmv, E16, m1)    \
+-  V(I32x4Splat, kRiscvVmv, E32, m1)    \
+-  V(I64x2Splat, kRiscvVmv, E64, m1)    \
+-  V(F32x4Neg, kRiscvVfnegVv, E32, m1)  \
+-  V(F64x2Neg, kRiscvVfnegVv, E64, m1)  \
+-  V(F64x2Splat, kRiscvVfmvVf, E64, m1)
++#define SIMD_UNOP_LIST2(V)                 \
++  V(F32x4Splat, kRiscvVfmvVf, E32, m1)     \
++  V(I8x16Neg, kRiscvVnegVv, E8, m1)        \
++  V(I16x8Neg, kRiscvVnegVv, E16, m1)       \
++  V(I32x4Neg, kRiscvVnegVv, E32, m1)       \
++  V(I64x2Neg, kRiscvVnegVv, E64, m1)       \
++  V(I8x16Splat, kRiscvVmv, E8, m1)         \
++  V(I16x8Splat, kRiscvVmv, E16, m1)        \
++  V(I32x4Splat, kRiscvVmv, E32, m1)        \
++  V(I64x2Splat, kRiscvVmv, E64, m1)        \
++  V(F32x4Neg, kRiscvVfnegVv, E32, m1)      \
++  V(F64x2Neg, kRiscvVfnegVv, E64, m1)      \
++  V(F64x2Splat, kRiscvVfmvVf, E64, m1)     \
++  V(I32x4AllTrue, kRiscvVAllTrue, E32, m1) \
++  V(I16x8AllTrue, kRiscvVAllTrue, E16, m1) \
++  V(I8x16AllTrue, kRiscvVAllTrue, E8, m1)  \
++  V(I64x2AllTrue, kRiscvVAllTrue, E64, m1) \
++  V(I64x2Abs, kRiscvVAbs, E64, m1)         \
++  V(I32x4Abs, kRiscvVAbs, E32, m1)         \
++  V(I16x8Abs, kRiscvVAbs, E16, m1)         \
++  V(I8x16Abs, kRiscvVAbs, E8, m1)
+ 
+ #define SIMD_UNOP_LIST(V)                                       \
+   V(F64x2Abs, kRiscvF64x2Abs)                                   \
+@@ -1090,8 +1104,6 @@ void InstructionSelectorT<Adapter>::VisitI16x8ExtAddPairwiseI8x16U(Node* node) {
+   V(F64x2Floor, kRiscvF64x2Floor)                               \
+   V(F64x2Trunc, kRiscvF64x2Trunc)                               \
+   V(F64x2NearestInt, kRiscvF64x2NearestInt)                     \
+-  V(I64x2Abs, kRiscvI64x2Abs)                                   \
+-  V(I64x2BitMask, kRiscvI64x2BitMask)                           \
+   V(F32x4SConvertI32x4, kRiscvF32x4SConvertI32x4)               \
+   V(F32x4UConvertI32x4, kRiscvF32x4UConvertI32x4)               \
+   V(F32x4Abs, kRiscvF32x4Abs)                                   \
+@@ -1115,25 +1127,13 @@ void InstructionSelectorT<Adapter>::VisitI16x8ExtAddPairwiseI8x16U(Node* node) {
+   V(I32x4SConvertI16x8High, kRiscvI32x4SConvertI16x8High)       \
+   V(I32x4UConvertI16x8Low, kRiscvI32x4UConvertI16x8Low)         \
+   V(I32x4UConvertI16x8High, kRiscvI32x4UConvertI16x8High)       \
+-  V(I32x4Abs, kRiscvI32x4Abs)                                   \
+-  V(I32x4BitMask, kRiscvI32x4BitMask)                           \
+   V(I32x4TruncSatF64x2SZero, kRiscvI32x4TruncSatF64x2SZero)     \
+   V(I32x4TruncSatF64x2UZero, kRiscvI32x4TruncSatF64x2UZero)     \
+   V(I16x8SConvertI8x16Low, kRiscvI16x8SConvertI8x16Low)         \
+   V(I16x8SConvertI8x16High, kRiscvI16x8SConvertI8x16High)       \
+-  V(I16x8UConvertI8x16Low, kRiscvI16x8UConvertI8x16Low)         \
+-  V(I16x8UConvertI8x16High, kRiscvI16x8UConvertI8x16High)       \
+-  V(I16x8Abs, kRiscvI16x8Abs)                                   \
+-  V(I16x8BitMask, kRiscvI16x8BitMask)                           \
+-  V(I8x16Abs, kRiscvI8x16Abs)                                   \
+-  V(I8x16BitMask, kRiscvI8x16BitMask)                           \
+   V(I8x16Popcnt, kRiscvI8x16Popcnt)                             \
+-  V(S128Not, kRiscvS128Not)                                     \
+-  V(V128AnyTrue, kRiscvV128AnyTrue)                             \
+-  V(I32x4AllTrue, kRiscvI32x4AllTrue)                           \
+-  V(I16x8AllTrue, kRiscvI16x8AllTrue)                           \
+-  V(I8x16AllTrue, kRiscvI8x16AllTrue)                           \
+-  V(I64x2AllTrue, kRiscvI64x2AllTrue)
++  V(S128Not, kRiscvVnot)                                        \
++  V(V128AnyTrue, kRiscvV128AnyTrue)
+ 
+ #define SIMD_SHIFT_OP_LIST(V) \
+   V(I64x2Shl)                 \
+@@ -1296,13 +1296,6 @@ SIMD_UNOP_LIST(SIMD_VISIT_UNOP)
+ SIMD_SHIFT_OP_LIST(SIMD_VISIT_SHIFT_OP)
+ #undef SIMD_VISIT_SHIFT_OP
+ 
+-// #define SIMD_VISIT_BINOP(Name, instruction)                     \
+-//   template <typename Adapter>                                   \
+-//   void InstructionSelectorT<Adapter>::Visit##Name(Node* node) { \
+-//     VisitRRR(this, instruction, node);                          \
+-//   }
+-// SIMD_BINOP_LIST2(SIMD_VISIT_BINOP)
+-// #undef SIMD_VISIT_BINOP
+ 
+ #define SIMD_VISIT_BINOP_RVV(Name, instruction, VSEW, LMUL)           \
+   template <typename Adapter>                                         \
+@@ -1601,17 +1594,6 @@ void InstructionSelectorT<Adapter>::VisitI8x16SConvertI16x8(Node* node) {
+              g.UseImmediate(FPURoundingMode::RNE));
+ }
+ 
+-// case kRiscvI8x16UConvertI16x8: {
+-//   __ VU.set(kScratchReg, E16, m1);
+-//   __ vmv_vv(v26, i.InputSimd128Register(0));
+-//   __ vmv_vv(v27, i.InputSimd128Register(1));
+-//   __ VU.set(kScratchReg, E16, m2);
+-//   __ vmax_vx(v26, v26, zero_reg);
+-//   __ VU.set(kScratchReg, E8, m1);
+-//   __ VU.set(FPURoundingMode::RNE);
+-//   __ vnclipu_vi(i.OutputSimd128Register(), v26, 0);
+-//   break;
+-// }
+ template <typename Adapter>
+ void InstructionSelectorT<Adapter>::VisitI8x16UConvertI16x8(Node* node) {
+   RiscvOperandGeneratorT<Adapter> g(this);
+@@ -1778,6 +1760,41 @@ void InstructionSelectorT<Adapter>::VisitI8x16Swizzle(Node* node) {
+        g.UseImmediate(m1), arraysize(temps), temps);
+ }
+ 
++#define VISIT_BIMASK(TYPE, VSEW, LMUL)                                      \
++  template <typename Adapter>                                               \
++  void InstructionSelectorT<Adapter>::Visit##TYPE##BitMask(Node* node) {    \
++    RiscvOperandGeneratorT<Adapter> g(this);                                \
++    InstructionOperand temp = g.TempFpRegister(v16);                        \
++    this->Emit(kRiscvVmslt, temp, g.UseRegister(node->InputAt(0)),          \
++               g.UseImmediate(0), g.UseImmediate(VSEW), g.UseImmediate(m1), \
++               g.UseImmediate(true));                                       \
++    this->Emit(kRiscvVmvXs, g.DefineAsRegister(node), temp,                 \
++               g.UseImmediate(E32), g.UseImmediate(m1));                    \
++  }
++
++SIMD_INT_TYPE_LIST(VISIT_BIMASK)
++#undef VISIT_BIMASK
++
++template <typename Adapter>
++void InstructionSelectorT<Adapter>::VisitI16x8UConvertI8x16High(Node* node) {
++  RiscvOperandGeneratorT<Adapter> g(this);
++  InstructionOperand temp = g.TempFpRegister(kSimd128ScratchReg);
++  Emit(kRiscvVslidedown, temp, g.UseRegister(node->InputAt(0)),
++       g.UseImmediate(8), g.UseImmediate(E8), g.UseImmediate(m1));
++  Emit(kRiscvVzextVf2, g.DefineAsRegister(node), temp, g.UseImmediate(E16),
++       g.UseImmediate(m1));
++}
++
++template <typename Adapter>
++void InstructionSelectorT<Adapter>::VisitI16x8UConvertI8x16Low(Node* node) {
++  RiscvOperandGeneratorT<Adapter> g(this);
++  InstructionOperand temp = g.TempFpRegister(kSimd128ScratchReg);
++  Emit(kRiscvVmv, temp, g.UseRegister(node->InputAt(0)), g.UseImmediate(E16),
++       g.UseImmediate(m1));
++  Emit(kRiscvVzextVf2, g.DefineAsRegister(node), temp, g.UseImmediate(E16),
++       g.UseImmediate(m1));
++}
++
+ template <typename Adapter>
+ void InstructionSelectorT<Adapter>::VisitSignExtendWord8ToInt32(node_t node) {
+   if constexpr (Adapter::IsTurboshaft) {
+-- 
+2.35.1
+

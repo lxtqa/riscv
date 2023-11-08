@@ -1,0 +1,286 @@
+From c2eda65a85d1c85f9037fa89b63ae725b18dbfbe Mon Sep 17 00:00:00 2001
+From: Jakob Linke <jgruber@chromium.org>
+Date: Thu, 11 May 2023 09:20:57 +0200
+Subject: [PATCH] [osr] Avoid handling interrupts in the middle of OSR
+
+.. since interrupts may trigger code deoptimization, which in turn
+invalidates assumptions we've already checked at the beginning of
+OnStackReplacement.
+
+This CL disables the stack check as part of the bytecode budget
+interrupt, i.e. we don't call stack_guard()->HandleInterrupts()
+in Runtime_BytecodeBudgetInterrupt_{Ignition,Sparkplug}.
+
+Fixed: chromium:1432470,chromium:1442603
+Change-Id: I63dc51812741161cfb2f1cdb67c46e269d37f0f6
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4518604
+Reviewed-by: Toon Verwaest <verwaest@chromium.org>
+Commit-Queue: Jakob Linke <jgruber@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#87590}
+---
+ src/baseline/baseline-compiler.cc        | 12 ++++--
+ src/baseline/baseline-compiler.h         |  9 +++-
+ src/interpreter/interpreter-assembler.cc | 13 +++---
+ src/interpreter/interpreter-assembler.h  |  7 +++-
+ test/mjsunit/mjsunit.status              |  3 ++
+ test/mjsunit/regress/regress-1432470.js  | 39 +++++++++++++++++
+ test/mjsunit/regress/regress-1442603.js  | 53 ++++++++++++++++++++++++
+ 7 files changed, 123 insertions(+), 13 deletions(-)
+ create mode 100644 test/mjsunit/regress/regress-1432470.js
+ create mode 100644 test/mjsunit/regress/regress-1442603.js
+
+diff --git a/src/baseline/baseline-compiler.cc b/src/baseline/baseline-compiler.cc
+index 30e2baf4467..760cefb3bf6 100644
+--- a/src/baseline/baseline-compiler.cc
++++ b/src/baseline/baseline-compiler.cc
+@@ -596,14 +596,17 @@ INTRINSICS_LIST(DECLARE_VISITOR)
+ #undef DECLARE_VISITOR
+ 
+ void BaselineCompiler::UpdateInterruptBudgetAndJumpToLabel(
+-    int weight, Label* label, Label* skip_interrupt_label) {
++    int weight, Label* label, Label* skip_interrupt_label,
++    StackCheckBehavior stack_check_behavior) {
+   if (weight != 0) {
+     ASM_CODE_COMMENT(&masm_);
+     __ AddToInterruptBudgetAndJumpIfNotExceeded(weight, skip_interrupt_label);
+ 
+     DCHECK_LT(weight, 0);
+     SaveAccumulatorScope accumulator_scope(&basm_);
+-    CallRuntime(Runtime::kBytecodeBudgetInterruptWithStackCheck_Sparkplug,
++    CallRuntime(stack_check_behavior == kEnableStackCheck
++                    ? Runtime::kBytecodeBudgetInterruptWithStackCheck_Sparkplug
++                    : Runtime::kBytecodeBudgetInterrupt_Sparkplug,
+                 __ FunctionOperand());
+   }
+   if (label) __ Jump(label);
+@@ -1919,7 +1922,7 @@ void BaselineCompiler::VisitJumpLoop() {
+   // We can pass in the same label twice since it's a back edge and thus already
+   // bound.
+   DCHECK(label->is_bound());
+-  UpdateInterruptBudgetAndJumpToLabel(weight, label, label);
++  UpdateInterruptBudgetAndJumpToLabel(weight, label, label, kEnableStackCheck);
+ 
+ #ifndef V8_JITLESS
+   {
+@@ -1945,7 +1948,8 @@ void BaselineCompiler::VisitJumpLoop() {
+     __ Bind(&osr);
+     Label do_osr;
+     int weight = bytecode_->length() * v8_flags.osr_to_tierup;
+-    UpdateInterruptBudgetAndJumpToLabel(-weight, nullptr, &do_osr);
++    UpdateInterruptBudgetAndJumpToLabel(-weight, nullptr, &do_osr,
++                                        kDisableStackCheck);
+     __ Bind(&do_osr);
+     CallBuiltin<Builtin::kBaselineOnStackReplacement>(maybe_target_code);
+     __ AddToInterruptBudgetAndJumpIfNotExceeded(weight, nullptr);
+diff --git a/src/baseline/baseline-compiler.h b/src/baseline/baseline-compiler.h
+index c686827e9e6..801a809b327 100644
+--- a/src/baseline/baseline-compiler.h
++++ b/src/baseline/baseline-compiler.h
+@@ -102,8 +102,13 @@ class BaselineCompiler {
+   // Jump helpers.
+   Label* NewLabel();
+   Label* BuildForwardJumpLabel();
+-  void UpdateInterruptBudgetAndJumpToLabel(int weight, Label* label,
+-                                           Label* skip_interrupt_label);
++  enum StackCheckBehavior {
++    kEnableStackCheck,
++    kDisableStackCheck,
++  };
++  void UpdateInterruptBudgetAndJumpToLabel(
++      int weight, Label* label, Label* skip_interrupt_label,
++      StackCheckBehavior stack_check_behavior);
+   void JumpIfRoot(RootIndex root);
+   void JumpIfNotRoot(RootIndex root);
+ 
+diff --git a/src/interpreter/interpreter-assembler.cc b/src/interpreter/interpreter-assembler.cc
+index b5b117892aa..1797a1c1289 100644
+--- a/src/interpreter/interpreter-assembler.cc
++++ b/src/interpreter/interpreter-assembler.cc
+@@ -1037,7 +1037,8 @@ TNode<Int32T> InterpreterAssembler::UpdateInterruptBudget(
+   return new_budget;
+ }
+ 
+-void InterpreterAssembler::DecreaseInterruptBudget(TNode<Int32T> weight) {
++void InterpreterAssembler::DecreaseInterruptBudget(
++    TNode<Int32T> weight, StackCheckBehavior stack_check_behavior) {
+   Comment("[ DecreaseInterruptBudget");
+   Label done(this), interrupt_check(this);
+ 
+@@ -1052,9 +1053,8 @@ void InterpreterAssembler::DecreaseInterruptBudget(TNode<Int32T> weight) {
+          &interrupt_check);
+ 
+   BIND(&interrupt_check);
+-  // JumpLoop should do a stack check as part of the interrupt.
+   TNode<JSFunction> function = CAST(LoadRegister(Register::function_closure()));
+-  CallRuntime(bytecode() == Bytecode::kJumpLoop
++  CallRuntime(stack_check_behavior == kEnableStackCheck
+                   ? Runtime::kBytecodeBudgetInterruptWithStackCheck_Ignition
+                   : Runtime::kBytecodeBudgetInterrupt_Ignition,
+               GetContext(), function);
+@@ -1095,7 +1095,8 @@ void InterpreterAssembler::Jump(TNode<IntPtrT> jump_offset) {
+ }
+ 
+ void InterpreterAssembler::JumpBackward(TNode<IntPtrT> jump_offset) {
+-  DecreaseInterruptBudget(TruncateIntPtrToInt32(jump_offset));
++  DecreaseInterruptBudget(TruncateIntPtrToInt32(jump_offset),
++                          kEnableStackCheck);
+   JumpToOffset(IntPtrSub(BytecodeOffset(), jump_offset));
+ }
+ 
+@@ -1323,7 +1324,7 @@ void InterpreterAssembler::UpdateInterruptBudgetOnReturn() {
+   TNode<Int32T> profiling_weight =
+       Int32Sub(TruncateIntPtrToInt32(BytecodeOffset()),
+                Int32Constant(kFirstBytecodeOffset));
+-  DecreaseInterruptBudget(profiling_weight);
++  DecreaseInterruptBudget(profiling_weight, kDisableStackCheck);
+ }
+ 
+ TNode<Int8T> InterpreterAssembler::LoadOsrState(
+@@ -1414,7 +1415,7 @@ void InterpreterAssembler::OnStackReplacement(
+         LoadAndUntagFixedArrayBaseLength(BytecodeArrayTaggedPointer());
+     TNode<IntPtrT> weight =
+         IntPtrMul(length, IntPtrConstant(v8_flags.osr_to_tierup));
+-    DecreaseInterruptBudget(TruncateWordToInt32(weight));
++    DecreaseInterruptBudget(TruncateWordToInt32(weight), kDisableStackCheck);
+     Callable callable = CodeFactory::InterpreterOnStackReplacement(isolate());
+     CallStub(callable, context, maybe_target_code.value());
+     UpdateInterruptBudget(
+diff --git a/src/interpreter/interpreter-assembler.h b/src/interpreter/interpreter-assembler.h
+index 5c164fd9a72..1aa9a9ba34c 100644
+--- a/src/interpreter/interpreter-assembler.h
++++ b/src/interpreter/interpreter-assembler.h
+@@ -258,7 +258,12 @@ class V8_EXPORT_PRIVATE InterpreterAssembler : public CodeStubAssembler {
+   TNode<Int32T> UpdateInterruptBudget(TNode<Int32T> weight);
+   // Decrements the bytecode array's interrupt budget by a 32-bit unsigned
+   // |weight| and calls Runtime::kInterrupt if counter reaches zero.
+-  void DecreaseInterruptBudget(TNode<Int32T> weight);
++  enum StackCheckBehavior {
++    kEnableStackCheck,
++    kDisableStackCheck,
++  };
++  void DecreaseInterruptBudget(TNode<Int32T> weight,
++                               StackCheckBehavior stack_check_behavior);
+ 
+   TNode<Int8T> LoadOsrState(TNode<FeedbackVector> feedback_vector);
+ 
+diff --git a/test/mjsunit/mjsunit.status b/test/mjsunit/mjsunit.status
+index 676ad4890ca..84c714b1a27 100644
+--- a/test/mjsunit/mjsunit.status
++++ b/test/mjsunit/mjsunit.status
+@@ -569,6 +569,9 @@
+   'wasm/bigint-opt': [SKIP],
+   'wasm/simd-lane-memory64': [SKIP],
+   'regress/regress-1320641': [SKIP],
++
++  # Needs a huge Uint8Array.
++  'regress/regress-1432470': [SKIP],
+ }],  # 'arch in (ia32, arm, riscv32)'
+ 
+ ##############################################################################
+diff --git a/test/mjsunit/regress/regress-1432470.js b/test/mjsunit/regress/regress-1432470.js
+new file mode 100644
+index 00000000000..3915ca4fe69
+--- /dev/null
++++ b/test/mjsunit/regress/regress-1432470.js
+@@ -0,0 +1,39 @@
++// Copyright 2023 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++const v2 = new Uint8ClampedArray(216);
++const v5 = new BigInt64Array(5);
++const v8 = new Uint32Array(2);
++for (let v9 = 0; v9 < 5; v9++) {
++  const v12 = new Float32Array(4096);
++  function f13() {
++    return f13;
++  }
++  const v14 = f13();
++  const v16 = 7 * v14;
++  const v17 = +v16;
++  const v18 = 4096 + v14;
++  const v19 = v18 * v17;
++  class C21 extends Array {
++    constructor(a23, a24, a25, a26) {
++      super();
++      v18.toLowerCase(a24, 7, 7, f13);
++    }
++  }
++  const v28 = new C21(v19, v16, 7, C21);
++  const v31 = new Uint8Array(1073741824);
++  for (let i = 0; i < 25; i++) {
++    let v36 = ("valueOf")[216];
++    for (let v37 = 0; v37 < 50; v37++) {
++      for (let v38 = 0; v38 < 50; v38++) {
++        v36 % (4096 >>> 4096);
++        v36++;
++      }
++      0 == 99;
++      class C45 {
++      }
++    }
++  }
++  Array(56393);
++}
+diff --git a/test/mjsunit/regress/regress-1442603.js b/test/mjsunit/regress/regress-1442603.js
+new file mode 100644
+index 00000000000..6bb7c783774
+--- /dev/null
++++ b/test/mjsunit/regress/regress-1442603.js
+@@ -0,0 +1,53 @@
++// Copyright 2023 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Flags: --expose-gc --stress-flush-code
++// Flags: --always-turbofan --always-osr --osr-to-tierup=200
++
++function main() {
++  function f0() {
++    try {
++      var v0 = 0;
++    } catch (v3) { }
++    try {
++      var v1 = new Array(23);
++    } catch (v4) { }
++    try {
++      for (; v0 < v1.length; v0++) {
++        v1[v0] = new Uint32Array(262142);
++        v1[v0] = new Uint32Array(262139);
++        v1[v0] = new Uint32Array(262139);
++      }
++    } catch (v5) { }
++    v0 = -13;
++    try {
++      var v2 = [];
++    } catch (v6) { }
++    try {
++      var v1 = new Array(23);
++    } catch (v7) { }
++    try {
++      v2.xxx = "xxx";
++    } catch (e) { }
++    try {
++      for (var v0 = 0; v0 < 1024; v0++) {
++        v2[v0] = new Array(v0);
++        v2[v0] = new Array(v0);
++        v2[v0] = new Array(v0);
++        v2[v0].xxx = "xxx " + v0;
++        v2[v0].xxx = "xxx " + v0;
++        v2[v0].xxx = "xxx " + v0;
++      }
++    } catch (v8) { }
++    try {
++      gc();
++      a(900000)[b(b(900000), 900000)] = 900000;
++    } catch (v9) { }
++  }
++  gc();
++  f0();
++}
++main();
++main();
++main();
+-- 
+2.35.1
+

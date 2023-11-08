@@ -1,0 +1,137 @@
+From 032ab3d2ecca1dd5286295164f5f5e603a8ee774 Mon Sep 17 00:00:00 2001
+From: Camillo Bruni <cbruni@chromium.org>
+Date: Thu, 27 May 2021 12:35:22 +0200
+Subject: [PATCH] [codegen] Assert that RegisterArray has only unique registers
+
+Bug: v8:11420
+Change-Id: Iede5f605f500c72b455906cc53fc417a16be1900
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/2919821
+Reviewed-by: Santiago Aboy Solanes <solanes@chromium.org>
+Commit-Queue: Camillo Bruni <cbruni@chromium.org>
+Cr-Commit-Position: refs/heads/master@{#74819}
+---
+ src/codegen/arm/interface-descriptors-arm-inl.h     |  4 +++-
+ src/codegen/arm64/interface-descriptors-arm64-inl.h |  4 +++-
+ src/codegen/ia32/interface-descriptors-ia32-inl.h   |  3 +++
+ src/codegen/interface-descriptors-inl.h             | 11 ++++++++---
+ src/codegen/interface-descriptors.h                 |  1 +
+ src/codegen/x64/interface-descriptors-x64-inl.h     |  6 ++++++
+ 6 files changed, 24 insertions(+), 5 deletions(-)
+
+diff --git a/src/codegen/arm/interface-descriptors-arm-inl.h b/src/codegen/arm/interface-descriptors-arm-inl.h
+index 28500ebc519..c9cc6b1b95f 100644
+--- a/src/codegen/arm/interface-descriptors-arm-inl.h
++++ b/src/codegen/arm/interface-descriptors-arm-inl.h
+@@ -21,11 +21,13 @@ constexpr auto CallInterfaceDescriptor::DefaultRegisterArray() {
+ 
+ // static
+ constexpr auto WriteBarrierDescriptor::registers() {
+-  return RegisterArray(r0, r1, r2, r3, r4, kReturnRegister0);
++  STATIC_ASSERT(kReturnRegister0 == r0);
++  return RegisterArray(r0, r1, r2, r3, r4);
+ }
+ 
+ // static
+ constexpr auto DynamicCheckMapsDescriptor::registers() {
++  STATIC_ASSERT(kReturnRegister0 == r0);
+   return RegisterArray(r0, r1, r2, r3, cp);
+ }
+ 
+diff --git a/src/codegen/arm64/interface-descriptors-arm64-inl.h b/src/codegen/arm64/interface-descriptors-arm64-inl.h
+index 5a5d98be283..a0aa40a55dd 100644
+--- a/src/codegen/arm64/interface-descriptors-arm64-inl.h
++++ b/src/codegen/arm64/interface-descriptors-arm64-inl.h
+@@ -22,11 +22,13 @@ constexpr auto CallInterfaceDescriptor::DefaultRegisterArray() {
+ 
+ // static
+ constexpr auto WriteBarrierDescriptor::registers() {
+-  return RegisterArray(x0, x1, x2, x3, x4, kReturnRegister0);
++  STATIC_ASSERT(kReturnRegister0 == x0);
++  return RegisterArray(x0, x1, x2, x3, x4);
+ }
+ 
+ // static
+ constexpr auto DynamicCheckMapsDescriptor::registers() {
++  STATIC_ASSERT(kReturnRegister0 == x0);
+   return RegisterArray(x0, x1, x2, x3, cp);
+ }
+ 
+diff --git a/src/codegen/ia32/interface-descriptors-ia32-inl.h b/src/codegen/ia32/interface-descriptors-ia32-inl.h
+index d6ae1aa736a..1914e756a9d 100644
+--- a/src/codegen/ia32/interface-descriptors-ia32-inl.h
++++ b/src/codegen/ia32/interface-descriptors-ia32-inl.h
+@@ -20,11 +20,14 @@ constexpr auto CallInterfaceDescriptor::DefaultRegisterArray() {
+ 
+ // static
+ constexpr auto WriteBarrierDescriptor::registers() {
++  STATIC_ASSERT(esi == kContextRegister);
+   return RegisterArray(ecx, edx, esi, edi, kReturnRegister0);
+ }
+ 
+ // static
+ constexpr auto DynamicCheckMapsDescriptor::registers() {
++  STATIC_ASSERT(esi == kContextRegister);
++  STATIC_ASSERT(eax == kReturnRegister0);
+   return RegisterArray(eax, ecx, edx, edi, esi);
+ }
+ 
+diff --git a/src/codegen/interface-descriptors-inl.h b/src/codegen/interface-descriptors-inl.h
+index 273e9d3e8e0..81d20f9d622 100644
+--- a/src/codegen/interface-descriptors-inl.h
++++ b/src/codegen/interface-descriptors-inl.h
+@@ -271,13 +271,18 @@ constexpr auto LoadWithReceiverBaselineDescriptor::registers() {
+ // static
+ constexpr auto BaselineOutOfLinePrologueDescriptor::registers() {
+   // TODO(v8:11421): Implement on other platforms.
+-#if V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_IA32 || \
+-    V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_PPC || V8_TARGET_ARCH_PPC64 ||  \
+-    V8_TARGET_ARCH_S390 || V8_TARGET_ARCH_RISCV64
++#if V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_ARM ||  \
++    V8_TARGET_ARCH_PPC || V8_TARGET_ARCH_PPC64 || V8_TARGET_ARCH_S390 || \
++    V8_TARGET_ARCH_RISCV64
+   return RegisterArray(
+       kContextRegister, kJSFunctionRegister, kJavaScriptCallArgCountRegister,
+       kJavaScriptCallExtraArg1Register, kJavaScriptCallNewTargetRegister,
+       kInterpreterBytecodeArrayRegister);
++#elif V8_TARGET_ARCH_IA32
++  STATIC_ASSERT(kJSFunctionRegister == kInterpreterBytecodeArrayRegister);
++  return RegisterArray(
++      kContextRegister, kJSFunctionRegister, kJavaScriptCallArgCountRegister,
++      kJavaScriptCallExtraArg1Register, kJavaScriptCallNewTargetRegister);
+ #else
+   return DefaultRegisterArray();
+ #endif
+diff --git a/src/codegen/interface-descriptors.h b/src/codegen/interface-descriptors.h
+index 247b414f32a..a3350b8b223 100644
+--- a/src/codegen/interface-descriptors.h
++++ b/src/codegen/interface-descriptors.h
+@@ -506,6 +506,7 @@ struct EmptyRegisterArray {
+ template <typename... Registers>
+ constexpr std::array<Register, 1 + sizeof...(Registers)> RegisterArray(
+     Register first_reg, Registers... regs) {
++  DCHECK(!AreAliased(first_reg, regs...));
+   return {first_reg, regs...};
+ }
+ constexpr EmptyRegisterArray RegisterArray() { return {}; }
+diff --git a/src/codegen/x64/interface-descriptors-x64-inl.h b/src/codegen/x64/interface-descriptors-x64-inl.h
+index e15ffb4af76..eaad9f06050 100644
+--- a/src/codegen/x64/interface-descriptors-x64-inl.h
++++ b/src/codegen/x64/interface-descriptors-x64-inl.h
+@@ -33,8 +33,14 @@ constexpr auto TSANRelaxedStoreDescriptor::registers() {
+ 
+ // static
+ constexpr auto DynamicCheckMapsDescriptor::registers() {
++#if V8_TARGET_OS_WIN
+   return RegisterArray(kReturnRegister0, arg_reg_1, arg_reg_2, arg_reg_3,
+                        kRuntimeCallFunctionRegister, kContextRegister);
++#else
++  STATIC_ASSERT(kContextRegister == arg_reg_2);
++  return RegisterArray(kReturnRegister0, arg_reg_1, arg_reg_2, arg_reg_3,
++                       kRuntimeCallFunctionRegister);
++#endif  // V8_TARGET_OS_WIN
+ }
+ 
+ // static
+-- 
+2.35.1
+

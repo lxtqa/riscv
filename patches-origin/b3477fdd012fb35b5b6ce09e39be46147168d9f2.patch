@@ -1,0 +1,3337 @@
+From b3477fdd012fb35b5b6ce09e39be46147168d9f2 Mon Sep 17 00:00:00 2001
+From: Liviu Rau <liviurau@google.com>
+Date: Mon, 18 Jul 2022 11:05:55 +0200
+Subject: [PATCH] [test] Refactor testrunner (4)
+
+ - Removed duplication and unnecessary indirection from all suites testcfgs.
+ - Introduced a more comprehensive context to cover both command context and other platform specific concerns.
+ - Propagated above context to TestLoader to allow for test counting command execution on all platforms.
+ - Wrapped original pool with another class to give it a new interface and allow injecting different implementations in the future.
+ - Consolidated progress indicators under a single processor in the pipeline.
+ - Consolidated result retention requirements calculation outside of pipeline chain.
+ - Refactored LoaderProc and got it under tests.
+ - Added some more tests for the standard runner.
+ - Extracted BuildConfig class.
+
+
+Bug: v8:12785
+Change-Id: I87be040e91f792a983662bb5a10d55b36a14ea7f
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3701595
+Reviewed-by: Michael Achenbach <machenbach@chromium.org>
+Commit-Queue: Liviu Rau <liviurau@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#81770}
+---
+ test/benchmarks/testcfg.py                    |   9 +-
+ test/bigint/testcfg.py                        |  12 +-
+ test/cctest/testcfg.py                        |   6 +-
+ test/debugger/testcfg.py                      |   4 -
+ test/debugging/testcfg.py                     |   4 -
+ test/fuzzer/testcfg.py                        |   4 -
+ test/fuzzilli/testcfg.py                      |   4 -
+ test/inspector/testcfg.py                     |   4 -
+ test/intl/testcfg.py                          |   4 -
+ test/message/testcfg.py                       |   4 -
+ test/mjsunit/testcfg.py                       |   4 -
+ test/mkgrokdump/testcfg.py                    |   9 +-
+ test/mozilla/testcfg.py                       |   9 +-
+ test/test262/testcfg.py                       |   9 +-
+ test/unittests/testcfg.py                     |  12 +-
+ test/wasm-api-tests/testcfg.py                |  12 +-
+ test/wasm-js/testcfg.py                       |   9 +-
+ test/wasm-spec-tests/testcfg.py               |   9 +-
+ test/webkit/testcfg.py                        |   4 -
+ tools/run_perf.py                             |   2 +-
+ tools/testrunner/base_runner.py               | 302 ++++--------
+ tools/testrunner/build_config.py              | 152 ++++++
+ tools/testrunner/local/android.py             |  19 +-
+ tools/testrunner/local/command.py             |  82 ++--
+ .../local/fake_testsuite/testcfg.py           |   3 -
+ tools/testrunner/local/pool.py                |  61 ++-
+ tools/testrunner/local/testsuite.py           |  13 +-
+ tools/testrunner/local/testsuite_test.py      |   6 +-
+ tools/testrunner/num_fuzzer.py                |  45 +-
+ tools/testrunner/objects/testcase.py          |  24 +-
+ tools/testrunner/standard_runner.py           |  69 +--
+ tools/testrunner/standard_runner_test.py      |  85 +++-
+ .../testdata/testroot1/test/sweet/testcfg.py  |   3 -
+ .../testdata/testroot2/test/sweet/testcfg.py  |   3 -
+ .../testdata/testroot3/test/sweet/testcfg.py  |   3 -
+ .../testroot5/test/sweet/sweet.status         |   2 +-
+ .../testdata/testroot5/test/sweet/testcfg.py  |   5 +-
+ .../testdata/testroot6/out/build/d8_mocked.py |  18 +
+ .../testroot6/out/build/v8_build_config.json  |  32 ++
+ .../testdata/testroot6/test/fat/fat.status    |  19 +
+ .../testdata/testroot6/test/fat/testcfg.py    |  41 ++
+ tools/testrunner/testproc/base.py             |  30 --
+ tools/testrunner/testproc/combiner.py         |   8 +-
+ tools/testrunner/testproc/execution.py        |  43 +-
+ tools/testrunner/testproc/fuzzer.py           |   6 -
+ tools/testrunner/testproc/indicators.py       | 419 +++++++++++++++++
+ tools/testrunner/testproc/loader.py           |  33 +-
+ tools/testrunner/testproc/loader_test.py      |  75 +++
+ tools/testrunner/testproc/progress.py         | 443 ++----------------
+ tools/testrunner/testproc/result.py           |  14 +
+ tools/testrunner/testproc/seed.py             |   7 +-
+ tools/testrunner/testproc/sigproc.py          |  10 +-
+ tools/testrunner/testproc/variant.py          |   8 +-
+ tools/testrunner/testproc/variant_test.py     |   1 -
+ tools/testrunner/utils/test_utils.py          |  56 ++-
+ tools/unittests/run_perf_test.py              |   3 +-
+ 56 files changed, 1272 insertions(+), 1005 deletions(-)
+ create mode 100644 tools/testrunner/build_config.py
+ create mode 100644 tools/testrunner/testdata/testroot6/out/build/d8_mocked.py
+ create mode 100644 tools/testrunner/testdata/testroot6/out/build/v8_build_config.json
+ create mode 100644 tools/testrunner/testdata/testroot6/test/fat/fat.status
+ create mode 100644 tools/testrunner/testdata/testroot6/test/fat/testcfg.py
+ create mode 100644 tools/testrunner/testproc/indicators.py
+ create mode 100755 tools/testrunner/testproc/loader_test.py
+
+diff --git a/test/benchmarks/testcfg.py b/test/benchmarks/testcfg.py
+index bf24b7a7d56..7c7974cfd9d 100644
+--- a/test/benchmarks/testcfg.py
++++ b/test/benchmarks/testcfg.py
+@@ -98,8 +98,9 @@ class TestLoader(testsuite.TestLoader):
+ 
+ 
+ class TestSuite(testsuite.TestSuite):
+-  def __init__(self, *args, **kwargs):
+-    super(TestSuite, self).__init__(*args, **kwargs)
++
++  def __init__(self, ctx, *args, **kwargs):
++    super(TestSuite, self).__init__(ctx, *args, **kwargs)
+     self.testroot = os.path.join(self.root, "data")
+ 
+   def _test_loader_class(self):
+@@ -135,7 +136,3 @@ class TestCase(testcase.D8TestCase):
+ 
+   def _get_source_path(self):
+     return os.path.join(self.suite.testroot, self.path + self._get_suffix())
+-
+-
+-def GetSuite(*args, **kwargs):
+-  return TestSuite(*args, **kwargs)
+diff --git a/test/bigint/testcfg.py b/test/bigint/testcfg.py
+index edf42d81ed9..d882f16650d 100644
+--- a/test/bigint/testcfg.py
++++ b/test/bigint/testcfg.py
+@@ -25,10 +25,10 @@ class TestLoader(testsuite.TestLoader):
+       os.path.join(self.test_config.shell_dir, SHELL))
+     if utils.IsWindows():
+       shell += ".exe"
+-    cmd = command.Command(
+-      cmd_prefix=self.test_config.command_prefix,
+-      shell=shell,
+-      args=['--list'] + self.test_config.extra_flags)
++    cmd = self.ctx.command(
++        cmd_prefix=self.test_config.command_prefix,
++        shell=shell,
++        args=['--list'] + self.test_config.extra_flags)
+     output = cmd.execute()
+ 
+     if output.exit_code != 0:
+@@ -57,7 +57,3 @@ class TestCase(testcase.TestCase):
+ 
+   def get_shell(self):
+     return SHELL
+-
+-
+-def GetSuite(*args, **kwargs):
+-  return TestSuite(*args, **kwargs)
+diff --git a/test/cctest/testcfg.py b/test/cctest/testcfg.py
+index 79a0d723d1e..83d2c140ebc 100644
+--- a/test/cctest/testcfg.py
++++ b/test/cctest/testcfg.py
+@@ -44,7 +44,7 @@ class TestLoader(testsuite.TestLoader):
+     shell = os.path.abspath(os.path.join(self.test_config.shell_dir, SHELL))
+     if utils.IsWindows():
+       shell += ".exe"
+-    cmd = command.Command(
++    cmd = self.ctx.command(
+         cmd_prefix=self.test_config.command_prefix,
+         shell=shell,
+         args=["--list"] + self.test_config.extra_flags)
+@@ -87,7 +87,3 @@ class TestCase(testcase.TestCase):
+ 
+   def _get_files_params(self):
+     return [self.path]
+-
+-
+-def GetSuite(*args, **kwargs):
+-  return TestSuite(*args, **kwargs)
+diff --git a/test/debugger/testcfg.py b/test/debugger/testcfg.py
+index 74d885bb44d..1f3e49d24fb 100644
+--- a/test/debugger/testcfg.py
++++ b/test/debugger/testcfg.py
+@@ -73,7 +73,3 @@ class TestCase(testcase.D8TestCase):
+     if os.path.exists(base_path + self._get_suffix()):
+       return base_path + self._get_suffix()
+     return base_path + '.mjs'
+-
+-
+-def GetSuite(*args, **kwargs):
+-  return TestSuite(*args, **kwargs)
+diff --git a/test/debugging/testcfg.py b/test/debugging/testcfg.py
+index 1a212de9697..f5d15a9f938 100644
+--- a/test/debugging/testcfg.py
++++ b/test/debugging/testcfg.py
+@@ -94,7 +94,3 @@ class TestSuite(testsuite.TestSuite):
+ 
+   def _test_class(self):
+     return TestCase
+-
+-
+-def GetSuite(*args, **kwargs):
+-  return TestSuite(*args, **kwargs)
+diff --git a/test/fuzzer/testcfg.py b/test/fuzzer/testcfg.py
+index c4d60e929b9..4b5657abca4 100644
+--- a/test/fuzzer/testcfg.py
++++ b/test/fuzzer/testcfg.py
+@@ -65,7 +65,3 @@ class TestCase(testcase.TestCase):
+   def get_shell(self):
+     group, _ = self.path.split(os.path.sep, 1)
+     return 'v8_simple_%s_fuzzer' % group
+-
+-
+-def GetSuite(*args, **kwargs):
+-  return TestSuite(*args, **kwargs)
+diff --git a/test/fuzzilli/testcfg.py b/test/fuzzilli/testcfg.py
+index 2324b60ced1..3845eb0caaa 100644
+--- a/test/fuzzilli/testcfg.py
++++ b/test/fuzzilli/testcfg.py
+@@ -52,7 +52,3 @@ class TestCase(testcase.TestCase):
+ 
+   def get_shell(self):
+     return 'v8_fuzzilli_test'
+-
+-
+-def GetSuite(*args, **kwargs):
+-  return TestSuite(*args, **kwargs)
+diff --git a/test/inspector/testcfg.py b/test/inspector/testcfg.py
+index a45bf6c49eb..f7325aa23b5 100644
+--- a/test/inspector/testcfg.py
++++ b/test/inspector/testcfg.py
+@@ -67,7 +67,3 @@ class TestCase(testcase.TestCase):
+         self.expected_outcomes,
+         os.path.join(self.suite.root, self.path) + EXPECTED_SUFFIX,
+         self.suite.test_config.regenerate_expected_files)
+-
+-
+-def GetSuite(*args, **kwargs):
+-  return TestSuite(*args, **kwargs)
+diff --git a/test/intl/testcfg.py b/test/intl/testcfg.py
+index c324304ac9a..1b0c36e0c02 100644
+--- a/test/intl/testcfg.py
++++ b/test/intl/testcfg.py
+@@ -92,7 +92,3 @@ class TestCase(testcase.D8TestCase):
+ 
+   def _get_source_path(self):
+     return os.path.join(self.suite.root, self.path + self._get_suffix())
+-
+-
+-def GetSuite(*args, **kwargs):
+-  return TestSuite(*args, **kwargs)
+diff --git a/test/message/testcfg.py b/test/message/testcfg.py
+index 6801c76c5de..fb19eb320ec 100644
+--- a/test/message/testcfg.py
++++ b/test/message/testcfg.py
+@@ -100,7 +100,3 @@ class TestCase(testcase.D8TestCase):
+                            self._expected_fail(),
+                            self._base_path + '.out',
+                            self.suite.test_config.regenerate_expected_files)
+-
+-
+-def GetSuite(*args, **kwargs):
+-  return TestSuite(*args, **kwargs)
+diff --git a/test/mjsunit/testcfg.py b/test/mjsunit/testcfg.py
+index 6fa631a0a81..3afd9e2bce9 100644
+--- a/test/mjsunit/testcfg.py
++++ b/test/mjsunit/testcfg.py
+@@ -275,7 +275,3 @@ class CombinedTest(testcase.D8TestCase):
+     # Combine flags from all status file entries.
+     return self._get_combined_flags(
+         test._get_statusfile_flags() for test in self._tests)
+-
+-
+-def GetSuite(*args, **kwargs):
+-  return TestSuite(*args, **kwargs)
+diff --git a/test/mkgrokdump/testcfg.py b/test/mkgrokdump/testcfg.py
+index 0a20dc98392..955b075b20e 100644
+--- a/test/mkgrokdump/testcfg.py
++++ b/test/mkgrokdump/testcfg.py
+@@ -18,8 +18,9 @@ class TestLoader(testsuite.TestLoader):
+ 
+ #TODO(tmrts): refactor the test creation logic to migrate to TestLoader
+ class TestSuite(testsuite.TestSuite):
+-  def __init__(self, *args, **kwargs):
+-    super(TestSuite, self).__init__(*args, **kwargs)
++
++  def __init__(self, ctx, *args, **kwargs):
++    super(TestSuite, self).__init__(ctx, *args, **kwargs)
+ 
+     v8_path = os.path.dirname(os.path.dirname(os.path.abspath(self.root)))
+     self.expected_path = os.path.join(v8_path, 'tools', 'v8heapconst.py')
+@@ -47,7 +48,3 @@ class TestCase(testcase.TestCase):
+   @property
+   def output_proc(self):
+     return mkgrokdump.OutProc(self.expected_outcomes, self.suite.expected_path)
+-
+-
+-def GetSuite(*args, **kwargs):
+-  return TestSuite(*args, **kwargs)
+diff --git a/test/mozilla/testcfg.py b/test/mozilla/testcfg.py
+index 72448938ff1..95c2ba6a276 100644
+--- a/test/mozilla/testcfg.py
++++ b/test/mozilla/testcfg.py
+@@ -75,8 +75,9 @@ class TestLoader(testsuite.JSTestLoader):
+ 
+ 
+ class TestSuite(testsuite.TestSuite):
+-  def __init__(self, *args, **kwargs):
+-    super(TestSuite, self).__init__(*args, **kwargs)
++
++  def __init__(self, ctx, *args, **kwargs):
++    super(TestSuite, self).__init__(ctx, *args, **kwargs)
+     self.test_root = os.path.join(self.root, "data")
+     self._test_loader.test_root = self.test_root
+ 
+@@ -117,7 +118,3 @@ class TestCase(testcase.D8TestCase):
+     if self.path.endswith('-n'):
+       return mozilla.NegOutProc(self.expected_outcomes)
+     return mozilla.OutProc(self.expected_outcomes)
+-
+-
+-def GetSuite(*args, **kwargs):
+-  return TestSuite(*args, **kwargs)
+diff --git a/test/test262/testcfg.py b/test/test262/testcfg.py
+index 3ab9dac4461..20d358b4fea 100644
+--- a/test/test262/testcfg.py
++++ b/test/test262/testcfg.py
+@@ -123,8 +123,9 @@ class TestLoader(testsuite.JSTestLoader):
+ 
+ 
+ class TestSuite(testsuite.TestSuite):
+-  def __init__(self, *args, **kwargs):
+-    super(TestSuite, self).__init__(*args, **kwargs)
++
++  def __init__(self, ctx, *args, **kwargs):
++    super(TestSuite, self).__init__(ctx, *args, **kwargs)
+     self.test_root = os.path.join(self.root, *TEST_262_SUITE_PATH)
+     # TODO: this makes the TestLoader mutable, refactor it.
+     self._test_loader.test_root = self.test_root
+@@ -252,7 +253,3 @@ class TestCase(testcase.D8TestCase):
+     if self.expected_outcomes == outproc.OUTCOMES_PASS:
+       return test262.PASS_NO_EXCEPTION
+     return test262.NoExceptionOutProc(self.expected_outcomes)
+-
+-
+-def GetSuite(*args, **kwargs):
+-  return TestSuite(*args, **kwargs)
+diff --git a/test/unittests/testcfg.py b/test/unittests/testcfg.py
+index 21136d4cd77..43ec0c2b11b 100644
+--- a/test/unittests/testcfg.py
++++ b/test/unittests/testcfg.py
+@@ -24,10 +24,10 @@ class TestLoader(testsuite.TestLoader):
+ 
+     output = None
+     for i in range(3): # Try 3 times in case of errors.
+-      cmd = command.Command(
+-        cmd_prefix=self.test_config.command_prefix,
+-        shell=shell,
+-        args=['--gtest_list_tests'] + self.test_config.extra_flags)
++      cmd = self.ctx.command(
++          cmd_prefix=self.test_config.command_prefix,
++          shell=shell,
++          args=['--gtest_list_tests'] + self.test_config.extra_flags)
+       output = cmd.execute()
+       if output.exit_code == 0:
+         break
+@@ -89,7 +89,3 @@ class TestCase(testcase.TestCase):
+       if os.path.exists(expectation_file):
+         return [expectation_file]
+     return []
+-
+-
+-def GetSuite(*args, **kwargs):
+-  return TestSuite(*args, **kwargs)
+diff --git a/test/wasm-api-tests/testcfg.py b/test/wasm-api-tests/testcfg.py
+index 5d2a96a7c6b..c843ddf57f3 100644
+--- a/test/wasm-api-tests/testcfg.py
++++ b/test/wasm-api-tests/testcfg.py
+@@ -24,10 +24,10 @@ class TestLoader(testsuite.TestLoader):
+ 
+     output = None
+     for i in range(3): # Try 3 times in case of errors.
+-      cmd = command.Command(
+-        cmd_prefix=self.test_config.command_prefix,
+-        shell=shell,
+-        args=['--gtest_list_tests'] + self.test_config.extra_flags)
++      cmd = self.ctx.command(
++          cmd_prefix=self.test_config.command_prefix,
++          shell=shell,
++          args=['--gtest_list_tests'] + self.test_config.extra_flags)
+       output = cmd.execute()
+       if output.exit_code == 0:
+         break
+@@ -77,7 +77,3 @@ class TestCase(testcase.TestCase):
+ 
+   def get_shell(self):
+     return "wasm_api_tests"
+-
+-
+-def GetSuite(*args, **kwargs):
+-  return TestSuite(*args, **kwargs)
+diff --git a/test/wasm-js/testcfg.py b/test/wasm-js/testcfg.py
+index a28586a0e3f..7d52419dc31 100644
+--- a/test/wasm-js/testcfg.py
++++ b/test/wasm-js/testcfg.py
+@@ -38,8 +38,9 @@ class TestLoader(testsuite.JSTestLoader):
+ 
+ 
+ class TestSuite(testsuite.TestSuite):
+-  def __init__(self, *args, **kwargs):
+-    super(TestSuite, self).__init__(*args, **kwargs)
++
++  def __init__(self, ctx, *args, **kwargs):
++    super(TestSuite, self).__init__(ctx, *args, **kwargs)
+     self.mjsunit_js = os.path.join(os.path.dirname(self.root), "mjsunit",
+                                    "mjsunit.js")
+     self.test_root = os.path.join(self.root, "tests")
+@@ -114,7 +115,3 @@ class TestCase(testcase.D8TestCase):
+   def _get_source_path(self):
+     # All tests are named `path/name.any.js`
+     return os.path.join(self.suite.test_root, self.path + ANY_JS)
+-
+-
+-def GetSuite(*args, **kwargs):
+-  return TestSuite(*args, **kwargs)
+diff --git a/test/wasm-spec-tests/testcfg.py b/test/wasm-spec-tests/testcfg.py
+index 90dbf9c2d7b..1f45c88fbdc 100644
+--- a/test/wasm-spec-tests/testcfg.py
++++ b/test/wasm-spec-tests/testcfg.py
+@@ -28,8 +28,9 @@ class TestLoader(testsuite.JSTestLoader):
+   pass
+ 
+ class TestSuite(testsuite.TestSuite):
+-  def __init__(self, *args, **kwargs):
+-    super(TestSuite, self).__init__(*args, **kwargs)
++
++  def __init__(self, ctx, *args, **kwargs):
++    super(TestSuite, self).__init__(ctx, *args, **kwargs)
+     self.test_root = os.path.join(self.root, "tests")
+     self._test_loader.test_root = self.test_root
+ 
+@@ -48,7 +49,3 @@ class TestCase(testcase.D8TestCase):
+       if os.sep.join(['proposals', proposal['name']]) in self.path:
+         return proposal['flags']
+     return []
+-
+-
+-def GetSuite(*args, **kwargs):
+-  return TestSuite(*args, **kwargs)
+diff --git a/test/webkit/testcfg.py b/test/webkit/testcfg.py
+index 500f44656b9..4958d705ed7 100644
+--- a/test/webkit/testcfg.py
++++ b/test/webkit/testcfg.py
+@@ -96,7 +96,3 @@ class TestCase(testcase.D8TestCase):
+     return webkit.OutProc(
+         self.expected_outcomes,
+         os.path.join(self.suite.root, self.path) + '-expected.txt')
+-
+-
+-def GetSuite(*args, **kwargs):
+-  return TestSuite(*args, **kwargs)
+diff --git a/tools/run_perf.py b/tools/run_perf.py
+index 32716bde4d1..9b4243e0ed6 100644
+--- a/tools/run_perf.py
++++ b/tools/run_perf.py
+@@ -871,7 +871,7 @@ class AndroidPlatform(Platform):  # pragma: no cover
+ 
+   def __init__(self, args):
+     super(AndroidPlatform, self).__init__(args)
+-    self.driver = android.android_driver(args.device)
++    self.driver = android.Driver.instance(args.device)
+ 
+   def PreExecution(self):
+     self.driver.set_high_perf_mode()
+diff --git a/tools/testrunner/base_runner.py b/tools/testrunner/base_runner.py
+index a132fec89a7..60404ae77b0 100644
+--- a/tools/testrunner/base_runner.py
++++ b/tools/testrunner/base_runner.py
+@@ -19,10 +19,11 @@ from testrunner.local import command
+ from testrunner.local import testsuite
+ from testrunner.local import utils
+ from testrunner.test_config import TestConfig
+-from testrunner.testproc import progress
++from testrunner.testproc import indicators
+ from testrunner.testproc.sigproc import SignalProc
+ from testrunner.testproc import util
+ from testrunner.utils.augmented_options import AugmentedOptions
++from testrunner.build_config import BuildConfig
+ 
+ 
+ DEFAULT_OUT_GN = 'out.gn'
+@@ -86,21 +87,6 @@ TEST_MAP = {
+   ],
+ }
+ 
+-# Increase the timeout for these:
+-SLOW_ARCHS = [
+-  "arm",
+-  "arm64",
+-  "mips",
+-  "mipsel",
+-  "mips64",
+-  "mips64el",
+-  "s390",
+-  "s390x",
+-  "riscv64",
+-  "loong64"
+-]
+-
+-
+ ModeConfig = namedtuple(
+     'ModeConfig', 'label flags timeout_scalefactor status_mode')
+ 
+@@ -132,106 +118,17 @@ TRY_RELEASE_MODE = ModeConfig(
+ )
+ 
+ PROGRESS_INDICATORS = {
+-  'verbose': progress.VerboseProgressIndicator,
+-  'ci': progress.CIProgressIndicator,
+-  'dots': progress.DotsProgressIndicator,
+-  'color': progress.ColorProgressIndicator,
+-  'mono': progress.MonochromeProgressIndicator,
+-  'stream': progress.StreamProgressIndicator,
++    'verbose': indicators.VerboseProgressIndicator,
++    'ci': indicators.CIProgressIndicator,
++    'dots': indicators.DotsProgressIndicator,
++    'color': indicators.ColorProgressIndicator,
++    'mono': indicators.MonochromeProgressIndicator,
++    'stream': indicators.StreamProgressIndicator,
+ }
+ 
+ class TestRunnerError(Exception):
+   pass
+ 
+-
+-class BuildConfig(object):
+-  def __init__(self, build_config):
+-    # In V8 land, GN's x86 is called ia32.
+-    if build_config['v8_target_cpu'] == 'x86':
+-      self.arch = 'ia32'
+-    else:
+-      self.arch = build_config['v8_target_cpu']
+-
+-    self.asan = build_config['is_asan']
+-    self.cfi_vptr = build_config['is_cfi']
+-    self.control_flow_integrity = build_config['v8_control_flow_integrity']
+-    self.concurrent_marking = build_config['v8_enable_concurrent_marking']
+-    self.single_generation = build_config['v8_enable_single_generation']
+-    self.dcheck_always_on = build_config['dcheck_always_on']
+-    self.gcov_coverage = build_config['is_gcov_coverage']
+-    self.is_android = build_config['is_android']
+-    self.is_clang = build_config['is_clang']
+-    self.is_debug = build_config['is_debug']
+-    self.is_full_debug = build_config['is_full_debug']
+-    self.msan = build_config['is_msan']
+-    self.no_i18n = not build_config['v8_enable_i18n_support']
+-    self.predictable = build_config['v8_enable_verify_predictable']
+-    self.simulator_run = (build_config['target_cpu'] !=
+-                          build_config['v8_target_cpu'])
+-    self.tsan = build_config['is_tsan']
+-    # TODO(machenbach): We only have ubsan not ubsan_vptr.
+-    self.ubsan_vptr = build_config['is_ubsan_vptr']
+-    self.verify_csa = build_config['v8_enable_verify_csa']
+-    self.lite_mode = build_config['v8_enable_lite_mode']
+-    self.pointer_compression = build_config['v8_enable_pointer_compression']
+-    self.pointer_compression_shared_cage = build_config['v8_enable_pointer_compression_shared_cage']
+-    self.shared_ro_heap = build_config['v8_enable_shared_ro_heap']
+-    self.sandbox = build_config['v8_enable_sandbox']
+-    self.third_party_heap = build_config['v8_enable_third_party_heap']
+-    self.webassembly = build_config['v8_enable_webassembly']
+-    self.dict_property_const_tracking = build_config['v8_dict_property_const_tracking']
+-    # Export only for MIPS target
+-    if self.arch in ['mips', 'mipsel', 'mips64', 'mips64el']:
+-      self.mips_arch_variant = build_config['mips_arch_variant']
+-      self.mips_use_msa = build_config['mips_use_msa']
+-
+-  @property
+-  def use_sanitizer(self):
+-    return (self.asan or self.cfi_vptr or self.msan or self.tsan or
+-            self.ubsan_vptr)
+-
+-  def timeout_scalefactor(self, initial_factor):
+-    """Increases timeout for slow build configurations."""
+-    factors = dict(
+-      lite_mode         = 2,
+-      predictable       = 4,
+-      tsan              = 2,
+-      use_sanitizer     = 1.5,
+-      is_full_debug     = 4,
+-    )
+-    result = initial_factor
+-    for k,v in factors.items():
+-      if getattr(self, k, False):
+-        result *= v
+-    if self.arch in SLOW_ARCHS:
+-      result *= 4.5
+-    return result
+-
+-  def __str__(self):
+-    attrs = [
+-      'asan',
+-      'cfi_vptr',
+-      'control_flow_integrity',
+-      'dcheck_always_on',
+-      'gcov_coverage',
+-      'msan',
+-      'no_i18n',
+-      'predictable',
+-      'tsan',
+-      'ubsan_vptr',
+-      'verify_csa',
+-      'lite_mode',
+-      'pointer_compression',
+-      'pointer_compression_shared_cage',
+-      'sandbox',
+-      'third_party_heap',
+-      'webassembly',
+-      'dict_property_const_tracking',
+-    ]
+-    detected_options = [attr for attr in attrs if getattr(self, attr, False)]
+-    return '\n'.join(detected_options)
+-
+-
+ class BaseTestRunner(object):
+   def __init__(self, basedir=None):
+     self.v8_root = up(up(up(__file__)))
+@@ -278,13 +175,13 @@ class BaseTestRunner(object):
+ 
+       args = self._parse_test_args(args)
+ 
+-      with command.command_context(self.target_os, self.options.device):
++      with command.os_context(self.target_os, self.options) as ctx:
+         names = self._args_to_suite_names(args)
+-        tests = self._load_testsuite_generators(names)
++        tests = self._load_testsuite_generators(ctx, names)
+         self._setup_env()
+         print(">>> Running tests for %s.%s" % (self.build_config.arch,
+                                                self.mode_options.label))
+-        exit_code = self._do_execute(tests, args)
++        exit_code = self._do_execute(tests, args, ctx)
+         if exit_code == utils.EXIT_CODE_FAILURES and self.options.json_test_results:
+           print("Force exit code 0 after failures. Json test results file "
+                 "generated with failure information.")
+@@ -457,7 +354,7 @@ class BaseTestRunner(object):
+               % build_config_path)
+         raise TestRunnerError()
+ 
+-    return BuildConfig(build_config_json)
++    return BuildConfig(build_config_json, self.options)
+ 
+   # Returns possible build paths in order:
+   # gn
+@@ -615,7 +512,7 @@ class BaseTestRunner(object):
+   def _get_default_suite_names(self):
+     return [] # pragma: no cover
+ 
+-  def _load_testsuite_generators(self, names):
++  def _load_testsuite_generators(self, ctx, names):
+     test_config = self._create_test_config()
+     variables = self._get_statusfile_variables()
+ 
+@@ -625,7 +522,7 @@ class BaseTestRunner(object):
+       if self.options.verbose:
+         print('>>> Loading test suite: %s' % name)
+       suite = testsuite.TestSuite.Load(
+-          os.path.join(self.options.test_root, name), test_config,
++          ctx, os.path.join(self.options.test_root, name), test_config,
+           self.framework_name)
+ 
+       if self._is_testsuite_supported(suite):
+@@ -640,86 +537,86 @@ class BaseTestRunner(object):
+     return True
+ 
+   def _get_statusfile_variables(self):
+-    simd_mips = (
+-      self.build_config.arch in ['mipsel', 'mips', 'mips64', 'mips64el'] and
+-      self.build_config.mips_arch_variant == "r6" and
+-      self.build_config.mips_use_msa)
+-
+-    mips_arch_variant = (
+-      self.build_config.arch in ['mipsel', 'mips', 'mips64', 'mips64el'] and
+-      self.build_config.mips_arch_variant)
+-
+-    no_simd_hardware = any(
+-        i in self.options.extra_flags for i in ['--noenable-sse3',
+-                                           '--no-enable-sse3',
+-                                           '--noenable-ssse3',
+-                                           '--no-enable-ssse3',
+-                                           '--noenable-sse4-1',
+-                                           '--no-enable-sse4_1'])
+-
+-    # Set no_simd_hardware on architectures without Simd enabled.
+-    if self.build_config.arch == 'mips64el' or \
+-       self.build_config.arch == 'mipsel':
+-      no_simd_hardware = not simd_mips
+-
+-    if self.build_config.arch == 'loong64':
+-      no_simd_hardware = True
+-
+-    # S390 hosts without VEF1 do not support Simd.
+-    if self.build_config.arch == 's390x' and \
+-       not self.build_config.simulator_run and \
+-       not utils.IsS390SimdSupported():
+-      no_simd_hardware = True
+-
+-    # Ppc64 processors earlier than POWER9 do not support Simd instructions
+-    if self.build_config.arch == 'ppc64' and \
+-       not self.build_config.simulator_run and \
+-       utils.GuessPowerProcessorVersion() < 9:
+-      no_simd_hardware = True
+-
+     return {
+-      "arch": self.build_config.arch,
+-      "asan": self.build_config.asan,
+-      "byteorder": sys.byteorder,
+-      "cfi_vptr": self.build_config.cfi_vptr,
+-      "control_flow_integrity": self.build_config.control_flow_integrity,
+-      "concurrent_marking": self.build_config.concurrent_marking,
+-      "single_generation": self.build_config.single_generation,
+-      "dcheck_always_on": self.build_config.dcheck_always_on,
+-      "deopt_fuzzer": False,
+-      "endurance_fuzzer": False,
+-      "gc_fuzzer": False,
+-      "gc_stress": False,
+-      "gcov_coverage": self.build_config.gcov_coverage,
+-      "has_webassembly": self.build_config.webassembly,
+-      "isolates": self.options.isolates,
+-      "is_clang": self.build_config.is_clang,
+-      "is_full_debug": self.build_config.is_full_debug,
+-      "mips_arch_variant": mips_arch_variant,
+-      "mode": self.mode_options.status_mode,
+-      "msan": self.build_config.msan,
+-      "no_harness": self.options.no_harness,
+-      "no_i18n": self.build_config.no_i18n,
+-      "no_simd_hardware": no_simd_hardware,
+-      "novfp3": False,
+-      "optimize_for_size": "--optimize-for-size" in self.options.extra_flags,
+-      "predictable": self.build_config.predictable,
+-      "simd_mips": simd_mips,
+-      "simulator_run": self.build_config.simulator_run and
+-                       not self.options.dont_skip_simulator_slow_tests,
+-      "system": self.target_os,
+-      "third_party_heap": self.build_config.third_party_heap,
+-      "tsan": self.build_config.tsan,
+-      "ubsan_vptr": self.build_config.ubsan_vptr,
+-      "verify_csa": self.build_config.verify_csa,
+-      "lite_mode": self.build_config.lite_mode,
+-      "pointer_compression": self.build_config.pointer_compression,
+-      "pointer_compression_shared_cage": self.build_config.pointer_compression_shared_cage,
+-      "no_js_shared_memory": (not self.build_config.shared_ro_heap) or
+-                             (self.build_config.pointer_compression and
+-                              not self.build_config.pointer_compression_shared_cage),
+-      "sandbox": self.build_config.sandbox,
+-      "dict_property_const_tracking": self.build_config.dict_property_const_tracking,
++        "arch":
++            self.build_config.arch,
++        "asan":
++            self.build_config.asan,
++        "byteorder":
++            sys.byteorder,
++        "cfi_vptr":
++            self.build_config.cfi_vptr,
++        "control_flow_integrity":
++            self.build_config.control_flow_integrity,
++        "concurrent_marking":
++            self.build_config.concurrent_marking,
++        "single_generation":
++            self.build_config.single_generation,
++        "dcheck_always_on":
++            self.build_config.dcheck_always_on,
++        "deopt_fuzzer":
++            False,
++        "endurance_fuzzer":
++            False,
++        "gc_fuzzer":
++            False,
++        "gc_stress":
++            False,
++        "gcov_coverage":
++            self.build_config.gcov_coverage,
++        "has_webassembly":
++            self.build_config.webassembly,
++        "isolates":
++            self.options.isolates,
++        "is_clang":
++            self.build_config.is_clang,
++        "is_full_debug":
++            self.build_config.is_full_debug,
++        "mips_arch_variant":
++            self.build_config.mips_arch_variant,
++        "mode":
++            self.mode_options.status_mode,
++        "msan":
++            self.build_config.msan,
++        "no_harness":
++            self.options.no_harness,
++        "no_i18n":
++            self.build_config.no_i18n,
++        "no_simd_hardware":
++            self.build_config.no_simd_hardware,
++        "novfp3":
++            False,
++        "optimize_for_size":
++            "--optimize-for-size" in self.options.extra_flags,
++        "predictable":
++            self.build_config.predictable,
++        "simd_mips":
++            self.build_config.simd_mips,
++        "simulator_run":
++            self.build_config.simulator_run
++            and not self.options.dont_skip_simulator_slow_tests,
++        "system":
++            self.target_os,
++        "third_party_heap":
++            self.build_config.third_party_heap,
++        "tsan":
++            self.build_config.tsan,
++        "ubsan_vptr":
++            self.build_config.ubsan_vptr,
++        "verify_csa":
++            self.build_config.verify_csa,
++        "lite_mode":
++            self.build_config.lite_mode,
++        "pointer_compression":
++            self.build_config.pointer_compression,
++        "pointer_compression_shared_cage":
++            self.build_config.pointer_compression_shared_cage,
++        "no_js_shared_memory":
++            self.build_config.no_js_shared_memory,
++        "sandbox":
++            self.build_config.sandbox,
++        "dict_property_const_tracking":
++            self.build_config.dict_property_const_tracking,
+     }
+ 
+   def _runner_flags(self):
+@@ -749,21 +646,8 @@ class BaseTestRunner(object):
+     raise NotImplementedError() # pragma: no coverage
+ 
+   def _prepare_procs(self, procs):
+-    procs = list([_f for _f in procs if _f])
+     for i in range(0, len(procs) - 1):
+       procs[i].connect_to(procs[i + 1])
+-    procs[0].setup()
+-
+-  def _create_progress_indicators(self, test_count):
+-    procs = [PROGRESS_INDICATORS[self.options.progress]()]
+-    if self.options.json_test_results:
+-      procs.append(progress.JsonTestProgressIndicator(self.framework_name))
+-
+-    for proc in procs:
+-      proc.configure(self.options)
+-      proc.set_test_count(test_count)
+-
+-    return procs
+ 
+   def _create_signal_proc(self):
+     return SignalProc()
+diff --git a/tools/testrunner/build_config.py b/tools/testrunner/build_config.py
+new file mode 100644
+index 00000000000..402253e6a2b
+--- /dev/null
++++ b/tools/testrunner/build_config.py
+@@ -0,0 +1,152 @@
++# Copyright 2022 the V8 project authors. All rights reserved.
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++from testrunner.local import utils
++
++# Increase the timeout for these:
++SLOW_ARCHS = [
++    "arm", "arm64", "mips", "mipsel", "mips64", "mips64el", "s390", "s390x",
++    "riscv64", "loong64"
++]
++
++
++class BuildConfig(object):
++
++  def __init__(self, build_config, options):
++    self.options = options
++    # In V8 land, GN's x86 is called ia32.
++    if build_config['v8_target_cpu'] == 'x86':
++      self.arch = 'ia32'
++    else:
++      self.arch = build_config['v8_target_cpu']
++
++    self.asan = build_config['is_asan']
++    self.cfi_vptr = build_config['is_cfi']
++    self.control_flow_integrity = build_config['v8_control_flow_integrity']
++    self.concurrent_marking = build_config['v8_enable_concurrent_marking']
++    self.single_generation = build_config['v8_enable_single_generation']
++    self.dcheck_always_on = build_config['dcheck_always_on']
++    self.gcov_coverage = build_config['is_gcov_coverage']
++    self.is_android = build_config['is_android']
++    self.is_clang = build_config['is_clang']
++    self.is_debug = build_config['is_debug']
++    self.is_full_debug = build_config['is_full_debug']
++    self.msan = build_config['is_msan']
++    self.no_i18n = not build_config['v8_enable_i18n_support']
++    self.predictable = build_config['v8_enable_verify_predictable']
++    self.simulator_run = (
++        build_config['target_cpu'] != build_config['v8_target_cpu'])
++    self.tsan = build_config['is_tsan']
++    # TODO(machenbach): We only have ubsan not ubsan_vptr.
++    self.ubsan_vptr = build_config['is_ubsan_vptr']
++    self.verify_csa = build_config['v8_enable_verify_csa']
++    self.lite_mode = build_config['v8_enable_lite_mode']
++    self.pointer_compression = build_config['v8_enable_pointer_compression']
++    self.pointer_compression_shared_cage = build_config[
++        'v8_enable_pointer_compression_shared_cage']
++    self.shared_ro_heap = build_config['v8_enable_shared_ro_heap']
++    self.sandbox = build_config['v8_enable_sandbox']
++    self.third_party_heap = build_config['v8_enable_third_party_heap']
++    self.webassembly = build_config['v8_enable_webassembly']
++    self.dict_property_const_tracking = build_config[
++        'v8_dict_property_const_tracking']
++    # Export only for MIPS target
++    if self.arch in ['mips', 'mipsel', 'mips64', 'mips64el']:
++      self._mips_arch_variant = build_config['mips_arch_variant']
++      self.mips_use_msa = build_config['mips_use_msa']
++
++  @property
++  def use_sanitizer(self):
++    return (self.asan or self.cfi_vptr or self.msan or self.tsan or
++            self.ubsan_vptr)
++
++  @property
++  def no_js_shared_memory(self):
++    return (not self.shared_ro_heap) or (
++        self.pointer_compression and not self.pointer_compression_shared_cage)
++
++  @property
++  def is_mips_arch(self):
++    return self.arch in ['mipsel', 'mips', 'mips64', 'mips64el']
++
++  @property
++  def simd_mips(self):
++    return (self.is_mips_arch and self._mips_arch_variant == "r6" and
++            self.mips_use_msa)
++
++  @property
++  def mips_arch_variant(self):
++    return (self.is_mips_arch and self._mips_arch_variant)
++
++  @property
++  def no_simd_hardware(self):
++    # TODO(liviurau): Add some tests and refactor the logic here.
++    # We try to find all the reasons why we have no_simd.
++    no_simd_hardware = any(i in self.options.extra_flags for i in [
++        '--noenable-sse3', '--no-enable-sse3', '--noenable-ssse3',
++        '--no-enable-ssse3', '--noenable-sse4-1', '--no-enable-sse4_1'
++    ])
++
++    # Set no_simd_hardware on architectures without Simd enabled.
++    if self.arch == 'mips64el' or \
++       self.arch == 'mipsel':
++      no_simd_hardware = not self.simd_mips
++
++    if self.arch == 'loong64':
++      no_simd_hardware = True
++
++    # S390 hosts without VEF1 do not support Simd.
++    if self.arch == 's390x' and \
++       not self.simulator_run and \
++       not utils.IsS390SimdSupported():
++      no_simd_hardware = True
++
++    # Ppc64 processors earlier than POWER9 do not support Simd instructions
++    if self.arch == 'ppc64' and \
++       not self.simulator_run and \
++       utils.GuessPowerProcessorVersion() < 9:
++      no_simd_hardware = True
++
++    return no_simd_hardware
++
++  def timeout_scalefactor(self, initial_factor):
++    """Increases timeout for slow build configurations."""
++    factors = dict(
++        lite_mode=2,
++        predictable=4,
++        tsan=2,
++        use_sanitizer=1.5,
++        is_full_debug=4,
++    )
++    result = initial_factor
++    for k, v in factors.items():
++      if getattr(self, k, False):
++        result *= v
++    if self.arch in SLOW_ARCHS:
++      result *= 4.5
++    return result
++
++  def __str__(self):
++    attrs = [
++        'asan',
++        'cfi_vptr',
++        'control_flow_integrity',
++        'dcheck_always_on',
++        'gcov_coverage',
++        'msan',
++        'no_i18n',
++        'predictable',
++        'tsan',
++        'ubsan_vptr',
++        'verify_csa',
++        'lite_mode',
++        'pointer_compression',
++        'pointer_compression_shared_cage',
++        'sandbox',
++        'third_party_heap',
++        'webassembly',
++        'dict_property_const_tracking',
++    ]
++    detected_options = [attr for attr in attrs if getattr(self, attr, False)]
++    return '\n'.join(detected_options)
+diff --git a/tools/testrunner/local/android.py b/tools/testrunner/local/android.py
+index cfc4e537f57..213f4baa9ab 100644
+--- a/tools/testrunner/local/android.py
++++ b/tools/testrunner/local/android.py
+@@ -29,7 +29,15 @@ class CommandFailedException(Exception):
+     self.output = output
+ 
+ 
+-class _Driver(object):
++class Driver(object):
++  __instance = None
++
++  @staticmethod
++  def instance(device):
++    if not Driver.__instance:
++      Driver.__instance = Driver(device)
++    return Driver.__instance
++
+   """Helper class to execute shell commands on an Android device."""
+   def __init__(self, device=None):
+     assert os.path.exists(ANDROID_DIR)
+@@ -188,12 +196,3 @@ class _Driver(object):
+     """Set device into default performance mode."""
+     perf = perf_control.PerfControl(self.device)
+     perf.SetDefaultPerfMode()
+-
+-
+-_ANDROID_DRIVER = None
+-def android_driver(device=None):
+-  """Singleton access method to the driver class."""
+-  global _ANDROID_DRIVER
+-  if not _ANDROID_DRIVER:
+-    _ANDROID_DRIVER = _Driver(device)
+-  return _ANDROID_DRIVER
+diff --git a/tools/testrunner/local/command.py b/tools/testrunner/local/command.py
+index e5c707908d0..9a5f11bcb51 100644
+--- a/tools/testrunner/local/command.py
++++ b/tools/testrunner/local/command.py
+@@ -11,9 +11,10 @@ import sys
+ import threading
+ import time
+ 
+-from ..local.android import (
+-    android_driver, CommandFailedException, TimeoutException)
++from ..local.android import (Driver, CommandFailedException, TimeoutException)
+ from ..objects import output
++from ..local.pool import DefaultExecutionPool, AbortException,\
++  taskkill_windows
+ 
+ BASE_DIR = os.path.normpath(
+     os.path.join(os.path.dirname(os.path.abspath(__file__)), '..' , '..', '..'))
+@@ -29,12 +30,6 @@ def setup_testing():
+   """
+   signal.signal = lambda *_: None
+ 
+-
+-class AbortException(Exception):
+-  """Indicates early abort on SIGINT, SIGTERM or internal hard timeout."""
+-  pass
+-
+-
+ @contextmanager
+ def handle_sigterm(process, abort_fun, enabled):
+   """Call`abort_fun` on sigterm and restore previous handler to prevent
+@@ -208,22 +203,6 @@ class PosixCommand(BaseCommand):
+     os.killpg(process.pid, signal.SIGKILL)
+ 
+ 
+-def taskkill_windows(process, verbose=False, force=True):
+-  force_flag = ' /F' if force else ''
+-  tk = subprocess.Popen(
+-      'taskkill /T%s /PID %d' % (force_flag, process.pid),
+-      stdout=subprocess.PIPE,
+-      stderr=subprocess.PIPE,
+-  )
+-  stdout, stderr = tk.communicate()
+-  if verbose:
+-    print('Taskkill results for %d' % process.pid)
+-    print(stdout)
+-    print(stderr)
+-    print('Return code: %d' % tk.returncode)
+-    sys.stdout.flush()
+-
+-
+ class WindowsCommand(BaseCommand):
+   def _start_process(self, **kwargs):
+     # Try to change the error mode to avoid dialogs on fatal errors. Don't
+@@ -325,54 +304,67 @@ class AndroidCommand(BaseCommand):
+         duration,
+     )
+ 
+-
+ Command = None
+ 
+-class CommandContext():
+-  def __init__(self, command):
++
++class DefaultOSContext():
++
++  def __init__(self, command, pool=None):
+     self.command = command
++    self.pool = pool or DefaultExecutionPool()
+ 
+   @contextmanager
+-  def context(self, device):
++  def context(self, options):
+     yield
+ 
+-class AndroidContext():
++
++class AndroidOSContext(DefaultOSContext):
++
+   def __init__(self):
+-    self.command = AndroidCommand
++    super(AndroidOSContext, self).__init__(AndroidCommand)
+ 
+   @contextmanager
+-  def context(self, device):
++  def context(self, options):
+     try:
+-      AndroidCommand.driver = android_driver(device)
++      AndroidCommand.driver = Driver.instance(options.device)
+       yield
+     finally:
+       AndroidCommand.driver.tear_down()
+ 
++
++# TODO(liviurau): Add documentation with diagrams to describe how context and
++# its components gets initialized and eventually teared down and how does it
++# interact with both tests and underlying platform specific concerns.
++def find_os_context_factory(target_os):
++  registry = dict(
++      android=AndroidOSContext,
++      windows=lambda: DefaultOSContext(WindowsCommand))
++  default = lambda: DefaultOSContext(PosixCommand)
++  return registry.get(target_os, default)
++
++
+ @contextmanager
+-def command_context(target_os, device):
+-  factory = dict(
+-    android=AndroidContext(),
+-    windows=CommandContext(WindowsCommand),
+-  )
+-  context = factory.get(target_os, CommandContext(PosixCommand))
+-  with context.context(device):
+-    global Command
+-    Command = context.command
+-    yield
++def os_context(target_os, options):
++  factory = find_os_context_factory(target_os)
++  context = factory()
++  with context.context(options):
++    yield context
+ 
+-# Deprecated : use command_context
++
++# Deprecated : use os_context
+ def setup(target_os, device):
+   """Set the Command class to the OS-specific version."""
+   global Command
+   if target_os == 'android':
+-    AndroidCommand.driver = android_driver(device)
++    AndroidCommand.driver = Driver.instance(device)
+     Command = AndroidCommand
+   elif target_os == 'windows':
+     Command = WindowsCommand
+   else:
+     Command = PosixCommand
+ 
+-# Deprecated : use command_context
++
++# Deprecated : use os_context
+ def tear_down():
+   """Clean up after using commands."""
+   if Command == AndroidCommand:
+diff --git a/tools/testrunner/local/fake_testsuite/testcfg.py b/tools/testrunner/local/fake_testsuite/testcfg.py
+index 6fef99f7ca6..7dc5d7068f3 100644
+--- a/tools/testrunner/local/fake_testsuite/testcfg.py
++++ b/tools/testrunner/local/fake_testsuite/testcfg.py
+@@ -26,6 +26,3 @@ class TestSuite(testsuite.TestSuite):
+ 
+   def _test_class(self):
+     return TestCase
+-
+-def GetSuite(*args, **kwargs):
+-  return TestSuite(*args, **kwargs)
+diff --git a/tools/testrunner/local/pool.py b/tools/testrunner/local/pool.py
+index 7090875d998..34d8d33e39e 100644
+--- a/tools/testrunner/local/pool.py
++++ b/tools/testrunner/local/pool.py
+@@ -3,14 +3,15 @@
+ # Use of this source code is governed by a BSD-style license that can be
+ # found in the LICENSE file.
+ 
+-from contextlib import contextmanager
+-from multiprocessing import Process, Queue
++import collections
+ import os
+ import signal
++import subprocess
+ import traceback
+ 
++from contextlib import contextmanager
++from multiprocessing import Process, Queue
+ from queue import Empty
+-from . import command
+ from . import utils
+ 
+ 
+@@ -31,6 +32,27 @@ def setup_testing():
+   Process.pid = property(lambda self: None)
+ 
+ 
++def taskkill_windows(process, verbose=False, force=True):
++  force_flag = ' /F' if force else ''
++  tk = subprocess.Popen(
++      'taskkill /T%s /PID %d' % (force_flag, process.pid),
++      stdout=subprocess.PIPE,
++      stderr=subprocess.PIPE,
++  )
++  stdout, stderr = tk.communicate()
++  if verbose:
++    print('Taskkill results for %d' % process.pid)
++    print(stdout)
++    print(stderr)
++    print('Return code: %d' % tk.returncode)
++    sys.stdout.flush()
++
++
++class AbortException(Exception):
++  """Indicates early abort on SIGINT, SIGTERM or internal hard timeout."""
++  pass
++
++
+ class NormalResult():
+   def __init__(self, result):
+     self.result = result
+@@ -67,7 +89,7 @@ def Worker(fn, work_queue, done_queue,
+     for args in iter(work_queue.get, "STOP"):
+       try:
+         done_queue.put(NormalResult(fn(*args, **kwargs)))
+-      except command.AbortException:
++      except AbortException:
+         # SIGINT, SIGTERM or internal hard timeout.
+         break
+       except Exception as e:
+@@ -235,7 +257,7 @@ class Pool():
+   def _terminate_processes(self):
+     for p in self.processes:
+       if utils.IsWindows():
+-        command.taskkill_windows(p, verbose=True, force=False)
++        taskkill_windows(p, verbose=True, force=False)
+       else:
+         os.kill(p.pid, signal.SIGTERM)
+ 
+@@ -299,3 +321,32 @@ class Pool():
+         return MaybeResult.create_result(result.result)
+       except Empty:
+         return MaybeResult.create_heartbeat()
++
++
++# Global function for multiprocessing, because pickling a static method doesn't
++# work on Windows.
++def run_job(job, process_context):
++  return job.run(process_context)
++
++
++ProcessContext = collections.namedtuple('ProcessContext', ['result_reduction'])
++
++
++class DefaultExecutionPool():
++
++  def init(self, jobs, notify_fun):
++    self._pool = Pool(jobs, notify_fun=notify_fun)
++
++  def add_jobs(self, jobs):
++    self._pool.add(jobs)
++
++  def results(self, requirement):
++    return self._pool.imap_unordered(
++        fn=run_job,
++        gen=[],
++        process_context_fn=ProcessContext,
++        process_context_args=[requirement],
++    )
++
++  def abort(self):
++    self._pool.abort()
+diff --git a/tools/testrunner/local/testsuite.py b/tools/testrunner/local/testsuite.py
+index 5b46fd4c6bd..8130841e40b 100644
+--- a/tools/testrunner/local/testsuite.py
++++ b/tools/testrunner/local/testsuite.py
+@@ -81,7 +81,8 @@ class TestLoader(object):
+   """Base class for loading TestSuite tests after applying test suite
+   transformations."""
+ 
+-  def __init__(self, suite, test_class, test_config, test_root):
++  def __init__(self, ctx, suite, test_class, test_config, test_root):
++    self.ctx = ctx
+     self.suite = suite
+     self.test_class = test_class
+     self.test_config = test_config
+@@ -246,12 +247,12 @@ def _load_testsuite_module(name, root):
+ 
+ class TestSuite(object):
+   @staticmethod
+-  def Load(root, test_config, framework_name):
++  def Load(ctx, root, test_config, framework_name):
+     name = root.split(os.path.sep)[-1]
+     with _load_testsuite_module(name, root) as module:
+-      return module.GetSuite(name, root, test_config, framework_name)
++      return module.TestSuite(ctx, name, root, test_config, framework_name)
+ 
+-  def __init__(self, name, root, test_config, framework_name):
++  def __init__(self, ctx, name, root, test_config, framework_name):
+     self.name = name  # string
+     self.root = root  # string containing path
+     self.test_config = test_config
+@@ -259,8 +260,8 @@ class TestSuite(object):
+     self.tests = None  # list of TestCase objects
+     self.statusfile = None
+ 
+-    self._test_loader = self._test_loader_class()(
+-      self, self._test_class(), self.test_config, self.root)
++    self._test_loader = self._test_loader_class()(ctx, self, self._test_class(),
++                                                  self.test_config, self.root)
+ 
+   def status_file(self):
+     return "%s/%s.status" % (self.root, self.name)
+diff --git a/tools/testrunner/local/testsuite_test.py b/tools/testrunner/local/testsuite_test.py
+index 50b24f177f6..19db71092cd 100755
+--- a/tools/testrunner/local/testsuite_test.py
++++ b/tools/testrunner/local/testsuite_test.py
+@@ -12,6 +12,7 @@ TOOLS_PATH = os.path.dirname(
+     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ sys.path.append(TOOLS_PATH)
+ 
++from testrunner.local.command import DefaultOSContext, PosixCommand
+ from testrunner.local.testsuite import TestSuite
+ from testrunner.test_config import TestConfig
+ 
+@@ -35,8 +36,9 @@ class TestSuiteTest(unittest.TestCase):
+         verbose=False,
+     )
+ 
+-    self.suite = TestSuite.Load(self.test_root, self.test_config,
+-                                "standard_runner")
++    self.suite = TestSuite.Load(
++        DefaultOSContext(PosixCommand), self.test_root, self.test_config,
++        "standard_runner")
+ 
+   def testLoadingTestSuites(self):
+     self.assertEqual(self.suite.name, "fake_testsuite")
+diff --git a/tools/testrunner/num_fuzzer.py b/tools/testrunner/num_fuzzer.py
+index d623e76f2b1..a92b5cd4496 100755
+--- a/tools/testrunner/num_fuzzer.py
++++ b/tools/testrunner/num_fuzzer.py
+@@ -20,7 +20,7 @@ from testrunner.testproc.loader import LoadProc
+ from testrunner.utils import random_utils
+ from testrunner.testproc.rerun import RerunProc
+ from testrunner.testproc.timeout import TimeoutProc
+-from testrunner.testproc.progress import ResultsTracker
++from testrunner.testproc.progress import ResultsTracker, ProgressProc
+ from testrunner.testproc.shard import ShardProc
+ 
+ 
+@@ -145,31 +145,33 @@ class NumFuzzer(base_runner.BaseTestRunner):
+     })
+     return variables
+ 
+-  def _do_execute(self, tests, args):
++  def _do_execute(self, tests, args, ctx):
+     loader = LoadProc(tests)
+     combiner = CombinerProc.create(self.options)
+     results = ResultsTracker.create(self.options)
+-    execproc = ExecutionProc(self.options.j)
++    execproc = ExecutionProc(ctx, self.options.j)
+     sigproc = self._create_signal_proc()
+-    indicators = self._create_progress_indicators(
+-      tests.test_count_estimate)
++    progress = ProgressProc(self.options, self.framework_name,
++                            tests.test_count_estimate)
+     procs = [
+-      loader,
+-      NameFilterProc(args) if args else None,
+-      StatusFileFilterProc(None, None),
+-      # TODO(majeski): Improve sharding when combiner is present. Maybe select
+-      # different random seeds for shards instead of splitting tests.
+-      ShardProc.create(self.options),
+-      ExpectationProc(),
+-      combiner,
+-      fuzzer.FuzzerProc.create(self.options),
+-      sigproc,
+-    ] + indicators + [
+-      results,
+-      TimeoutProc.create(self.options),
+-      RerunProc.create(self.options),
+-      execproc,
++        loader,
++        NameFilterProc(args) if args else None,
++        StatusFileFilterProc(None, None),
++        # TODO(majeski): Improve sharding when combiner is present. Maybe select
++        # different random seeds for shards instead of splitting tests.
++        ShardProc.create(self.options),
++        ExpectationProc(),
++        combiner,
++        fuzzer.FuzzerProc.create(self.options),
++        sigproc,
++        progress,
++        results,
++        TimeoutProc.create(self.options),
++        RerunProc.create(self.options),
++        execproc,
+     ]
++    procs = [p for p in procs if p]
++
+     self._prepare_procs(procs)
+     loader.load_initial_tests()
+ 
+@@ -181,8 +183,7 @@ class NumFuzzer(base_runner.BaseTestRunner):
+     # processed.
+     execproc.run()
+ 
+-    for indicator in indicators:
+-      indicator.finished()
++    progress.finished()
+ 
+     print('>>> %d tests ran' % results.total)
+     if results.failed:
+diff --git a/tools/testrunner/objects/testcase.py b/tools/testrunner/objects/testcase.py
+index 66d07657eca..31f8cfb1765 100644
+--- a/tools/testrunner/objects/testcase.py
++++ b/tools/testrunner/objects/testcase.py
+@@ -290,7 +290,7 @@ class TestCase(object):
+   def only_standard_variant(self):
+     return statusfile.NO_VARIANTS in self._statusfile_outcomes
+ 
+-  def get_command(self):
++  def get_command(self, ctx):
+     params = self._get_cmd_params()
+     env = self._get_cmd_env()
+     shell = self.get_shell()
+@@ -298,7 +298,7 @@ class TestCase(object):
+       shell += '.exe'
+     shell_flags = self._get_shell_flags()
+     timeout = self._get_timeout(params)
+-    return self._create_cmd(shell, shell_flags + params, env, timeout)
++    return self._create_cmd(ctx, shell, shell_flags + params, env, timeout)
+ 
+   def _get_cmd_params(self):
+     """Gets all command parameters and combines them in the following order:
+@@ -393,16 +393,16 @@ class TestCase(object):
+   def _get_suffix(self):
+     return '.js'
+ 
+-  def _create_cmd(self, shell, params, env, timeout):
+-    return command.Command(
+-      cmd_prefix=self._test_config.command_prefix,
+-      shell=os.path.abspath(os.path.join(self._test_config.shell_dir, shell)),
+-      args=params,
+-      env=env,
+-      timeout=timeout,
+-      verbose=self._test_config.verbose,
+-      resources_func=self._get_resources,
+-      handle_sigterm=True,
++  def _create_cmd(self, ctx, shell, params, env, timeout):
++    return ctx.command(
++        cmd_prefix=self._test_config.command_prefix,
++        shell=os.path.abspath(os.path.join(self._test_config.shell_dir, shell)),
++        args=params,
++        env=env,
++        timeout=timeout,
++        verbose=self._test_config.verbose,
++        resources_func=self._get_resources,
++        handle_sigterm=True,
+     )
+ 
+   def _parse_source_flags(self, source=None):
+diff --git a/tools/testrunner/standard_runner.py b/tools/testrunner/standard_runner.py
+index 290867eab4c..d960fbe37c6 100755
+--- a/tools/testrunner/standard_runner.py
++++ b/tools/testrunner/standard_runner.py
+@@ -13,7 +13,7 @@ import sys
+ import tempfile
+ from testrunner.testproc.rerun import RerunProc
+ from testrunner.testproc.timeout import TimeoutProc
+-from testrunner.testproc.progress import ResultsTracker
++from testrunner.testproc.progress import ResultsTracker, ProgressProc
+ from testrunner.testproc.shard import ShardProc
+ 
+ # Adds testrunner to the path hence it has to be imported at the beggining.
+@@ -22,7 +22,6 @@ sys.path.append(TOOLS_PATH)
+ 
+ import testrunner.base_runner as base_runner
+ 
+-from testrunner.local import utils
+ from testrunner.local.variants import ALL_VARIANTS
+ from testrunner.objects import predictable
+ from testrunner.testproc.execution import ExecutionProc
+@@ -284,71 +283,55 @@ class StandardTestRunner(base_runner.BaseTestRunner):
+     """Create processor for sequencing heavy tests on swarming."""
+     return SequenceProc(self.options.max_heavy_tests) if self.options.swarming else None
+ 
+-  def _do_execute(self, tests, args):
++  def _do_execute(self, tests, args, ctx):
+     jobs = self.options.j
+ 
+     print('>>> Running with test processors')
+     loader = LoadProc(tests, initial_batch_size=self.options.j * 2)
+     results = ResultsTracker.create(self.options)
+-    indicators = self._create_progress_indicators(
+-        tests.test_count_estimate)
+-
+     outproc_factory = None
+     if self.build_config.predictable:
+       outproc_factory = predictable.get_outproc
+-    execproc = ExecutionProc(jobs, outproc_factory)
++    execproc = ExecutionProc(ctx, jobs, outproc_factory)
+     sigproc = self._create_signal_proc()
+-
++    progress = ProgressProc(self.options, self.framework_name,
++                            tests.test_count_estimate)
+     procs = [
+-      loader,
+-      NameFilterProc(args) if args else None,
+-      StatusFileFilterProc(self.options.slow_tests, self.options.pass_fail_tests),
+-      VariantProc(self._variants),
+-      StatusFileFilterProc(self.options.slow_tests, self.options.pass_fail_tests),
+-      self._create_predictable_filter(),
+-      ShardProc.create(self.options),
+-      self._create_seed_proc(),
+-      self._create_sequence_proc(),
+-      sigproc,
+-    ] + indicators + [
+-      results,
+-      TimeoutProc.create(self.options),
+-      RerunProc.create(self.options),
+-      execproc,
++        loader,
++        NameFilterProc(args) if args else None,
++        VariantProc(self._variants),
++        StatusFileFilterProc(self.options.slow_tests,
++                             self.options.pass_fail_tests),
++        self._create_predictable_filter(),
++        ShardProc.create(self.options),
++        self._create_seed_proc(),
++        self._create_sequence_proc(),
++        sigproc,
++        progress,
++        results,
++        TimeoutProc.create(self.options),
++        RerunProc.create(self.options),
++        execproc,
+     ]
++    procs = [p for p in procs if p]
+ 
+     self._prepare_procs(procs)
+     loader.load_initial_tests()
+ 
+     # This starts up worker processes and blocks until all tests are
+     # processed.
+-    execproc.run()
+-
+-    for indicator in indicators:
+-      indicator.finished()
+-
+-    if tests.test_count_estimate:
+-      percentage = float(results.total) / tests.test_count_estimate * 100
+-    else:
+-      percentage = 0
++    requirement = max(p._requirement for p in procs)
++    execproc.run(requirement)
+ 
+-    print (('>>> %d base tests produced %d (%d%s)'
+-           ' non-filtered tests') % (
+-        tests.test_count_estimate, results.total, percentage, '%'))
++    progress.finished()
+ 
+-    print('>>> %d tests ran' % (results.total - results.remaining))
++    results.standard_show(tests)
+ 
+-    exit_code = utils.EXIT_CODE_PASS
+-    if results.failed:
+-      exit_code = utils.EXIT_CODE_FAILURES
+-    if not results.total:
+-      exit_code = utils.EXIT_CODE_NO_TESTS
+ 
+     if self.options.time:
+       self._print_durations()
+ 
+-    # Indicate if a SIGINT or SIGTERM happened.
+-    return max(exit_code, sigproc.exit_code)
++    return sigproc.worst_exit_code(results)
+ 
+   def _print_durations(self):
+ 
+diff --git a/tools/testrunner/standard_runner_test.py b/tools/testrunner/standard_runner_test.py
+index b6dfff7869d..2d5bba282f9 100644
+--- a/tools/testrunner/standard_runner_test.py
++++ b/tools/testrunner/standard_runner_test.py
+@@ -17,20 +17,22 @@ with different test suite extensions and build configurations.
+ # TODO(machenbach): Coverage data from multiprocessing doesn't work.
+ # TODO(majeski): Add some tests for the fuzzers.
+ 
++from collections import deque
+ import os
+ import sys
+ import unittest
+ from os.path import dirname as up
++from mock import patch
+ 
+ TOOLS_ROOT = up(up(os.path.abspath(__file__)))
+ sys.path.append(TOOLS_ROOT)
+-
+ from testrunner import standard_runner
+ from testrunner import num_fuzzer
+ from testrunner.utils.test_utils import (
+-  temp_base,
+-  TestRunnerTest,
+-  with_json_output,
++    temp_base,
++    TestRunnerTest,
++    with_json_output,
++    FakeOSContext,
+ )
+ 
+ class StandardRunnerTest(TestRunnerTest):
+@@ -215,6 +217,39 @@ class StandardRunnerTest(TestRunnerTest):
+     # TODO(machenbach): Test some more implications of the auto-detected
+     # options, e.g. that the right env variables are set.
+ 
++  def testLimitedPreloading(self):
++    result = self.run_tests('--progress=verbose', '--variants=default', '-j1',
++                            'sweet/*')
++    result.stdout_includes("sweet/mangoes default: PASS")
++    result.stdout_includes("sweet/cherries default: FAIL")
++    result.stdout_includes("sweet/apples default: FAIL")
++    result.stdout_includes("sweet/strawberries default: FAIL")
++    result.stdout_includes("sweet/bananas default: PASS")
++    result.stdout_includes("sweet/blackberries default: FAIL")
++    result.stdout_includes("sweet/raspberries default: PASS")
++
++  def testWithFakeContext(self):
++    with patch(
++        'testrunner.local.command.find_os_context_factory',
++        return_value=FakeOSContext):
++      result = self.run_tests(
++          '--progress=verbose',
++          'sweet/cherries',
++      )
++      result.stdout_includes('===>Starting stuff\n'
++                             '>>> Running tests for x64.release\n'
++                             '>>> Running with test processors\n')
++      result.stdout_includes('--- stdout ---\nfake stdout 1')
++      result.stdout_includes('--- stderr ---\nfake stderr 1')
++      result.stdout_includes('Command: fake_wrapper ')
++      result.stdout_includes(
++          '===\n'
++          '=== 1 tests failed\n'
++          '===\n'
++          '>>> 7 base tests produced 1 (14%) non-filtered tests\n'
++          '>>> 1 tests ran\n'
++          '<===Stopping stuff\n')
++
+   def testSkips(self):
+     """Test skipping tests in status file for a specific variant."""
+     result = self.run_tests(
+@@ -404,6 +439,48 @@ class StandardRunnerTest(TestRunnerTest):
+     result.stdout_includes('3 tests ran')
+     result.has_returncode(1)
+ 
++  def testHeavySequence(self):
++    """Test a configuration with 2 heavy tests.
++    One heavy test will get buffered before being run.
++    """
++    appended = 0
++    popped = 0
++
++    def mock_deque():
++
++      class MockQ():
++
++        def __init__(self):
++          self.buffer = deque()
++
++        def append(self, test):
++          nonlocal appended
++          self.buffer.append(test)
++          appended += 1
++
++        def popleft(self):
++          nonlocal popped
++          popped += 1
++          return self.buffer.popleft()
++
++        def __bool__(self):
++          return bool(self.buffer)
++
++      return MockQ()
++
++    # Swarming option will trigger a cleanup routine on the bot
++    def mock_kill():
++      pass
++
++    with patch('testrunner.testproc.sequence.deque', side_effect=mock_deque), \
++         patch('testrunner.testproc.util.kill_processes_linux', side_effect=mock_kill):
++      result = self.run_tests(
++          '--variants=default', '--swarming', 'fat', baseroot="testroot6")
++
++      result.has_returncode(1)
++      self.assertEqual(1, appended)
++      self.assertEqual(1, popped)
++
+   def testRunnerFlags(self):
+     """Test that runner-specific flags are passed to tests."""
+     result = self.run_tests(
+diff --git a/tools/testrunner/testdata/testroot1/test/sweet/testcfg.py b/tools/testrunner/testdata/testroot1/test/sweet/testcfg.py
+index a2dfc9d7489..d504feec4d3 100644
+--- a/tools/testrunner/testdata/testroot1/test/sweet/testcfg.py
++++ b/tools/testrunner/testdata/testroot1/test/sweet/testcfg.py
+@@ -31,6 +31,3 @@ class TestCase(testcase.D8TestCase):
+ 
+   def _get_files_params(self):
+     return [self.name]
+-
+-def GetSuite(*args, **kwargs):
+-  return TestSuite(*args, **kwargs)
+diff --git a/tools/testrunner/testdata/testroot2/test/sweet/testcfg.py b/tools/testrunner/testdata/testroot2/test/sweet/testcfg.py
+index 3606cd3ecaf..2d8e767e897 100644
+--- a/tools/testrunner/testdata/testroot2/test/sweet/testcfg.py
++++ b/tools/testrunner/testdata/testroot2/test/sweet/testcfg.py
+@@ -29,6 +29,3 @@ class TestCase(testcase.TestCase):
+ 
+   def _get_files_params(self):
+     return [self.name]
+-
+-def GetSuite(*args, **kwargs):
+-  return TestSuite(*args, **kwargs)
+diff --git a/tools/testrunner/testdata/testroot3/test/sweet/testcfg.py b/tools/testrunner/testdata/testroot3/test/sweet/testcfg.py
+index 248250873d5..6b874d08171 100644
+--- a/tools/testrunner/testdata/testroot3/test/sweet/testcfg.py
++++ b/tools/testrunner/testdata/testroot3/test/sweet/testcfg.py
+@@ -31,6 +31,3 @@ class TestCase(testcase.D8TestCase):
+ 
+   def _get_files_params(self):
+     return [self.name]
+-
+-def GetSuite(*args, **kwargs):
+-  return TestSuite(*args, **kwargs)
+diff --git a/tools/testrunner/testdata/testroot5/test/sweet/sweet.status b/tools/testrunner/testdata/testroot5/test/sweet/sweet.status
+index a0bd5177398..6d819aff92b 100644
+--- a/tools/testrunner/testdata/testroot5/test/sweet/sweet.status
++++ b/tools/testrunner/testdata/testroot5/test/sweet/sweet.status
+@@ -1,4 +1,4 @@
+-# Copyright 2017 the V8 project authors. All rights reserved.
++# Copyright 2022 the V8 project authors. All rights reserved.
+ # Use of this source code is governed by a BSD-style license that can be
+ # found in the LICENSE file.
+ 
+diff --git a/tools/testrunner/testdata/testroot5/test/sweet/testcfg.py b/tools/testrunner/testdata/testroot5/test/sweet/testcfg.py
+index a2dfc9d7489..69d79082643 100644
+--- a/tools/testrunner/testdata/testroot5/test/sweet/testcfg.py
++++ b/tools/testrunner/testdata/testroot5/test/sweet/testcfg.py
+@@ -1,4 +1,4 @@
+-# Copyright 2017 the V8 project authors. All rights reserved.
++# Copyright 2022 the V8 project authors. All rights reserved.
+ # Use of this source code is governed by a BSD-style license that can be
+ # found in the LICENSE file.
+ 
+@@ -31,6 +31,3 @@ class TestCase(testcase.D8TestCase):
+ 
+   def _get_files_params(self):
+     return [self.name]
+-
+-def GetSuite(*args, **kwargs):
+-  return TestSuite(*args, **kwargs)
+diff --git a/tools/testrunner/testdata/testroot6/out/build/d8_mocked.py b/tools/testrunner/testdata/testroot6/out/build/d8_mocked.py
+new file mode 100644
+index 00000000000..75dcacf70f6
+--- /dev/null
++++ b/tools/testrunner/testdata/testroot6/out/build/d8_mocked.py
+@@ -0,0 +1,18 @@
++# Copyright 2017 the V8 project authors. All rights reserved.
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++"""
++Dummy d8 replacement. Just passes all test, except if 'berries' is in args.
++"""
++
++# for py2/py3 compatibility
++from __future__ import print_function
++
++import sys
++
++args = ' '.join(sys.argv[1:])
++print(args)
++# Let all berries fail.
++if 'berries' in args:
++  sys.exit(1)
++sys.exit(0)
+diff --git a/tools/testrunner/testdata/testroot6/out/build/v8_build_config.json b/tools/testrunner/testdata/testroot6/out/build/v8_build_config.json
+new file mode 100644
+index 00000000000..a1cff614429
+--- /dev/null
++++ b/tools/testrunner/testdata/testroot6/out/build/v8_build_config.json
+@@ -0,0 +1,32 @@
++{
++  "current_cpu": "x64",
++  "dcheck_always_on": false,
++  "is_android": false,
++  "is_asan": false,
++  "is_cfi": false,
++  "is_clang": true,
++  "is_component_build": false,
++  "is_debug": false,
++  "is_full_debug": false,
++  "is_gcov_coverage": false,
++  "is_ubsan_vptr": false,
++  "is_msan": false,
++  "is_tsan": false,
++  "target_cpu": "x64",
++  "v8_current_cpu": "x64",
++  "v8_enable_i18n_support": true,
++  "v8_enable_verify_predictable": false,
++  "v8_target_cpu": "x64",
++  "v8_enable_concurrent_marking": true,
++  "v8_enable_verify_csa": false,
++  "v8_enable_lite_mode": false,
++  "v8_enable_pointer_compression": true,
++  "v8_enable_pointer_compression_shared_cage": true,
++  "v8_enable_sandbox": false,
++  "v8_enable_shared_ro_heap": true,
++  "v8_control_flow_integrity": false,
++  "v8_enable_single_generation": false,
++  "v8_enable_third_party_heap": false,
++  "v8_enable_webassembly": true,
++  "v8_dict_property_const_tracking": false
++}
+diff --git a/tools/testrunner/testdata/testroot6/test/fat/fat.status b/tools/testrunner/testdata/testroot6/test/fat/fat.status
+new file mode 100644
+index 00000000000..481b2423570
+--- /dev/null
++++ b/tools/testrunner/testdata/testroot6/test/fat/fat.status
+@@ -0,0 +1,19 @@
++# Copyright 2017 the V8 project authors. All rights reserved.
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++[
++[ALWAYS, {
++  'raspberries': [FAIL, HEAVY],
++  'strawberries': [PASS, ['mode == release', SLOW], ['mode == debug', NO_VARIANTS]],
++  'mangoes': [PASS, SLOW, HEAVY],
++
++  # Both cherries and apples are to test how PASS an FAIL from different
++  # sections are merged.
++  'cherries': [PASS, SLOW],
++  'apples': [FAIL],
++
++  # Unused rule.
++  'carrots': [PASS, FAIL],
++}],
++]
+diff --git a/tools/testrunner/testdata/testroot6/test/fat/testcfg.py b/tools/testrunner/testdata/testroot6/test/fat/testcfg.py
+new file mode 100644
+index 00000000000..12bbf4bacbf
+--- /dev/null
++++ b/tools/testrunner/testdata/testroot6/test/fat/testcfg.py
+@@ -0,0 +1,41 @@
++# Copyright 2017 the V8 project authors. All rights reserved.
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++"""
++Dummy test suite extension with some fruity tests.
++"""
++
++from testrunner.local import testsuite
++from testrunner.objects import testcase
++
++
++class TestLoader(testsuite.TestLoader):
++
++  def _list_test_filenames(self):
++    return [
++        'bananas',
++        'apples',
++        'cherries',
++        'mangoes',
++        'strawberries',
++        'blackberries',
++        'raspberries',
++    ]
++
++
++class TestSuite(testsuite.TestSuite):
++
++  def _test_loader_class(self):
++    return TestLoader
++
++  def _test_class(self):
++    return TestCase
++
++
++class TestCase(testcase.D8TestCase):
++
++  def get_shell(self):
++    return 'd8_mocked.py'
++
++  def _get_files_params(self):
++    return [self.name]
+diff --git a/tools/testrunner/testproc/base.py b/tools/testrunner/testproc/base.py
+index 8dbf13ae257..3d2f60c4d6f 100644
+--- a/tools/testrunner/testproc/base.py
++++ b/tools/testrunner/testproc/base.py
+@@ -42,37 +42,11 @@ class TestProc(object):
+     self._next_proc = None
+     self._stopped = False
+     self._requirement = DROP_RESULT
+-    self._prev_requirement = None
+-    self._reduce_result = lambda result: result
+ 
+   def connect_to(self, next_proc):
+     """Puts `next_proc` after itself in the chain."""
+     next_proc._prev_proc = self
+     self._next_proc = next_proc
+-
+-  def remove_from_chain(self):
+-    if self._prev_proc:
+-      self._prev_proc._next_proc = self._next_proc
+-    if self._next_proc:
+-      self._next_proc._prev_proc = self._prev_proc
+-
+-  def setup(self, requirement=DROP_RESULT):
+-    """
+-    Method called by previous processor or processor pipeline creator to let
+-    the processors know what part of the result can be ignored.
+-    """
+-    self._prev_requirement = requirement
+-    if self._next_proc:
+-      self._next_proc.setup(max(requirement, self._requirement))
+-
+-    # Since we're not winning anything by droping part of the result we are
+-    # dropping the whole result or pass it as it is. The real reduction happens
+-    # during result creation (in the output processor), so the result is
+-    # immutable.
+-    if (self._prev_requirement < self._requirement and
+-        self._prev_requirement == DROP_RESULT):
+-      self._reduce_result = lambda _: None
+-
+   def next_test(self, test):
+     """
+     Method called by previous processor whenever it produces new test.
+@@ -126,11 +100,7 @@ class TestProc(object):
+ 
+   def _send_result(self, test, result):
+     """Helper method for sending result to the previous processor."""
+-    if not test.keep_output:
+-      result = self._reduce_result(result)
+     self._prev_proc.result_for(test, result)
+-
+-
+ class TestProcObserver(TestProc):
+   """Processor used for observing the data."""
+   def __init__(self):
+diff --git a/tools/testrunner/testproc/combiner.py b/tools/testrunner/testproc/combiner.py
+index 2175af883f4..eb65bbde133 100644
+--- a/tools/testrunner/testproc/combiner.py
++++ b/tools/testrunner/testproc/combiner.py
+@@ -23,7 +23,7 @@ class CombinerProc(base.TestProc):
+       count: how many tests to generate. 0 means infinite running
+     """
+     super(CombinerProc, self).__init__()
+-
++    self._requirement = base.DROP_RESULT
+     self._rng = rng
+     self._min_size = min_group_size
+     self._max_size = max_group_size
+@@ -38,12 +38,6 @@ class CombinerProc(base.TestProc):
+     # {suite name: instance of TestCombiner}
+     self._combiners = {}
+ 
+-  def setup(self, requirement=base.DROP_RESULT):
+-    # Combiner is not able to pass results (even as None) to the previous
+-    # processor.
+-    assert requirement == base.DROP_RESULT
+-    self._next_proc.setup(base.DROP_RESULT)
+-
+   def next_test(self, test):
+     group_key = self._get_group_key(test)
+     if not group_key:
+diff --git a/tools/testrunner/testproc/execution.py b/tools/testrunner/testproc/execution.py
+index ae4b849b342..60c25d310d1 100644
+--- a/tools/testrunner/testproc/execution.py
++++ b/tools/testrunner/testproc/execution.py
+@@ -5,22 +5,8 @@
+ import collections
+ 
+ from . import base
+-from ..local import pool
+-
+-
+-# Global function for multiprocessing, because pickling a static method doesn't
+-# work on Windows.
+-def run_job(job, process_context):
+-  return job.run(process_context)
+-
+-
+-def create_process_context(result_reduction):
+-  return ProcessContext(result_reduction)
+-
+ 
+ JobResult = collections.namedtuple('JobResult', ['id', 'result'])
+-ProcessContext = collections.namedtuple('ProcessContext', ['result_reduction'])
+-
+ 
+ class Job(object):
+   def __init__(self, test_id, cmd, outproc, keep_output):
+@@ -42,23 +28,19 @@ class ExecutionProc(base.TestProc):
+   sends results to the previous processor.
+   """
+ 
+-  def __init__(self, jobs, outproc_factory=None):
++  def __init__(self, ctx, jobs, outproc_factory=None):
+     super(ExecutionProc, self).__init__()
+-    self._pool = pool.Pool(jobs, notify_fun=self.notify_previous)
++    self.ctx = ctx
++    self.ctx.pool.init(jobs, notify_fun=self.notify_previous)
+     self._outproc_factory = outproc_factory or (lambda t: t.output_proc)
+     self._tests = {}
+ 
+   def connect_to(self, next_proc):
+-    assert False, 'ExecutionProc cannot be connected to anything'
+-
+-  def run(self):
+-    it = self._pool.imap_unordered(
+-        fn=run_job,
+-        gen=[],
+-        process_context_fn=create_process_context,
+-        process_context_args=[self._prev_requirement],
+-    )
+-    for pool_result in it:
++    assert False, \
++        'ExecutionProc cannot be connected to anything' # pragma: no cover
++
++  def run(self, requirement=None):
++    for pool_result in self.ctx.pool.results(requirement):
+       self._unpack_result(pool_result)
+ 
+   def next_test(self, test):
+@@ -66,20 +48,21 @@ class ExecutionProc(base.TestProc):
+       return False
+ 
+     test_id = test.procid
+-    cmd = test.get_command()
++    cmd = test.get_command(self.ctx)
+     self._tests[test_id] = test, cmd
+ 
+     outproc = self._outproc_factory(test)
+-    self._pool.add([Job(test_id, cmd, outproc, test.keep_output)])
++    self.ctx.pool.add_jobs([Job(test_id, cmd, outproc, test.keep_output)])
+ 
+     return True
+ 
+   def result_for(self, test, result):
+-    assert False, 'ExecutionProc cannot receive results'
++    assert False, \
++        'ExecutionProc cannot receive results' # pragma: no cover
+ 
+   def stop(self):
+     super(ExecutionProc, self).stop()
+-    self._pool.abort()
++    self.ctx.pool.abort()
+ 
+   def _unpack_result(self, pool_result):
+     if pool_result.heartbeat:
+diff --git a/tools/testrunner/testproc/fuzzer.py b/tools/testrunner/testproc/fuzzer.py
+index d15d96ff686..4ca57803211 100644
+--- a/tools/testrunner/testproc/fuzzer.py
++++ b/tools/testrunner/testproc/fuzzer.py
+@@ -157,18 +157,12 @@ class FuzzerProc(base.TestProcProducer):
+         set, processor passes None as analysis result to fuzzers
+     """
+     super(FuzzerProc, self).__init__('Fuzzer')
+-
+     self._rng = rng
+     self._count = count
+     self._fuzzer_configs = fuzzers
+     self._disable_analysis = disable_analysis
+     self._gens = {}
+ 
+-  def setup(self, requirement=base.DROP_RESULT):
+-    # Fuzzer is optimized to not store the results
+-    assert requirement == base.DROP_RESULT
+-    super(FuzzerProc, self).setup(requirement)
+-
+   def _next_test(self, test):
+     if self.is_stopped:
+       return False
+diff --git a/tools/testrunner/testproc/indicators.py b/tools/testrunner/testproc/indicators.py
+new file mode 100644
+index 00000000000..c123cac1433
+--- /dev/null
++++ b/tools/testrunner/testproc/indicators.py
+@@ -0,0 +1,419 @@
++# Copyright 2022 the V8 project authors. All rights reserved.
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++import datetime
++import json
++import platform
++import sys
++import time
++
++from . import base
++from . import util
++
++
++def print_failure_header(test, is_flaky=False):
++  text = [str(test)]
++  if test.output_proc.negative:
++    text.append('[negative]')
++  if is_flaky:
++    text.append('(flaky)')
++  output = '=== %s ===' % ' '.join(text)
++  encoding = sys.stdout.encoding or 'utf-8'
++  print(output.encode(encoding, errors='replace').decode(encoding))
++
++
++class ProgressIndicator():
++
++  def __init__(self, options, test_count):
++    self.options = None
++    self.options = options
++    self._total = test_count
++
++  def on_test_result(self, test, result):
++    pass
++
++  def finished(self):
++    pass
++
++
++class SimpleProgressIndicator(ProgressIndicator):
++
++  def __init__(self, options, test_count):
++    super(SimpleProgressIndicator, self).__init__(options, test_count)
++    self._requirement = base.DROP_PASS_OUTPUT
++
++    self._failed = []
++
++  def on_test_result(self, test, result):
++    # TODO(majeski): Support for dummy/grouped results
++    if result.has_unexpected_output:
++      self._failed.append((test, result, False))
++    elif result.is_rerun:
++      # Print only the first result of a flaky failure that was rerun.
++      self._failed.append((test, result.results[0], True))
++
++  def finished(self):
++    crashed = 0
++    flaky = 0
++    print()
++    for test, result, is_flaky in self._failed:
++      flaky += int(is_flaky)
++      print_failure_header(test, is_flaky=is_flaky)
++      if result.output.stderr:
++        print("--- stderr ---")
++        print(result.output.stderr.strip())
++      if result.output.stdout:
++        print("--- stdout ---")
++        print(result.output.stdout.strip())
++      print("Command: %s" % result.cmd.to_string())
++      if result.output.HasCrashed():
++        print("exit code: %s" % result.output.exit_code_string)
++        print("--- CRASHED ---")
++        crashed += 1
++      if result.output.HasTimedOut():
++        print("--- TIMEOUT ---")
++    if len(self._failed) == 0:
++      print("===")
++      print("=== All tests succeeded")
++      print("===")
++    else:
++      print()
++      print("===")
++      print("=== %d tests failed" % len(self._failed))
++      if flaky > 0:
++        print("=== %d tests were flaky" % flaky)
++      if crashed > 0:
++        print("=== %d tests CRASHED" % crashed)
++      print("===")
++
++
++class StreamProgressIndicator(ProgressIndicator):
++
++  def __init__(self, options, test_count):
++    super(StreamProgressIndicator, self).__init__(options, test_count)
++    self._requirement = base.DROP_PASS_OUTPUT
++
++  def on_test_result(self, test, result):
++    if not result.has_unexpected_output:
++      self.print('PASS', test)
++    elif result.output.HasCrashed():
++      self.print("CRASH", test)
++    elif result.output.HasTimedOut():
++      self.print("TIMEOUT", test)
++    else:
++      if test.is_fail:
++        self.print("UNEXPECTED PASS", test)
++      else:
++        self.print("FAIL", test)
++
++  def print(self, prefix, test):
++    print('%s: %ss' % (prefix, test))
++    sys.stdout.flush()
++
++
++class VerboseProgressIndicator(SimpleProgressIndicator):
++
++  def __init__(self, options, test_count):
++    super(VerboseProgressIndicator, self).__init__(options, test_count)
++    self._last_printed_time = time.time()
++
++  def _print(self, text):
++    encoding = sys.stdout.encoding or 'utf-8'
++    print(text.encode(encoding, errors='replace').decode(encoding))
++    sys.stdout.flush()
++    self._last_printed_time = time.time()
++
++  def _message(self, test, result):
++    return '%s %s: %s' % (test, test.variant or 'default', result.status())
++
++  def on_test_result(self, test, result):
++    super(VerboseProgressIndicator, self).on_test_result(test, result)
++    self._print(self._message(test, result))
++
++  # TODO(machenbach): Remove this platform specific hack and implement a proper
++  # feedback channel from the workers, providing which tests are currently run.
++  def _print_processes_linux(self):
++    if platform.system() == 'Linux':
++      self._print('List of processes:')
++      for pid, cmd in util.list_processes_linux():
++        # Show command with pid, but other process info cut off.
++        self._print('pid: %d cmd: %s' % (pid, cmd))
++
++  def _ensure_delay(self, delay):
++    return time.time() - self._last_printed_time > delay
++
++  def _on_heartbeat(self):
++    if self._ensure_delay(30):
++      # Print something every 30 seconds to not get killed by an output
++      # timeout.
++      self._print('Still working...')
++      self._print_processes_linux()
++
++  def _on_event(self, event):
++    self._print(event)
++    self._print_processes_linux()
++
++
++class CIProgressIndicator(VerboseProgressIndicator):
++
++  def on_test_result(self, test, result):
++    super(VerboseProgressIndicator, self).on_test_result(test, result)
++    if self.options.ci_test_completion:
++      with open(self.options.ci_test_completion, "a") as f:
++        f.write(self._message(test, result) + "\n")
++    self._output_feedback()
++
++  def _output_feedback(self):
++    """Reduced the verbosity leads to getting killed by an ouput timeout.
++    We ensure output every minute.
++    """
++    if self._ensure_delay(60):
++      dt = time.time()
++      st = datetime.datetime.fromtimestamp(dt).strftime('%Y-%m-%d %H:%M:%S')
++      self._print(st)
++
++
++class DotsProgressIndicator(SimpleProgressIndicator):
++
++  def __init__(self, options, test_count):
++    super(DotsProgressIndicator, self).__init__(options, test_count)
++    self._count = 0
++
++  def on_test_result(self, test, result):
++    super(DotsProgressIndicator, self).on_test_result(test, result)
++    # TODO(majeski): Support for dummy/grouped results
++    self._count += 1
++    if self._count > 1 and self._count % 50 == 1:
++      sys.stdout.write('\n')
++    if result.has_unexpected_output:
++      if result.output.HasCrashed():
++        sys.stdout.write('C')
++        sys.stdout.flush()
++      elif result.output.HasTimedOut():
++        sys.stdout.write('T')
++        sys.stdout.flush()
++      else:
++        sys.stdout.write('F')
++        sys.stdout.flush()
++    else:
++      sys.stdout.write('.')
++      sys.stdout.flush()
++
++
++class CompactProgressIndicator(ProgressIndicator):
++
++  def __init__(self, options, test_count, templates):
++    super(CompactProgressIndicator, self).__init__(options, test_count)
++    self._requirement = base.DROP_PASS_OUTPUT
++
++    self._templates = templates
++    self._last_status_length = 0
++    self._start_time = time.time()
++
++    self._passed = 0
++    self._failed = 0
++
++  def on_test_result(self, test, result):
++    # TODO(majeski): Support for dummy/grouped results
++    if result.has_unexpected_output:
++      self._failed += 1
++    else:
++      self._passed += 1
++
++    self._print_progress(str(test))
++    if result.has_unexpected_output:
++      output = result.output
++      stdout = output.stdout.strip()
++      stderr = output.stderr.strip()
++
++      self._clear_line(self._last_status_length)
++      print_failure_header(test)
++      if len(stdout):
++        self.printFormatted('stdout', stdout)
++      if len(stderr):
++        self.printFormatted('stderr', stderr)
++      self.printFormatted('command',
++                          "Command: %s" % result.cmd.to_string(relative=True))
++      if output.HasCrashed():
++        self.printFormatted('failure',
++                            "exit code: %s" % output.exit_code_string)
++        self.printFormatted('failure', "--- CRASHED ---")
++      elif output.HasTimedOut():
++        self.printFormatted('failure', "--- TIMEOUT ---")
++      else:
++        if test.is_fail:
++          self.printFormatted('failure', "--- UNEXPECTED PASS ---")
++          if test.expected_failure_reason != None:
++            self.printFormatted('failure', test.expected_failure_reason)
++        else:
++          self.printFormatted('failure', "--- FAILED ---")
++
++  def finished(self):
++    self._print_progress('Done')
++    print()
++
++  def _print_progress(self, name):
++    self._clear_line(self._last_status_length)
++    elapsed = time.time() - self._start_time
++    if self._total:
++      progress = (self._passed + self._failed) * 100 // self._total
++    else:
++      progress = 0
++    status = self._templates['status_line'] % {
++        'passed': self._passed,
++        'progress': progress,
++        'failed': self._failed,
++        'test': name,
++        'mins': int(elapsed) // 60,
++        'secs': int(elapsed) % 60
++    }
++    status = self._truncateStatusLine(status, 78)
++    self._last_status_length = len(status)
++    print(status, end='')
++    sys.stdout.flush()
++
++  def _truncateStatusLine(self, string, length):
++    if length and len(string) > (length - 3):
++      return string[:(length - 3)] + "..."
++    else:
++      return string
++
++  def _clear_line(self, last_length):
++    raise NotImplementedError()
++
++
++class ColorProgressIndicator(CompactProgressIndicator):
++
++  def __init__(self, options, test_count):
++    templates = {
++        'status_line': ("[%(mins)02i:%(secs)02i|"
++                        "\033[34m%%%(progress) 4d\033[0m|"
++                        "\033[32m+%(passed) 4d\033[0m|"
++                        "\033[31m-%(failed) 4d\033[0m]: %(test)s"),
++        'stdout': "\033[1m%s\033[0m",
++        'stderr': "\033[31m%s\033[0m",
++        'failure': "\033[1;31m%s\033[0m",
++        'command': "\033[33m%s\033[0m",
++    }
++    super(ColorProgressIndicator, self).__init__(options, test_count, templates)
++
++  def printFormatted(self, format, string):
++    print(self._templates[format] % string)
++
++  def _truncateStatusLine(self, string, length):
++    # Add some slack for the color control chars
++    return super(ColorProgressIndicator,
++                 self)._truncateStatusLine(string, length + 3 * 9)
++
++  def _clear_line(self, last_length):
++    print("\033[1K\r", end='')
++
++
++class MonochromeProgressIndicator(CompactProgressIndicator):
++
++  def __init__(self, options, test_count):
++    templates = {
++        'status_line': ("[%(mins)02i:%(secs)02i|%%%(progress) 4d|"
++                        "+%(passed) 4d|-%(failed) 4d]: %(test)s"),
++    }
++    super(MonochromeProgressIndicator, self).__init__(options, test_count,
++                                                      templates)
++
++  def printFormatted(self, format, string):
++    print(string)
++
++  def _clear_line(self, last_length):
++    print(("\r" + (" " * last_length) + "\r"), end='')
++
++
++class JsonTestProgressIndicator(ProgressIndicator):
++
++  def __init__(self, options, test_count, framework_name):
++    super(JsonTestProgressIndicator, self).__init__(options, test_count)
++    self.tests = util.FixedSizeTopList(
++        self.options.slow_tests_cutoff, key=lambda rec: rec['duration'])
++    # We want to drop stdout/err for all passed tests on the first try, but we
++    # need to get outputs for all runs after the first one. To accommodate that,
++    # reruns are set to keep the result no matter what requirement says, i.e.
++    # keep_output set to True in the RerunProc.
++    self._requirement = base.DROP_PASS_STDOUT
++
++    self.framework_name = framework_name
++    self.results = []
++    self.duration_sum = 0
++    self.test_count = 0
++
++  def on_test_result(self, test, result):
++    if result.is_rerun:
++      self.process_results(test, result.results)
++    else:
++      self.process_results(test, [result])
++
++  def process_results(self, test, results):
++    for run, result in enumerate(results):
++      # TODO(majeski): Support for dummy/grouped results
++      output = result.output
++
++      self._buffer_slow_tests(test, result, output, run)
++
++      # Omit tests that run as expected on the first try.
++      # Everything that happens after the first run is included in the output
++      # even if it flakily passes.
++      if not result.has_unexpected_output and run == 0:
++        continue
++
++      record = self._test_record(test, result, output, run)
++      record.update({
++          "result": test.output_proc.get_outcome(output),
++          "stdout": output.stdout,
++          "stderr": output.stderr,
++      })
++      self.results.append(record)
++
++  def _buffer_slow_tests(self, test, result, output, run):
++
++    def result_value(test, result, output):
++      if not result.has_unexpected_output:
++        return ""
++      return test.output_proc.get_outcome(output)
++
++    record = self._test_record(test, result, output, run)
++    record.update({
++        "result": result_value(test, result, output),
++        "marked_slow": test.is_slow,
++    })
++    self.tests.add(record)
++    self.duration_sum += record['duration']
++    self.test_count += 1
++
++  def _test_record(self, test, result, output, run):
++    return {
++        "name": str(test),
++        "flags": result.cmd.args,
++        "command": result.cmd.to_string(relative=True),
++        "run": run + 1,
++        "exit_code": output.exit_code,
++        "expected": test.expected_outcomes,
++        "duration": output.duration,
++        "random_seed": test.random_seed,
++        "target_name": test.get_shell(),
++        "variant": test.variant,
++        "variant_flags": test.variant_flags,
++        "framework_name": self.framework_name,
++    }
++
++  def finished(self):
++    duration_mean = None
++    if self.test_count:
++      duration_mean = self.duration_sum / self.test_count
++
++    result = {
++        "results": self.results,
++        "slowest_tests": self.tests.as_list(),
++        "duration_mean": duration_mean,
++        "test_total": self.test_count,
++    }
++
++    with open(self.options.json_test_results, "w") as f:
++      json.dump(result, f)
+diff --git a/tools/testrunner/testproc/loader.py b/tools/testrunner/testproc/loader.py
+index 1dcb36c904c..59e03a0b59d 100644
+--- a/tools/testrunner/testproc/loader.py
++++ b/tools/testrunner/testproc/loader.py
+@@ -16,28 +16,21 @@ class LoadProc(base.TestProc):
+ 
+ 
+   def load_initial_tests(self):
+-    """
+-    Args:
+-      exec_proc: execution processor that the tests are being loaded into
+-      initial_batch_size: initial number of tests to load
+-    """
+-    loaded_tests = 0
+-    while loaded_tests < self.initial_batch_size:
+-      try:
+-        t = next(self.tests)
+-      except StopIteration:
+-        return
+-
++    """Send an initial batch of tests down to executor"""
++    if not self.initial_batch_size:
++      return
++    to_load = self.initial_batch_size
++    for t in self.tests:
+       if self._send_test(t):
+-        loaded_tests += 1
++        to_load -= 1
++      if not to_load:
++        break
+ 
+   def next_test(self, test):
+-    assert False, 'Nothing can be connected to the LoadProc'
++    assert False, \
++        'Nothing can be connected to the LoadProc' # pragma: no cover
+ 
+   def result_for(self, test, result):
+-    try:
+-      while not self._send_test(next(self.tests)):
+-        pass
+-    except StopIteration:
+-      # No more tests to load.
+-      pass
++    for t in self.tests:
++      if self._send_test(t):
++        break
+diff --git a/tools/testrunner/testproc/loader_test.py b/tools/testrunner/testproc/loader_test.py
+new file mode 100755
+index 00000000000..309ad4f2947
+--- /dev/null
++++ b/tools/testrunner/testproc/loader_test.py
+@@ -0,0 +1,75 @@
++#!/usr/bin/env python3
++# Copyright 2022 the V8 project authors. All rights reserved.
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++import os
++import sys
++import unittest
++from unittest.mock import patch
++from contextlib import contextmanager
++
++TOOLS_PATH = os.path.dirname(
++    os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++sys.path.append(TOOLS_PATH)
++
++from testrunner.testproc.loader import LoadProc
++
++
++class LoadProcTest(unittest.TestCase):
++  # TODO(liviurau): test interaction between load_initialtests and results_for.
++
++  def setUp(self):
++    self.loader = LoadProc(iter(range(4)), 2)
++
++  @contextmanager
++  def send_test_return_values(self, l):
++
++    def do_pop(*args):
++      return l.pop()
++
++    with patch(
++        'testrunner.testproc.loader.LoadProc._send_test', side_effect=do_pop):
++      yield
++
++  def test_react_to_2_results(self):
++    with self.send_test_return_values([True] * 2):
++      self.loader.result_for(None, None)
++      self.loader.result_for(None, None)
++      self.assertEqual(2, next(self.loader.tests))
++
++  def test_react_to_result_but_fail_to_send(self):
++    with self.send_test_return_values([False] * 4):
++      self.loader.result_for(None, None)
++      self.assertEqual("empty", next(self.loader.tests, "empty"))
++
++  def test_init(self):
++    with self.send_test_return_values([True] * 4):
++      self.loader.load_initial_tests()
++      self.assertEqual(2, next(self.loader.tests))
++
++  def test_init_fully_filtered(self):
++    with self.send_test_return_values([False] * 4):
++      self.loader.load_initial_tests()
++      self.assertEqual("empty", next(self.loader.tests, "empty"))
++
++  def test_init_filter_1(self):
++    with self.send_test_return_values([True, False, True]):
++      self.loader.load_initial_tests()
++      self.assertEqual(3, next(self.loader.tests))
++
++  def test_init_infinity(self):
++    self.loader = LoadProc(iter(range(500)))
++    with self.send_test_return_values(([False] * 100) + ([True] * 400)):
++      self.loader.load_initial_tests()
++      self.assertEqual("empty", next(self.loader.tests, "empty"))
++
++  def test_init_0(self):
++    self.loader = LoadProc(iter(range(10)), 0)
++    with self.send_test_return_values([]):  # _send_test never gets called
++      self.loader.load_initial_tests()
++      self.assertEqual(0, next(self.loader.tests))
++
++
++if __name__ == '__main__':
++  unittest.main()
+diff --git a/tools/testrunner/testproc/progress.py b/tools/testrunner/testproc/progress.py
+index d1f1959d902..97a47a57647 100644
+--- a/tools/testrunner/testproc/progress.py
++++ b/tools/testrunner/testproc/progress.py
+@@ -2,25 +2,11 @@
+ # Use of this source code is governed by a BSD-style license that can be
+ # found in the LICENSE file.
+ 
+-import datetime
+-import json
+-import platform
+-import sys
+-import time
+ 
+ from . import base
+-from . import util
+-
+-
+-def print_failure_header(test, is_flaky=False):
+-  text = [str(test)]
+-  if test.output_proc.negative:
+-    text.append('[negative]')
+-  if is_flaky:
+-    text.append('(flaky)')
+-  output = '=== %s ===' % ' '.join(text)
+-  encoding = sys.stdout.encoding or 'utf-8'
+-  print(output.encode(encoding, errors='replace').decode(encoding))
++from testrunner.local import utils
++from testrunner.testproc.indicators import JsonTestProgressIndicator
++from testrunner.base_runner import PROGRESS_INDICATORS
+ 
+ 
+ class ResultsTracker(base.TestProcObserver):
+@@ -50,409 +36,40 @@ class ResultsTracker(base.TestProcObserver):
+         print('>>> Too many failures, exiting...')
+         self.stop()
+ 
+-
+-class ProgressIndicator(base.TestProcObserver):
+-  def __init__(self):
+-    super(base.TestProcObserver, self).__init__()
+-    self.options = None
+-
+-  def finished(self):
+-    pass
+-
+-  def configure(self, options):
+-    self.options = options
+-
+-  def set_test_count(self, test_count):
+-    self._total = test_count
+-
+-
+-
+-class SimpleProgressIndicator(ProgressIndicator):
+-  def __init__(self):
+-    super(SimpleProgressIndicator, self).__init__()
+-    self._requirement = base.DROP_PASS_OUTPUT
+-
+-    self._failed = []
+-
+-  def _on_result_for(self, test, result):
+-    # TODO(majeski): Support for dummy/grouped results
+-    if result.has_unexpected_output:
+-      self._failed.append((test, result, False))
+-    elif result.is_rerun:
+-      # Print only the first result of a flaky failure that was rerun.
+-      self._failed.append((test, result.results[0], True))
+-
+-  def finished(self):
+-    crashed = 0
+-    flaky = 0
+-    print()
+-    for test, result, is_flaky in self._failed:
+-      flaky += int(is_flaky)
+-      print_failure_header(test, is_flaky=is_flaky)
+-      if result.output.stderr:
+-        print("--- stderr ---")
+-        print(result.output.stderr.strip())
+-      if result.output.stdout:
+-        print("--- stdout ---")
+-        print(result.output.stdout.strip())
+-      print("Command: %s" % result.cmd.to_string())
+-      if result.output.HasCrashed():
+-        print("exit code: %s" % result.output.exit_code_string)
+-        print("--- CRASHED ---")
+-        crashed += 1
+-      if result.output.HasTimedOut():
+-        print("--- TIMEOUT ---")
+-    if len(self._failed) == 0:
+-      print("===")
+-      print("=== All tests succeeded")
+-      print("===")
+-    else:
+-      print()
+-      print("===")
+-      print("=== %d tests failed" % len(self._failed))
+-      if flaky > 0:
+-        print("=== %d tests were flaky" % flaky)
+-      if crashed > 0:
+-        print("=== %d tests CRASHED" % crashed)
+-      print("===")
+-
+-
+-class StreamProgressIndicator(ProgressIndicator):
+-  def __init__(self):
+-    super(StreamProgressIndicator, self).__init__()
+-    self._requirement = base.DROP_PASS_OUTPUT
+-
+-  def _on_result_for(self, test, result):
+-    if not result.has_unexpected_output:
+-      self.print('PASS', test)
+-    elif result.output.HasCrashed():
+-      self.print("CRASH", test)
+-    elif result.output.HasTimedOut():
+-      self.print("TIMEOUT", test)
+-    else:
+-      if test.is_fail:
+-        self.print("UNEXPECTED PASS", test)
+-      else:
+-        self.print("FAIL", test)
+-
+-  def print(self, prefix, test):
+-    print('%s: %ss' % (prefix, test))
+-    sys.stdout.flush()
+-
+-
+-def format_result_status(result):
+-  if result.has_unexpected_output:
+-    if result.output.HasCrashed():
+-      return 'CRASH'
+-    else:
+-      return 'FAIL'
+-  else:
+-    return 'PASS'
+-
+-
+-class VerboseProgressIndicator(SimpleProgressIndicator):
+-  def __init__(self):
+-    super(VerboseProgressIndicator, self).__init__()
+-    self._last_printed_time = time.time()
+-
+-  def _print(self, text):
+-    encoding = sys.stdout.encoding or 'utf-8'
+-    print(text.encode(encoding, errors='replace').decode(encoding))
+-    sys.stdout.flush()
+-    self._last_printed_time = time.time()
+-
+-  def _message(self, test, result):
+-    # TODO(majeski): Support for dummy/grouped results
+-    if result.is_rerun:
+-      outcome = ' '.join(format_result_status(r) for r in result.results)
+-    else:
+-      outcome = format_result_status(result)
+-    return '%s %s: %s' % (
+-      test, test.variant or 'default', outcome)
+-
+-  def _on_result_for(self, test, result):
+-    super(VerboseProgressIndicator, self)._on_result_for(test, result)
+-    self._print(self._message(test, result))
+-
+-  # TODO(machenbach): Remove this platform specific hack and implement a proper
+-  # feedback channel from the workers, providing which tests are currently run.
+-  def _print_processes_linux(self):
+-    if platform.system() == 'Linux':
+-      self._print('List of processes:')
+-      for pid, cmd in util.list_processes_linux():
+-        # Show command with pid, but other process info cut off.
+-        self._print('pid: %d cmd: %s' % (pid, cmd))
+-
+-  def _ensure_delay(self, delay):
+-    return time.time() - self._last_printed_time > delay
+-
+-  def _on_heartbeat(self):
+-    if self._ensure_delay(30):
+-      # Print something every 30 seconds to not get killed by an output
+-      # timeout.
+-      self._print('Still working...')
+-      self._print_processes_linux()
+-
+-  def _on_event(self, event):
+-    self._print(event)
+-    self._print_processes_linux()
+-
+-
+-class CIProgressIndicator(VerboseProgressIndicator):
+-  def _on_result_for(self, test, result):
+-    super(VerboseProgressIndicator, self)._on_result_for(test, result)
+-    if self.options.ci_test_completion:
+-      with open(self.options.ci_test_completion, "a") as f:
+-        f.write(self._message(test, result) + "\n")
+-    self._output_feedback()
+-
+-  def _output_feedback(self):
+-    """Reduced the verbosity leads to getting killed by an ouput timeout.
+-    We ensure output every minute.
+-    """
+-    if self._ensure_delay(60):
+-      dt = time.time()
+-      st = datetime.datetime.fromtimestamp(dt).strftime('%Y-%m-%d %H:%M:%S')
+-      self._print(st)
+-
+-
+-class DotsProgressIndicator(SimpleProgressIndicator):
+-  def __init__(self):
+-    super(DotsProgressIndicator, self).__init__()
+-    self._count = 0
+-
+-  def _on_result_for(self, test, result):
+-    super(DotsProgressIndicator, self)._on_result_for(test, result)
+-    # TODO(majeski): Support for dummy/grouped results
+-    self._count += 1
+-    if self._count > 1 and self._count % 50 == 1:
+-      sys.stdout.write('\n')
+-    if result.has_unexpected_output:
+-      if result.output.HasCrashed():
+-        sys.stdout.write('C')
+-        sys.stdout.flush()
+-      elif result.output.HasTimedOut():
+-        sys.stdout.write('T')
+-        sys.stdout.flush()
+-      else:
+-        sys.stdout.write('F')
+-        sys.stdout.flush()
++  def standard_show(self, tests):
++    if tests.test_count_estimate:
++      percentage = float(self.total) / tests.test_count_estimate * 100
+     else:
+-      sys.stdout.write('.')
+-      sys.stdout.flush()
+-
++      percentage = 0
++    print(('>>> %d base tests produced %d (%d%s)'
++           ' non-filtered tests') %
++          (tests.test_count_estimate, self.total, percentage, '%'))
++    print('>>> %d tests ran' % (self.total - self.remaining))
+ 
+-class CompactProgressIndicator(ProgressIndicator):
+-  def __init__(self, templates):
+-    super(CompactProgressIndicator, self).__init__()
+-    self._requirement = base.DROP_PASS_OUTPUT
+-
+-    self._templates = templates
+-    self._last_status_length = 0
+-    self._start_time = time.time()
+-
+-    self._passed = 0
+-    self._failed = 0
+-
+-  def _on_result_for(self, test, result):
+-    # TODO(majeski): Support for dummy/grouped results
+-    if result.has_unexpected_output:
+-      self._failed += 1
+-    else:
+-      self._passed += 1
+-
+-    self._print_progress(str(test))
+-    if result.has_unexpected_output:
+-      output = result.output
+-      stdout = output.stdout.strip()
+-      stderr = output.stderr.strip()
+-
+-      self._clear_line(self._last_status_length)
+-      print_failure_header(test)
+-      if len(stdout):
+-        self.printFormatted('stdout', stdout)
+-      if len(stderr):
+-        self.printFormatted('stderr', stderr)
+-      self.printFormatted(
+-          'command', "Command: %s" % result.cmd.to_string(relative=True))
+-      if output.HasCrashed():
+-        self.printFormatted(
+-            'failure', "exit code: %s" % output.exit_code_string)
+-        self.printFormatted('failure', "--- CRASHED ---")
+-      elif output.HasTimedOut():
+-        self.printFormatted('failure', "--- TIMEOUT ---")
+-      else:
+-        if test.is_fail:
+-          self.printFormatted('failure', "--- UNEXPECTED PASS ---")
+-          if test.expected_failure_reason != None:
+-            self.printFormatted('failure', test.expected_failure_reason)
+-        else:
+-          self.printFormatted('failure', "--- FAILED ---")
+-
+-  def finished(self):
+-    self._print_progress('Done')
+-    print()
+-
+-  def _print_progress(self, name):
+-    self._clear_line(self._last_status_length)
+-    elapsed = time.time() - self._start_time
+-    if self._total:
+-      progress = (self._passed + self._failed) * 100 // self._total
+-    else:
+-      progress = 0
+-    status = self._templates['status_line'] % {
+-      'passed': self._passed,
+-      'progress': progress,
+-      'failed': self._failed,
+-      'test': name,
+-      'mins': int(elapsed) // 60,
+-      'secs': int(elapsed) % 60
+-    }
+-    status = self._truncateStatusLine(status, 78)
+-    self._last_status_length = len(status)
+-    print(status, end='')
+-    sys.stdout.flush()
+-
+-  def _truncateStatusLine(self, string, length):
+-    if length and len(string) > (length - 3):
+-      return string[:(length - 3)] + "..."
+-    else:
+-      return string
++  def exit_code(self):
++    exit_code = utils.EXIT_CODE_PASS
++    if self.failed:
++      exit_code = utils.EXIT_CODE_FAILURES
++    if not self.total:
++      exit_code = utils.EXIT_CODE_NO_TESTS
++    return exit_code
+ 
+-  def _clear_line(self, last_length):
+-    raise NotImplementedError()
+ 
++class ProgressProc(base.TestProcObserver):
+ 
+-class ColorProgressIndicator(CompactProgressIndicator):
+-  def __init__(self):
+-    templates = {
+-      'status_line': ("[%(mins)02i:%(secs)02i|"
+-                      "\033[34m%%%(progress) 4d\033[0m|"
+-                      "\033[32m+%(passed) 4d\033[0m|"
+-                      "\033[31m-%(failed) 4d\033[0m]: %(test)s"),
+-      'stdout': "\033[1m%s\033[0m",
+-      'stderr': "\033[31m%s\033[0m",
+-      'failure': "\033[1;31m%s\033[0m",
+-      'command': "\033[33m%s\033[0m",
+-    }
+-    super(ColorProgressIndicator, self).__init__(templates)
++  def __init__(self, options, framework_name, test_count):
++    super(ProgressProc, self).__init__()
++    self.procs = [PROGRESS_INDICATORS[options.progress](options, test_count)]
++    if options.json_test_results:
++      self.procs.insert(
++          0, JsonTestProgressIndicator(options, test_count, framework_name))
+ 
+-  def printFormatted(self, format, string):
+-    print(self._templates[format] % string)
+-
+-  def _truncateStatusLine(self, string, length):
+-    # Add some slack for the color control chars
+-    return super(ColorProgressIndicator, self)._truncateStatusLine(
+-        string, length + 3*9)
+-
+-  def _clear_line(self, last_length):
+-    print("\033[1K\r", end='')
+-
+-
+-class MonochromeProgressIndicator(CompactProgressIndicator):
+-  def __init__(self):
+-    templates = {
+-        'status_line': ("[%(mins)02i:%(secs)02i|%%%(progress) 4d|"
+-                        "+%(passed) 4d|-%(failed) 4d]: %(test)s"),
+-    }
+-    super(MonochromeProgressIndicator, self).__init__(templates)
+-
+-  def printFormatted(self, format, string):
+-    print(string)
+-
+-  def _clear_line(self, last_length):
+-    print(("\r" + (" " * last_length) + "\r"), end='')
+-
+-
+-class JsonTestProgressIndicator(ProgressIndicator):
+-  def __init__(self, framework_name):
+-    super(JsonTestProgressIndicator, self).__init__()
+-    # We want to drop stdout/err for all passed tests on the first try, but we
+-    # need to get outputs for all runs after the first one. To accommodate that,
+-    # reruns are set to keep the result no matter what requirement says, i.e.
+-    # keep_output set to True in the RerunProc.
+-    self._requirement = base.DROP_PASS_STDOUT
+-
+-    self.framework_name = framework_name
+-    self.results = []
+-    self.duration_sum = 0
+-    self.test_count = 0
+-
+-  def configure(self, options):
+-    super(JsonTestProgressIndicator, self).configure(options)
+-    self.tests = util.FixedSizeTopList(
+-        self.options.slow_tests_cutoff,
+-        key=lambda rec: rec['duration'])
++    self._requirement = max(proc._requirement for proc in self.procs)
+ 
+   def _on_result_for(self, test, result):
+-    if result.is_rerun:
+-      self.process_results(test, result.results)
+-    else:
+-      self.process_results(test, [result])
+-
+-  def process_results(self, test, results):
+-    for run, result in enumerate(results):
+-      # TODO(majeski): Support for dummy/grouped results
+-      output = result.output
+-
+-      self._buffer_slow_tests(test, result, output, run)
+-
+-      # Omit tests that run as expected on the first try.
+-      # Everything that happens after the first run is included in the output
+-      # even if it flakily passes.
+-      if not result.has_unexpected_output and run == 0:
+-        continue
+-
+-      record = self._test_record(test, result, output, run)
+-      record.update({
+-          "result": test.output_proc.get_outcome(output),
+-          "stdout": output.stdout,
+-          "stderr": output.stderr,
+-        })
+-      self.results.append(record)
+-
+-  def _buffer_slow_tests(self, test, result, output, run):
+-    def result_value(test, result, output):
+-      if not result.has_unexpected_output:
+-        return ""
+-      return test.output_proc.get_outcome(output)
+-
+-    record = self._test_record(test, result, output, run)
+-    record.update({
+-        "result": result_value(test, result, output),
+-        "marked_slow": test.is_slow,
+-      })
+-    self.tests.add(record)
+-    self.duration_sum += record['duration']
+-    self.test_count += 1
+-
+-  def _test_record(self, test, result, output, run):
+-    return {
+-        "name": str(test),
+-        "flags": result.cmd.args,
+-        "command": result.cmd.to_string(relative=True),
+-        "run": run + 1,
+-        "exit_code": output.exit_code,
+-        "expected": test.expected_outcomes,
+-        "duration": output.duration,
+-        "random_seed": test.random_seed,
+-        "target_name": test.get_shell(),
+-        "variant": test.variant,
+-        "variant_flags": test.variant_flags,
+-        "framework_name": self.framework_name,
+-      }
++    for proc in self.procs:
++      proc.on_test_result(test, result)
+ 
+   def finished(self):
+-    duration_mean = None
+-    if self.test_count:
+-      duration_mean = self.duration_sum / self.test_count
+-
+-    result = {
+-      "results": self.results,
+-      "slowest_tests": self.tests.as_list(),
+-      "duration_mean": duration_mean,
+-      "test_total": self.test_count,
+-    }
+-
+-    with open(self.options.json_test_results, "w") as f:
+-      json.dump(result, f)
++    for proc in self.procs:
++      proc.finished()
+diff --git a/tools/testrunner/testproc/result.py b/tools/testrunner/testproc/result.py
+index c817fc06ec5..b1c42e47098 100644
+--- a/tools/testrunner/testproc/result.py
++++ b/tools/testrunner/testproc/result.py
+@@ -25,6 +25,17 @@ class Result(ResultBase):
+     self.output = output
+     self.cmd = cmd
+ 
++  def status(self):
++    if self.has_unexpected_output:
++      if not hasattr(self.output, "HasCrashed"):
++        raise Exception(type(self))
++      if self.output.HasCrashed():
++        return 'CRASH'
++      else:
++        return 'FAIL'
++    else:
++      return 'PASS'
++
+ 
+ class GroupedResult(ResultBase):
+   """Result consisting of multiple results. It can be used by processors that
+@@ -95,3 +106,6 @@ class RerunResult(Result):
+   @property
+   def is_rerun(self):
+     return True
++
++  def status(self):
++    return ' '.join(r.status() for r in self.results)
+diff --git a/tools/testrunner/testproc/seed.py b/tools/testrunner/testproc/seed.py
+index 9ee281d33cd..392bec2ef7c 100644
+--- a/tools/testrunner/testproc/seed.py
++++ b/tools/testrunner/testproc/seed.py
+@@ -18,6 +18,7 @@ class SeedProc(base.TestProcProducer):
+       parallel_subtests: How many subtest of each test to run at the same time.
+     """
+     super(SeedProc, self).__init__('Seed')
++    self._requirement = base.DROP_RESULT
+     self._count = count
+     self._seed = seed
+     self._last_idx = defaultdict(int)
+@@ -26,12 +27,6 @@ class SeedProc(base.TestProcProducer):
+     if count:
+       self._parallel_subtests = min(self._parallel_subtests, count)
+ 
+-  def setup(self, requirement=base.DROP_RESULT):
+-    super(SeedProc, self).setup(requirement)
+-
+-    # SeedProc is optimized for dropping the result
+-    assert requirement == base.DROP_RESULT
+-
+   def _next_test(self, test):
+     is_loaded = False
+     for _ in range(0, self._parallel_subtests):
+diff --git a/tools/testrunner/testproc/sigproc.py b/tools/testrunner/testproc/sigproc.py
+index f81e7f94205..6102c20613f 100644
+--- a/tools/testrunner/testproc/sigproc.py
++++ b/tools/testrunner/testproc/sigproc.py
+@@ -12,11 +12,6 @@ class SignalProc(base.TestProcObserver):
+   def __init__(self):
+     super(SignalProc, self).__init__()
+     self.exit_code = utils.EXIT_CODE_PASS
+-
+-  def setup(self, *args, **kwargs):
+-    super(SignalProc, self).setup(*args, **kwargs)
+-    # It should be called after processors are chained together to not loose
+-    # catched signal.
+     signal.signal(signal.SIGINT, self._on_ctrlc)
+     signal.signal(signal.SIGTERM, self._on_sigterm)
+ 
+@@ -29,3 +24,8 @@ class SignalProc(base.TestProcObserver):
+     print('>>> SIGTERM received, early abort...')
+     self.exit_code = utils.EXIT_CODE_TERMINATED
+     self.stop()
++
++  def worst_exit_code(self, results):
++    exit_code = results.exit_code()
++    # Indicate if a SIGINT or SIGTERM happened.
++    return max(exit_code, self.exit_code)
+diff --git a/tools/testrunner/testproc/variant.py b/tools/testrunner/testproc/variant.py
+index c31e8a0ad3e..21d952b55c2 100644
+--- a/tools/testrunner/testproc/variant.py
++++ b/tools/testrunner/testproc/variant.py
+@@ -23,17 +23,11 @@ class VariantProc(base.TestProcProducer):
+ 
+   def __init__(self, variants):
+     super(VariantProc, self).__init__('VariantProc')
++    self._requirement = base.DROP_RESULT
+     self._next_variant = {}
+     self._variant_gens = {}
+     self._variants = variants
+ 
+-  def setup(self, requirement=base.DROP_RESULT):
+-    super(VariantProc, self).setup(requirement)
+-
+-    # VariantProc is optimized for dropping the result and it should be placed
+-    # in the chain where it's possible.
+-    assert requirement == base.DROP_RESULT
+-
+   def _next_test(self, test):
+     gen = self._variants_gen(test)
+     self._next_variant[test.procid] = gen
+diff --git a/tools/testrunner/testproc/variant_test.py b/tools/testrunner/testproc/variant_test.py
+index 7be46950076..46e763a924b 100755
+--- a/tools/testrunner/testproc/variant_test.py
++++ b/tools/testrunner/testproc/variant_test.py
+@@ -86,7 +86,6 @@ class TestVariantProcLoading(unittest.TestCase):
+   def _simulate_proc(self, variants):
+     """Expects the list of instantiated test variants to load into the
+     VariantProc."""
+-    variants_mapping = {self.test: variants}
+ 
+     # Creates a Variant processor containing the possible types of test
+     # variants.
+diff --git a/tools/testrunner/utils/test_utils.py b/tools/testrunner/utils/test_utils.py
+index f2bcbbcbb86..d509061c7c3 100644
+--- a/tools/testrunner/utils/test_utils.py
++++ b/tools/testrunner/utils/test_utils.py
+@@ -11,10 +11,14 @@ import sys
+ import tempfile
+ import unittest
+ 
++from contextlib import contextmanager
+ from dataclasses import dataclass
+ from io import StringIO
+ from os.path import dirname as up
+ 
++from testrunner.local.command import BaseCommand, DefaultOSContext
++from testrunner.objects import output
++
+ TOOLS_ROOT = up(up(up(os.path.abspath(__file__))))
+ sys.path.append(TOOLS_ROOT)
+ 
+@@ -172,10 +176,60 @@ class TestRunnerTest(unittest.TestCase):
+           sys_args.append('--infra-staging')
+         else:
+           sys_args.append('--no-infra-staging')
+-        code = self.get_runner_class()(basedir=basedir).execute(sys_args)
++        runner = self.get_runner_class()(basedir=basedir)
++        code = runner.execute(sys_args)
+         json_out = clean_json_output(json_out_path, basedir)
+         return TestResult(stdout.getvalue(), stderr.getvalue(), code, json_out, self)
+ 
+     def get_runner_class():
+       """Implement to return the runner class"""
+       return None
++
++
++class FakeOSContext(DefaultOSContext):
++
++  def __init__(self):
++    super(FakeOSContext, self).__init__(FakeCommand)
++
++  @contextmanager
++  def context(self, device):
++    print("===>Starting stuff")
++    yield
++    print("<===Stopping stuff")
++
++  def on_load(self):
++    print("<==>Loading stuff")
++
++
++class FakeCommand(BaseCommand):
++  counter = 0
++
++  def __init__(self,
++               shell,
++               args=None,
++               cmd_prefix=None,
++               timeout=60,
++               env=None,
++               verbose=False,
++               resources_func=None,
++               handle_sigterm=False):
++    f_prefix = ['fake_wrapper'] + cmd_prefix
++    super(FakeCommand, self).__init__(
++        shell,
++        args=args,
++        cmd_prefix=f_prefix,
++        timeout=timeout,
++        env=env,
++        verbose=verbose,
++        handle_sigterm=handle_sigterm)
++
++  def execute(self):
++    FakeCommand.counter += 1
++    return output.Output(
++        0,  #return_code,
++        False,  # TODO: Figure out timeouts.
++        f'fake stdout {FakeCommand.counter}',
++        f'fake stderr {FakeCommand.counter}',
++        -1,  # No pid available.
++        99,
++    )
+diff --git a/tools/unittests/run_perf_test.py b/tools/unittests/run_perf_test.py
+index c140b7a7688..75ed6cef70c 100755
+--- a/tools/unittests/run_perf_test.py
++++ b/tools/unittests/run_perf_test.py
+@@ -3,7 +3,6 @@
+ # Use of this source code is governed by a BSD-style license that can be
+ # found in the LICENSE file.
+ 
+-from collections import namedtuple
+ import json
+ import os
+ import platform
+@@ -644,7 +643,7 @@ class PerfTest(unittest.TestCase):
+         'run_perf.AndroidPlatform.Run',
+         return_value=(Output(stdout='Richards: 1.234\nDeltaBlue: 10657567\n'),
+                       NULL_OUTPUT)).start()
+-    mock.patch('testrunner.local.android._Driver', autospec=True).start()
++    mock.patch('testrunner.local.android.Driver', autospec=True).start()
+     mock.patch(
+         'run_perf.Platform.ReadBuildConfig',
+         return_value={'is_android': True}).start()
+-- 
+2.35.1
+

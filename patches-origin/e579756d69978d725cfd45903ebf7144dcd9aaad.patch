@@ -1,0 +1,488 @@
+From e579756d69978d725cfd45903ebf7144dcd9aaad Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Wed, 28 Jun 2023 11:20:18 +0800
+Subject: [PATCH] [sandbox][riscv] Port sandbox
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Port commit ef16cd37f0aa1a74e0dbd593358086cbaa5534e0
+
+Bug: v8:10391
+
+Change-Id: I9acdc738f050f4bca7ccfdfdb2bfeec40dcf08a7
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4653674
+Commit-Queue: Yahan Lu <yahan@iscas.ac.cn>
+Reviewed-by: Thibaud Michaud <thibaudm@chromium.org>
+Auto-Submit: Yahan Lu <yahan@iscas.ac.cn>
+Reviewed-by: Samuel Groß <saelo@chromium.org>
+Reviewed-by: Ji Qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#88568}
+---
+ src/builtins/riscv/builtins-riscv.cc          | 10 ++-
+ src/codegen/riscv/macro-assembler-riscv.cc    | 83 +++++++++++--------
+ src/codegen/riscv/macro-assembler-riscv.h     | 35 ++++----
+ src/common/globals.h                          |  2 +-
+ .../backend/riscv/code-generator-riscv.cc     | 54 +++++++++++-
+ .../backend/riscv/instruction-codes-riscv.h   |  3 +
+ .../riscv/instruction-scheduler-riscv.cc      |  3 +
+ .../riscv/instruction-selector-riscv.h        | 16 ++++
+ .../riscv/instruction-selector-riscv64.cc     | 13 +--
+ .../baseline/riscv/liftoff-assembler-riscv.h  |  9 ++
+ src/wasm/wasm-code-manager.h                  |  2 +-
+ 11 files changed, 164 insertions(+), 66 deletions(-)
+
+diff --git a/src/builtins/riscv/builtins-riscv.cc b/src/builtins/riscv/builtins-riscv.cc
+index 9ca70363b11..7e8bf630a50 100644
+--- a/src/builtins/riscv/builtins-riscv.cc
++++ b/src/builtins/riscv/builtins-riscv.cc
+@@ -2880,7 +2880,11 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
+     ExternalReference pending_exception_address = ExternalReference::Create(
+         IsolateAddressId::kPendingExceptionAddress, masm->isolate());
+     __ li(a2, pending_exception_address);
++#ifndef V8_ENABLE_SANDBOX
+     __ LoadWord(a2, MemOperand(a2));
++#else
++    __ Lwu(a2, MemOperand(a2));
++#endif
+     // Cannot use check here as it attempts to generate call into runtime.
+     __ Branch(&okay, eq, a2, RootIndex::kTheHoleValue);
+     __ stop();
+@@ -3600,9 +3604,11 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+   // property_callback_info_arg = v8::PropertyCallbackInfo&
+   __ AddWord(property_callback_info_arg, sp, Operand(1 * kSystemPointerSize));
+ 
+-  __ LoadWord(
++  __ RecordComment("Load api_function_address");
++  __ LoadExternalPointerField(
+       api_function_address,
+-      FieldMemOperand(callback, AccessorInfo::kMaybeRedirectedGetterOffset));
++      FieldMemOperand(callback, AccessorInfo::kMaybeRedirectedGetterOffset),
++      kAccessorInfoGetterTag);
+ 
+   DCHECK(
+       !AreAliased(api_function_address, property_callback_info_arg, name_arg));
+diff --git a/src/codegen/riscv/macro-assembler-riscv.cc b/src/codegen/riscv/macro-assembler-riscv.cc
+index 6e608d51ea6..7f4a1b5dc3b 100644
+--- a/src/codegen/riscv/macro-assembler-riscv.cc
++++ b/src/codegen/riscv/macro-assembler-riscv.cc
+@@ -336,41 +336,6 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
+   bind(&done);
+ }
+ 
+-void MacroAssembler::DecodeSandboxedPointer(Register value) {
+-  ASM_CODE_COMMENT(this);
+-#ifdef V8_ENABLE_SANDBOX
+-  srli(value, value, kSandboxedPointerShift);
+-  AddWord(value, value, kPtrComprCageBaseRegister);
+-#else
+-  UNREACHABLE();
+-#endif
+-}
+-
+-void MacroAssembler::LoadSandboxedPointerField(
+-    Register destination, const MemOperand& field_operand) {
+-#ifdef V8_ENABLE_SANDBOX
+-  ASM_CODE_COMMENT(this);
+-  LoadWord(destination, field_operand);
+-  DecodeSandboxedPointer(destination);
+-#else
+-  UNREACHABLE();
+-#endif
+-}
+-
+-void MacroAssembler::StoreSandboxedPointerField(
+-    Register value, const MemOperand& dst_field_operand) {
+-#ifdef V8_ENABLE_SANDBOX
+-  ASM_CODE_COMMENT(this);
+-  UseScratchRegisterScope temps(this);
+-  Register scratch = temps.Acquire();
+-  SubWord(scratch, value, kPtrComprCageBaseRegister);
+-  slli(scratch, scratch, kSandboxedPointerShift);
+-  StoreWord(scratch, dst_field_operand);
+-#else
+-  UNREACHABLE();
+-#endif
+-}
+-
+ void MacroAssembler::LoadExternalPointerField(Register destination,
+                                               MemOperand field_operand,
+                                               ExternalPointerTag tag,
+@@ -393,7 +358,8 @@ void MacroAssembler::LoadExternalPointerField(Register destination,
+   lwu(destination, field_operand);
+   srli(destination, destination, kExternalPointerIndexShift);
+   slli(destination, destination, kExternalPointerTableEntrySizeLog2);
+-  LoadWord(destination, MemOperand(external_table, destination));
++  AddWord(external_table, external_table, destination);
++  LoadWord(destination, MemOperand(external_table, 0));
+   And(destination, destination, Operand(~tag));
+ #else
+   LoadWord(destination, field_operand);
+@@ -541,6 +507,41 @@ void MacroAssembler::RecordWrite(Register object, Operand offset,
+ // ---------------------------------------------------------------------------
+ // Instruction macros.
+ #if V8_TARGET_ARCH_RISCV64
++void MacroAssembler::DecodeSandboxedPointer(Register value) {
++  ASM_CODE_COMMENT(this);
++#ifdef V8_ENABLE_SANDBOX
++  srli(value, value, kSandboxedPointerShift);
++  AddWord(value, value, kPtrComprCageBaseRegister);
++#else
++  UNREACHABLE();
++#endif
++}
++
++void MacroAssembler::LoadSandboxedPointerField(
++    Register destination, const MemOperand& field_operand) {
++#ifdef V8_ENABLE_SANDBOX
++  ASM_CODE_COMMENT(this);
++  LoadWord(destination, field_operand);
++  DecodeSandboxedPointer(destination);
++#else
++  UNREACHABLE();
++#endif
++}
++
++void MacroAssembler::StoreSandboxedPointerField(
++    Register value, const MemOperand& dst_field_operand) {
++#ifdef V8_ENABLE_SANDBOX
++  ASM_CODE_COMMENT(this);
++  UseScratchRegisterScope temps(this);
++  Register scratch = temps.Acquire();
++  SubWord(scratch, value, kPtrComprCageBaseRegister);
++  slli(scratch, scratch, kSandboxedPointerShift);
++  StoreWord(scratch, dst_field_operand);
++#else
++  UNREACHABLE();
++#endif
++}
++
+ void MacroAssembler::Add32(Register rd, Register rs, const Operand& rt) {
+   if (rt.is_reg()) {
+     if (v8_flags.riscv_c_extension && (rd.code() == rs.code()) &&
+@@ -3990,6 +3991,11 @@ void MacroAssembler::Branch(Label* L, Condition cond, Register rs,
+   Register right = temps.Acquire();
+   if (COMPRESS_POINTERS_BOOL) {
+     Register left = rs;
++    if (V8_STATIC_ROOTS_BOOL && RootsTable::IsReadOnly(index) &&
++        is_int12(ReadOnlyRootPtr(index))) {
++      left = temps.Acquire();
++      Sll32(left, rs, 0);
++    }
+     LoadTaggedRoot(right, index);
+     Branch(L, cond, left, Operand(right));
+   } else {
+@@ -6515,6 +6521,11 @@ void MacroAssembler::DecompressTagged(const Register& destination,
+   AddWord(destination, kPtrComprCageBaseRegister, Operand(destination));
+ }
+ 
++void MacroAssembler::DecompressTagged(Register dst, Tagged_t immediate) {
++  ASM_CODE_COMMENT(this);
++  AddWord(dst, kPtrComprCageBaseRegister, static_cast<int32_t>(immediate));
++}
++
+ void MacroAssembler::AtomicDecompressTaggedSigned(Register dst,
+                                                   const MemOperand& src) {
+   ASM_CODE_COMMENT(this);
+diff --git a/src/codegen/riscv/macro-assembler-riscv.h b/src/codegen/riscv/macro-assembler-riscv.h
+index 426d32a607f..45d39987299 100644
+--- a/src/codegen/riscv/macro-assembler-riscv.h
++++ b/src/codegen/riscv/macro-assembler-riscv.h
+@@ -1122,6 +1122,18 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
+   void DecompressTagged(const Register& destination, const Register& source);
+   void DecompressTagged(Register dst, Tagged_t immediate);
+ 
++  // ---------------------------------------------------------------------------
++  // V8 Sandbox support
++
++  // Transform a SandboxedPointer from/to its encoded form, which is used when
++  // the pointer is stored on the heap and ensures that the pointer will always
++  // point into the sandbox.
++  void DecodeSandboxedPointer(Register value);
++  void LoadSandboxedPointerField(Register destination,
++                                 const MemOperand& field_operand);
++  void StoreSandboxedPointerField(Register value,
++                                  const MemOperand& dst_field_operand);
++
+   void AtomicDecompressTaggedSigned(Register dst, const MemOperand& src);
+   void AtomicDecompressTagged(Register dst, const MemOperand& src);
+ 
+@@ -1156,6 +1168,11 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
+     Sw(value, dst_field_operand);
+   }
+ #endif
++  // Loads a field containing off-heap pointer and does necessary decoding
++  // if sandboxed external pointers are enabled.
++  void LoadExternalPointerField(Register destination, MemOperand field_operand,
++                                ExternalPointerTag tag,
++                                Register isolate_root = no_reg);
+   // Control-flow integrity:
+ 
+   // Define a function entrypoint. This doesn't emit any code for this
+@@ -1481,24 +1498,6 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
+     DecodeField<Field>(reg, reg);
+   }
+ 
+-  // ---------------------------------------------------------------------------
+-  // V8 Sandbox support
+-
+-  // Transform a SandboxedPointer from/to its encoded form, which is used when
+-  // the pointer is stored on the heap and ensures that the pointer will always
+-  // point into the sandbox.
+-  void DecodeSandboxedPointer(Register value);
+-  void LoadSandboxedPointerField(Register destination,
+-                                 const MemOperand& field_operand);
+-  void StoreSandboxedPointerField(Register value,
+-                                  const MemOperand& dst_field_operand);
+-
+-  // Loads a field containing off-heap pointer and does necessary decoding
+-  // if sandboxed external pointers are enabled.
+-  void LoadExternalPointerField(Register destination, MemOperand field_operand,
+-                                ExternalPointerTag tag,
+-                                Register isolate_root = no_reg);
+-
+  protected:
+   inline Register GetRtAsRegisterHelper(const Operand& rt, Register scratch);
+   inline int32_t GetOffset(int32_t offset, Label* L, OffsetSize bits);
+diff --git a/src/common/globals.h b/src/common/globals.h
+index 59ac173876c..b89e09e424e 100644
+--- a/src/common/globals.h
++++ b/src/common/globals.h
+@@ -410,7 +410,7 @@ constexpr bool kPlatformRequiresCodeRange = true;
+     (V8_TARGET_ARCH_PPC || V8_TARGET_ARCH_PPC64) && V8_OS_LINUX
+ constexpr size_t kMaximalCodeRangeSize = 512 * MB;
+ constexpr size_t kMinExpectedOSPageSize = 64 * KB;  // OS page on PPC Linux
+-#elif V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_LOONG64
++#elif V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_LOONG64 || V8_TARGET_ARCH_RISCV64
+ constexpr size_t kMaximalCodeRangeSize =
+     (COMPRESS_POINTERS_BOOL && !V8_EXTERNAL_CODE_SPACE_BOOL) ? 128 * MB
+                                                              : 256 * MB;
+diff --git a/src/compiler/backend/riscv/code-generator-riscv.cc b/src/compiler/backend/riscv/code-generator-riscv.cc
+index b6a33671d44..0a04f4850ee 100644
+--- a/src/compiler/backend/riscv/code-generator-riscv.cc
++++ b/src/compiler/backend/riscv/code-generator-riscv.cc
+@@ -1264,6 +1264,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       __ Ror(i.OutputRegister(), i.InputRegister(0), i.InputOperand(1));
+       break;
+     case kRiscvCmp:
++#ifdef V8_TARGET_ARCH_RISCV64
++    case kRiscvCmp32:
++#endif
+       // Pseudo-instruction used for cmp/branch. No opcode emitted here.
+       break;
+     case kRiscvCmpZero:
+@@ -2218,6 +2221,14 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       __ DecompressTagged(result, operand);
+       break;
+     }
++    case kRiscvLoadDecodeSandboxedPointer:
++      __ LoadSandboxedPointerField(i.OutputRegister(), i.MemoryOperand());
++      break;
++    case kRiscvStoreEncodeSandboxedPointer: {
++      MemOperand mem = i.MemoryOperand(1);
++      __ StoreSandboxedPointerField(i.InputOrZeroRegister(0), mem);
++      break;
++    }
+     case kRiscvAtomicLoadDecompressTaggedSigned:
+       __ AtomicDecompressTaggedSigned(i.OutputRegister(), i.MemoryOperand());
+       break;
+@@ -3920,9 +3931,29 @@ void AssembleBranchToLabels(CodeGenerator* gen, MacroAssembler* masm,
+       default:
+         UNSUPPORTED_COND(instr->arch_opcode(), condition);
+     }
++#if V8_TARGET_ARCH_RISCV64
++  } else if (instr->arch_opcode() == kRiscvCmp ||
++             instr->arch_opcode() == kRiscvCmp32) {
++#elif V8_TARGET_ARCH_RISCV32
+   } else if (instr->arch_opcode() == kRiscvCmp) {
++#endif
+     Condition cc = FlagsConditionToConditionCmp(condition);
+-    __ Branch(tlabel, cc, i.InputRegister(0), i.InputOperand(1));
++    Register left = i.InputRegister(0);
++    Operand right = i.InputOperand(1);
++    // Word32Compare has two temp registers.
++#if V8_TARGET_ARCH_RISCV64
++    if (COMPRESS_POINTERS_BOOL && (instr->arch_opcode() == kRiscvCmp32)) {
++      Register temp0 = i.TempRegister(0);
++      Register temp1 = right.is_reg() ? i.TempRegister(1) : no_reg;
++      __ slliw(temp0, left, 0);
++      left = temp0;
++      if (temp1 != no_reg) {
++        __ slliw(temp1, right.rm(), 0);
++        right = Operand(temp1);
++      }
++    }
++#endif
++    __ Branch(tlabel, cc, left, right);
+   } else if (instr->arch_opcode() == kRiscvCmpZero) {
+     Condition cc = FlagsConditionToConditionCmp(condition);
+     if (i.InputOrZeroRegister(0) == zero_reg && IsInludeEqual(cc)) {
+@@ -4085,13 +4116,30 @@ void CodeGenerator::AssembleArchBoolean(Instruction* instr,
+ #endif
+     // Overflow occurs if overflow register is not zero
+     __ Sgtu(result, kScratchReg, zero_reg);
++#if V8_TARGET_ARCH_RISCV64
++  } else if (instr->arch_opcode() == kRiscvCmp ||
++             instr->arch_opcode() == kRiscvCmp32) {
++#elif V8_TARGET_ARCH_RISCV32
+   } else if (instr->arch_opcode() == kRiscvCmp) {
++#endif
+     Condition cc = FlagsConditionToConditionCmp(condition);
++    Register left = i.InputRegister(0);
++    Operand right = i.InputOperand(1);
++#if V8_TARGET_ARCH_RISCV64
++    if (COMPRESS_POINTERS_BOOL && (instr->arch_opcode() == kRiscvCmp32)) {
++      Register temp0 = i.TempRegister(0);
++      Register temp1 = right.is_reg() ? i.TempRegister(1) : no_reg;
++      __ slliw(temp0, left, 0);
++      left = temp0;
++      if (temp1 != no_reg) {
++        __ slliw(temp1, right.rm(), 0);
++        right = Operand(temp1);
++      }
++    }
++#endif
+     switch (cc) {
+       case eq:
+       case ne: {
+-        Register left = i.InputOrZeroRegister(0);
+-        Operand right = i.InputOperand(1);
+         if (instr->InputAt(1)->IsImmediate()) {
+           if (is_int12(-right.immediate())) {
+             if (right.immediate() == 0) {
+diff --git a/src/compiler/backend/riscv/instruction-codes-riscv.h b/src/compiler/backend/riscv/instruction-codes-riscv.h
+index 71d9081b138..ab3d8ed7770 100644
+--- a/src/compiler/backend/riscv/instruction-codes-riscv.h
++++ b/src/compiler/backend/riscv/instruction-codes-riscv.h
+@@ -65,10 +65,13 @@ namespace compiler {
+   V(RiscvStoreCompressTagged)               \
+   V(RiscvLoadDecompressTaggedSigned)        \
+   V(RiscvLoadDecompressTagged)              \
++  V(RiscvLoadDecodeSandboxedPointer)        \
++  V(RiscvStoreEncodeSandboxedPointer)       \
+   V(RiscvAtomicLoadDecompressTaggedSigned)  \
+   V(RiscvAtomicLoadDecompressTagged)        \
+   V(RiscvAtomicStoreCompressTagged)         \
+   V(RiscvWord64AtomicCompareExchangeUint64) \
++  V(RiscvCmp32)                             \
+   V(RiscvTst64)
+ #elif V8_TARGET_ARCH_RISCV32
+ #define TARGET_ARCH_OPCODE_LIST_SPECAIL(V) \
+diff --git a/src/compiler/backend/riscv/instruction-scheduler-riscv.cc b/src/compiler/backend/riscv/instruction-scheduler-riscv.cc
+index 2bddd12da03..7f18032ab72 100644
+--- a/src/compiler/backend/riscv/instruction-scheduler-riscv.cc
++++ b/src/compiler/backend/riscv/instruction-scheduler-riscv.cc
+@@ -53,6 +53,9 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kRiscvTruncLS:
+     case kRiscvTruncUlD:
+     case kRiscvTruncUlS:
++    case kRiscvLoadDecodeSandboxedPointer:
++    case kRiscvStoreEncodeSandboxedPointer:
++    case kRiscvCmp32:
+ #elif V8_TARGET_ARCH_RISCV32
+     case kRiscvAdd32:
+     case kRiscvAddPair:
+diff --git a/src/compiler/backend/riscv/instruction-selector-riscv.h b/src/compiler/backend/riscv/instruction-selector-riscv.h
+index 895d75e78fe..5f1ec078508 100644
+--- a/src/compiler/backend/riscv/instruction-selector-riscv.h
++++ b/src/compiler/backend/riscv/instruction-selector-riscv.h
+@@ -342,6 +342,22 @@ static void VisitCompare(InstructionSelectorT<Adapter>* selector,
+                          InstructionCode opcode, InstructionOperand left,
+                          InstructionOperand right,
+                          FlagsContinuationT<Adapter>* cont) {
++#ifdef V8_COMPRESS_POINTERS
++  if (opcode == kRiscvCmp32) {
++    RiscvOperandGeneratorT<Adapter> g(selector);
++    InstructionOperand inputs[] = {left, right};
++    if (right.IsImmediate()) {
++      InstructionOperand temps[1] = {g.TempRegister()};
++      selector->EmitWithContinuation(opcode, 0, nullptr, arraysize(inputs),
++                                     inputs, arraysize(temps), temps, cont);
++    } else {
++      InstructionOperand temps[2] = {g.TempRegister(), g.TempRegister()};
++      selector->EmitWithContinuation(opcode, 0, nullptr, arraysize(inputs),
++                                     inputs, arraysize(temps), temps, cont);
++    }
++    return;
++  }
++#endif
+   selector->EmitWithContinuation(opcode, left, right, cont);
+ }
+ 
+diff --git a/src/compiler/backend/riscv/instruction-selector-riscv64.cc b/src/compiler/backend/riscv/instruction-selector-riscv64.cc
+index 1b16f636350..d0c7b599bc7 100644
+--- a/src/compiler/backend/riscv/instruction-selector-riscv64.cc
++++ b/src/compiler/backend/riscv/instruction-selector-riscv64.cc
+@@ -334,10 +334,11 @@ void InstructionSelectorT<Adapter>::VisitLoad(node_t node) {
+       opcode = kRiscvLw;
+       break;
+ #else
+-                                                 // Fall through.
+ #endif
++    case MachineRepresentation::kSandboxedPointer:
++      opcode = kRiscvLoadDecodeSandboxedPointer;
++      break;
+     case MachineRepresentation::kSimd256:           // Fall through.
+-    case MachineRepresentation::kSandboxedPointer:  // Fall through.
+     case MachineRepresentation::kMapWord:           // Fall through.
+     case MachineRepresentation::kNone:
+       UNREACHABLE();
+@@ -422,8 +423,10 @@ void InstructionSelectorT<Adapter>::VisitStore(Node* node) {
+ #else
+         UNREACHABLE();
+ #endif
++      case MachineRepresentation::kSandboxedPointer:
++        opcode = kRiscvStoreEncodeSandboxedPointer;
++        break;
+       case MachineRepresentation::kSimd256:           // Fall through.
+-      case MachineRepresentation::kSandboxedPointer:  // Fall through.
+       case MachineRepresentation::kMapWord:           // Fall through.
+       case MachineRepresentation::kNone:
+         UNREACHABLE();
+@@ -2122,8 +2125,8 @@ void InstructionSelectorT<Adapter>::VisitWord32Equal(node_t node) {
+       if (RootsTable::IsReadOnly(root_index)) {
+         Tagged_t ptr =
+             MacroAssemblerBase::ReadOnlyRootPtr(root_index, isolate());
+-        if (g.CanBeImmediate(ptr, kRiscvCmp)) {
+-            return VisitCompare(this, kRiscvCmp, g.UseRegister(left),
++        if (g.CanBeImmediate(ptr, kRiscvCmp32)) {
++            return VisitCompare(this, kRiscvCmp32, g.UseRegister(left),
+                                 g.TempImmediate(ptr), &cont);
+         }
+       }
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv.h
+index 41fe865dca8..13808539481 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv.h
+@@ -200,6 +200,15 @@ void LiftoffAssembler::LoadTaggedPointerFromInstance(Register dst,
+   LoadTaggedField(dst, MemOperand{instance, offset});
+ }
+ 
++#ifdef V8_ENABLE_SANDBOX
++void LiftoffAssembler::LoadExternalPointer(Register dst, Register instance,
++                                           int offset, ExternalPointerTag tag,
++                                           Register /* scratch */) {
++  LoadExternalPointerField(dst, FieldMemOperand(instance, offset), tag,
++                           kRootRegister);
++}
++#endif
++
+ void LiftoffAssembler::SpillInstance(Register instance) {
+   StoreWord(instance, liftoff::GetInstanceOperand());
+ }
+diff --git a/src/wasm/wasm-code-manager.h b/src/wasm/wasm-code-manager.h
+index c08aaff4d4e..80c6bfc82ea 100644
+--- a/src/wasm/wasm-code-manager.h
++++ b/src/wasm/wasm-code-manager.h
+@@ -604,7 +604,7 @@ class WasmCodeAllocator {
+ class V8_EXPORT_PRIVATE NativeModule final {
+  public:
+ #if V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_S390X || V8_TARGET_ARCH_ARM64 || \
+-    V8_TARGET_ARCH_PPC64 || V8_TARGET_ARCH_LOONG64
++    V8_TARGET_ARCH_PPC64 || V8_TARGET_ARCH_LOONG64 || V8_TARGET_ARCH_RISCV64
+   static constexpr bool kNeedsFarJumpsBetweenCodeSpaces = true;
+ #else
+   static constexpr bool kNeedsFarJumpsBetweenCodeSpaces = false;
+-- 
+2.35.1
+

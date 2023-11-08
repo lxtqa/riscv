@@ -1,0 +1,2577 @@
+From 49d78b893bffdaf59db5bd68fda73280914c15a8 Mon Sep 17 00:00:00 2001
+From: Andreas Haas <ahaas@chromium.org>
+Date: Fri, 27 Oct 2023 10:43:14 +0200
+Subject: [PATCH] Reland "[wasm] Single landing pad for trap handlers"
+
+This is a reland of commit 682d41b0064f61b364d58557259c89299e05507f
+
+A macro was missing for arm64 linux in the original CL.
+
+Original change's description:
+> [wasm] Single landing pad for trap handlers
+>
+> This CL is the implementation of https://docs.google.com/document/d/19ANifiWruc4k1PX4HSZ-61Ssnk6DSov7E1Iusd6mN94/edit?usp=sharing
+>
+> With this CL the WebAssembly trap handler always jumps to the same
+> landing pad for segfaults that should be transformed into JavaScript
+> exceptions. The landing pad then calls into the runtime to throw the
+> exception. The landing pad fakes a call from the memory access which
+> triggered the segfault so that a correct stack trace is created.
+> Source position information is added at the memory access to provide
+> debug information, and safepoint information for GCs that get
+> triggered when allocating the exception.
+>
+> Bug: v8:14102
+> Change-Id: I5abb57f4ecdf9e575eba8f49e4c1e28815fadf21
+> Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4660460
+> Reviewed-by: Mark Mentovai <mark@chromium.org>
+> Reviewed-by: Mark Seaborn <mseaborn@chromium.org>
+> Reviewed-by: Matthias Liedtke <mliedtke@chromium.org>
+> Reviewed-by: Jakob Linke <jgruber@chromium.org>
+> Reviewed-by: Clemens Backes <clemensb@chromium.org>
+> Commit-Queue: Andreas Haas <ahaas@chromium.org>
+> Cr-Commit-Position: refs/heads/main@{#90626}
+
+Bug: v8:14102
+Change-Id: Ibbbfb7d7dd6594fa6e8f1193f9f63fcdb409b316
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4983668
+Reviewed-by: Jakob Kummerow <jkummerow@chromium.org>
+Commit-Queue: Andreas Haas <ahaas@chromium.org>
+Reviewed-by: Clemens Backes <clemensb@chromium.org>
+Reviewed-by: Matthias Liedtke <mliedtke@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#90642}
+---
+ src/builtins/arm/builtins-arm.cc              |   4 +
+ src/builtins/arm64/builtins-arm64.cc          |  24 ++
+ src/builtins/builtins-definitions.h           |   1 +
+ src/builtins/ia32/builtins-ia32.cc            |   4 +
+ src/builtins/loong64/builtins-loong64.cc      |   4 +
+ src/builtins/mips64/builtins-mips64.cc        |   4 +
+ src/builtins/ppc/builtins-ppc.cc              |   4 +
+ src/builtins/riscv/builtins-riscv.cc          |   4 +
+ src/builtins/s390/builtins-s390.cc            |   4 +
+ src/builtins/wasm.tq                          |   5 +
+ src/builtins/x64/builtins-x64.cc              |  25 ++
+ src/codegen/arm64/register-arm64.h            |   1 +
+ src/codegen/safepoint-table.cc                |   5 +-
+ src/codegen/safepoint-table.h                 |   6 +-
+ src/codegen/x64/register-x64.h                |   1 +
+ .../backend/arm64/code-generator-arm64.cc     | 299 +++++++++---------
+ src/compiler/backend/code-generator.cc        |   9 +-
+ src/compiler/backend/code-generator.h         |   9 +-
+ src/compiler/backend/instruction-selector.cc  |  25 ++
+ .../backend/loong64/code-generator-loong64.cc |   2 +-
+ .../backend/x64/code-generator-x64.cc         | 214 ++++++-------
+ src/compiler/pipeline.cc                      |   3 +-
+ src/compiler/revectorizer.cc                  |  10 +-
+ src/compiler/revectorizer.h                   |   6 +-
+ src/execution/arm64/simulator-arm64.cc        |   1 +
+ src/execution/isolate.cc                      |  19 ++
+ src/runtime/runtime-wasm.cc                   |  37 +++
+ src/runtime/runtime.h                         |   1 +
+ src/trap-handler/handler-inside-posix.cc      |  41 ++-
+ src/trap-handler/handler-inside-win.cc        |  14 +-
+ src/trap-handler/handler-inside.cc            |   4 +-
+ src/trap-handler/handler-outside.cc           |   7 +-
+ src/trap-handler/handler-shared.cc            |   1 +
+ src/trap-handler/trap-handler-internal.h      |   8 +-
+ src/trap-handler/trap-handler.h               |   9 +-
+ src/wasm/baseline/liftoff-compiler.cc         |  73 ++---
+ src/wasm/wasm-code-manager.cc                 |   4 +-
+ src/wasm/wasm-opcodes-inl.h                   |  17 +
+ src/wasm/wasm-opcodes.h                       |   3 +
+ test/unittests/compiler/revec-unittest.cc     |  24 +-
+ .../wasm/trap-handler-native-unittest.cc      |  41 +--
+ .../wasm/trap-handler-simulator-unittest.cc   |  18 +-
+ 42 files changed, 592 insertions(+), 403 deletions(-)
+
+diff --git a/src/builtins/arm/builtins-arm.cc b/src/builtins/arm/builtins-arm.cc
+index 7209b889cd2..6a489e0b6d6 100644
+--- a/src/builtins/arm/builtins-arm.cc
++++ b/src/builtins/arm/builtins-arm.cc
+@@ -2908,6 +2908,10 @@ void Builtins::Generate_WasmToJsWrapperAsm(MacroAssembler* masm) {
+   __ TailCallBuiltin(Builtin::kWasmToJsWrapperCSA);
+ }
+ 
++void Builtins::Generate_WasmTrapHandlerLandingPad(MacroAssembler* masm) {
++  __ Trap();
++}
++
+ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
+   // TODO(v8:12191): Implement for this platform.
+   __ Trap();
+diff --git a/src/builtins/arm64/builtins-arm64.cc b/src/builtins/arm64/builtins-arm64.cc
+index 993ffd220f4..59d18c2f206 100644
+--- a/src/builtins/arm64/builtins-arm64.cc
++++ b/src/builtins/arm64/builtins-arm64.cc
+@@ -3630,6 +3630,30 @@ void Builtins::Generate_WasmToJsWrapperAsm(MacroAssembler* masm) {
+   __ TailCallBuiltin(Builtin::kWasmToJsWrapperCSA);
+ }
+ 
++void Builtins::Generate_WasmTrapHandlerLandingPad(MacroAssembler* masm) {
++  // This builtin gets called from the WebAssembly trap handler when an
++  // out-of-bounds memory access happened or when a null reference gets
++  // dereferenced. This builtin then fakes a call from the instruction that
++  // triggered the signal to the runtime. This is done by setting a return
++  // address and then jumping to a builtin which will call further to the
++  // runtime.
++  // As the return address we use the fault address + 1. Using the fault address
++  // itself would cause problems with safepoints and source positions.
++  //
++  // The problem with safepoints is that a safepoint has to be registered at the
++  // return address, and that at most one safepoint should be registered at a
++  // location. However, there could already be a safepoint registered at the
++  // fault address if the fault address is the return address of a call.
++  //
++  // The problem with source positions is that the stack trace code looks for
++  // the source position of a call before the return address. The source
++  // position of the faulty memory access, however, is recorded at the fault
++  // address. Therefore the stack trace code would not find the source position
++  // if we used the fault address as the return address.
++  __ Add(lr, kWasmTrapHandlerFaultAddressRegister, 1);
++  __ TailCallBuiltin(Builtin::kWasmTrapHandlerThrowTrap);
++}
++
+ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
+   auto regs = RegisterAllocator::WithAllocatableGeneralRegisters();
+   // Set up the stackframe.
+diff --git a/src/builtins/builtins-definitions.h b/src/builtins/builtins-definitions.h
+index 3a7ec1d3d44..ae9d557def0 100644
+--- a/src/builtins/builtins-definitions.h
++++ b/src/builtins/builtins-definitions.h
+@@ -1010,6 +1010,7 @@ namespace internal {
+   IF_WASM(ASM, WasmSuspend, WasmSuspend)                                       \
+   IF_WASM(ASM, WasmResume, WasmDummy)                                          \
+   IF_WASM(ASM, WasmReject, WasmDummy)                                          \
++  IF_WASM(ASM, WasmTrapHandlerLandingPad, WasmDummy)                           \
+   IF_WASM(ASM, WasmCompileLazy, WasmDummy)                                     \
+   IF_WASM(ASM, WasmLiftoffFrameSetup, WasmDummy)                               \
+   IF_WASM(ASM, WasmDebugBreak, WasmDummy)                                      \
+diff --git a/src/builtins/ia32/builtins-ia32.cc b/src/builtins/ia32/builtins-ia32.cc
+index bf29764b89f..e7d94653ad8 100644
+--- a/src/builtins/ia32/builtins-ia32.cc
++++ b/src/builtins/ia32/builtins-ia32.cc
+@@ -3353,6 +3353,10 @@ void Builtins::Generate_WasmToJsWrapperAsm(MacroAssembler* masm) {
+   __ TailCallBuiltin(Builtin::kWasmToJsWrapperCSA);
+ }
+ 
++void Builtins::Generate_WasmTrapHandlerLandingPad(MacroAssembler* masm) {
++  __ Trap();
++}
++
+ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
+   // TODO(v8:12191): Implement for this platform.
+   __ Trap();
+diff --git a/src/builtins/loong64/builtins-loong64.cc b/src/builtins/loong64/builtins-loong64.cc
+index 9ba3106d511..3774ab05eb1 100644
+--- a/src/builtins/loong64/builtins-loong64.cc
++++ b/src/builtins/loong64/builtins-loong64.cc
+@@ -2931,6 +2931,10 @@ void Builtins::Generate_WasmReturnPromiseOnSuspendAsm(MacroAssembler* masm) {
+ 
+ void Builtins::Generate_WasmToJsWrapperAsm(MacroAssembler* masm) { __ Trap(); }
+ 
++void Builtins::Generate_WasmTrapHandlerLandingPad(MacroAssembler* masm) {
++  __ Trap();
++}
++
+ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
+   // TODO(v8:12191): Implement for this platform.
+   __ Trap();
+diff --git a/src/builtins/mips64/builtins-mips64.cc b/src/builtins/mips64/builtins-mips64.cc
+index 2078a7b7782..a4344be06d6 100644
+--- a/src/builtins/mips64/builtins-mips64.cc
++++ b/src/builtins/mips64/builtins-mips64.cc
+@@ -2900,6 +2900,10 @@ void Builtins::Generate_WasmReturnPromiseOnSuspendAsm(MacroAssembler* masm) {
+ 
+ void Builtins::Generate_WasmToJsWrapperAsm(MacroAssembler* masm) { __ Trap(); }
+ 
++void Builtins::Generate_WasmTrapHandlerLandingPad(MacroAssembler* masm) {
++  __ Trap();
++}
++
+ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
+   // TODO(v8:12191): Implement for this platform.
+   __ Trap();
+diff --git a/src/builtins/ppc/builtins-ppc.cc b/src/builtins/ppc/builtins-ppc.cc
+index 6a5452f1d2e..f11808454b9 100644
+--- a/src/builtins/ppc/builtins-ppc.cc
++++ b/src/builtins/ppc/builtins-ppc.cc
+@@ -3099,6 +3099,10 @@ void Builtins::Generate_WasmReturnPromiseOnSuspendAsm(MacroAssembler* masm) {
+ 
+ void Builtins::Generate_WasmToJsWrapperAsm(MacroAssembler* masm) { __ Trap(); }
+ 
++void Builtins::Generate_WasmTrapHandlerLandingPad(MacroAssembler* masm) {
++  __ Trap();
++}
++
+ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
+   // TODO(v8:12191): Implement for this platform.
+   __ Trap();
+diff --git a/src/builtins/riscv/builtins-riscv.cc b/src/builtins/riscv/builtins-riscv.cc
+index db2ccb81419..8279c5867b1 100644
+--- a/src/builtins/riscv/builtins-riscv.cc
++++ b/src/builtins/riscv/builtins-riscv.cc
+@@ -3229,6 +3229,10 @@ void Builtins::Generate_WasmReturnPromiseOnSuspendAsm(MacroAssembler* masm) {
+ 
+ void Builtins::Generate_WasmToJsWrapperAsm(MacroAssembler* masm) { __ Trap(); }
+ 
++void Builtins::Generate_WasmTrapHandlerLandingPad(MacroAssembler* masm) {
++  __ Trap();
++}
++
+ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
+   // TODO(v8:12191): Implement for this platform.
+   __ Trap();
+diff --git a/src/builtins/s390/builtins-s390.cc b/src/builtins/s390/builtins-s390.cc
+index ebe32a5e910..c8af69df10d 100644
+--- a/src/builtins/s390/builtins-s390.cc
++++ b/src/builtins/s390/builtins-s390.cc
+@@ -3087,6 +3087,10 @@ void Builtins::Generate_WasmReturnPromiseOnSuspendAsm(MacroAssembler* masm) {
+ 
+ void Builtins::Generate_WasmToJsWrapperAsm(MacroAssembler* masm) { __ Trap(); }
+ 
++void Builtins::Generate_WasmTrapHandlerLandingPad(MacroAssembler* masm) {
++  __ Trap();
++}
++
+ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
+   // TODO(v8:12191): Implement for this platform.
+   __ Trap();
+diff --git a/src/builtins/wasm.tq b/src/builtins/wasm.tq
+index 185c2a70922..489d4d216a1 100644
+--- a/src/builtins/wasm.tq
++++ b/src/builtins/wasm.tq
+@@ -24,6 +24,7 @@ extern runtime WasmFunctionTableSet(
+ extern runtime ThrowRangeError(Context, Smi): never;
+ extern runtime ThrowWasmError(Context, Smi): never;
+ extern runtime WasmThrowRangeError(Context, Smi): never;
++extern runtime TrapHandlerThrowWasmError(Context): never;
+ extern runtime WasmThrowTypeError(Context, Smi, JSAny): never;
+ extern runtime WasmThrowTypeErrorTwoArgs(Context, Smi, JSAny, JSAny): never;
+ extern runtime WasmThrow(Context, Object, FixedArray): JSAny;
+@@ -671,6 +672,10 @@ builtin ThrowWasmTrapUnreachable(): JSAny {
+   tail WasmTrap(SmiConstant(MessageTemplate::kWasmTrapUnreachable));
+ }
+ 
++builtin WasmTrapHandlerThrowTrap(): JSAny {
++  tail runtime::TrapHandlerThrowWasmError(LoadContextFromWasmOrJsFrame());
++}
++
+ builtin ThrowWasmTrapMemOutOfBounds(): JSAny {
+   tail WasmTrap(SmiConstant(MessageTemplate::kWasmTrapMemOutOfBounds));
+ }
+diff --git a/src/builtins/x64/builtins-x64.cc b/src/builtins/x64/builtins-x64.cc
+index ed40c2cb415..4278b91e447 100644
+--- a/src/builtins/x64/builtins-x64.cc
++++ b/src/builtins/x64/builtins-x64.cc
+@@ -3590,6 +3590,31 @@ void Builtins::Generate_WasmToJsWrapperAsm(MacroAssembler* masm) {
+   __ TailCallBuiltin(Builtin::kWasmToJsWrapperCSA);
+ }
+ 
++void Builtins::Generate_WasmTrapHandlerLandingPad(MacroAssembler* masm) {
++  // This builtin gets called from the WebAssembly trap handler when an
++  // out-of-bounds memory access happened or when a null reference gets
++  // dereferenced. This builtin then fakes a call from the instruction that
++  // triggered the signal to the runtime. This is done by setting a return
++  // address and then jumping to a builtin which will call further to the
++  // runtime.
++  // As the return address we use the fault address + 1. Using the fault address
++  // itself would cause problems with safepoints and source positions.
++  //
++  // The problem with safepoints is that a safepoint has to be registered at the
++  // return address, and that at most one safepoint should be registered at a
++  // location. However, there could already be a safepoint registered at the
++  // fault address if the fault address is the return address of a call.
++  //
++  // The problem with source positions is that the stack trace code looks for
++  // the source position of a call before the return address. The source
++  // position of the faulty memory access, however, is recorded at the fault
++  // address. Therefore the stack trace code would not find the source position
++  // if we used the fault address as the return address.
++  __ incq(kWasmTrapHandlerFaultAddressRegister);
++  __ pushq(kWasmTrapHandlerFaultAddressRegister);
++  __ TailCallBuiltin(Builtin::kWasmTrapHandlerThrowTrap);
++}
++
+ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
+   // Set up the stackframe.
+   __ EnterFrame(StackFrame::STACK_SWITCH);
+diff --git a/src/codegen/arm64/register-arm64.h b/src/codegen/arm64/register-arm64.h
+index 27051355a9b..32453b09126 100644
+--- a/src/codegen/arm64/register-arm64.h
++++ b/src/codegen/arm64/register-arm64.h
+@@ -609,6 +609,7 @@ constexpr Register kRuntimeCallArgCountRegister = x0;
+ constexpr Register kRuntimeCallArgvRegister = x11;
+ constexpr Register kWasmInstanceRegister = x7;
+ constexpr Register kWasmCompileLazyFuncIndexRegister = x8;
++constexpr Register kWasmTrapHandlerFaultAddressRegister = x16;
+ 
+ constexpr DoubleRegister kFPReturnRegister0 = d0;
+ 
+diff --git a/src/codegen/safepoint-table.cc b/src/codegen/safepoint-table.cc
+index a3dda0f2330..1bbd23767f2 100644
+--- a/src/codegen/safepoint-table.cc
++++ b/src/codegen/safepoint-table.cc
+@@ -122,8 +122,9 @@ void SafepointTable::Print(std::ostream& os) const {
+ }
+ 
+ SafepointTableBuilder::Safepoint SafepointTableBuilder::DefineSafepoint(
+-    Assembler* assembler) {
+-  entries_.emplace_back(zone_, assembler->pc_offset_for_safepoint());
++    Assembler* assembler, int pc_offset) {
++  pc_offset = pc_offset ? pc_offset : assembler->pc_offset_for_safepoint();
++  entries_.emplace_back(zone_, pc_offset);
+   return SafepointTableBuilder::Safepoint(&entries_.back(), this);
+ }
+ 
+diff --git a/src/codegen/safepoint-table.h b/src/codegen/safepoint-table.h
+index 0db461f2f13..97314717684 100644
+--- a/src/codegen/safepoint-table.h
++++ b/src/codegen/safepoint-table.h
+@@ -223,8 +223,10 @@ class SafepointTableBuilder : public SafepointTableBuilderBase {
+     SafepointTableBuilder* const table_;
+   };
+ 
+-  // Define a new safepoint for the current position in the body.
+-  Safepoint DefineSafepoint(Assembler* assembler);
++  // Define a new safepoint for the current position in the body. The
++  // `pc_offset` parameter allows to define a different offset than the current
++  // pc_offset.
++  Safepoint DefineSafepoint(Assembler* assembler, int pc_offset = 0);
+ 
+   // Emit the safepoint table after the body. The number of bits per
+   // entry must be enough to hold all the pointer indexes.
+diff --git a/src/codegen/x64/register-x64.h b/src/codegen/x64/register-x64.h
+index c79b33ff2bb..13ed62bdd1e 100644
+--- a/src/codegen/x64/register-x64.h
++++ b/src/codegen/x64/register-x64.h
+@@ -289,6 +289,7 @@ constexpr Register kRuntimeCallFunctionRegister = rbx;
+ constexpr Register kRuntimeCallArgCountRegister = rax;
+ constexpr Register kRuntimeCallArgvRegister = r15;
+ constexpr Register kWasmInstanceRegister = rsi;
++constexpr Register kWasmTrapHandlerFaultAddressRegister = r10;
+ 
+ // Default scratch register used by MacroAssembler (and other code that needs
+ // a spare register). The register isn't callee save, and not used by the
+diff --git a/src/compiler/backend/arm64/code-generator-arm64.cc b/src/compiler/backend/arm64/code-generator-arm64.cc
+index 37cb923043d..817cd1adc12 100644
+--- a/src/compiler/backend/arm64/code-generator-arm64.cc
++++ b/src/compiler/backend/arm64/code-generator-arm64.cc
+@@ -445,37 +445,26 @@ class WasmOutOfLineTrap : public OutOfLineCode {
+   Instruction* instr_;
+ };
+ 
+-class WasmProtectedInstructionTrap final : public WasmOutOfLineTrap {
+- public:
+-  WasmProtectedInstructionTrap(CodeGenerator* gen, int pc, Instruction* instr,
+-                               TrapId trap_id)
+-      : WasmOutOfLineTrap(gen, instr), pc_(pc), trap_id_(trap_id) {}
+-
+-  void Generate() override {
+-    DCHECK(v8_flags.wasm_bounds_checks && !v8_flags.wasm_enforce_bounds_checks);
+-    gen_->AddProtectedInstructionLanding(pc_, __ pc_offset());
+-    GenerateWithTrapId(trap_id_);
+-  }
+-
+- private:
+-  int pc_;
+-  TrapId trap_id_;
+-};
+-
+-void EmitOOLTrapIfNeeded(Zone* zone, CodeGenerator* codegen,
+-                         InstructionCode opcode, Instruction* instr, int pc) {
++void RecordTrapInfoIfNeeded(Zone* zone, CodeGenerator* codegen,
++                            InstructionCode opcode, Instruction* instr,
++                            int pc) {
+   const MemoryAccessMode access_mode = AccessModeField::decode(opcode);
+-  if (access_mode == kMemoryAccessProtectedMemOutOfBounds) {
+-    zone->New<WasmProtectedInstructionTrap>(codegen, pc, instr,
+-                                            TrapId::kTrapMemOutOfBounds);
+-  } else if (access_mode == kMemoryAccessProtectedNullDereference) {
+-    zone->New<WasmProtectedInstructionTrap>(codegen, pc, instr,
+-                                            TrapId::kTrapNullDereference);
++  if (access_mode == kMemoryAccessProtectedMemOutOfBounds ||
++      access_mode == kMemoryAccessProtectedNullDereference) {
++    ReferenceMap* reference_map =
++        codegen->zone()->New<ReferenceMap>(codegen->zone());
++    // The safepoint has to be recorded at the return address of a call. Address
++    // we use as the fake return address in the case of the trap handler is the
++    // fault address (here `pc`) + 1. Therefore the safepoint here has to be
++    // recorded at pc + 1;
++    codegen->RecordSafepoint(reference_map, pc + 1);
++    codegen->RecordProtectedInstruction(pc);
+   }
+ }
+ #else
+-void EmitOOLTrapIfNeeded(Zone* zone, CodeGenerator* codegen,
+-                         InstructionCode opcode, Instruction* instr, int pc) {
++void RecordTrapInfoIfNeeded(Zone* zone, CodeGenerator* codegen,
++                            InstructionCode opcode, Instruction* instr,
++                            int pc) {
+   DCHECK_EQ(kMemoryAccessDirect, AccessModeField::decode(opcode));
+ }
+ #endif  // V8_ENABLE_WEBASSEMBLY
+@@ -507,107 +496,107 @@ void EmitFpOrNeonUnop(MacroAssembler* masm, Fn fn, Instruction* instr,
+     }                                                                       \
+   } while (0)
+ 
+-#define ASSEMBLE_ATOMIC_LOAD_INTEGER(asm_instr, reg)                   \
+-  do {                                                                 \
+-    __ Add(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1)); \
+-    EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());  \
+-    __ asm_instr(i.Output##reg(), i.TempRegister(0));                  \
++#define ASSEMBLE_ATOMIC_LOAD_INTEGER(asm_instr, reg)                     \
++  do {                                                                   \
++    __ Add(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));   \
++    RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
++    __ asm_instr(i.Output##reg(), i.TempRegister(0));                    \
+   } while (0)
+ 
+-#define ASSEMBLE_ATOMIC_STORE_INTEGER(asm_instr, reg)                  \
+-  do {                                                                 \
+-    __ Add(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1)); \
+-    EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());  \
+-    __ asm_instr(i.Input##reg(2), i.TempRegister(0));                  \
++#define ASSEMBLE_ATOMIC_STORE_INTEGER(asm_instr, reg)                    \
++  do {                                                                   \
++    __ Add(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));   \
++    RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
++    __ asm_instr(i.Input##reg(2), i.TempRegister(0));                    \
+   } while (0)
+ 
+-#define ASSEMBLE_ATOMIC_EXCHANGE_INTEGER(suffix, reg)                   \
+-  do {                                                                  \
+-    __ Add(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));  \
+-    if (CpuFeatures::IsSupported(LSE)) {                                \
+-      CpuFeatureScope scope(masm(), LSE);                               \
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
+-      __ Swpal##suffix(i.Input##reg(2), i.Output##reg(),                \
+-                       MemOperand(i.TempRegister(0)));                  \
+-    } else {                                                            \
+-      Label exchange;                                                   \
+-      __ Bind(&exchange);                                               \
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
+-      __ ldaxr##suffix(i.Output##reg(), i.TempRegister(0));             \
+-      __ stlxr##suffix(i.TempRegister32(1), i.Input##reg(2),            \
+-                       i.TempRegister(0));                              \
+-      __ Cbnz(i.TempRegister32(1), &exchange);                          \
+-    }                                                                   \
++#define ASSEMBLE_ATOMIC_EXCHANGE_INTEGER(suffix, reg)                      \
++  do {                                                                     \
++    __ Add(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));     \
++    if (CpuFeatures::IsSupported(LSE)) {                                   \
++      CpuFeatureScope scope(masm(), LSE);                                  \
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
++      __ Swpal##suffix(i.Input##reg(2), i.Output##reg(),                   \
++                       MemOperand(i.TempRegister(0)));                     \
++    } else {                                                               \
++      Label exchange;                                                      \
++      __ Bind(&exchange);                                                  \
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
++      __ ldaxr##suffix(i.Output##reg(), i.TempRegister(0));                \
++      __ stlxr##suffix(i.TempRegister32(1), i.Input##reg(2),               \
++                       i.TempRegister(0));                                 \
++      __ Cbnz(i.TempRegister32(1), &exchange);                             \
++    }                                                                      \
+   } while (0)
+ 
+-#define ASSEMBLE_ATOMIC_COMPARE_EXCHANGE_INTEGER(suffix, ext, reg)      \
+-  do {                                                                  \
+-    __ Add(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));  \
+-    if (CpuFeatures::IsSupported(LSE)) {                                \
+-      DCHECK_EQ(i.OutputRegister(), i.InputRegister(2));                \
+-      CpuFeatureScope scope(masm(), LSE);                               \
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
+-      __ Casal##suffix(i.Output##reg(), i.Input##reg(3),                \
+-                       MemOperand(i.TempRegister(0)));                  \
+-    } else {                                                            \
+-      Label compareExchange;                                            \
+-      Label exit;                                                       \
+-      __ Bind(&compareExchange);                                        \
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
+-      __ ldaxr##suffix(i.Output##reg(), i.TempRegister(0));             \
+-      __ Cmp(i.Output##reg(), Operand(i.Input##reg(2), ext));           \
+-      __ B(ne, &exit);                                                  \
+-      __ stlxr##suffix(i.TempRegister32(1), i.Input##reg(3),            \
+-                       i.TempRegister(0));                              \
+-      __ Cbnz(i.TempRegister32(1), &compareExchange);                   \
+-      __ Bind(&exit);                                                   \
+-    }                                                                   \
++#define ASSEMBLE_ATOMIC_COMPARE_EXCHANGE_INTEGER(suffix, ext, reg)         \
++  do {                                                                     \
++    __ Add(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));     \
++    if (CpuFeatures::IsSupported(LSE)) {                                   \
++      DCHECK_EQ(i.OutputRegister(), i.InputRegister(2));                   \
++      CpuFeatureScope scope(masm(), LSE);                                  \
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
++      __ Casal##suffix(i.Output##reg(), i.Input##reg(3),                   \
++                       MemOperand(i.TempRegister(0)));                     \
++    } else {                                                               \
++      Label compareExchange;                                               \
++      Label exit;                                                          \
++      __ Bind(&compareExchange);                                           \
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
++      __ ldaxr##suffix(i.Output##reg(), i.TempRegister(0));                \
++      __ Cmp(i.Output##reg(), Operand(i.Input##reg(2), ext));              \
++      __ B(ne, &exit);                                                     \
++      __ stlxr##suffix(i.TempRegister32(1), i.Input##reg(3),               \
++                       i.TempRegister(0));                                 \
++      __ Cbnz(i.TempRegister32(1), &compareExchange);                      \
++      __ Bind(&exit);                                                      \
++    }                                                                      \
+   } while (0)
+ 
+-#define ASSEMBLE_ATOMIC_SUB(suffix, reg)                                 \
+-  do {                                                                   \
+-    __ Add(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));   \
+-    if (CpuFeatures::IsSupported(LSE)) {                                 \
+-      CpuFeatureScope scope(masm(), LSE);                                \
+-      UseScratchRegisterScope temps(masm());                             \
+-      Register scratch = temps.AcquireSameSizeAs(i.Input##reg(2));       \
+-      __ Neg(scratch, i.Input##reg(2));                                  \
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());  \
+-      __ Ldaddal##suffix(scratch, i.Output##reg(),                       \
+-                         MemOperand(i.TempRegister(0)));                 \
+-    } else {                                                             \
+-      Label binop;                                                       \
+-      __ Bind(&binop);                                                   \
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());  \
+-      __ ldaxr##suffix(i.Output##reg(), i.TempRegister(0));              \
+-      __ Sub(i.Temp##reg(1), i.Output##reg(), Operand(i.Input##reg(2))); \
+-      __ stlxr##suffix(i.TempRegister32(2), i.Temp##reg(1),              \
+-                       i.TempRegister(0));                               \
+-      __ Cbnz(i.TempRegister32(2), &binop);                              \
+-    }                                                                    \
++#define ASSEMBLE_ATOMIC_SUB(suffix, reg)                                   \
++  do {                                                                     \
++    __ Add(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));     \
++    if (CpuFeatures::IsSupported(LSE)) {                                   \
++      CpuFeatureScope scope(masm(), LSE);                                  \
++      UseScratchRegisterScope temps(masm());                               \
++      Register scratch = temps.AcquireSameSizeAs(i.Input##reg(2));         \
++      __ Neg(scratch, i.Input##reg(2));                                    \
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
++      __ Ldaddal##suffix(scratch, i.Output##reg(),                         \
++                         MemOperand(i.TempRegister(0)));                   \
++    } else {                                                               \
++      Label binop;                                                         \
++      __ Bind(&binop);                                                     \
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
++      __ ldaxr##suffix(i.Output##reg(), i.TempRegister(0));                \
++      __ Sub(i.Temp##reg(1), i.Output##reg(), Operand(i.Input##reg(2)));   \
++      __ stlxr##suffix(i.TempRegister32(2), i.Temp##reg(1),                \
++                       i.TempRegister(0));                                 \
++      __ Cbnz(i.TempRegister32(2), &binop);                                \
++    }                                                                      \
+   } while (0)
+ 
+-#define ASSEMBLE_ATOMIC_AND(suffix, reg)                                 \
+-  do {                                                                   \
+-    __ Add(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));   \
+-    if (CpuFeatures::IsSupported(LSE)) {                                 \
+-      CpuFeatureScope scope(masm(), LSE);                                \
+-      UseScratchRegisterScope temps(masm());                             \
+-      Register scratch = temps.AcquireSameSizeAs(i.Input##reg(2));       \
+-      __ Mvn(scratch, i.Input##reg(2));                                  \
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());  \
+-      __ Ldclral##suffix(scratch, i.Output##reg(),                       \
+-                         MemOperand(i.TempRegister(0)));                 \
+-    } else {                                                             \
+-      Label binop;                                                       \
+-      __ Bind(&binop);                                                   \
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());  \
+-      __ ldaxr##suffix(i.Output##reg(), i.TempRegister(0));              \
+-      __ And(i.Temp##reg(1), i.Output##reg(), Operand(i.Input##reg(2))); \
+-      __ stlxr##suffix(i.TempRegister32(2), i.Temp##reg(1),              \
+-                       i.TempRegister(0));                               \
+-      __ Cbnz(i.TempRegister32(2), &binop);                              \
+-    }                                                                    \
++#define ASSEMBLE_ATOMIC_AND(suffix, reg)                                   \
++  do {                                                                     \
++    __ Add(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));     \
++    if (CpuFeatures::IsSupported(LSE)) {                                   \
++      CpuFeatureScope scope(masm(), LSE);                                  \
++      UseScratchRegisterScope temps(masm());                               \
++      Register scratch = temps.AcquireSameSizeAs(i.Input##reg(2));         \
++      __ Mvn(scratch, i.Input##reg(2));                                    \
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
++      __ Ldclral##suffix(scratch, i.Output##reg(),                         \
++                         MemOperand(i.TempRegister(0)));                   \
++    } else {                                                               \
++      Label binop;                                                         \
++      __ Bind(&binop);                                                     \
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
++      __ ldaxr##suffix(i.Output##reg(), i.TempRegister(0));                \
++      __ And(i.Temp##reg(1), i.Output##reg(), Operand(i.Input##reg(2)));   \
++      __ stlxr##suffix(i.TempRegister32(2), i.Temp##reg(1),                \
++                       i.TempRegister(0));                                 \
++      __ Cbnz(i.TempRegister32(2), &binop);                                \
++    }                                                                      \
+   } while (0)
+ 
+ #define ASSEMBLE_ATOMIC_BINOP(suffix, bin_instr, lse_instr, reg)               \
+@@ -615,13 +604,13 @@ void EmitFpOrNeonUnop(MacroAssembler* masm, Fn fn, Instruction* instr,
+     __ Add(i.TempRegister(0), i.InputRegister(0), i.InputRegister(1));         \
+     if (CpuFeatures::IsSupported(LSE)) {                                       \
+       CpuFeatureScope scope(masm(), LSE);                                      \
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());        \
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());     \
+       __ lse_instr##suffix(i.Input##reg(2), i.Output##reg(),                   \
+                            MemOperand(i.TempRegister(0)));                     \
+     } else {                                                                   \
+       Label binop;                                                             \
+       __ Bind(&binop);                                                         \
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());        \
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());     \
+       __ ldaxr##suffix(i.Output##reg(), i.TempRegister(0));                    \
+       __ bin_instr(i.Temp##reg(1), i.Output##reg(), Operand(i.Input##reg(2))); \
+       __ stlxr##suffix(i.TempRegister32(2), i.Temp##reg(1),                    \
+@@ -1050,7 +1039,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       auto ool = zone()->New<OutOfLineRecordWrite>(
+           this, object, offset, value, mode, DetermineStubCallMode(),
+           &unwinding_info_writer_);
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ StoreTaggedField(value, MemOperand(object, offset));
+       if (mode > RecordWriteMode::kValueIsIndirectPointer) {
+         __ JumpIfSmi(value, ool->exit());
+@@ -1104,7 +1093,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       auto ool = zone()->New<OutOfLineRecordWrite>(
+           this, object, offset, value, mode, DetermineStubCallMode(),
+           &unwinding_info_writer_, tag);
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ StoreIndirectPointerField(value, MemOperand(object, offset));
+       __ CheckPageFlag(object, MemoryChunk::kPointersFromHereAreInterestingMask,
+                        ne, ool->entry());
+@@ -1971,64 +1960,64 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       __ Fmov(i.OutputRegister(), i.InputDoubleRegister(0));
+       break;
+     case kArm64Ldrb:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Ldrb(i.OutputRegister(), i.MemoryOperand());
+       break;
+     case kArm64Ldrsb:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Ldrsb(i.OutputRegister(), i.MemoryOperand());
+       break;
+     case kArm64LdrsbW:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Ldrsb(i.OutputRegister32(), i.MemoryOperand());
+       break;
+     case kArm64Strb:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Strb(i.InputOrZeroRegister64(0), i.MemoryOperand(1));
+       break;
+     case kArm64Ldrh:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Ldrh(i.OutputRegister(), i.MemoryOperand());
+       break;
+     case kArm64Ldrsh:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Ldrsh(i.OutputRegister(), i.MemoryOperand());
+       break;
+     case kArm64LdrshW:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Ldrsh(i.OutputRegister32(), i.MemoryOperand());
+       break;
+     case kArm64Strh:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Strh(i.InputOrZeroRegister64(0), i.MemoryOperand(1));
+       break;
+     case kArm64Ldrsw:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Ldrsw(i.OutputRegister(), i.MemoryOperand());
+       break;
+     case kArm64LdrW:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Ldr(i.OutputRegister32(), i.MemoryOperand());
+       break;
+     case kArm64StrW:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Str(i.InputOrZeroRegister32(0), i.MemoryOperand(1));
+       break;
+     case kArm64StrWPair:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Stp(i.InputOrZeroRegister32(0), i.InputOrZeroRegister32(1),
+              i.MemoryOperand(2));
+       break;
+     case kArm64Ldr:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Ldr(i.OutputRegister(), i.MemoryOperand());
+       break;
+     case kArm64LdrDecompressTaggedSigned:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ DecompressTaggedSigned(i.OutputRegister(), i.MemoryOperand());
+       break;
+     case kArm64LdrDecompressTagged:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ DecompressTagged(i.OutputRegister(), i.MemoryOperand());
+       break;
+     case kArm64LdarDecompressTaggedSigned:
+@@ -2043,16 +2032,16 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       __ LoadSandboxedPointerField(i.OutputRegister(), i.MemoryOperand());
+       break;
+     case kArm64Str:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Str(i.InputOrZeroRegister64(0), i.MemoryOperand(1));
+       break;
+     case kArm64StrPair:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Stp(i.InputOrZeroRegister64(0), i.InputOrZeroRegister64(1),
+              i.MemoryOperand(2));
+       break;
+     case kArm64StrCompressTagged:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ StoreTaggedField(i.InputOrZeroRegister64(0), i.MemoryOperand(1));
+       break;
+     case kArm64StlrCompressTagged:
+@@ -2070,27 +2059,27 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+                                     i.MemoryOperand(1));
+       break;
+     case kArm64LdrS:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Ldr(i.OutputDoubleRegister().S(), i.MemoryOperand());
+       break;
+     case kArm64StrS:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Str(i.InputFloat32OrZeroRegister(0), i.MemoryOperand(1));
+       break;
+     case kArm64LdrD:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Ldr(i.OutputDoubleRegister(), i.MemoryOperand());
+       break;
+     case kArm64StrD:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Str(i.InputFloat64OrZeroRegister(0), i.MemoryOperand(1));
+       break;
+     case kArm64LdrQ:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Ldr(i.OutputSimd128Register(), i.MemoryOperand());
+       break;
+     case kArm64StrQ:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Str(i.InputSimd128Register(0), i.MemoryOperand(1));
+       break;
+     case kArm64DmbIsh:
+@@ -2949,58 +2938,58 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       SIMD_UNOP_CASE(kArm64S8x4Reverse, Rev32, 16B);
+       SIMD_UNOP_CASE(kArm64S8x2Reverse, Rev16, 16B);
+     case kArm64LoadSplat: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       VectorFormat f = VectorFormatFillQ(LaneSizeField::decode(opcode));
+       __ ld1r(i.OutputSimd128Register().Format(f), i.MemoryOperand(0));
+       break;
+     }
+     case kArm64LoadLane: {
+       DCHECK_EQ(i.OutputSimd128Register(), i.InputSimd128Register(0));
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       VectorFormat f = VectorFormatFillQ(LaneSizeField::decode(opcode));
+       int laneidx = i.InputInt8(1);
+       __ ld1(i.OutputSimd128Register().Format(f), laneidx, i.MemoryOperand(2));
+       break;
+     }
+     case kArm64StoreLane: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       VectorFormat f = VectorFormatFillQ(LaneSizeField::decode(opcode));
+       int laneidx = i.InputInt8(1);
+       __ st1(i.InputSimd128Register(0).Format(f), laneidx, i.MemoryOperand(2));
+       break;
+     }
+     case kArm64S128Load8x8S: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Ldr(i.OutputSimd128Register().V8B(), i.MemoryOperand(0));
+       __ Sxtl(i.OutputSimd128Register().V8H(), i.OutputSimd128Register().V8B());
+       break;
+     }
+     case kArm64S128Load8x8U: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Ldr(i.OutputSimd128Register().V8B(), i.MemoryOperand(0));
+       __ Uxtl(i.OutputSimd128Register().V8H(), i.OutputSimd128Register().V8B());
+       break;
+     }
+     case kArm64S128Load16x4S: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Ldr(i.OutputSimd128Register().V4H(), i.MemoryOperand(0));
+       __ Sxtl(i.OutputSimd128Register().V4S(), i.OutputSimd128Register().V4H());
+       break;
+     }
+     case kArm64S128Load16x4U: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Ldr(i.OutputSimd128Register().V4H(), i.MemoryOperand(0));
+       __ Uxtl(i.OutputSimd128Register().V4S(), i.OutputSimd128Register().V4H());
+       break;
+     }
+     case kArm64S128Load32x2S: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Ldr(i.OutputSimd128Register().V2S(), i.MemoryOperand(0));
+       __ Sxtl(i.OutputSimd128Register().V2D(), i.OutputSimd128Register().V2S());
+       break;
+     }
+     case kArm64S128Load32x2U: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Ldr(i.OutputSimd128Register().V2S(), i.MemoryOperand(0));
+       __ Uxtl(i.OutputSimd128Register().V2D(), i.OutputSimd128Register().V2S());
+       break;
+diff --git a/src/compiler/backend/code-generator.cc b/src/compiler/backend/code-generator.cc
+index 77511bd3514..9ed2a71c6c8 100644
+--- a/src/compiler/backend/code-generator.cc
++++ b/src/compiler/backend/code-generator.cc
+@@ -104,10 +104,9 @@ CodeGenerator::CodeGenerator(Zone* codegen_zone, Frame* frame, Linkage* linkage,
+   masm_.set_builtin(builtin);
+ }
+ 
+-void CodeGenerator::AddProtectedInstructionLanding(uint32_t instr_offset,
+-                                                   uint32_t landing_offset) {
++void CodeGenerator::RecordProtectedInstruction(uint32_t instr_offset) {
+ #if V8_ENABLE_WEBASSEMBLY
+-  protected_instructions_.push_back({instr_offset, landing_offset});
++  protected_instructions_.push_back({instr_offset});
+ #endif  // V8_ENABLE_WEBASSEMBLY
+ }
+ 
+@@ -533,8 +532,8 @@ bool CodeGenerator::IsNextInAssemblyOrder(RpoNumber block) const {
+       .IsNext(instructions()->InstructionBlockAt(block)->ao_number());
+ }
+ 
+-void CodeGenerator::RecordSafepoint(ReferenceMap* references) {
+-  auto safepoint = safepoints()->DefineSafepoint(masm());
++void CodeGenerator::RecordSafepoint(ReferenceMap* references, int pc_offset) {
++  auto safepoint = safepoints()->DefineSafepoint(masm(), pc_offset);
+   int frame_header_offset = frame()->GetFixedSlotCount();
+   for (const InstructionOperand& operand : references->reference_operands()) {
+     if (operand.IsStackSlot()) {
+diff --git a/src/compiler/backend/code-generator.h b/src/compiler/backend/code-generator.h
+index e5f04e66a25..d3beaea6ded 100644
+--- a/src/compiler/backend/code-generator.h
++++ b/src/compiler/backend/code-generator.h
+@@ -170,8 +170,7 @@ class V8_EXPORT_PRIVATE CodeGenerator final : public GapResolver::Assembler {
+ 
+   Label* GetLabel(RpoNumber rpo) { return &labels_[rpo.ToSize()]; }
+ 
+-  void AddProtectedInstructionLanding(uint32_t instr_offset,
+-                                      uint32_t landing_offset);
++  void RecordProtectedInstruction(uint32_t instr_offset);
+ 
+   SourcePosition start_source_position() const {
+     return start_source_position_;
+@@ -180,8 +179,10 @@ class V8_EXPORT_PRIVATE CodeGenerator final : public GapResolver::Assembler {
+   void AssembleSourcePosition(Instruction* instr);
+   void AssembleSourcePosition(SourcePosition source_position);
+ 
+-  // Record a safepoint with the given pointer map.
+-  void RecordSafepoint(ReferenceMap* references);
++  // Record a safepoint with the given pointer map. When pc_offset is 0, then
++  // the current pc is used to define the safepoint. Otherwise the provided
++  // pc_offset is used.
++  void RecordSafepoint(ReferenceMap* references, int pc_offset = 0);
+ 
+   Zone* zone() const { return zone_; }
+   MacroAssembler* masm() { return &masm_; }
+diff --git a/src/compiler/backend/instruction-selector.cc b/src/compiler/backend/instruction-selector.cc
+index caa95af6837..064f0755546 100644
+--- a/src/compiler/backend/instruction-selector.cc
++++ b/src/compiler/backend/instruction-selector.cc
+@@ -1578,6 +1578,31 @@ bool InstructionSelectorT<Adapter>::IsSourcePositionUsed(node_t node) {
+       case IrOpcode::kProtectedStore:
+       case IrOpcode::kLoadTrapOnNull:
+       case IrOpcode::kStoreTrapOnNull:
++      case IrOpcode::kLoadTransform:
++      case IrOpcode::kLoadLane:
++      case IrOpcode::kLoad:
++      case IrOpcode::kStore:
++      case IrOpcode::kStoreLane:
++      case IrOpcode::kWord32AtomicLoad:
++      case IrOpcode::kWord32AtomicStore:
++      case IrOpcode::kWord32AtomicAdd:
++      case IrOpcode::kWord32AtomicSub:
++      case IrOpcode::kWord32AtomicAnd:
++      case IrOpcode::kWord32AtomicOr:
++      case IrOpcode::kWord32AtomicXor:
++      case IrOpcode::kWord32AtomicExchange:
++      case IrOpcode::kWord32AtomicCompareExchange:
++      case IrOpcode::kWord64AtomicLoad:
++      case IrOpcode::kWord64AtomicStore:
++      case IrOpcode::kWord64AtomicAdd:
++      case IrOpcode::kWord64AtomicSub:
++      case IrOpcode::kWord64AtomicAnd:
++      case IrOpcode::kWord64AtomicOr:
++      case IrOpcode::kWord64AtomicXor:
++      case IrOpcode::kWord64AtomicExchange:
++      case IrOpcode::kWord64AtomicCompareExchange:
++      case IrOpcode::kUnalignedLoad:
++      case IrOpcode::kUnalignedStore:
+         return true;
+       default:
+         return false;
+diff --git a/src/compiler/backend/loong64/code-generator-loong64.cc b/src/compiler/backend/loong64/code-generator-loong64.cc
+index 6fc5f1bf22f..dc07238322e 100644
+--- a/src/compiler/backend/loong64/code-generator-loong64.cc
++++ b/src/compiler/backend/loong64/code-generator-loong64.cc
+@@ -269,7 +269,7 @@ class WasmProtectedInstructionTrap final : public WasmOutOfLineTrap {
+ 
+   void Generate() override {
+     DCHECK(v8_flags.wasm_bounds_checks && !v8_flags.wasm_enforce_bounds_checks);
+-    gen_->AddProtectedInstructionLanding(pc_, __ pc_offset());
++    gen_->RecordProtectedInstruction(pc_, __ pc_offset());
+     GenerateWithTrapId(trap_id_);
+   }
+ 
+diff --git a/src/compiler/backend/x64/code-generator-x64.cc b/src/compiler/backend/x64/code-generator-x64.cc
+index 2c6d50892fe..2dc78740960 100644
+--- a/src/compiler/backend/x64/code-generator-x64.cc
++++ b/src/compiler/backend/x64/code-generator-x64.cc
+@@ -490,39 +490,28 @@ class WasmOutOfLineTrap : public OutOfLineCode {
+   Instruction* instr_;
+ };
+ 
+-class WasmProtectedInstructionTrap final : public WasmOutOfLineTrap {
+- public:
+-  WasmProtectedInstructionTrap(CodeGenerator* gen, int pc, Instruction* instr,
+-                               TrapId trap_id)
+-      : WasmOutOfLineTrap(gen, instr), pc_(pc), trap_id_(trap_id) {}
+-
+-  void Generate() final {
+-    DCHECK(v8_flags.wasm_bounds_checks && !v8_flags.wasm_enforce_bounds_checks);
+-    gen_->AddProtectedInstructionLanding(pc_, __ pc_offset());
+-    GenerateWithTrapId(trap_id_);
+-  }
+-
+- private:
+-  int pc_;
+-  TrapId trap_id_;
+-};
+-
+-void EmitOOLTrapIfNeeded(Zone* zone, CodeGenerator* codegen,
+-                         InstructionCode opcode, Instruction* instr, int pc) {
++void RecordTrapInfoIfNeeded(Zone* zone, CodeGenerator* codegen,
++                            InstructionCode opcode, Instruction* instr,
++                            int pc) {
+   const MemoryAccessMode access_mode = instr->memory_access_mode();
+-  if (access_mode == kMemoryAccessProtectedMemOutOfBounds) {
+-    zone->New<WasmProtectedInstructionTrap>(codegen, pc, instr,
+-                                            TrapId::kTrapMemOutOfBounds);
+-  } else if (access_mode == kMemoryAccessProtectedNullDereference) {
+-    zone->New<WasmProtectedInstructionTrap>(codegen, pc, instr,
+-                                            TrapId::kTrapNullDereference);
++  if (access_mode == kMemoryAccessProtectedMemOutOfBounds ||
++      access_mode == kMemoryAccessProtectedNullDereference) {
++    ReferenceMap* reference_map =
++        codegen->zone()->New<ReferenceMap>(codegen->zone());
++    // The safepoint has to be recorded at the return address of a call. Address
++    // we use as the fake return address in the case of the trap handler is the
++    // fault address (here `pc`) + 1. Therefore the safepoint here has to be
++    // recorded at pc + 1;
++    codegen->RecordSafepoint(reference_map, pc + 1);
++    codegen->RecordProtectedInstruction(pc);
+   }
+ }
+ 
+ #else
+ 
+-void EmitOOLTrapIfNeeded(Zone* zone, CodeGenerator* codegen,
+-                         InstructionCode opcode, Instruction* instr, int pc) {
++void RecordTrapInfoIfNeeded(Zone* zone, CodeGenerator* codegen,
++                            InstructionCode opcode, Instruction* instr,
++                            int pc) {
+   DCHECK_EQ(kMemoryAccessDirect, instr->memory_access_mode());
+ }
+ 
+@@ -688,8 +677,8 @@ void EmitTSANAwareStore(Zone* zone, CodeGenerator* codegen,
+   // path. It is not crucial, but it would be nice to remove this restriction.
+   if (codegen->code_kind() != CodeKind::FOR_TESTING) {
+     if (instr->HasMemoryAccessMode()) {
+-      EmitOOLTrapIfNeeded(zone, codegen, instr->opcode(), instr,
+-                          masm->pc_offset());
++      RecordTrapInfoIfNeeded(zone, codegen, instr->opcode(), instr,
++                             masm->pc_offset());
+     }
+     int size = ElementSizeInBytes(rep);
+     EmitMemoryProbeForTrapHandlerIfNeeded(masm, i.TempRegister(0), operand,
+@@ -700,8 +689,8 @@ void EmitTSANAwareStore(Zone* zone, CodeGenerator* codegen,
+   } else {
+     int store_instr_offset = EmitStore<order>(masm, operand, value, rep);
+     if (instr->HasMemoryAccessMode()) {
+-      EmitOOLTrapIfNeeded(zone, codegen, instr->opcode(), instr,
+-                          store_instr_offset);
++      RecordTrapInfoIfNeeded(zone, codegen, instr->opcode(), instr,
++                             store_instr_offset);
+     }
+   }
+ }
+@@ -779,7 +768,8 @@ void EmitTSANAwareStore(Zone* zone, CodeGenerator* codegen,
+          order == std::memory_order_seq_cst);
+   int store_instr_off = EmitStore<order>(masm, operand, value, rep);
+   if (instr->HasMemoryAccessMode()) {
+-    EmitOOLTrapIfNeeded(zone, codegen, instr->opcode(), instr, store_instr_off);
++    RecordTrapInfoIfNeeded(zone, codegen, instr->opcode(), instr,
++                           store_instr_off);
+   }
+ }
+ 
+@@ -983,30 +973,30 @@ void EmitTSANRelaxedLoadOOLIfNeeded(Zone* zone, CodeGenerator* codegen,
+     __ CallCFunction(ExternalReference::ieee754_##name##_function(), 1); \
+   } while (false)
+ 
+-#define ASSEMBLE_ATOMIC_BINOP(bin_inst, mov_inst, cmpxchg_inst)       \
+-  do {                                                                \
+-    Label binop;                                                      \
+-    __ bind(&binop);                                                  \
+-    EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
+-    __ mov_inst(rax, i.MemoryOperand(1));                             \
+-    __ movl(i.TempRegister(0), rax);                                  \
+-    __ bin_inst(i.TempRegister(0), i.InputRegister(0));               \
+-    __ lock();                                                        \
+-    __ cmpxchg_inst(i.MemoryOperand(1), i.TempRegister(0));           \
+-    __ j(not_equal, &binop);                                          \
++#define ASSEMBLE_ATOMIC_BINOP(bin_inst, mov_inst, cmpxchg_inst)          \
++  do {                                                                   \
++    Label binop;                                                         \
++    __ bind(&binop);                                                     \
++    RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
++    __ mov_inst(rax, i.MemoryOperand(1));                                \
++    __ movl(i.TempRegister(0), rax);                                     \
++    __ bin_inst(i.TempRegister(0), i.InputRegister(0));                  \
++    __ lock();                                                           \
++    __ cmpxchg_inst(i.MemoryOperand(1), i.TempRegister(0));              \
++    __ j(not_equal, &binop);                                             \
+   } while (false)
+ 
+-#define ASSEMBLE_ATOMIC64_BINOP(bin_inst, mov_inst, cmpxchg_inst)     \
+-  do {                                                                \
+-    Label binop;                                                      \
+-    __ bind(&binop);                                                  \
+-    EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
+-    __ mov_inst(rax, i.MemoryOperand(1));                             \
+-    __ movq(i.TempRegister(0), rax);                                  \
+-    __ bin_inst(i.TempRegister(0), i.InputRegister(0));               \
+-    __ lock();                                                        \
+-    __ cmpxchg_inst(i.MemoryOperand(1), i.TempRegister(0));           \
+-    __ j(not_equal, &binop);                                          \
++#define ASSEMBLE_ATOMIC64_BINOP(bin_inst, mov_inst, cmpxchg_inst)        \
++  do {                                                                   \
++    Label binop;                                                         \
++    __ bind(&binop);                                                     \
++    RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset()); \
++    __ mov_inst(rax, i.MemoryOperand(1));                                \
++    __ movq(i.TempRegister(0), rax);                                     \
++    __ bin_inst(i.TempRegister(0), i.InputRegister(0));                  \
++    __ lock();                                                           \
++    __ cmpxchg_inst(i.MemoryOperand(1), i.TempRegister(0));              \
++    __ j(not_equal, &binop);                                             \
+   } while (false)
+ 
+ // Handles both SSE and AVX codegen. For SSE we use DefineSameAsFirst, so the
+@@ -1154,7 +1144,7 @@ void EmitTSANRelaxedLoadOOLIfNeeded(Zone* zone, CodeGenerator* codegen,
+     } else {                                                             \
+       __ ASM_INSTR(dst, src, i.InputOperand(2), laneidx, &load_offset);  \
+     }                                                                    \
+-    EmitOOLTrapIfNeeded(zone(), this, opcode, instr, load_offset);       \
++    RecordTrapInfoIfNeeded(zone(), this, opcode, instr, load_offset);    \
+   } while (false)
+ 
+ #define ASSEMBLE_SEQ_CST_STORE(rep)                                            \
+@@ -1613,7 +1603,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+     }
+     case kArchStoreWithWriteBarrier:  // Fall through.
+     case kArchAtomicStoreWithWriteBarrier: {
+-      // {EmitTSANAwareStore} calls EmitOOLTrapIfNeeded. No need to do it here.
++      // {EmitTSANAwareStore} calls RecordTrapInfoIfNeeded. No need to do it
++      // here.
+       RecordWriteMode mode = RecordWriteModeField::decode(instr->opcode());
+       // Indirect pointer writes must use a different opcode.
+       DCHECK_NE(mode, RecordWriteMode::kValueIsIndirectPointer);
+@@ -2681,21 +2672,21 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       __ Subsd(i.InputDoubleRegister(0), kScratchDoubleReg);
+       break;
+     case kX64Movsxbl:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       ASSEMBLE_MOVX(movsxbl);
+       __ AssertZeroExtended(i.OutputRegister());
+       break;
+     case kX64Movzxbl:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       ASSEMBLE_MOVX(movzxbl);
+       __ AssertZeroExtended(i.OutputRegister());
+       break;
+     case kX64Movsxbq:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       ASSEMBLE_MOVX(movsxbq);
+       break;
+     case kX64Movzxbq:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       ASSEMBLE_MOVX(movzxbq);
+       __ AssertZeroExtended(i.OutputRegister());
+       break;
+@@ -2716,21 +2707,21 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       break;
+     }
+     case kX64Movsxwl:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       ASSEMBLE_MOVX(movsxwl);
+       __ AssertZeroExtended(i.OutputRegister());
+       break;
+     case kX64Movzxwl:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       ASSEMBLE_MOVX(movzxwl);
+       __ AssertZeroExtended(i.OutputRegister());
+       break;
+     case kX64Movsxwq:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       ASSEMBLE_MOVX(movsxwq);
+       break;
+     case kX64Movzxwq:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       ASSEMBLE_MOVX(movzxwq);
+       __ AssertZeroExtended(i.OutputRegister());
+       break;
+@@ -2752,7 +2743,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+     }
+     case kX64Movl:
+       if (instr->HasOutput()) {
+-        EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++        RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+         if (HasAddressingMode(instr)) {
+           Operand address(i.MemoryOperand());
+           __ movl(i.OutputRegister(), address);
+@@ -2783,12 +2774,12 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       }
+       break;
+     case kX64Movsxlq:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       ASSEMBLE_MOVX(movsxlq);
+       break;
+     case kX64MovqDecompressTaggedSigned: {
+       CHECK(instr->HasOutput());
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       Operand address(i.MemoryOperand());
+       __ DecompressTaggedSigned(i.OutputRegister(), address);
+       EmitTSANRelaxedLoadOOLIfNeeded(zone(), this, masm(), address, i,
+@@ -2797,7 +2788,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+     }
+     case kX64MovqDecompressTagged: {
+       CHECK(instr->HasOutput());
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       Operand address(i.MemoryOperand());
+       __ DecompressTagged(i.OutputRegister(), address);
+       EmitTSANRelaxedLoadOOLIfNeeded(zone(), this, masm(), address, i,
+@@ -2805,7 +2796,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       break;
+     }
+     case kX64MovqCompressTagged: {
+-      // {EmitTSANAwareStore} calls EmitOOLTrapIfNeeded. No need to do it here.
++      // {EmitTSANAwareStore} calls RecordTrapInfoIfNeeded. No need to do it
++      // here.
+       CHECK(!instr->HasOutput());
+       size_t index = 0;
+       Operand operand = i.MemoryOperand(&index);
+@@ -2857,7 +2849,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+     }
+     case kX64Movq:
+       if (instr->HasOutput()) {
+-        EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++        RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+         Operand address(i.MemoryOperand());
+         __ movq(i.OutputRegister(), address);
+         EmitTSANRelaxedLoadOOLIfNeeded(zone(), this, masm(), address, i,
+@@ -2879,7 +2871,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       }
+       break;
+     case kX64Movss:
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       if (instr->HasOutput()) {
+         __ Movss(i.OutputDoubleRegister(), i.MemoryOperand());
+       } else {
+@@ -2889,7 +2881,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       }
+       break;
+     case kX64Movsd: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       if (instr->HasOutput()) {
+         __ Movsd(i.OutputDoubleRegister(), i.MemoryOperand());
+       } else {
+@@ -2900,7 +2892,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       break;
+     }
+     case kX64Movdqu: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       if (instr->HasOutput()) {
+         __ Movdqu(i.OutputSimd128Register(), i.MemoryOperand());
+       } else {
+@@ -3672,7 +3664,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+     }
+     case kX64F64x2PromoteLowF32x4: {
+       if (HasAddressingMode(instr)) {
+-        EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++        RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+         __ Cvtps2pd(i.OutputSimd128Register(), i.MemoryOperand());
+       } else {
+         __ Cvtps2pd(i.OutputSimd128Register(), i.InputSimd128Register(0));
+@@ -5680,7 +5672,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       break;
+     }
+     case kX64Pextrb: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       size_t index = 0;
+       if (HasAddressingMode(instr)) {
+         Operand operand = i.MemoryOperand(&index);
+@@ -5693,7 +5685,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       break;
+     }
+     case kX64Pextrw: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       size_t index = 0;
+       if (HasAddressingMode(instr)) {
+         Operand operand = i.MemoryOperand(&index);
+@@ -5905,59 +5897,59 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       break;
+     }
+     case kX64S128Load8Splat: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ S128Load8Splat(i.OutputSimd128Register(), i.MemoryOperand(),
+                         kScratchDoubleReg);
+       break;
+     }
+     case kX64S128Load16Splat: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ S128Load16Splat(i.OutputSimd128Register(), i.MemoryOperand(),
+                          kScratchDoubleReg);
+       break;
+     }
+     case kX64S128Load32Splat: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ S128Load32Splat(i.OutputSimd128Register(), i.MemoryOperand());
+       break;
+     }
+     case kX64S128Load64Splat: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Movddup(i.OutputSimd128Register(), i.MemoryOperand());
+       break;
+     }
+     case kX64S128Load8x8S: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Pmovsxbw(i.OutputSimd128Register(), i.MemoryOperand());
+       break;
+     }
+     case kX64S128Load8x8U: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Pmovzxbw(i.OutputSimd128Register(), i.MemoryOperand());
+       break;
+     }
+     case kX64S128Load16x4S: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Pmovsxwd(i.OutputSimd128Register(), i.MemoryOperand());
+       break;
+     }
+     case kX64S128Load16x4U: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Pmovzxwd(i.OutputSimd128Register(), i.MemoryOperand());
+       break;
+     }
+     case kX64S128Load32x2S: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Pmovsxdq(i.OutputSimd128Register(), i.MemoryOperand());
+       break;
+     }
+     case kX64S128Load32x2U: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ Pmovzxdq(i.OutputSimd128Register(), i.MemoryOperand());
+       break;
+     }
+     case kX64S128Store32Lane: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       size_t index = 0;
+       Operand operand = i.MemoryOperand(&index);
+       uint8_t lane = i.InputUint8(index + 1);
+@@ -5965,7 +5957,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       break;
+     }
+     case kX64S128Store64Lane: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       size_t index = 0;
+       Operand operand = i.MemoryOperand(&index);
+       uint8_t lane = i.InputUint8(index + 1);
+@@ -6293,13 +6285,13 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+     }
+     case kAtomicExchangeInt8: {
+       DCHECK_EQ(AtomicWidthField::decode(opcode), AtomicWidth::kWord32);
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ xchgb(i.InputRegister(0), i.MemoryOperand(1));
+       __ movsxbl(i.InputRegister(0), i.InputRegister(0));
+       break;
+     }
+     case kAtomicExchangeUint8: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ xchgb(i.InputRegister(0), i.MemoryOperand(1));
+       switch (AtomicWidthField::decode(opcode)) {
+         case AtomicWidth::kWord32:
+@@ -6313,13 +6305,13 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+     }
+     case kAtomicExchangeInt16: {
+       DCHECK_EQ(AtomicWidthField::decode(opcode), AtomicWidth::kWord32);
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ xchgw(i.InputRegister(0), i.MemoryOperand(1));
+       __ movsxwl(i.InputRegister(0), i.InputRegister(0));
+       break;
+     }
+     case kAtomicExchangeUint16: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ xchgw(i.InputRegister(0), i.MemoryOperand(1));
+       switch (AtomicWidthField::decode(opcode)) {
+         case AtomicWidth::kWord32:
+@@ -6332,20 +6324,20 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       break;
+     }
+     case kAtomicExchangeWord32: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ xchgl(i.InputRegister(0), i.MemoryOperand(1));
+       break;
+     }
+     case kAtomicCompareExchangeInt8: {
+       DCHECK_EQ(AtomicWidthField::decode(opcode), AtomicWidth::kWord32);
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ lock();
+       __ cmpxchgb(i.MemoryOperand(2), i.InputRegister(1));
+       __ movsxbl(rax, rax);
+       break;
+     }
+     case kAtomicCompareExchangeUint8: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ lock();
+       __ cmpxchgb(i.MemoryOperand(2), i.InputRegister(1));
+       switch (AtomicWidthField::decode(opcode)) {
+@@ -6360,14 +6352,14 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+     }
+     case kAtomicCompareExchangeInt16: {
+       DCHECK_EQ(AtomicWidthField::decode(opcode), AtomicWidth::kWord32);
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ lock();
+       __ cmpxchgw(i.MemoryOperand(2), i.InputRegister(1));
+       __ movsxwl(rax, rax);
+       break;
+     }
+     case kAtomicCompareExchangeUint16: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ lock();
+       __ cmpxchgw(i.MemoryOperand(2), i.InputRegister(1));
+       switch (AtomicWidthField::decode(opcode)) {
+@@ -6381,7 +6373,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       break;
+     }
+     case kAtomicCompareExchangeWord32: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ lock();
+       __ cmpxchgl(i.MemoryOperand(2), i.InputRegister(1));
+       if (AtomicWidthField::decode(opcode) == AtomicWidth::kWord64) {
+@@ -6391,12 +6383,12 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       break;
+     }
+     case kX64Word64AtomicExchangeUint64: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ xchgq(i.InputRegister(0), i.MemoryOperand(1));
+       break;
+     }
+     case kX64Word64AtomicCompareExchangeUint64: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ lock();
+       __ cmpxchgq(i.MemoryOperand(2), i.InputRegister(1));
+       break;
+@@ -6468,31 +6460,31 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       break;
+     }
+     case kX64S256Load8Splat: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       CpuFeatureScope avx2_scope(masm(), AVX2);
+       __ vpbroadcastb(i.OutputSimd256Register(), i.MemoryOperand());
+       break;
+     }
+     case kX64S256Load16Splat: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       CpuFeatureScope avx2_scope(masm(), AVX2);
+       __ vpbroadcastw(i.OutputSimd256Register(), i.MemoryOperand());
+       break;
+     }
+     case kX64S256Load32Splat: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       CpuFeatureScope avx_scope(masm(), AVX);
+       __ vbroadcastss(i.OutputSimd256Register(), i.MemoryOperand());
+       break;
+     }
+     case kX64S256Load64Splat: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       CpuFeatureScope avx_scope(masm(), AVX);
+       __ vbroadcastsd(i.OutputSimd256Register(), i.MemoryOperand());
+       break;
+     }
+     case kX64Movdqu256: {
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       CpuFeatureScope avx_scope(masm(), AVX);
+       if (instr->HasOutput()) {
+         __ vmovdqu(i.OutputSimd256Register(), i.MemoryOperand());
+@@ -6569,37 +6561,37 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+     }
+     case kX64S256Load8x16S: {
+       CpuFeatureScope avx_scope(masm(), AVX2);
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ vpmovsxbw(i.OutputSimd256Register(), i.MemoryOperand());
+       break;
+     }
+     case kX64S256Load8x16U: {
+       CpuFeatureScope avx_scope(masm(), AVX2);
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ vpmovzxbw(i.OutputSimd256Register(), i.MemoryOperand());
+       break;
+     }
+     case kX64S256Load16x8S: {
+       CpuFeatureScope avx_scope(masm(), AVX2);
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ vpmovsxwd(i.OutputSimd256Register(), i.MemoryOperand());
+       break;
+     }
+     case kX64S256Load16x8U: {
+       CpuFeatureScope avx_scope(masm(), AVX2);
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ vpmovzxwd(i.OutputSimd256Register(), i.MemoryOperand());
+       break;
+     }
+     case kX64S256Load32x4S: {
+       CpuFeatureScope avx_scope(masm(), AVX2);
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ vpmovsxdq(i.OutputSimd256Register(), i.MemoryOperand());
+       break;
+     }
+     case kX64S256Load32x4U: {
+       CpuFeatureScope avx_scope(masm(), AVX2);
+-      EmitOOLTrapIfNeeded(zone(), this, opcode, instr, __ pc_offset());
++      RecordTrapInfoIfNeeded(zone(), this, opcode, instr, __ pc_offset());
+       __ vpmovzxdq(i.OutputSimd256Register(), i.MemoryOperand());
+       break;
+     }
+diff --git a/src/compiler/pipeline.cc b/src/compiler/pipeline.cc
+index 6f5eea3e5d8..5d53cc4ed49 100644
+--- a/src/compiler/pipeline.cc
++++ b/src/compiler/pipeline.cc
+@@ -2396,7 +2396,8 @@ struct RevectorizePhase {
+   DECL_PIPELINE_PHASE_CONSTANTS(Revectorizer)
+ 
+   void Run(PipelineData* data, Zone* temp_zone) {
+-    Revectorizer revec(temp_zone, data->graph(), data->mcgraph());
++    Revectorizer revec(temp_zone, data->graph(), data->mcgraph(),
++                       data->source_positions());
+     revec.TryRevectorize(data->info()->GetDebugName().get());
+   }
+ };
+diff --git a/src/compiler/revectorizer.cc b/src/compiler/revectorizer.cc
+index b2f21ef73fb..4819aa02d81 100644
+--- a/src/compiler/revectorizer.cc
++++ b/src/compiler/revectorizer.cc
+@@ -7,6 +7,7 @@
+ #include "src/base/cpu.h"
+ #include "src/base/logging.h"
+ #include "src/compiler/all-nodes.h"
++#include "src/compiler/compiler-source-position-table.h"
+ #include "src/compiler/machine-operator.h"
+ #include "src/compiler/node-observer.h"
+ #include "src/compiler/opcodes.h"
+@@ -882,11 +883,13 @@ void SLPTree::ForEach(FunctionType callback) {
+ 
+ //////////////////////////////////////////////////////
+ 
+-Revectorizer::Revectorizer(Zone* zone, Graph* graph, MachineGraph* mcgraph)
++Revectorizer::Revectorizer(Zone* zone, Graph* graph, MachineGraph* mcgraph,
++                           SourcePositionTable* source_positions)
+     : zone_(zone),
+       graph_(graph),
+       mcgraph_(mcgraph),
+       group_of_stores_(zone),
++      source_positions_(source_positions),
+       support_simd256_(false) {
+   DetectCPUFeatures();
+   slp_tree_ = zone_->New<SLPTree>(zone, graph);
+@@ -1073,6 +1076,7 @@ Node* Revectorizer::VectorizeTree(PackNode* pnode) {
+         inputs.resize_no_init(4);
+         // Update LoadSplat offset.
+         if (index) {
++          SourcePositionTable::Scope scope(source_positions_, source);
+           inputs[0] = graph()->NewNode(mcgraph_->machine()->Int64Add(),
+                                        source->InputAt(0),
+                                        mcgraph_->Int64Constant(offset));
+@@ -1220,6 +1224,7 @@ Node* Revectorizer::VectorizeTree(PackNode* pnode) {
+ 
+   DCHECK(pnode->RevectorizedNode() || new_op);
+   if (new_op != nullptr) {
++    SourcePositionTable::Scope scope(source_positions_, node0);
+     Node* new_node =
+         graph()->NewNode(new_op, input_count, inputs.begin(), true);
+     pnode->SetRevectorizedNode(new_node);
+@@ -1291,6 +1296,8 @@ void Revectorizer::DetectCPUFeatures() {
+ }
+ 
+ bool Revectorizer::TryRevectorize(const char* function) {
++  source_positions_->AddDecorator();
++
+   bool success = false;
+   if (support_simd256_ && graph_->GetSimdStoreNodes().size()) {
+     TRACE("TryRevectorize %s\n", function);
+@@ -1307,6 +1314,7 @@ bool Revectorizer::TryRevectorize(const char* function) {
+     }
+     TRACE("Finish revectorize %s\n", function);
+   }
++  source_positions_->RemoveDecorator();
+   return success;
+ }
+ 
+diff --git a/src/compiler/revectorizer.h b/src/compiler/revectorizer.h
+index b74a6c60b36..f38bae3d270 100644
+--- a/src/compiler/revectorizer.h
++++ b/src/compiler/revectorizer.h
+@@ -28,6 +28,8 @@ namespace v8 {
+ namespace internal {
+ namespace compiler {
+ 
++class SourcePositionTable;
++
+ struct V8_EXPORT_PRIVATE MemoryOffsetComparer {
+   bool operator()(const Node* lhs, const Node* rhs) const;
+ };
+@@ -161,7 +163,8 @@ class SLPTree : public NON_EXPORTED_BASE(ZoneObject) {
+ class V8_EXPORT_PRIVATE Revectorizer final
+     : public NON_EXPORTED_BASE(ZoneObject) {
+  public:
+-  Revectorizer(Zone* zone, Graph* graph, MachineGraph* mcgraph);
++  Revectorizer(Zone* zone, Graph* graph, MachineGraph* mcgraph,
++               SourcePositionTable* source_positions);
+   void DetectCPUFeatures();
+   bool TryRevectorize(const char* name);
+ 
+@@ -194,6 +197,7 @@ class V8_EXPORT_PRIVATE Revectorizer final
+   ZoneMap<Node*, ZoneMap<Node*, StoreNodeSet>*> group_of_stores_;
+   std::unordered_set<Node*> sources_;
+   SLPTree* slp_tree_;
++  SourcePositionTable* source_positions_;
+ 
+   bool support_simd256_;
+ 
+diff --git a/src/execution/arm64/simulator-arm64.cc b/src/execution/arm64/simulator-arm64.cc
+index beba51defc5..73de266de36 100644
+--- a/src/execution/arm64/simulator-arm64.cc
++++ b/src/execution/arm64/simulator-arm64.cc
+@@ -81,6 +81,7 @@ bool Simulator::ProbeMemory(uintptr_t address, uintptr_t access_size) {
+       trap_handler::ProbeMemory(last_accessed_byte, current_pc);
+   if (!landing_pad) return true;
+   set_pc(landing_pad);
++  set_reg(kWasmTrapHandlerFaultAddressRegister.code(), current_pc);
+   return false;
+ #else
+   return true;
+diff --git a/src/execution/isolate.cc b/src/execution/isolate.cc
+index 0acacef2f93..378d9dd6739 100644
+--- a/src/execution/isolate.cc
++++ b/src/execution/isolate.cc
+@@ -3638,6 +3638,25 @@ Isolate::Isolate(std::unique_ptr<i::IsolateAllocator> isolate_allocator)
+ 
+   InitializeDefaultEmbeddedBlob();
+ 
++#if V8_ENABLE_WEBASSEMBLY
++  // If we are in production V8 and not in mksnapshot we have to pass the
++  // landing pad builtin to the WebAssembly TrapHandler.
++  // TODO(ahaas): Isolate creation is the earliest point in time when builtins
++  // are available, so we cannot set the landing pad earlier at the moment.
++  // However, if builtins ever get loaded during process initialization time,
++  // then the initialization of the trap handler landing pad should also go
++  // there.
++  // TODO(ahaas): The code of the landing pad does not have to be a builtin,
++  // we could also just move it to the trap handler, and implement it e.g. with
++  // inline assembly. It's not clear if that's worth it.
++  if (Isolate::CurrentEmbeddedBlobCodeSize()) {
++    EmbeddedData embedded_data = EmbeddedData::FromBlob();
++    Address landing_pad =
++        embedded_data.InstructionStartOf(Builtin::kWasmTrapHandlerLandingPad);
++    i::trap_handler::SetLandingPad(landing_pad);
++  }
++#endif  // V8_ENABLE_WEBASSEMBLY
++
+   MicrotaskQueue::SetUpDefaultMicrotaskQueue(this);
+ }
+ 
+diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
+index c67ec6d1415..5f711bc6066 100644
+--- a/src/runtime/runtime-wasm.cc
++++ b/src/runtime/runtime-wasm.cc
+@@ -21,6 +21,7 @@
+ #include "src/wasm/wasm-debug.h"
+ #include "src/wasm/wasm-engine.h"
+ #include "src/wasm/wasm-objects.h"
++#include "src/wasm/wasm-opcodes-inl.h"
+ #include "src/wasm/wasm-subtyping.h"
+ #include "src/wasm/wasm-value.h"
+ 
+@@ -220,6 +221,42 @@ RUNTIME_FUNCTION(Runtime_WasmMemoryGrow) {
+   return Smi::FromInt(ret);
+ }
+ 
++RUNTIME_FUNCTION(Runtime_TrapHandlerThrowWasmError) {
++  ClearThreadInWasmScope flag_scope(isolate);
++  HandleScope scope(isolate);
++  std::vector<FrameSummary> summary;
++  FrameFinder<WasmFrame> frame_finder(isolate, {StackFrame::EXIT});
++  WasmFrame* frame = frame_finder.frame();
++  // TODO(ahaas): We cannot use frame->position() here because for inlined
++  // function it does not return the correct source position. We should remove
++  // frame->position() to avoid problems in the future.
++  frame->Summarize(&summary);
++  DCHECK(summary.back().IsWasm());
++  int pos = summary.back().AsWasm().SourcePosition();
++
++  wasm::WasmCodeRefScope code_ref_scope;
++  auto wire_bytes = frame->wasm_code()->native_module()->wire_bytes();
++  wasm::WasmOpcode op = static_cast<wasm::WasmOpcode>(wire_bytes.at(pos));
++  MessageTemplate message = MessageTemplate::kWasmTrapMemOutOfBounds;
++  if (op == wasm::kGCPrefix || op == wasm::kExprRefAsNonNull ||
++      op == wasm::kExprCallRef || op == wasm::kExprReturnCallRef ||
++      // Calling imported string function with null can trigger a signal.
++      op == wasm::kExprCallFunction || op == wasm::kExprReturnCall) {
++    message = MessageTemplate::kWasmTrapNullDereference;
++#if DEBUG
++  } else {
++    if (wasm::WasmOpcodes::IsPrefixOpcode(op)) {
++      op = wasm::Decoder{wire_bytes}
++               .read_prefixed_opcode<wasm::Decoder::NoValidationTag>(
++                   &wire_bytes.begin()[pos])
++               .first;
++    }
++    DCHECK(wasm::WasmOpcodes::IsMemoryAccessOpcode(op));
++#endif  // DEBUG
++  }
++  return ThrowWasmError(isolate, message);
++}
++
+ RUNTIME_FUNCTION(Runtime_ThrowWasmError) {
+   ClearThreadInWasmScope flag_scope(isolate);
+   HandleScope scope(isolate);
+diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
+index 377f3c84099..f3a7f598fdd 100644
+--- a/src/runtime/runtime.h
++++ b/src/runtime/runtime.h
+@@ -624,6 +624,7 @@ namespace internal {
+ #define FOR_EACH_INTRINSIC_WASM(F, I)         \
+   F(ThrowBadSuspenderError, 0, 1)             \
+   F(ThrowWasmError, 1, 1)                     \
++  F(TrapHandlerThrowWasmError, 0, 1)          \
+   F(ThrowWasmStackOverflow, 0, 1)             \
+   F(WasmI32AtomicWait, 4, 1)                  \
+   F(WasmI64AtomicWait, 5, 1)                  \
+diff --git a/src/trap-handler/handler-inside-posix.cc b/src/trap-handler/handler-inside-posix.cc
+index 10f80ed0a24..159e07d2235 100644
+--- a/src/trap-handler/handler-inside-posix.cc
++++ b/src/trap-handler/handler-inside-posix.cc
+@@ -50,13 +50,11 @@ namespace trap_handler {
+ #if V8_TRAP_HANDLER_SUPPORTED
+ 
+ #if V8_OS_LINUX && V8_HOST_ARCH_ARM64
+-#define CONTEXT_PC() &uc->uc_mcontext.pc
+-#elif V8_OS_DARWIN && V8_HOST_ARCH_ARM64
+-#define CONTEXT_PC() &uc->uc_mcontext->__ss.__pc
+-#elif V8_OS_LINUX && V8_HOST_ARCH_LOONG64
+-#define CONTEXT_PC() &uc->uc_mcontext.__pc
++#define CONTEXT_REG(reg, REG) &uc->uc_mcontext.regs[REG]
+ #elif V8_OS_LINUX
+ #define CONTEXT_REG(reg, REG) &uc->uc_mcontext.gregs[REG_##REG]
++#elif V8_OS_DARWIN && V8_HOST_ARCH_ARM64
++#define CONTEXT_REG(reg, REG) &uc->uc_mcontext->__ss.__x[REG]
+ #elif V8_OS_DARWIN
+ #define CONTEXT_REG(reg, REG) &uc->uc_mcontext->__ss.__##reg
+ #elif V8_OS_FREEBSD
+@@ -65,6 +63,14 @@ namespace trap_handler {
+ #error "Unsupported platform."
+ #endif
+ 
++#if V8_OS_LINUX && V8_HOST_ARCH_ARM64
++#define CONTEXT_PC() &uc->uc_mcontext.pc
++#elif V8_OS_DARWIN && V8_HOST_ARCH_ARM64
++#define CONTEXT_PC() &uc->uc_mcontext->__ss.__pc
++#elif V8_OS_LINUX && V8_HOST_ARCH_LOONG64
++#define CONTEXT_PC() &uc->uc_mcontext.__pc
++#endif
++
+ bool IsKernelGeneratedSignal(siginfo_t* info) {
+   // On macOS, only `info->si_code > 0` is relevant, because macOS leaves
+   // si_code at its default of 0 for signals that don’t originate in hardware.
+@@ -146,8 +152,6 @@ bool TryHandleSignal(int signum, siginfo_t* info, void* context) {
+ #endif
+ 
+     uintptr_t fault_addr = *context_ip;
+-    uintptr_t landing_pad = 0;
+-
+ #ifdef V8_TRAP_HANDLER_VIA_SIMULATOR
+     // Only handle signals triggered by the load in {ProbeMemory}.
+     if (fault_addr != reinterpret_cast<uintptr_t>(&ProbeMemory)) {
+@@ -156,18 +160,29 @@ bool TryHandleSignal(int signum, siginfo_t* info, void* context) {
+ 
+     // The simulated ip will be in the second parameter register (%rsi).
+     auto* simulated_ip_reg = CONTEXT_REG(rsi, RSI);
+-    if (!TryFindLandingPad(*simulated_ip_reg, &landing_pad)) return false;
+-    TH_DCHECK(landing_pad != 0);
++    if (!IsFaultAddressCovered(*simulated_ip_reg)) return false;
++    TH_DCHECK(gLandingPad != 0);
+ 
+     auto* return_reg = CONTEXT_REG(rax, RAX);
+-    *return_reg = landing_pad;
++    *return_reg = gLandingPad;
++    // The fault_address that is set in non-simulator builds here is set in the
++    // simulator directly.
+     // Continue at the memory probing continuation.
+     *context_ip = reinterpret_cast<uintptr_t>(&probe_memory_continuation);
+ #else
+-    if (!TryFindLandingPad(fault_addr, &landing_pad)) return false;
+-
++    if (!IsFaultAddressCovered(fault_addr)) return false;
++    TH_DCHECK(gLandingPad != 0);
+     // Tell the caller to return to the landing pad.
+-    *context_ip = landing_pad;
++    *context_ip = gLandingPad;
++
++#if V8_HOST_ARCH_X64
++    auto* fault_address_reg = CONTEXT_REG(r10, R10);
++#elif V8_HOST_ARCH_ARM64
++    auto* fault_address_reg = CONTEXT_REG(x16, 16);
++#else
++#error "Unsupported architecture."
++#endif
++    *fault_address_reg = fault_addr;
+ #endif
+   }
+   // We will return to wasm code, so restore the g_thread_in_wasm_code flag.
+diff --git a/src/trap-handler/handler-inside-win.cc b/src/trap-handler/handler-inside-win.cc
+index 4956437aa65..f3cfc566f3d 100644
+--- a/src/trap-handler/handler-inside-win.cc
++++ b/src/trap-handler/handler-inside-win.cc
+@@ -99,7 +99,6 @@ bool TryHandleWasmTrap(EXCEPTION_POINTERS* exception) {
+   const EXCEPTION_RECORD* record = exception->ExceptionRecord;
+ 
+   uintptr_t fault_addr = reinterpret_cast<uintptr_t>(record->ExceptionAddress);
+-  uintptr_t landing_pad = 0;
+ 
+ #ifdef V8_TRAP_HANDLER_VIA_SIMULATOR
+   // Only handle signals triggered by the load in {ProbeMemory}.
+@@ -107,18 +106,21 @@ bool TryHandleWasmTrap(EXCEPTION_POINTERS* exception) {
+ 
+   // The simulated ip will be in the second parameter register (%rdx).
+   uintptr_t simulated_ip = exception->ContextRecord->Rdx;
+-  if (!TryFindLandingPad(simulated_ip, &landing_pad)) return false;
+-  TH_DCHECK(landing_pad != 0);
++  if (!IsFaultAddressCovered(simulated_ip)) return false;
+ 
+-  exception->ContextRecord->Rax = landing_pad;
++  exception->ContextRecord->Rax = gLandingPad;
++  // The fault_address that is set in non-simulator builds here is set in the
++  // simulator directly.
+   // Continue at the memory probing continuation.
+   exception->ContextRecord->Rip =
+       reinterpret_cast<uintptr_t>(&probe_memory_continuation);
+ #else
+-  if (!TryFindLandingPad(fault_addr, &landing_pad)) return false;
++  if (!IsFaultAddressCovered(fault_addr)) return false;
+ 
++  TH_DCHECK(gLandingPad != 0);
+   // Tell the caller to return to the landing pad.
+-  exception->ContextRecord->Rip = landing_pad;
++  exception->ContextRecord->Rip = gLandingPad;
++  exception->ContextRecord->R10 = fault_addr;
+ #endif
+   // We will return to wasm code, so restore the g_thread_in_wasm_code flag.
+   g_thread_in_wasm_code = true;
+diff --git a/src/trap-handler/handler-inside.cc b/src/trap-handler/handler-inside.cc
+index 2414a22961c..4b74340f3a2 100644
+--- a/src/trap-handler/handler-inside.cc
++++ b/src/trap-handler/handler-inside.cc
+@@ -34,7 +34,7 @@ namespace trap_handler {
+ 
+ // This function contains the platform independent portions of fault
+ // classification.
+-bool TryFindLandingPad(uintptr_t fault_addr, uintptr_t* landing_pad) {
++bool IsFaultAddressCovered(uintptr_t fault_addr) {
+   // TODO(eholk): broad code range check
+ 
+   // Taking locks in the trap handler is risky because a fault in the trap
+@@ -62,8 +62,6 @@ bool TryFindLandingPad(uintptr_t fault_addr, uintptr_t* landing_pad) {
+       for (unsigned j = 0; j < data->num_protected_instructions; ++j) {
+         if (data->instructions[j].instr_offset == offset) {
+           // Hurray again, we found the actual instruction.
+-          *landing_pad = data->instructions[j].landing_offset + base;
+-
+           gRecoveredTrapCount.store(
+               gRecoveredTrapCount.load(std::memory_order_relaxed) + 1,
+               std::memory_order_relaxed);
+diff --git a/src/trap-handler/handler-outside.cc b/src/trap-handler/handler-outside.cc
+index aa5a20d8a79..22ede82b563 100644
+--- a/src/trap-handler/handler-outside.cc
++++ b/src/trap-handler/handler-outside.cc
+@@ -81,10 +81,6 @@ void ValidateCodeObjects() {
+     for (unsigned j = 0; j < data->num_protected_instructions; ++j) {
+       TH_DCHECK(data->instructions[j].instr_offset >= 0);
+       TH_DCHECK(data->instructions[j].instr_offset < data->size);
+-      TH_DCHECK(data->instructions[j].landing_offset >= 0);
+-      TH_DCHECK(data->instructions[j].landing_offset < data->size);
+-      TH_DCHECK(data->instructions[j].landing_offset >
+-                data->instructions[j].instr_offset);
+     }
+   }
+ 
+@@ -262,7 +258,6 @@ bool EnableTrapHandler(bool use_v8_handler) {
+       g_can_enable_trap_handler.exchange(false, std::memory_order_relaxed);
+   // EnableTrapHandler called twice, or after IsTrapHandlerEnabled.
+   TH_CHECK(can_enable);
+-
+   if (!V8_TRAP_HANDLER_SUPPORTED) {
+     return false;
+   }
+@@ -274,6 +269,8 @@ bool EnableTrapHandler(bool use_v8_handler) {
+   return true;
+ }
+ 
++void SetLandingPad(uintptr_t landing_pad) { gLandingPad.store(landing_pad); }
++
+ }  // namespace trap_handler
+ }  // namespace internal
+ }  // namespace v8
+diff --git a/src/trap-handler/handler-shared.cc b/src/trap-handler/handler-shared.cc
+index 11ea53d477c..1c6c25ce65f 100644
+--- a/src/trap-handler/handler-shared.cc
++++ b/src/trap-handler/handler-shared.cc
+@@ -35,6 +35,7 @@ static_assert(sizeof(g_thread_in_wasm_code) > 1,
+ size_t gNumCodeObjects = 0;
+ CodeProtectionInfoListEntry* gCodeObjects = nullptr;
+ std::atomic_size_t gRecoveredTrapCount = {0};
++std::atomic<uintptr_t> gLandingPad = {0};
+ 
+ #if !defined(__cpp_lib_atomic_value_initialization) || \
+     __cpp_lib_atomic_value_initialization < 201911L
+diff --git a/src/trap-handler/trap-handler-internal.h b/src/trap-handler/trap-handler-internal.h
+index 71588ab8957..89ec5b9111d 100644
+--- a/src/trap-handler/trap-handler-internal.h
++++ b/src/trap-handler/trap-handler-internal.h
+@@ -56,11 +56,11 @@ extern CodeProtectionInfoListEntry* gCodeObjects;
+ 
+ extern std::atomic_size_t gRecoveredTrapCount;
+ 
++extern std::atomic<uintptr_t> gLandingPad;
++
+ // Searches the fault location table for an entry matching fault_addr. If found,
+-// returns true and sets landing_pad to the address of a fragment of code that
+-// can recover from this fault. Otherwise, returns false and leaves offset
+-// unchanged.
+-bool TryFindLandingPad(uintptr_t fault_addr, uintptr_t* landing_pad);
++// returns true, otherwise, returns false.
++bool IsFaultAddressCovered(uintptr_t fault_addr);
+ 
+ }  // namespace trap_handler
+ }  // namespace internal
+diff --git a/src/trap-handler/trap-handler.h b/src/trap-handler/trap-handler.h
+index 396a3f11790..289a755d3b1 100644
+--- a/src/trap-handler/trap-handler.h
++++ b/src/trap-handler/trap-handler.h
+@@ -90,11 +90,6 @@ struct ProtectedInstructionData {
+   // The offset of this instruction from the start of its code object.
+   // Wasm code never grows larger than 2GB, so uint32_t is sufficient.
+   uint32_t instr_offset;
+-
+-  // The offset of the landing pad from the start of its code object.
+-  //
+-  // TODO(eholk): Using a single landing pad and store parameters here.
+-  uint32_t landing_offset;
+ };
+ 
+ const int kInvalidIndex = -1;
+@@ -129,6 +124,10 @@ TH_EXPORT_PRIVATE extern std::atomic<bool> g_can_enable_trap_handler;
+ // rather than relying on the embedder to do it.
+ TH_EXPORT_PRIVATE bool EnableTrapHandler(bool use_v8_handler);
+ 
++// Set the address that the trap handler should continue execution from when it
++// gets a fault at a recognised address.
++TH_EXPORT_PRIVATE void SetLandingPad(uintptr_t landing_pad);
++
+ inline bool IsTrapHandlerEnabled() {
+   TH_DCHECK(!g_is_trap_handler_enabled || V8_TRAP_HANDLER_SUPPORTED);
+   // Disallow enabling the trap handler after retrieving the current value.
+diff --git a/src/wasm/baseline/liftoff-compiler.cc b/src/wasm/baseline/liftoff-compiler.cc
+index e59feccd58f..d63d642fe9a 100644
+--- a/src/wasm/baseline/liftoff-compiler.cc
++++ b/src/wasm/baseline/liftoff-compiler.cc
+@@ -425,7 +425,6 @@ class LiftoffCompiler {
+     LiftoffRegList regs_to_save;
+     Register cached_instance;
+     OutOfLineSafepointInfo* safepoint_info;
+-    uint32_t trapping_pc;  // The PC that should execute the OOL code on trap.
+     // These two pointers will only be used for debug code:
+     SpilledRegistersForInspection* spilled_registers;
+     DebugSideTableBuilder::EntryBuilder* debug_sidetable_entry_builder;
+@@ -434,7 +433,7 @@ class LiftoffCompiler {
+     static OutOfLineCode Trap(
+         Zone* zone, Builtin builtin, WasmCodePosition pos,
+         SpilledRegistersForInspection* spilled_registers,
+-        OutOfLineSafepointInfo* safepoint_info, uint32_t pc,
++        OutOfLineSafepointInfo* safepoint_info,
+         DebugSideTableBuilder::EntryBuilder* debug_sidetable_entry_builder) {
+       DCHECK_LT(0, pos);
+       return {
+@@ -445,7 +444,6 @@ class LiftoffCompiler {
+           {},                            // regs_to_save
+           no_reg,                        // cached_instance
+           safepoint_info,                // safepoint_info
+-          pc,                            // trapping_pc
+           spilled_registers,             // spilled_registers
+           debug_sidetable_entry_builder  // debug_side_table_entry_builder
+       };
+@@ -463,7 +461,6 @@ class LiftoffCompiler {
+           regs_to_save,                  // regs_to_save
+           cached_instance,               // cached_instance
+           safepoint_info,                // safepoint_info
+-          0,                             // trapping_pc
+           spilled_regs,                  // spilled_registers
+           debug_sidetable_entry_builder  // debug_side_table_entry_builder
+       };
+@@ -481,7 +478,6 @@ class LiftoffCompiler {
+           regs_to_save,                  // regs_to_save
+           cached_instance,               // cached_instance
+           safepoint_info,                // safepoint_info
+-          0,                             // trapping_pc
+           spilled_regs,                  // spilled_registers
+           debug_sidetable_entry_builder  // debug_side_table_entry_builder
+       };
+@@ -947,7 +943,7 @@ class LiftoffCompiler {
+         // the OOL code is shared).
+         out_of_line_code_.push_back(OutOfLineCode::Trap(
+             zone_, Builtin::kThrowWasmTrapUnreachable, decoder->position(),
+-            nullptr, nullptr, 0, nullptr));
++            nullptr, nullptr, nullptr));
+ 
+         // Subtract 16 steps for the function call itself (including the
+         // function prologue), plus 1 for each local (including parameters). Do
+@@ -972,19 +968,6 @@ class LiftoffCompiler {
+     const bool is_stack_check = ool->builtin == Builtin::kWasmStackGuard;
+     const bool is_tierup = ool->builtin == Builtin::kWasmTriggerTierUp;
+ 
+-    // Only memory OOB traps need a {pc}, but not unconditionally. Static OOB
+-    // accesses do not need protected instruction information, hence they also
+-    // do not set {pc}.
+-    DCHECK_IMPLIES(ool->builtin != Builtin::kThrowWasmTrapMemOutOfBounds,
+-                   ool->trapping_pc == 0);
+-
+-    if (ool->trapping_pc != 0) {
+-      uint32_t pc = static_cast<uint32_t>(__ pc_offset());
+-      DCHECK_EQ(pc, __ pc_offset());
+-      protected_instructions_.emplace_back(
+-          trap_handler::ProtectedInstructionData{ool->trapping_pc, pc});
+-    }
+-
+     if (!ool->regs_to_save.is_empty()) {
+       __ PushRegisters(ool->regs_to_save);
+     }
+@@ -2982,11 +2965,7 @@ class LiftoffCompiler {
+     return spilled;
+   }
+ 
+-  Label* AddOutOfLineTrap(FullDecoder* decoder, Builtin builtin,
+-                          uint32_t trapping_pc = 0) {
+-    // Only memory OOB traps need a {pc}.
+-    DCHECK_IMPLIES(builtin != Builtin::kThrowWasmTrapMemOutOfBounds,
+-                   trapping_pc == 0);
++  Label* AddOutOfLineTrap(FullDecoder* decoder, Builtin builtin) {
+     DCHECK(v8_flags.wasm_bounds_checks);
+     OutOfLineSafepointInfo* safepoint_info = nullptr;
+     // Execution does not return after a trap. Therefore we don't have to define
+@@ -3003,7 +2982,7 @@ class LiftoffCompiler {
+         zone_, builtin, decoder->position(),
+         V8_UNLIKELY(for_debugging_) ? GetSpilledRegistersForInspection()
+                                     : nullptr,
+-        safepoint_info, trapping_pc, RegisterOOLDebugSideTableEntry(decoder)));
++        safepoint_info, RegisterOOLDebugSideTableEntry(decoder)));
+     return out_of_line_code_.back().label.get();
+   }
+ 
+@@ -3047,7 +3026,7 @@ class LiftoffCompiler {
+     // Set {pc} of the OOL code to {0} to avoid generation of protected
+     // instruction information (see {GenerateOutOfLineCode}.
+     Label* trap_label =
+-        AddOutOfLineTrap(decoder, Builtin::kThrowWasmTrapMemOutOfBounds, 0);
++        AddOutOfLineTrap(decoder, Builtin::kThrowWasmTrapMemOutOfBounds);
+ 
+     // Convert the index to ptrsize, bounds-checking the high word on 32-bit
+     // systems for memory64.
+@@ -3105,7 +3084,7 @@ class LiftoffCompiler {
+                          LiftoffRegList pinned) {
+     SCOPED_CODE_COMMENT("alignment check");
+     Label* trap_label =
+-        AddOutOfLineTrap(decoder, Builtin::kThrowWasmTrapUnalignedAccess, 0);
++        AddOutOfLineTrap(decoder, Builtin::kThrowWasmTrapUnalignedAccess);
+     Register address = __ GetUnusedRegister(kGpReg, pinned).gp();
+ 
+     FREEZE_STATE(trapping);
+@@ -3294,8 +3273,11 @@ class LiftoffCompiler {
+       __ Load(value, mem, index, offset, type, &protected_load_pc, true,
+               i64_offset);
+       if (imm.memory->bounds_checks == kTrapHandler) {
+-        AddOutOfLineTrap(decoder, Builtin::kThrowWasmTrapMemOutOfBounds,
+-                         protected_load_pc);
++        protected_instructions_.emplace_back(
++            trap_handler::ProtectedInstructionData{protected_load_pc});
++        source_position_table_builder_.AddPosition(
++            protected_load_pc, SourcePosition(decoder->position()), true);
++        DefineSafepoint(protected_load_pc);
+       }
+       __ PushRegister(kind, value);
+     }
+@@ -3338,8 +3320,11 @@ class LiftoffCompiler {
+                      &protected_load_pc);
+ 
+     if (imm.memory->bounds_checks == kTrapHandler) {
+-      AddOutOfLineTrap(decoder, Builtin::kThrowWasmTrapMemOutOfBounds,
+-                       protected_load_pc);
++      protected_instructions_.emplace_back(
++          trap_handler::ProtectedInstructionData{protected_load_pc});
++      source_position_table_builder_.AddPosition(
++          protected_load_pc, SourcePosition(decoder->position()), true);
++      DefineSafepoint(protected_load_pc);
+     }
+     __ PushRegister(kS128, value);
+ 
+@@ -3378,12 +3363,14 @@ class LiftoffCompiler {
+     Register addr = GetMemoryStart(imm.mem_index, pinned);
+     LiftoffRegister result = __ GetUnusedRegister(reg_class_for(kS128), {});
+     uint32_t protected_load_pc = 0;
+-
+     __ LoadLane(result, value, addr, index, offset, type, laneidx,
+                 &protected_load_pc, i64_offset);
+     if (imm.memory->bounds_checks == kTrapHandler) {
+-      AddOutOfLineTrap(decoder, Builtin::kThrowWasmTrapMemOutOfBounds,
+-                       protected_load_pc);
++      protected_instructions_.emplace_back(
++          trap_handler::ProtectedInstructionData{protected_load_pc});
++      source_position_table_builder_.AddPosition(
++          protected_load_pc, SourcePosition(decoder->position()), true);
++      DefineSafepoint(protected_load_pc);
+     }
+ 
+     __ PushRegister(kS128, result);
+@@ -3437,8 +3424,11 @@ class LiftoffCompiler {
+       __ Store(mem, index, offset, value, type, outer_pinned,
+                &protected_store_pc, true, i64_offset);
+       if (imm.memory->bounds_checks == kTrapHandler) {
+-        AddOutOfLineTrap(decoder, Builtin::kThrowWasmTrapMemOutOfBounds,
+-                         protected_store_pc);
++        protected_instructions_.emplace_back(
++            trap_handler::ProtectedInstructionData{protected_store_pc});
++        source_position_table_builder_.AddPosition(
++            protected_store_pc, SourcePosition(decoder->position()), true);
++        DefineSafepoint(protected_store_pc);
+       }
+     }
+ 
+@@ -3474,8 +3464,11 @@ class LiftoffCompiler {
+     __ StoreLane(addr, index, offset, value, type, lane, &protected_store_pc,
+                  i64_offset);
+     if (imm.memory->bounds_checks == kTrapHandler) {
+-      AddOutOfLineTrap(decoder, Builtin::kThrowWasmTrapMemOutOfBounds,
+-                       protected_store_pc);
++      protected_instructions_.emplace_back(
++          trap_handler::ProtectedInstructionData{protected_store_pc});
++      source_position_table_builder_.AddPosition(
++          protected_store_pc, SourcePosition(decoder->position()), true);
++      DefineSafepoint(protected_store_pc);
+     }
+     if (V8_UNLIKELY(v8_flags.trace_wasm_memory)) {
+       // TODO(14259): Implement memory tracing for multiple memories.
+@@ -8211,8 +8204,8 @@ class LiftoffCompiler {
+     os << "\n";
+   }
+ 
+-  void DefineSafepoint() {
+-    auto safepoint = safepoint_table_builder_.DefineSafepoint(&asm_);
++  void DefineSafepoint(int pc_offset = 0) {
++    auto safepoint = safepoint_table_builder_.DefineSafepoint(&asm_, pc_offset);
+     __ cache_state()->DefineSafepoint(safepoint);
+   }
+ 
+diff --git a/src/wasm/wasm-code-manager.cc b/src/wasm/wasm-code-manager.cc
+index 451e0043d23..a46ab14cfff 100644
+--- a/src/wasm/wasm-code-manager.cc
++++ b/src/wasm/wasm-code-manager.cc
+@@ -426,10 +426,10 @@ void WasmCode::Disassemble(const char* name, std::ostream& os,
+   }
+ 
+   if (protected_instructions_size_ > 0) {
+-    os << "Protected instructions:\n pc offset  land pad\n";
++    os << "Protected instructions:\n pc offset\n";
+     for (auto& data : protected_instructions()) {
+       os << std::setw(10) << std::hex << data.instr_offset << std::setw(10)
+-         << std::hex << data.landing_offset << "\n";
++         << "\n";
+     }
+     os << "\n";
+   }
+diff --git a/src/wasm/wasm-opcodes-inl.h b/src/wasm/wasm-opcodes-inl.h
+index 42c71aa262a..093a39c1e7c 100644
+--- a/src/wasm/wasm-opcodes-inl.h
++++ b/src/wasm/wasm-opcodes-inl.h
+@@ -136,6 +136,23 @@ constexpr bool WasmOpcodes::IsRelaxedSimdOpcode(WasmOpcode opcode) {
+   return (opcode & 0xfff00) == 0xfd100;
+ }
+ 
++#if DEBUG
++// static
++constexpr bool WasmOpcodes::IsMemoryAccessOpcode(WasmOpcode opcode) {
++  switch (opcode) {
++#define MEM_OPCODE(name, ...) case WasmOpcode::kExpr##name:
++    FOREACH_LOAD_MEM_OPCODE(MEM_OPCODE)
++    FOREACH_STORE_MEM_OPCODE(MEM_OPCODE)
++    FOREACH_ATOMIC_OPCODE(MEM_OPCODE)
++    FOREACH_SIMD_MEM_OPCODE(MEM_OPCODE)
++    FOREACH_SIMD_MEM_1_OPERAND_OPCODE(MEM_OPCODE)
++    return true;
++    default:
++      return false;
++  }
++}
++#endif  // DEBUG
++
+ constexpr uint8_t WasmOpcodes::ExtractPrefix(WasmOpcode opcode) {
+   // See comment on {WasmOpcode} for the encoding.
+   return (opcode > 0xffff) ? opcode >> 12 : opcode >> 8;
+diff --git a/src/wasm/wasm-opcodes.h b/src/wasm/wasm-opcodes.h
+index 0b3fc2314b2..90b0dfd8214 100644
+--- a/src/wasm/wasm-opcodes.h
++++ b/src/wasm/wasm-opcodes.h
+@@ -902,6 +902,9 @@ class V8_EXPORT_PRIVATE WasmOpcodes {
+   static constexpr bool IsExternRefOpcode(WasmOpcode);
+   static constexpr bool IsThrowingOpcode(WasmOpcode);
+   static constexpr bool IsRelaxedSimdOpcode(WasmOpcode);
++#if DEBUG
++  static constexpr bool IsMemoryAccessOpcode(WasmOpcode);
++#endif  // DEBUG
+   // Check whether the given opcode always jumps, i.e. all instructions after
+   // this one in the current block are dead. Returns false for |end|.
+   static constexpr bool IsUnconditionalJump(WasmOpcode);
+diff --git a/test/unittests/compiler/revec-unittest.cc b/test/unittests/compiler/revec-unittest.cc
+index 4be6154507a..2fcf81f000d 100644
+--- a/test/unittests/compiler/revec-unittest.cc
++++ b/test/unittests/compiler/revec-unittest.cc
+@@ -33,7 +33,9 @@ class RevecTest : public TestWithIsolateAndZone {
+         common_(zone()),
+         machine_(zone(), MachineRepresentation::kWord64,
+                  MachineOperatorBuilder::Flag::kAllOptionalOps),
+-        mcgraph_(&graph_, &common_, &machine_) {}
++        mcgraph_(&graph_, &common_, &machine_),
++        source_positions_(
++            mcgraph()->zone()->New<SourcePositionTable>(mcgraph()->graph())) {}
+ 
+   void TestBinOp(const Operator* bin_op,
+                  const IrOpcode::Value expected_simd256_op_code);
+@@ -49,12 +51,14 @@ class RevecTest : public TestWithIsolateAndZone {
+   CommonOperatorBuilder* common() { return &common_; }
+   MachineOperatorBuilder* machine() { return &machine_; }
+   MachineGraph* mcgraph() { return &mcgraph_; }
++  SourcePositionTable* source_positions() { return source_positions_; }
+ 
+  private:
+   Graph graph_;
+   CommonOperatorBuilder common_;
+   MachineOperatorBuilder machine_;
+   MachineGraph mcgraph_;
++  SourcePositionTable* source_positions_;
+ };
+ 
+ // Create a graph which perform binary operation on two 256 bit vectors(a, b),
+@@ -110,7 +114,7 @@ void RevecTest::TestBinOp(const Operator* bin_op,
+   graph()->SetSimd(true);
+ 
+   // Test whether the graph can be revectorized
+-  Revectorizer revec(zone(), graph(), mcgraph());
++  Revectorizer revec(zone(), graph(), mcgraph(), source_positions());
+   EXPECT_TRUE(revec.TryRevectorize(nullptr));
+ 
+   // Test whether the graph has been revectorized
+@@ -239,7 +243,7 @@ TEST_F(RevecTest, ReorderLoadChain1) {
+   graph()->SetSimd(true);
+ 
+   // Test whether the graph can be revectorized
+-  Revectorizer revec(zone(), graph(), mcgraph());
++  Revectorizer revec(zone(), graph(), mcgraph(), source_positions());
+   EXPECT_TRUE(revec.TryRevectorize(nullptr));
+ }
+ 
+@@ -299,7 +303,7 @@ TEST_F(RevecTest, ReorderLoadChain2) {
+   graph()->SetSimd(true);
+ 
+   // Test whether the graph can be revectorized
+-  Revectorizer revec(zone(), graph(), mcgraph());
++  Revectorizer revec(zone(), graph(), mcgraph(), source_positions());
+   EXPECT_TRUE(revec.TryRevectorize(nullptr));
+ }
+ 
+@@ -357,7 +361,7 @@ void RevecTest::TestShiftOp(const Operator* shift_op,
+   graph()->RecordSimdStore(store1);
+   graph()->SetSimd(true);
+ 
+-  Revectorizer revec(zone(), graph(), mcgraph());
++  Revectorizer revec(zone(), graph(), mcgraph(), source_positions());
+   bool result = revec.TryRevectorize(nullptr);
+ 
+   if (CpuFeatures::IsSupported(AVX2)) {
+@@ -426,7 +430,7 @@ void RevecTest::TestSplatOp(const Operator* splat_op,
+   graph()->RecordSimdStore(store1);
+   graph()->SetSimd(true);
+ 
+-  Revectorizer revec(zone(), graph(), mcgraph());
++  Revectorizer revec(zone(), graph(), mcgraph(), source_positions());
+   bool result = revec.TryRevectorize(nullptr);
+ 
+   EXPECT_TRUE(result);
+@@ -513,7 +517,7 @@ TEST_F(RevecTest, ShuffleForSplat) {
+   graph()->RecordSimdStore(store1);
+   graph()->SetSimd(true);
+ 
+-  Revectorizer revec(zone(), graph(), mcgraph());
++  Revectorizer revec(zone(), graph(), mcgraph(), source_positions());
+   EXPECT_TRUE(revec.TryRevectorize(nullptr));
+ 
+   // Test whether the graph has been revectorized
+@@ -572,7 +576,7 @@ void RevecTest::TestLoadSplat(
+   graph()->RecordSimdStore(store1);
+   graph()->SetSimd(true);
+ 
+-  Revectorizer revec(zone(), graph(), mcgraph());
++  Revectorizer revec(zone(), graph(), mcgraph(), source_positions());
+   bool result = revec.TryRevectorize(nullptr);
+ 
+   EXPECT_TRUE(result);
+@@ -645,7 +649,7 @@ TEST_F(RevecTest, StoreDependencyCheck) {
+   graph()->SetSimd(true);
+ 
+   // Test whether the graph can be revectorized
+-  Revectorizer revec(zone(), graph(), mcgraph());
++  Revectorizer revec(zone(), graph(), mcgraph(), source_positions());
+   EXPECT_FALSE(revec.TryRevectorize(nullptr));
+ }
+ 
+@@ -682,7 +686,7 @@ TEST_F(RevecTest, S128Zero) {
+   graph()->SetSimd(true);
+ 
+   // Test whether the graph can be revectorized
+-  Revectorizer revec(zone(), graph(), mcgraph());
++  Revectorizer revec(zone(), graph(), mcgraph(), source_positions());
+   EXPECT_TRUE(revec.TryRevectorize(nullptr));
+ }
+ 
+diff --git a/test/unittests/wasm/trap-handler-native-unittest.cc b/test/unittests/wasm/trap-handler-native-unittest.cc
+index 3eac3678298..d5918c38fc2 100644
+--- a/test/unittests/wasm/trap-handler-native-unittest.cc
++++ b/test/unittests/wasm/trap-handler-native-unittest.cc
+@@ -391,12 +391,15 @@ TEST_P(TrapHandlerTest, TestTrapHandlerRecovery) {
+   CodeDesc desc;
+   masm.GetCode(static_cast<LocalIsolate*>(nullptr), &desc);
+ 
+-  trap_handler::ProtectedInstructionData protected_instruction{crash_offset,
+-                                                               recovery_offset};
++  trap_handler::ProtectedInstructionData protected_instruction{crash_offset};
+   trap_handler::RegisterHandlerData(reinterpret_cast<Address>(desc.buffer),
+                                     desc.instr_size, 1, &protected_instruction);
+ 
++  uintptr_t landing_pad =
++      reinterpret_cast<uintptr_t>(buffer_->start()) + recovery_offset;
++  trap_handler::SetLandingPad(landing_pad);
+   ExecuteBuffer();
++  trap_handler::SetLandingPad(0);
+ }
+ 
+ TEST_P(TrapHandlerTest, TestReleaseHandlerData) {
+@@ -438,19 +441,21 @@ TEST_P(TrapHandlerTest, TestReleaseHandlerData) {
+   CodeDesc desc;
+   masm.GetCode(static_cast<LocalIsolate*>(nullptr), &desc);
+ 
+-  trap_handler::ProtectedInstructionData protected_instruction{crash_offset,
+-                                                               recovery_offset};
++  trap_handler::ProtectedInstructionData protected_instruction{crash_offset};
+   int handler_id = trap_handler::RegisterHandlerData(
+       reinterpret_cast<Address>(desc.buffer), desc.instr_size, 1,
+       &protected_instruction);
+ 
++  uintptr_t landing_pad =
++      reinterpret_cast<uintptr_t>(buffer_->start()) + recovery_offset;
++  trap_handler::SetLandingPad(landing_pad);
+   ExecuteBuffer();
+-
+   // Deregister from the trap handler. The trap handler should not do the
+   // recovery now.
+   trap_handler::ReleaseHandlerData(handler_id);
+ 
+   ExecuteExpectCrash(buffer_.get());
++  trap_handler::SetLandingPad(0);
+ }
+ 
+ TEST_P(TrapHandlerTest, TestNoThreadInWasmFlag) {
+@@ -463,7 +468,6 @@ TEST_P(TrapHandlerTest, TestNoThreadInWasmFlag) {
+   __ Move(scratch, crash_address_, RelocInfo::NO_INFO);
+   uint32_t crash_offset = __ pc_offset();
+   __ testl(MemOperand(scratch, 0), Immediate(1));
+-  uint32_t recovery_offset = __ pc_offset();
+   __ Pop(scratch);
+ #elif V8_HOST_ARCH_ARM64
+   UseScratchRegisterScope temps(&masm);
+@@ -471,14 +475,12 @@ TEST_P(TrapHandlerTest, TestNoThreadInWasmFlag) {
+   __ Mov(scratch, crash_address_);
+   uint32_t crash_offset = __ pc_offset();
+   __ Ldr(scratch, MemOperand(scratch));
+-  uint32_t recovery_offset = __ pc_offset();
+ #elif V8_HOST_ARCH_LOONG64
+   UseScratchRegisterScope temps(&masm);
+   Register scratch = temps.Acquire();
+   __ li(scratch, static_cast<int64_t>(crash_address_));
+   uint32_t crash_offset = __ pc_offset();
+   __ Ld_d(scratch, MemOperand(scratch, 0));
+-  uint32_t recovery_offset = __ pc_offset();
+ #else
+ #error Unsupported platform
+ #endif
+@@ -486,8 +488,7 @@ TEST_P(TrapHandlerTest, TestNoThreadInWasmFlag) {
+   CodeDesc desc;
+   masm.GetCode(static_cast<LocalIsolate*>(nullptr), &desc);
+ 
+-  trap_handler::ProtectedInstructionData protected_instruction{crash_offset,
+-                                                               recovery_offset};
++  trap_handler::ProtectedInstructionData protected_instruction{crash_offset};
+   trap_handler::RegisterHandlerData(reinterpret_cast<Address>(desc.buffer),
+                                     desc.instr_size, 1, &protected_instruction);
+ 
+@@ -505,8 +506,6 @@ TEST_P(TrapHandlerTest, TestCrashInWasmNoProtectedInstruction) {
+   uint32_t no_crash_offset = __ pc_offset();
+   __ Move(scratch, crash_address_, RelocInfo::NO_INFO);
+   __ testl(MemOperand(scratch, 0), Immediate(1));
+-  // Offset where the crash is not happening.
+-  uint32_t recovery_offset = __ pc_offset();
+   GenerateResetThreadInWasmFlagCode(&masm);
+   __ Pop(scratch);
+ #elif V8_HOST_ARCH_ARM64
+@@ -516,8 +515,6 @@ TEST_P(TrapHandlerTest, TestCrashInWasmNoProtectedInstruction) {
+   uint32_t no_crash_offset = __ pc_offset();
+   __ Mov(scratch, crash_address_);
+   __ Ldr(scratch, MemOperand(scratch));
+-  // Offset where the crash is not happening.
+-  uint32_t recovery_offset = __ pc_offset();
+   GenerateResetThreadInWasmFlagCode(&masm);
+ #elif V8_HOST_ARCH_LOONG64
+   GenerateSetThreadInWasmFlagCode(&masm);
+@@ -536,8 +533,7 @@ TEST_P(TrapHandlerTest, TestCrashInWasmNoProtectedInstruction) {
+   CodeDesc desc;
+   masm.GetCode(static_cast<LocalIsolate*>(nullptr), &desc);
+ 
+-  trap_handler::ProtectedInstructionData protected_instruction{no_crash_offset,
+-                                                               recovery_offset};
++  trap_handler::ProtectedInstructionData protected_instruction{no_crash_offset};
+   trap_handler::RegisterHandlerData(reinterpret_cast<Address>(desc.buffer),
+                                     desc.instr_size, 1, &protected_instruction);
+ 
+@@ -555,8 +551,6 @@ TEST_P(TrapHandlerTest, TestCrashInWasmWrongCrashType) {
+   __ xorq(scratch, scratch);
+   uint32_t crash_offset = __ pc_offset();
+   __ divq(scratch);
+-  // Offset where the crash is not happening.
+-  uint32_t recovery_offset = __ pc_offset();
+   GenerateResetThreadInWasmFlagCode(&masm);
+   __ Pop(scratch);
+ #elif V8_HOST_ARCH_ARM64
+@@ -564,8 +558,6 @@ TEST_P(TrapHandlerTest, TestCrashInWasmWrongCrashType) {
+   UseScratchRegisterScope temps(&masm);
+   uint32_t crash_offset = __ pc_offset();
+   __ Trap();
+-  // Offset where the crash is not happening.
+-  uint32_t recovery_offset = __ pc_offset();
+   GenerateResetThreadInWasmFlagCode(&masm);
+ #elif V8_HOST_ARCH_LOONG64
+   GenerateSetThreadInWasmFlagCode(&masm);
+@@ -582,8 +574,7 @@ TEST_P(TrapHandlerTest, TestCrashInWasmWrongCrashType) {
+   CodeDesc desc;
+   masm.GetCode(static_cast<LocalIsolate*>(nullptr), &desc);
+ 
+-  trap_handler::ProtectedInstructionData protected_instruction{crash_offset,
+-                                                               recovery_offset};
++  trap_handler::ProtectedInstructionData protected_instruction{crash_offset};
+   trap_handler::RegisterHandlerData(reinterpret_cast<Address>(desc.buffer),
+                                     desc.instr_size, 1, &protected_instruction);
+ 
+@@ -636,7 +627,6 @@ TEST_P(TrapHandlerTest, TestCrashInOtherThread) {
+   __ Move(scratch, crash_address_, RelocInfo::NO_INFO);
+   uint32_t crash_offset = __ pc_offset();
+   __ testl(MemOperand(scratch, 0), Immediate(1));
+-  uint32_t recovery_offset = __ pc_offset();
+   __ Pop(scratch);
+ #elif V8_HOST_ARCH_ARM64
+   UseScratchRegisterScope temps(&masm);
+@@ -644,14 +634,12 @@ TEST_P(TrapHandlerTest, TestCrashInOtherThread) {
+   __ Mov(scratch, crash_address_);
+   uint32_t crash_offset = __ pc_offset();
+   __ Ldr(scratch, MemOperand(scratch));
+-  uint32_t recovery_offset = __ pc_offset();
+ #elif V8_HOST_ARCH_LOONG64
+   UseScratchRegisterScope temps(&masm);
+   Register scratch = temps.Acquire();
+   __ li(scratch, static_cast<int64_t>(crash_address_));
+   uint32_t crash_offset = __ pc_offset();
+   __ Ld_d(scratch, MemOperand(scratch, 0));
+-  uint32_t recovery_offset = __ pc_offset();
+ #else
+ #error Unsupported platform
+ #endif
+@@ -659,8 +647,7 @@ TEST_P(TrapHandlerTest, TestCrashInOtherThread) {
+   CodeDesc desc;
+   masm.GetCode(static_cast<LocalIsolate*>(nullptr), &desc);
+ 
+-  trap_handler::ProtectedInstructionData protected_instruction{crash_offset,
+-                                                               recovery_offset};
++  trap_handler::ProtectedInstructionData protected_instruction{crash_offset};
+   trap_handler::RegisterHandlerData(reinterpret_cast<Address>(desc.buffer),
+                                     desc.instr_size, 1, &protected_instruction);
+ 
+diff --git a/test/unittests/wasm/trap-handler-simulator-unittest.cc b/test/unittests/wasm/trap-handler-simulator-unittest.cc
+index 586c72f6806..87581c20095 100644
+--- a/test/unittests/wasm/trap-handler-simulator-unittest.cc
++++ b/test/unittests/wasm/trap-handler-simulator-unittest.cc
+@@ -84,18 +84,23 @@ TEST_F(SimulatorTrapHandlerTest, ProbeMemoryFailWhileInWasm) {
+   EXPECT_DEATH_IF_SUPPORTED(ProbeMemory(InaccessibleMemoryPtr(), kFakePc), "");
+ }
+ 
+-TEST_F(SimulatorTrapHandlerTest, ProbeMemoryWithTrapHandled) {
+-  constexpr uintptr_t kFakeLandingPad = 19;
++namespace {
++uintptr_t v8_landing_pad() {
++  EmbeddedData embedded_data = EmbeddedData::FromBlob();
++  return embedded_data.InstructionStartOf(Builtin::kWasmTrapHandlerLandingPad);
++}
++}  // namespace
+ 
++TEST_F(SimulatorTrapHandlerTest, ProbeMemoryWithTrapHandled) {
+   constexpr bool kUseDefaultHandler = true;
+   CHECK(v8::V8::EnableWebAssemblyTrapHandler(kUseDefaultHandler));
+ 
+-  ProtectedInstructionData fake_protected_instruction{kFakePc, kFakeLandingPad};
++  ProtectedInstructionData fake_protected_instruction{kFakePc};
+   int handler_data_index =
+       RegisterHandlerData(0, 128, 1, &fake_protected_instruction);
+ 
+   SetThreadInWasm();
+-  EXPECT_EQ(kFakeLandingPad, ProbeMemory(InaccessibleMemoryPtr(), kFakePc));
++  EXPECT_EQ(v8_landing_pad(), ProbeMemory(InaccessibleMemoryPtr(), kFakePc));
+ 
+   // Reset everything.
+   ResetThreadInWasm();
+@@ -142,7 +147,7 @@ TEST_F(SimulatorTrapHandlerTest, ProbeMemoryWithLandingPad) {
+   constexpr bool kUseDefaultHandler = true;
+   CHECK(v8::V8::EnableWebAssemblyTrapHandler(kUseDefaultHandler));
+ 
+-  ProtectedInstructionData protected_instruction{crash_offset, recovery_offset};
++  ProtectedInstructionData protected_instruction{crash_offset};
+   int handler_data_index =
+       RegisterHandlerData(reinterpret_cast<Address>(desc.buffer),
+                           desc.instr_size, 1, &protected_instruction);
+@@ -152,12 +157,15 @@ TEST_F(SimulatorTrapHandlerTest, ProbeMemoryWithLandingPad) {
+   GeneratedCode<void> code = GeneratedCode<void>::FromAddress(
+       i_isolate(), reinterpret_cast<Address>(desc.buffer));
+ 
++  trap_handler::SetLandingPad(reinterpret_cast<uintptr_t>(buffer->start()) +
++                              recovery_offset);
+   SetThreadInWasm();
+   code.Call();
+   ResetThreadInWasm();
+ 
+   ReleaseHandlerData(handler_data_index);
+   RemoveTrapHandler();
++  trap_handler::SetLandingPad(0);
+ 
+   EXPECT_EQ(1u, GetRecoveredTrapCount());
+ }
+-- 
+2.35.1
+

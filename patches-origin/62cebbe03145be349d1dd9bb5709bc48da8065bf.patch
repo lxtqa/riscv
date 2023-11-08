@@ -1,0 +1,1351 @@
+From 62cebbe03145be349d1dd9bb5709bc48da8065bf Mon Sep 17 00:00:00 2001
+From: Clemens Backes <clemensb@chromium.org>
+Date: Mon, 5 Sep 2022 14:31:14 +0200
+Subject: [PATCH] [builtins] Use v8_flags for accessing flag values
+
+Avoid the deprecated FLAG_* syntax, access flag values via the
+{v8_flags} struct instead.
+
+R=nicohartmann@chromium.org
+
+Bug: v8:12887
+Change-Id: Icc9016552c53489afd821ff6d360c025e48fee18
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3871201
+Commit-Queue: Clemens Backes <clemensb@chromium.org>
+Reviewed-by: Nico Hartmann <nicohartmann@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#82981}
+---
+ src/builtins/accessors.cc                     |  3 +-
+ src/builtins/arm/builtins-arm.cc              | 24 ++++++++--------
+ src/builtins/arm64/builtins-arm64.cc          | 26 ++++++++---------
+ src/builtins/builtins-arraybuffer.cc          |  2 +-
+ .../builtins-atomics-synchronization.cc       | 12 ++++----
+ src/builtins/builtins-constructor-gen.cc      |  2 +-
+ src/builtins/builtins-constructor.h           |  5 ++--
+ src/builtins/builtins-handler-gen.cc          |  4 +--
+ src/builtins/builtins-shared-array.cc         |  2 +-
+ src/builtins/builtins-string-gen.cc           |  2 +-
+ src/builtins/builtins-struct.cc               |  2 +-
+ src/builtins/builtins.cc                      |  8 +++---
+ src/builtins/builtins.h                       |  2 +-
+ src/builtins/ia32/builtins-ia32.cc            | 26 ++++++++---------
+ src/builtins/loong64/builtins-loong64.cc      | 22 +++++++--------
+ src/builtins/mips/builtins-mips.cc            | 26 ++++++++---------
+ src/builtins/mips64/builtins-mips64.cc        | 22 +++++++--------
+ src/builtins/ppc/builtins-ppc.cc              | 28 +++++++++----------
+ src/builtins/profile-data-reader.cc           |  2 +-
+ src/builtins/riscv/builtins-riscv.cc          | 20 ++++++-------
+ src/builtins/s390/builtins-s390.cc            | 20 ++++++-------
+ src/builtins/setup-builtins-internal.cc       |  4 +--
+ src/builtins/x64/builtins-x64.cc              | 18 ++++++------
+ 23 files changed, 142 insertions(+), 140 deletions(-)
+
+diff --git a/src/builtins/accessors.cc b/src/builtins/accessors.cc
+index 36e225bb652..6c843de4f21 100644
+--- a/src/builtins/accessors.cc
++++ b/src/builtins/accessors.cc
+@@ -718,7 +718,8 @@ void Accessors::FunctionCallerGetter(
+   maybe_caller = FindCaller(isolate, function);
+   Handle<JSFunction> caller;
+   // We don't support caller access with correctness fuzzing.
+-  if (!FLAG_correctness_fuzzer_suppressions && maybe_caller.ToHandle(&caller)) {
++  if (!v8_flags.correctness_fuzzer_suppressions &&
++      maybe_caller.ToHandle(&caller)) {
+     result = caller;
+   } else {
+     result = isolate->factory()->null_value();
+diff --git a/src/builtins/arm/builtins-arm.cc b/src/builtins/arm/builtins-arm.cc
+index 4025a18062a..b41208b3e15 100644
+--- a/src/builtins/arm/builtins-arm.cc
++++ b/src/builtins/arm/builtins-arm.cc
+@@ -327,7 +327,7 @@ static void GetSharedFunctionInfoBytecodeOrBaseline(MacroAssembler* masm,
+   ASM_CODE_COMMENT(masm);
+   Label done;
+   __ CompareObjectType(sfi_data, scratch1, scratch1, CODET_TYPE);
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label not_baseline;
+     __ b(ne, &not_baseline);
+     AssertCodeIsBaseline(masm, sfi_data, scratch1);
+@@ -423,7 +423,7 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
+   }
+ 
+   // Underlying function needs to have bytecode available.
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label is_baseline;
+     __ ldr(r3, FieldMemOperand(r4, JSFunction::kSharedFunctionInfoOffset));
+     __ ldr(r3, FieldMemOperand(r3, SharedFunctionInfo::kFunctionDataOffset));
+@@ -1009,7 +1009,7 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+ 
+     // Baseline code frames store the feedback vector where interpreter would
+     // store the bytecode offset.
+-    if (FLAG_debug_code) {
++    if (v8_flags.debug_code) {
+       UseScratchRegisterScope temps(masm);
+       Register scratch = temps.Acquire();
+       __ CompareObjectType(feedback_vector, scratch, scratch,
+@@ -1523,7 +1523,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+   __ ldr(kInterpreterBytecodeArrayRegister,
+          MemOperand(fp, InterpreterFrameConstants::kBytecodeArrayFromFp));
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     // Check function data field is actually a BytecodeArray object.
+     __ SmiTst(kInterpreterBytecodeArrayRegister);
+     __ Assert(
+@@ -1539,7 +1539,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+          MemOperand(fp, InterpreterFrameConstants::kBytecodeOffsetFromFp));
+   __ SmiUntag(kInterpreterBytecodeOffsetRegister);
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label okay;
+     __ cmp(kInterpreterBytecodeOffsetRegister,
+            Operand(BytecodeArray::kHeaderSize - kHeapObjectTag));
+@@ -2011,7 +2011,7 @@ void Builtins::Generate_CallOrConstructVarargs(MacroAssembler* masm,
+   // -----------------------------------
+   Register scratch = r8;
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     // Allow r2 to be a FixedArray, or a FixedDoubleArray if r4 == 0.
+     Label ok, fail;
+     __ AssertNotSmi(r2);
+@@ -2708,7 +2708,7 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
+ #if V8_HOST_ARCH_ARM
+   int frame_alignment = MacroAssembler::ActivationFrameAlignment();
+   int frame_alignment_mask = frame_alignment - 1;
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     if (frame_alignment > kPointerSize) {
+       Label alignment_as_expected;
+       DCHECK(base::bits::IsPowerOfTwo(frame_alignment));
+@@ -2735,7 +2735,7 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
+ 
+   // Check that there is no pending exception, otherwise we
+   // should have returned the exception sentinel.
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label okay;
+     ExternalReference pending_exception_address = ExternalReference::Create(
+         IsolateAddressId::kPendingExceptionAddress, masm->isolate());
+@@ -2861,7 +2861,7 @@ void Builtins::Generate_DoubleToI(MacroAssembler* masm) {
+   // If we reach this code, 30 <= exponent <= 83.
+   // `TryInlineTruncateDoubleToI` above will have truncated any double with an
+   // exponent lower than 30.
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     // Scratch is exponent - 1.
+     __ cmp(scratch, Operand(30 - 1));
+     __ Check(ge, AbortReason::kUnexpectedValue);
+@@ -2971,7 +2971,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+   // No more valid handles (the result handle was the last one). Restore
+   // previous handle scope.
+   __ str(r4, MemOperand(r9, kNextOffset));
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     __ ldr(r1, MemOperand(r9, kLevelOffset));
+     __ cmp(r1, r6);
+     __ Check(eq, AbortReason::kUnexpectedLevelAfterReturnFromApiCall);
+@@ -3522,12 +3522,12 @@ void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
+ 
+     // Start with baseline code.
+     __ bind(&start_with_baseline);
+-  } else if (FLAG_debug_code) {
++  } else if (v8_flags.debug_code) {
+     __ CompareObjectType(code_obj, r3, r3, CODET_TYPE);
+     __ Assert(eq, AbortReason::kExpectedBaselineData);
+   }
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     AssertCodeIsBaseline(masm, code_obj, r3);
+   }
+ 
+diff --git a/src/builtins/arm64/builtins-arm64.cc b/src/builtins/arm64/builtins-arm64.cc
+index 0b0f9fed127..be6de04b544 100644
+--- a/src/builtins/arm64/builtins-arm64.cc
++++ b/src/builtins/arm64/builtins-arm64.cc
+@@ -73,7 +73,7 @@ void Generate_JSBuiltinsConstructStubHelper(MacroAssembler* masm) {
+     Label already_aligned;
+     Register argc = x0;
+ 
+-    if (FLAG_debug_code) {
++    if (v8_flags.debug_code) {
+       // Check that FrameScope pushed the context on to the stack already.
+       __ Peek(x2, 0);
+       __ Cmp(x2, cp);
+@@ -193,7 +193,7 @@ void Builtins::Generate_JSConstructStubGeneric(MacroAssembler* masm) {
+   __ EnterFrame(StackFrame::CONSTRUCT);
+   Label post_instantiation_deopt_entry, not_create_implicit_receiver;
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     // Check that FrameScope pushed the context on to the stack already.
+     __ Peek(x2, 0);
+     __ Cmp(x2, cp);
+@@ -411,7 +411,7 @@ static void GetSharedFunctionInfoBytecodeOrBaseline(MacroAssembler* masm,
+   ASM_CODE_COMMENT(masm);
+   Label done;
+   __ CompareObjectType(sfi_data, scratch1, scratch1, CODET_TYPE);
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label not_baseline;
+     __ B(ne, &not_baseline);
+     AssertCodeTIsBaseline(masm, sfi_data, scratch1);
+@@ -524,7 +524,7 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
+   }
+ 
+   // Underlying function needs to have bytecode available.
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label is_baseline;
+     __ LoadTaggedPointerField(
+         x3, FieldMemOperand(x4, JSFunction::kSharedFunctionInfoOffset));
+@@ -990,7 +990,7 @@ static void LeaveInterpreterFrame(MacroAssembler* masm, Register scratch1,
+   __ LeaveFrame(StackFrame::INTERPRETED);
+ 
+   // Drop receiver + arguments.
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     __ Tst(params_size, kSystemPointerSize - 1);
+     __ Check(eq, AbortReason::kUnexpectedValue);
+   }
+@@ -1194,7 +1194,7 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+   }
+ 
+   // Do "fast" return to the caller pc in lr.
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     // The accumulator should already be "undefined", we don't have to load it.
+     __ CompareRoot(kInterpreterAccumulatorRegister, RootIndex::kUndefinedValue);
+     __ Assert(eq, AbortReason::kUnexpectedValue);
+@@ -1678,7 +1678,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+   __ Ldr(kInterpreterBytecodeArrayRegister,
+          MemOperand(fp, InterpreterFrameConstants::kBytecodeArrayFromFp));
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     // Check function data field is actually a BytecodeArray object.
+     __ AssertNotSmi(
+         kInterpreterBytecodeArrayRegister,
+@@ -1693,7 +1693,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+   __ SmiUntag(kInterpreterBytecodeOffsetRegister,
+               MemOperand(fp, InterpreterFrameConstants::kBytecodeOffsetFromFp));
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label okay;
+     __ cmp(kInterpreterBytecodeOffsetRegister,
+            Operand(BytecodeArray::kHeaderSize - kHeapObjectTag));
+@@ -2347,7 +2347,7 @@ void Builtins::Generate_CallOrConstructVarargs(MacroAssembler* masm,
+   //  -- x4 : len (number of elements to push from args)
+   //  -- x3 : new.target (for [[Construct]])
+   // -----------------------------------
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     // Allow x2 to be a FixedArray, or a FixedDoubleArray if x4 == 0.
+     Label ok, fail;
+     __ AssertNotSmi(x2, AbortReason::kOperandIsNotAFixedArray);
+@@ -4311,7 +4311,7 @@ void Builtins::Generate_DoubleToI(MacroAssembler* masm) {
+   // signed overflow in the int64_t target. Since we've already handled
+   // exponents >= 84, we can guarantee that 63 <= exponent < 84.
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     __ Cmp(exponent, HeapNumber::kExponentBias + 63);
+     // Exponents less than this should have been handled by the Fcvt case.
+     __ Check(ge, AbortReason::kUnexpectedValue);
+@@ -4421,7 +4421,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+   // No more valid handles (the result handle was the last one). Restore
+   // previous handle scope.
+   __ Str(next_address_reg, MemOperand(handle_scope_base, kNextOffset));
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     __ Ldr(w1, MemOperand(handle_scope_base, kLevelOffset));
+     __ Cmp(w1, level_reg);
+     __ Check(eq, AbortReason::kUnexpectedLevelAfterReturnFromApiCall);
+@@ -5029,12 +5029,12 @@ void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
+ 
+     // Start with baseline code.
+     __ bind(&start_with_baseline);
+-  } else if (FLAG_debug_code) {
++  } else if (v8_flags.debug_code) {
+     __ CompareObjectType(code_obj, x3, x3, CODET_TYPE);
+     __ Assert(eq, AbortReason::kExpectedBaselineData);
+   }
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     AssertCodeTIsBaseline(masm, code_obj, x3);
+   }
+   if (V8_EXTERNAL_CODE_SPACE_BOOL) {
+diff --git a/src/builtins/builtins-arraybuffer.cc b/src/builtins/builtins-arraybuffer.cc
+index 7f27f26c644..4d19f6ed42d 100644
+--- a/src/builtins/builtins-arraybuffer.cc
++++ b/src/builtins/builtins-arraybuffer.cc
+@@ -136,7 +136,7 @@ BUILTIN(ArrayBufferConstructor) {
+   }
+ 
+   Handle<Object> number_max_length;
+-  if (FLAG_harmony_rab_gsab) {
++  if (v8_flags.harmony_rab_gsab) {
+     Handle<Object> max_length;
+     Handle<Object> options = args.atOrUndefined(isolate, 2);
+     ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+diff --git a/src/builtins/builtins-atomics-synchronization.cc b/src/builtins/builtins-atomics-synchronization.cc
+index 46f90cf6a04..904d5605970 100644
+--- a/src/builtins/builtins-atomics-synchronization.cc
++++ b/src/builtins/builtins-atomics-synchronization.cc
+@@ -9,13 +9,13 @@ namespace v8 {
+ namespace internal {
+ 
+ BUILTIN(AtomicsMutexConstructor) {
+-  DCHECK(FLAG_harmony_struct);
++  DCHECK(v8_flags.harmony_struct);
+   HandleScope scope(isolate);
+   return *isolate->factory()->NewJSAtomicsMutex();
+ }
+ 
+ BUILTIN(AtomicsMutexLock) {
+-  DCHECK(FLAG_harmony_struct);
++  DCHECK(v8_flags.harmony_struct);
+   constexpr char method_name[] = "Atomics.Mutex.lock";
+   HandleScope scope(isolate);
+ 
+@@ -57,7 +57,7 @@ BUILTIN(AtomicsMutexLock) {
+ }
+ 
+ BUILTIN(AtomicsMutexTryLock) {
+-  DCHECK(FLAG_harmony_struct);
++  DCHECK(v8_flags.harmony_struct);
+   constexpr char method_name[] = "Atomics.Mutex.tryLock";
+   HandleScope scope(isolate);
+ 
+@@ -89,13 +89,13 @@ BUILTIN(AtomicsMutexTryLock) {
+ }
+ 
+ BUILTIN(AtomicsConditionConstructor) {
+-  DCHECK(FLAG_harmony_struct);
++  DCHECK(v8_flags.harmony_struct);
+   HandleScope scope(isolate);
+   return *isolate->factory()->NewJSAtomicsCondition();
+ }
+ 
+ BUILTIN(AtomicsConditionWait) {
+-  DCHECK(FLAG_harmony_struct);
++  DCHECK(v8_flags.harmony_struct);
+   constexpr char method_name[] = "Atomics.Condition.wait";
+   HandleScope scope(isolate);
+ 
+@@ -145,7 +145,7 @@ BUILTIN(AtomicsConditionWait) {
+ }
+ 
+ BUILTIN(AtomicsConditionNotify) {
+-  DCHECK(FLAG_harmony_struct);
++  DCHECK(v8_flags.harmony_struct);
+   constexpr char method_name[] = "Atomics.Condition.notify";
+   HandleScope scope(isolate);
+ 
+diff --git a/src/builtins/builtins-constructor-gen.cc b/src/builtins/builtins-constructor-gen.cc
+index 803885298eb..ab7c6c4a212 100644
+--- a/src/builtins/builtins-constructor-gen.cc
++++ b/src/builtins/builtins-constructor-gen.cc
+@@ -604,7 +604,7 @@ TNode<HeapObject> ConstructorBuiltinsAssembler::CreateShallowObjectLiteral(
+   TVARIABLE(IntPtrT, allocation_size, instance_size);
+   TNode<BoolT> is_instance_size_aligned;
+   constexpr int filler_size = kDoubleSize - kTaggedSize;
+-  bool needs_allocation_memento = FLAG_allocation_site_pretenuring;
++  bool needs_allocation_memento = v8_flags.allocation_site_pretenuring;
+   if (needs_allocation_memento) {
+     DCHECK(V8_ALLOCATION_SITE_TRACKING_BOOL);
+     // Prepare for inner-allocating the AllocationMemento.
+diff --git a/src/builtins/builtins-constructor.h b/src/builtins/builtins-constructor.h
+index 6e0dbd412ed..717472e197f 100644
+--- a/src/builtins/builtins-constructor.h
++++ b/src/builtins/builtins-constructor.h
+@@ -16,8 +16,9 @@ namespace internal {
+ class ConstructorBuiltins {
+  public:
+   static int MaximumFunctionContextSlots() {
+-    return FLAG_test_small_max_function_context_stub_size ? kSmallMaximumSlots
+-                                                          : kMaximumSlots;
++    return v8_flags.test_small_max_function_context_stub_size
++               ? kSmallMaximumSlots
++               : kMaximumSlots;
+   }
+ 
+   // Maximum number of elements in copied array (chosen so that even an array
+diff --git a/src/builtins/builtins-handler-gen.cc b/src/builtins/builtins-handler-gen.cc
+index 5d2c3c4445b..124b9f6b6f2 100644
+--- a/src/builtins/builtins-handler-gen.cc
++++ b/src/builtins/builtins-handler-gen.cc
+@@ -152,7 +152,7 @@ void HandlerBuiltinsAssembler::Generate_ElementsTransitionAndStore(
+ 
+   Label miss(this);
+ 
+-  if (FLAG_trace_elements_transitions) {
++  if (v8_flags.trace_elements_transitions) {
+     // Tracing elements transitions is the job of the runtime.
+     Goto(&miss);
+   } else {
+@@ -258,7 +258,7 @@ void HandlerBuiltinsAssembler::DispatchByElementsKind(
+ #define ELEMENTS_KINDS_CASE(KIND)                                   \
+   BIND(&if_##KIND);                                                 \
+   {                                                                 \
+-    if (!FLAG_enable_sealed_frozen_elements_kind &&                 \
++    if (!v8_flags.enable_sealed_frozen_elements_kind &&             \
+         IsAnyNonextensibleElementsKindUnchecked(KIND)) {            \
+       /* Disable support for frozen or sealed elements kinds. */    \
+       Unreachable();                                                \
+diff --git a/src/builtins/builtins-shared-array.cc b/src/builtins/builtins-shared-array.cc
+index a59595d418b..1ddfe36c007 100644
+--- a/src/builtins/builtins-shared-array.cc
++++ b/src/builtins/builtins-shared-array.cc
+@@ -16,7 +16,7 @@ static_assert(FixedArray::SizeFor(kMaxJSSharedArraySize) <=
+               kMaxRegularHeapObjectSize);
+ 
+ BUILTIN(SharedArrayConstructor) {
+-  DCHECK(FLAG_shared_string_table);
++  DCHECK(v8_flags.shared_string_table);
+ 
+   HandleScope scope(isolate);
+ 
+diff --git a/src/builtins/builtins-string-gen.cc b/src/builtins/builtins-string-gen.cc
+index 335e21cff58..37f78793576 100644
+--- a/src/builtins/builtins-string-gen.cc
++++ b/src/builtins/builtins-string-gen.cc
+@@ -1654,7 +1654,7 @@ TNode<String> StringBuiltinsAssembler::SubString(TNode<String> string,
+   // encoding at this point.
+   Label external_string(this);
+   {
+-    if (FLAG_string_slices) {
++    if (v8_flags.string_slices) {
+       Label next(this);
+ 
+       // Short slice.  Copy instead of slicing.
+diff --git a/src/builtins/builtins-struct.cc b/src/builtins/builtins-struct.cc
+index 64d82045d39..a0d75e72086 100644
+--- a/src/builtins/builtins-struct.cc
++++ b/src/builtins/builtins-struct.cc
+@@ -16,7 +16,7 @@ constexpr int kMaxJSStructFields = 999;
+ static_assert(kMaxJSStructFields <= kMaxNumberOfDescriptors);
+ 
+ BUILTIN(SharedStructTypeConstructor) {
+-  DCHECK(FLAG_shared_string_table);
++  DCHECK(v8_flags.shared_string_table);
+ 
+   HandleScope scope(isolate);
+   static const char method_name[] = "SharedStructType";
+diff --git a/src/builtins/builtins.cc b/src/builtins/builtins.cc
+index 3edd96f28f3..faa1308b980 100644
+--- a/src/builtins/builtins.cc
++++ b/src/builtins/builtins.cc
+@@ -250,13 +250,13 @@ const char* Builtins::name(Builtin builtin) {
+ }
+ 
+ void Builtins::PrintBuiltinCode() {
+-  DCHECK(FLAG_print_builtin_code);
++  DCHECK(v8_flags.print_builtin_code);
+ #ifdef ENABLE_DISASSEMBLER
+   for (Builtin builtin = Builtins::kFirst; builtin <= Builtins::kLast;
+        ++builtin) {
+     const char* builtin_name = name(builtin);
+     if (PassesFilter(base::CStrVector(builtin_name),
+-                     base::CStrVector(FLAG_print_builtin_code_filter))) {
++                     base::CStrVector(v8_flags.print_builtin_code_filter))) {
+       CodeTracer::Scope trace_scope(isolate_->GetCodeTracer());
+       OFStream os(trace_scope.file());
+       CodeT builtin_code = code(builtin);
+@@ -268,7 +268,7 @@ void Builtins::PrintBuiltinCode() {
+ }
+ 
+ void Builtins::PrintBuiltinSize() {
+-  DCHECK(FLAG_print_builtin_size);
++  DCHECK(v8_flags.print_builtin_size);
+   for (Builtin builtin = Builtins::kFirst; builtin <= Builtins::kLast;
+        ++builtin) {
+     const char* builtin_name = name(builtin);
+@@ -518,7 +518,7 @@ bool Builtins::IsCpp(Builtin builtin) {
+ // static
+ bool Builtins::AllowDynamicFunction(Isolate* isolate, Handle<JSFunction> target,
+                                     Handle<JSObject> target_global_proxy) {
+-  if (FLAG_allow_unsafe_function_constructor) return true;
++  if (v8_flags.allow_unsafe_function_constructor) return true;
+   HandleScopeImplementer* impl = isolate->handle_scope_implementer();
+   Handle<Context> responsible_context = impl->LastEnteredOrMicrotaskContext();
+   // TODO(verwaest): Remove this.
+diff --git a/src/builtins/builtins.h b/src/builtins/builtins.h
+index 315171836a8..c3935b53d01 100644
+--- a/src/builtins/builtins.h
++++ b/src/builtins/builtins.h
+@@ -299,7 +299,7 @@ class Builtins {
+     // The position independent version of InterpreterEntryTrampoline used as
+     // a template to create copies of the builtin at runtime. The copies are
+     // used to create better profiling information for ticks in bytecode
+-    // execution. See FLAG_interpreted_frames_native_stack for details.
++    // execution. See v8_flags.interpreted_frames_native_stack for details.
+     kForProfiling
+   };
+   static void Generate_InterpreterEntryTrampoline(
+diff --git a/src/builtins/ia32/builtins-ia32.cc b/src/builtins/ia32/builtins-ia32.cc
+index 49941835b87..5acd4a35008 100644
+--- a/src/builtins/ia32/builtins-ia32.cc
++++ b/src/builtins/ia32/builtins-ia32.cc
+@@ -574,7 +574,7 @@ static void GetSharedFunctionInfoBytecodeOrBaseline(MacroAssembler* masm,
+   __ LoadMap(scratch1, sfi_data);
+ 
+   __ CmpInstanceType(scratch1, CODET_TYPE);
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label not_baseline;
+     __ j(not_equal, &not_baseline);
+     AssertCodeIsBaseline(masm, sfi_data, scratch1);
+@@ -675,7 +675,7 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
+   }
+ 
+   // Underlying function needs to have bytecode available.
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label is_baseline, ok;
+     __ mov(ecx, FieldOperand(edi, JSFunction::kSharedFunctionInfoOffset));
+     __ mov(ecx, FieldOperand(ecx, SharedFunctionInfo::kFunctionDataOffset));
+@@ -963,7 +963,7 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+   GetSharedFunctionInfoBytecode(masm, kInterpreterBytecodeArrayRegister, eax);
+ 
+   // Check function data field is actually a BytecodeArray object.
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     __ AssertNotSmi(kInterpreterBytecodeArrayRegister);
+     __ CmpObjectType(kInterpreterBytecodeArrayRegister, BYTECODE_ARRAY_TYPE,
+                      eax);
+@@ -1446,7 +1446,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+   __ mov(kInterpreterBytecodeArrayRegister,
+          Operand(ebp, InterpreterFrameConstants::kBytecodeArrayFromFp));
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     // Check function data field is actually a BytecodeArray object.
+     __ AssertNotSmi(kInterpreterBytecodeArrayRegister);
+     __ CmpObjectType(kInterpreterBytecodeArrayRegister, BYTECODE_ARRAY_TYPE,
+@@ -1461,7 +1461,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+          Operand(ebp, InterpreterFrameConstants::kBytecodeOffsetFromFp));
+   __ SmiUntag(kInterpreterBytecodeOffsetRegister);
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label okay;
+     __ cmp(kInterpreterBytecodeOffsetRegister,
+            Immediate(BytecodeArray::kHeaderSize - kHeapObjectTag));
+@@ -2080,7 +2080,7 @@ void Builtins::Generate_CallOrConstructVarargs(MacroAssembler* masm,
+   __ pop(kArgumentsList);
+   __ PushReturnAddressFrom(edx);
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     // Allow kArgumentsList to be a FixedArray, or a FixedDoubleArray if
+     // kArgumentsLength == 0.
+     Label ok, fail;
+@@ -2958,7 +2958,7 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
+   // Result returned in eax, or eax+edx if result size is 2.
+ 
+   // Check stack alignment.
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     __ CheckStackAlignment();
+   }
+   // Call C function.
+@@ -2977,7 +2977,7 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
+ 
+   // Check that there is no pending exception, otherwise we
+   // should have returned the exception sentinel.
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     __ push(edx);
+     __ LoadRoot(edx, RootIndex::kTheHoleValue);
+     Label okay;
+@@ -3159,7 +3159,7 @@ Operand ApiParameterOperand(int index) {
+ void PrepareCallApiFunction(MacroAssembler* masm, int argc, Register scratch) {
+   ASM_CODE_COMMENT(masm);
+   __ EnterApiExitFrame(argc, scratch);
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     __ mov(esi, Immediate(base::bit_cast<int32_t>(kZapValue)));
+   }
+ }
+@@ -3800,7 +3800,7 @@ void Builtins::Generate_MemMove(MacroAssembler* masm) {
+     __ mov(eax, count);
+     __ dec(eax);
+     __ shr(eax, 4);
+-    if (FLAG_debug_code) {
++    if (v8_flags.debug_code) {
+       Label ok;
+       __ cmp(eax, 3);
+       __ j(below_equal, &ok);
+@@ -3857,7 +3857,7 @@ void Builtins::Generate_MemMove(MacroAssembler* masm) {
+     MemMoveEmitPopAndReturn(masm);
+ 
+     __ bind(&small_size);  // Entry point into this block.
+-    if (FLAG_debug_code) {
++    if (v8_flags.debug_code) {
+       Label ok;
+       __ cmp(count, 8);
+       __ j(below_equal, &ok);
+@@ -4123,12 +4123,12 @@ void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
+             RelocInfo::CODE_TARGET);
+ 
+     __ bind(&start_with_baseline);
+-  } else if (FLAG_debug_code) {
++  } else if (v8_flags.debug_code) {
+     __ CmpObjectType(code_obj, CODET_TYPE, kInterpreterBytecodeOffsetRegister);
+     __ Assert(equal, AbortReason::kExpectedBaselineData);
+   }
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     AssertCodeIsBaseline(masm, code_obj, ecx);
+   }
+ 
+diff --git a/src/builtins/loong64/builtins-loong64.cc b/src/builtins/loong64/builtins-loong64.cc
+index fd142020dc4..ded0d0f0bc0 100644
+--- a/src/builtins/loong64/builtins-loong64.cc
++++ b/src/builtins/loong64/builtins-loong64.cc
+@@ -317,7 +317,7 @@ static void GetSharedFunctionInfoBytecodeOrBaseline(MacroAssembler* masm,
+   Label done;
+ 
+   __ GetObjectType(sfi_data, scratch1, scratch1);
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label not_baseline;
+     __ Branch(&not_baseline, ne, scratch1, Operand(CODET_TYPE));
+     AssertCodeIsBaseline(masm, sfi_data, scratch1);
+@@ -409,7 +409,7 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
+   }
+ 
+   // Underlying function needs to have bytecode available.
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label is_baseline;
+     __ Ld_d(a3, FieldMemOperand(a4, JSFunction::kSharedFunctionInfoOffset));
+     __ Ld_d(a3, FieldMemOperand(a3, SharedFunctionInfo::kFunctionDataOffset));
+@@ -1494,7 +1494,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+   __ Ld_d(kInterpreterBytecodeArrayRegister,
+           MemOperand(fp, InterpreterFrameConstants::kBytecodeArrayFromFp));
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     // Check function data field is actually a BytecodeArray object.
+     __ SmiTst(kInterpreterBytecodeArrayRegister, kScratchReg);
+     __ Assert(ne,
+@@ -1510,7 +1510,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+   __ SmiUntag(kInterpreterBytecodeOffsetRegister,
+               MemOperand(fp, InterpreterFrameConstants::kBytecodeOffsetFromFp));
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label okay;
+     __ Branch(&okay, ge, kInterpreterBytecodeOffsetRegister,
+               Operand(BytecodeArray::kHeaderSize - kHeapObjectTag));
+@@ -2021,7 +2021,7 @@ void Builtins::Generate_CallOrConstructVarargs(MacroAssembler* masm,
+   //  -- a4 : len (number of elements to push from args)
+   //  -- a3 : new.target (for [[Construct]])
+   // -----------------------------------
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     // Allow a2 to be a FixedArray, or a FixedDoubleArray if a4 == 0.
+     Label ok, fail;
+     __ AssertNotSmi(a2);
+@@ -2759,7 +2759,7 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
+ 
+   // Check that there is no pending exception, otherwise we
+   // should have returned the exception sentinel.
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label okay;
+     ExternalReference pending_exception_address = ExternalReference::Create(
+         IsolateAddressId::kPendingExceptionAddress, masm->isolate());
+@@ -3027,7 +3027,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+   // No more valid handles (the result handle was the last one). Restore
+   // previous handle scope.
+   __ St_d(s0, MemOperand(s5, kNextOffset));
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     __ Ld_w(a1, MemOperand(s5, kLevelOffset));
+     __ Check(eq, AbortReason::kUnexpectedLevelAfterReturnFromApiCall, a1,
+              Operand(s2));
+@@ -3297,7 +3297,7 @@ void Builtins::Generate_DirectCEntry(MacroAssembler* masm) {
+   __ Ld_d(ra, MemOperand(sp, 0));  // Return to calling code.
+ 
+   // TODO(LOONG_dev): LOONG64 Check this assert.
+-  if (FLAG_debug_code && FLAG_enable_slow_asserts) {
++  if (v8_flags.debug_code && v8_flags.enable_slow_asserts) {
+     // In case of an error the return address may point to a memory area
+     // filled with kZapValue by the GC. Dereference the address and check for
+     // this.
+@@ -3392,7 +3392,7 @@ void Generate_DeoptimizationEntry(MacroAssembler* masm,
+     if ((saved_regs.bits() & (1 << i)) != 0) {
+       __ Ld_d(a2, MemOperand(sp, i * kPointerSize));
+       __ St_d(a2, MemOperand(a1, offset));
+-    } else if (FLAG_debug_code) {
++    } else if (v8_flags.debug_code) {
+       __ li(a2, Operand(kDebugZapValue));
+       __ St_d(a2, MemOperand(a1, offset));
+     }
+@@ -3549,12 +3549,12 @@ void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
+ 
+     // Start with baseline code.
+     __ bind(&start_with_baseline);
+-  } else if (FLAG_debug_code) {
++  } else if (v8_flags.debug_code) {
+     __ GetObjectType(code_obj, t2, t2);
+     __ Assert(eq, AbortReason::kExpectedBaselineData, t2, Operand(CODET_TYPE));
+   }
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     AssertCodeIsBaseline(masm, code_obj, t2);
+   }
+ 
+diff --git a/src/builtins/mips/builtins-mips.cc b/src/builtins/mips/builtins-mips.cc
+index 29967ea74b1..e2ab1d6df1a 100644
+--- a/src/builtins/mips/builtins-mips.cc
++++ b/src/builtins/mips/builtins-mips.cc
+@@ -648,7 +648,7 @@ static void GetSharedFunctionInfoBytecodeOrBaseline(MacroAssembler* masm,
+   Label done;
+ 
+   __ GetObjectType(sfi_data, scratch1, scratch1);
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label not_baseline;
+     __ Branch(&not_baseline, ne, scratch1, Operand(CODET_TYPE));
+     AssertCodeIsBaseline(masm, sfi_data, scratch1);
+@@ -739,7 +739,7 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
+   }
+ 
+   // Underlying function needs to have bytecode available.
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label is_baseline;
+     __ lw(a3, FieldMemOperand(t0, JSFunction::kSharedFunctionInfoOffset));
+     __ lw(a3, FieldMemOperand(a3, SharedFunctionInfo::kFunctionDataOffset));
+@@ -1073,7 +1073,7 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+   __ Lw(feedback_vector,
+         FieldMemOperand(closure, JSFunction::kFeedbackCellOffset));
+   __ Lw(feedback_vector, FieldMemOperand(feedback_vector, Cell::kValueOffset));
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     UseScratchRegisterScope temps(masm);
+     Register scratch = temps.Acquire();
+     __ GetObjectType(feedback_vector, scratch, scratch);
+@@ -1134,7 +1134,7 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+ 
+     // Baseline code frames store the feedback vector where interpreter would
+     // store the bytecode offset.
+-    if (FLAG_debug_code) {
++    if (v8_flags.debug_code) {
+       UseScratchRegisterScope temps(masm);
+       Register invocation_count = temps.Acquire();
+       __ GetObjectType(feedback_vector, invocation_count, invocation_count);
+@@ -1626,7 +1626,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+   __ lw(kInterpreterBytecodeArrayRegister,
+         MemOperand(fp, InterpreterFrameConstants::kBytecodeArrayFromFp));
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     // Check function data field is actually a BytecodeArray object.
+     __ SmiTst(kInterpreterBytecodeArrayRegister, kScratchReg);
+     __ Assert(ne,
+@@ -1643,7 +1643,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+         MemOperand(fp, InterpreterFrameConstants::kBytecodeOffsetFromFp));
+   __ SmiUntag(kInterpreterBytecodeOffsetRegister);
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label okay;
+     __ Branch(&okay, ge, kInterpreterBytecodeOffsetRegister,
+               Operand(BytecodeArray::kHeaderSize - kHeapObjectTag));
+@@ -2097,7 +2097,7 @@ void Builtins::Generate_CallOrConstructVarargs(MacroAssembler* masm,
+   //  -- t0 : len (number of elements to push from args)
+   //  -- a3 : new.target (for [[Construct]])
+   // -----------------------------------
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     // Allow a2 to be a FixedArray, or a FixedDoubleArray if t0 == 0.
+     Label ok, fail;
+     __ AssertNotSmi(a2);
+@@ -2812,7 +2812,7 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
+ 
+   // Check that there is no pending exception, otherwise we
+   // should have returned the exception sentinel.
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label okay;
+     ExternalReference pending_exception_address = ExternalReference::Create(
+         IsolateAddressId::kPendingExceptionAddress, masm->isolate());
+@@ -3082,7 +3082,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+   // No more valid handles (the result handle was the last one). Restore
+   // previous handle scope.
+   __ sw(s0, MemOperand(s5, kNextOffset));
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     __ lw(a1, MemOperand(s5, kLevelOffset));
+     __ Check(eq, AbortReason::kUnexpectedLevelAfterReturnFromApiCall, a1,
+              Operand(s2));
+@@ -3347,7 +3347,7 @@ void Builtins::Generate_DirectCEntry(MacroAssembler* masm) {
+   __ Call(t9);                                 // Call the C++ function.
+   __ lw(t9, MemOperand(sp, kCArgsSlotsSize));  // Return to calling code.
+ 
+-  if (FLAG_debug_code && FLAG_enable_slow_asserts) {
++  if (v8_flags.debug_code && v8_flags.enable_slow_asserts) {
+     // In case of an error the return address may point to a memory area
+     // filled with kZapValue by the GC. Dereference the address and check for
+     // this.
+@@ -3954,7 +3954,7 @@ void Generate_DeoptimizationEntry(MacroAssembler* masm,
+     if ((saved_regs.bits() & (1 << i)) != 0) {
+       __ lw(a2, MemOperand(sp, i * kPointerSize));
+       __ sw(a2, MemOperand(a1, offset));
+-    } else if (FLAG_debug_code) {
++    } else if (v8_flags.debug_code) {
+       __ li(a2, kDebugZapValue);
+       __ sw(a2, MemOperand(a1, offset));
+     }
+@@ -4112,12 +4112,12 @@ void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
+ 
+     // Start with baseline code.
+     __ bind(&start_with_baseline);
+-  } else if (FLAG_debug_code) {
++  } else if (v8_flags.debug_code) {
+     __ GetObjectType(code_obj, t6, t6);
+     __ Assert(eq, AbortReason::kExpectedBaselineData, t6, Operand(CODET_TYPE));
+   }
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     AssertCodeIsBaseline(masm, code_obj, t2);
+   }
+ 
+diff --git a/src/builtins/mips64/builtins-mips64.cc b/src/builtins/mips64/builtins-mips64.cc
+index 4cfcedead3e..e875c395cbd 100644
+--- a/src/builtins/mips64/builtins-mips64.cc
++++ b/src/builtins/mips64/builtins-mips64.cc
+@@ -317,7 +317,7 @@ static void GetSharedFunctionInfoBytecodeOrBaseline(MacroAssembler* masm,
+   Label done;
+ 
+   __ GetObjectType(sfi_data, scratch1, scratch1);
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label not_baseline;
+     __ Branch(&not_baseline, ne, scratch1, Operand(CODET_TYPE));
+     AssertCodeIsBaseline(masm, sfi_data, scratch1);
+@@ -407,7 +407,7 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
+   }
+ 
+   // Underlying function needs to have bytecode available.
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label is_baseline;
+     __ Ld(a3, FieldMemOperand(a4, JSFunction::kSharedFunctionInfoOffset));
+     __ Ld(a3, FieldMemOperand(a3, SharedFunctionInfo::kFunctionDataOffset));
+@@ -1485,7 +1485,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+   __ Ld(kInterpreterBytecodeArrayRegister,
+         MemOperand(fp, InterpreterFrameConstants::kBytecodeArrayFromFp));
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     // Check function data field is actually a BytecodeArray object.
+     __ SmiTst(kInterpreterBytecodeArrayRegister, kScratchReg);
+     __ Assert(ne,
+@@ -1501,7 +1501,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+   __ SmiUntag(kInterpreterBytecodeOffsetRegister,
+               MemOperand(fp, InterpreterFrameConstants::kBytecodeOffsetFromFp));
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label okay;
+     __ Branch(&okay, ge, kInterpreterBytecodeOffsetRegister,
+               Operand(BytecodeArray::kHeaderSize - kHeapObjectTag));
+@@ -2014,7 +2014,7 @@ void Builtins::Generate_CallOrConstructVarargs(MacroAssembler* masm,
+   //  -- a4 : len (number of elements to push from args)
+   //  -- a3 : new.target (for [[Construct]])
+   // -----------------------------------
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     // Allow a2 to be a FixedArray, or a FixedDoubleArray if a4 == 0.
+     Label ok, fail;
+     __ AssertNotSmi(a2);
+@@ -2778,7 +2778,7 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
+ 
+   // Check that there is no pending exception, otherwise we
+   // should have returned the exception sentinel.
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label okay;
+     ExternalReference pending_exception_address = ExternalReference::Create(
+         IsolateAddressId::kPendingExceptionAddress, masm->isolate());
+@@ -3044,7 +3044,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+   // No more valid handles (the result handle was the last one). Restore
+   // previous handle scope.
+   __ Sd(s0, MemOperand(s5, kNextOffset));
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     __ Lw(a1, MemOperand(s5, kLevelOffset));
+     __ Check(eq, AbortReason::kUnexpectedLevelAfterReturnFromApiCall, a1,
+              Operand(s2));
+@@ -3319,7 +3319,7 @@ void Builtins::Generate_DirectCEntry(MacroAssembler* masm) {
+   __ Call(t9);                                 // Call the C++ function.
+   __ Ld(t9, MemOperand(sp, kCArgsSlotsSize));  // Return to calling code.
+ 
+-  if (FLAG_debug_code && FLAG_enable_slow_asserts) {
++  if (v8_flags.debug_code && v8_flags.enable_slow_asserts) {
+     // In case of an error the return address may point to a memory area
+     // filled with kZapValue by the GC. Dereference the address and check for
+     // this.
+@@ -3415,7 +3415,7 @@ void Generate_DeoptimizationEntry(MacroAssembler* masm,
+     if ((saved_regs.bits() & (1 << i)) != 0) {
+       __ Ld(a2, MemOperand(sp, i * kPointerSize));
+       __ Sd(a2, MemOperand(a1, offset));
+-    } else if (FLAG_debug_code) {
++    } else if (v8_flags.debug_code) {
+       __ li(a2, kDebugZapValue);
+       __ Sd(a2, MemOperand(a1, offset));
+     }
+@@ -3572,12 +3572,12 @@ void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
+ 
+     // Start with baseline code.
+     __ bind(&start_with_baseline);
+-  } else if (FLAG_debug_code) {
++  } else if (v8_flags.debug_code) {
+     __ GetObjectType(code_obj, t2, t2);
+     __ Assert(eq, AbortReason::kExpectedBaselineData, t2, Operand(CODET_TYPE));
+   }
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     AssertCodeIsBaseline(masm, code_obj, t2);
+   }
+ 
+diff --git a/src/builtins/ppc/builtins-ppc.cc b/src/builtins/ppc/builtins-ppc.cc
+index 0a2fbb7b90a..be4f3f3bf12 100644
+--- a/src/builtins/ppc/builtins-ppc.cc
++++ b/src/builtins/ppc/builtins-ppc.cc
+@@ -52,7 +52,7 @@ static void GetSharedFunctionInfoBytecodeOrBaseline(MacroAssembler* masm,
+   ASM_CODE_COMMENT(masm);
+   Label done;
+   __ CompareObjectType(sfi_data, scratch1, scratch1, CODET_TYPE);
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label not_baseline;
+     __ b(ne, &not_baseline);
+     AssertCodeIsBaseline(masm, sfi_data, scratch1);
+@@ -142,12 +142,12 @@ void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
+ 
+     // Start with baseline code.
+     __ bind(&start_with_baseline);
+-  } else if (FLAG_debug_code) {
++  } else if (v8_flags.debug_code) {
+     __ CompareObjectType(code_obj, r6, r6, CODET_TYPE);
+     __ Assert(eq, AbortReason::kExpectedBaselineData);
+   }
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     AssertCodeIsBaseline(masm, code_obj, r6);
+   }
+ 
+@@ -433,7 +433,7 @@ void OnStackReplacement(MacroAssembler* masm, OsrSourceTier source,
+     ConstantPoolUnavailableScope constant_pool_unavailable(masm);
+     __ addi(r3, r3, Operand(Code::kHeaderSize - kHeapObjectTag));  // Code start
+ 
+-    if (FLAG_enable_embedded_constant_pool) {
++    if (v8_flags.enable_embedded_constant_pool) {
+       __ LoadConstantPoolPointerRegisterFromCodeTargetAddress(r3);
+     }
+ 
+@@ -722,7 +722,7 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
+   }
+ 
+   // Underlying function needs to have bytecode available.
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label is_baseline;
+     __ LoadTaggedPointerField(
+         r6, FieldMemOperand(r7, JSFunction::kSharedFunctionInfoOffset), r0);
+@@ -845,7 +845,7 @@ void Generate_JSEntryVariant(MacroAssembler* masm, StackFrame::Type type,
+   // r8: argv
+   __ li(r0, Operand(-1));  // Push a bad frame pointer to fail if it is used.
+   __ push(r0);
+-  if (FLAG_enable_embedded_constant_pool) {
++  if (v8_flags.enable_embedded_constant_pool) {
+     __ li(kConstantPoolRegister, Operand::Zero());
+     __ push(kConstantPoolRegister);
+   }
+@@ -1256,7 +1256,7 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+ 
+     // Baseline code frames store the feedback vector where interpreter would
+     // store the bytecode offset.
+-    if (FLAG_debug_code) {
++    if (v8_flags.debug_code) {
+       Register scratch = r11;
+       __ CompareObjectType(feedback_vector, scratch, scratch,
+                            FEEDBACK_VECTOR_TYPE);
+@@ -1293,7 +1293,7 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+     ASM_CODE_COMMENT_STRING(masm, "Optimized marker check");
+ 
+     // Drop the frame created by the baseline call.
+-    if (FLAG_enable_embedded_constant_pool) {
++    if (v8_flags.enable_embedded_constant_pool) {
+       __ Pop(r0, fp, kConstantPoolRegister);
+     } else {
+       __ Pop(r0, fp);
+@@ -1795,7 +1795,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+   __ LoadU64(kInterpreterBytecodeArrayRegister,
+              MemOperand(fp, InterpreterFrameConstants::kBytecodeArrayFromFp));
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     // Check function data field is actually a BytecodeArray object.
+     __ TestIfSmi(kInterpreterBytecodeArrayRegister, r0);
+     __ Assert(ne,
+@@ -1812,7 +1812,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+              MemOperand(fp, InterpreterFrameConstants::kBytecodeOffsetFromFp));
+   __ SmiUntag(kInterpreterBytecodeOffsetRegister);
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label okay;
+     __ cmpi(kInterpreterBytecodeOffsetRegister,
+             Operand(BytecodeArray::kHeaderSize - kHeapObjectTag +
+@@ -2223,7 +2223,7 @@ void Builtins::Generate_CallOrConstructVarargs(MacroAssembler* masm,
+ 
+   Register scratch = ip;
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     // Allow r5 to be a FixedArray, or a FixedDoubleArray if r7 == 0.
+     Label ok, fail;
+     __ AssertNotSmi(r5);
+@@ -2974,7 +2974,7 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
+ 
+   // Check that there is no pending exception, otherwise we
+   // should have returned the exception sentinel.
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label okay;
+     ExternalReference pending_exception_address = ExternalReference::Create(
+         IsolateAddressId::kPendingExceptionAddress, masm->isolate());
+@@ -3059,7 +3059,7 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
+   ConstantPoolUnavailableScope constant_pool_unavailable(masm);
+   __ Move(ip, pending_handler_entrypoint_address);
+   __ LoadU64(ip, MemOperand(ip));
+-  if (FLAG_enable_embedded_constant_pool) {
++  if (v8_flags.enable_embedded_constant_pool) {
+     __ Move(kConstantPoolRegister, pending_handler_constant_pool_address);
+     __ LoadU64(kConstantPoolRegister, MemOperand(kConstantPoolRegister));
+   }
+@@ -3253,7 +3253,7 @@ static void CallApiFunctionAndReturn(MacroAssembler* masm,
+   // No more valid handles (the result handle was the last one). Restore
+   // previous handle scope.
+   __ StoreU64(r14, MemOperand(r17, kNextOffset));
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     __ lwz(r4, MemOperand(r17, kLevelOffset));
+     __ CmpS64(r4, r16);
+     __ Check(eq, AbortReason::kUnexpectedLevelAfterReturnFromApiCall);
+diff --git a/src/builtins/profile-data-reader.cc b/src/builtins/profile-data-reader.cc
+index e20e7e98a5c..8024666b47d 100644
+--- a/src/builtins/profile-data-reader.cc
++++ b/src/builtins/profile-data-reader.cc
+@@ -46,7 +46,7 @@ EnsureInitProfileData() {
+ 
+   if (initialized) return *data.get();
+   initialized = true;
+-  const char* filename = FLAG_turbo_profiling_input;
++  const char* filename = v8_flags.turbo_profiling_input;
+   if (filename == nullptr) return *data.get();
+   std::ifstream file(filename);
+   CHECK_WITH_MSG(file.good(), "Can't read log file");
+diff --git a/src/builtins/riscv/builtins-riscv.cc b/src/builtins/riscv/builtins-riscv.cc
+index 03c6523d6b8..cf3659407cf 100644
+--- a/src/builtins/riscv/builtins-riscv.cc
++++ b/src/builtins/riscv/builtins-riscv.cc
+@@ -431,7 +431,7 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
+   }
+ 
+   // Underlying function needs to have bytecode available.
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label is_baseline;
+     __ LoadTaggedPointerField(
+         a3, FieldMemOperand(a4, JSFunction::kSharedFunctionInfoOffset));
+@@ -1539,7 +1539,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+   __ LoadWord(kInterpreterBytecodeArrayRegister,
+               MemOperand(fp, InterpreterFrameConstants::kBytecodeArrayFromFp));
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     // Check function data field is actually a BytecodeArray object.
+     __ SmiTst(kInterpreterBytecodeArrayRegister, kScratchReg);
+     __ Assert(ne,
+@@ -1555,7 +1555,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+   __ SmiUntag(kInterpreterBytecodeOffsetRegister,
+               MemOperand(fp, InterpreterFrameConstants::kBytecodeOffsetFromFp));
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label okay;
+     __ Branch(&okay, ge, kInterpreterBytecodeOffsetRegister,
+               Operand(BytecodeArray::kHeaderSize - kHeapObjectTag),
+@@ -2081,7 +2081,7 @@ void Builtins::Generate_CallOrConstructVarargs(MacroAssembler* masm,
+   //  -- a4 : len (number of elements to push from args)
+   //  -- a3 : new.target (for [[Construct]])
+   // -----------------------------------
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     // Allow a2 to be a FixedArray, or a FixedDoubleArray if a4 == 0.
+     Label ok, fail;
+     __ AssertNotSmi(a2);
+@@ -2778,7 +2778,7 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
+ 
+   // Check that there is no pending exception, otherwise we
+   // should have returned the exception sentinel.
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label okay;
+     ExternalReference pending_exception_address = ExternalReference::Create(
+         IsolateAddressId::kPendingExceptionAddress, masm->isolate());
+@@ -3079,7 +3079,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+   // No more valid handles (the result handle was the last one). Restore
+   // previous handle scope.
+   __ StoreWord(s3, MemOperand(s5, kNextOffset));
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     __ Lw(a1, MemOperand(s5, kLevelOffset));
+     __ Check(eq, AbortReason::kUnexpectedLevelAfterReturnFromApiCall, a1,
+              Operand(s2));
+@@ -3359,7 +3359,7 @@ void Builtins::Generate_DirectCEntry(MacroAssembler* masm) {
+   __ Call(t6);                                    // Call the C++ function.
+   __ LoadWord(t6, MemOperand(sp, kCArgsSlotsSize));  // Return to calling code.
+ 
+-  if (FLAG_debug_code && FLAG_enable_slow_asserts) {
++  if (v8_flags.debug_code && v8_flags.enable_slow_asserts) {
+     // In case of an error the return address may point to a memory area
+     // filled with kZapValue by the GC. Dereference the address and check for
+     // this.
+@@ -3455,7 +3455,7 @@ void Generate_DeoptimizationEntry(MacroAssembler* masm,
+     if ((saved_regs.bits() & (1 << i)) != 0) {
+       __ LoadWord(a2, MemOperand(sp, i * kSystemPointerSize));
+       __ StoreWord(a2, MemOperand(a1, offset));
+-    } else if (FLAG_debug_code) {
++    } else if (v8_flags.debug_code) {
+       __ li(a2, kDebugZapValue);
+       __ StoreWord(a2, MemOperand(a1, offset));
+     }
+@@ -3619,14 +3619,14 @@ void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
+ 
+     // Start with baseline code.
+     __ bind(&start_with_baseline);
+-  } else if (FLAG_debug_code) {
++  } else if (v8_flags.debug_code) {
+     UseScratchRegisterScope temps(masm);
+     Register scratch = temps.Acquire();
+     __ GetObjectType(code_obj, scratch, scratch);
+     __ Assert(eq, AbortReason::kExpectedBaselineData, scratch,
+               Operand(CODET_TYPE));
+   }
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     UseScratchRegisterScope temps(masm);
+     Register scratch = temps.Acquire();
+     AssertCodeIsBaseline(masm, code_obj, scratch);
+diff --git a/src/builtins/s390/builtins-s390.cc b/src/builtins/s390/builtins-s390.cc
+index e1c66cc346a..9cfe09ea762 100644
+--- a/src/builtins/s390/builtins-s390.cc
++++ b/src/builtins/s390/builtins-s390.cc
+@@ -53,7 +53,7 @@ static void GetSharedFunctionInfoBytecodeOrBaseline(MacroAssembler* masm,
+   ASM_CODE_COMMENT(masm);
+   Label done;
+   __ CompareObjectType(sfi_data, scratch1, scratch1, CODET_TYPE);
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label not_baseline;
+     __ b(ne, &not_baseline);
+     AssertCodeIsBaseline(masm, sfi_data, scratch1);
+@@ -142,12 +142,12 @@ void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
+ 
+     // Start with baseline code.
+     __ bind(&start_with_baseline);
+-  } else if (FLAG_debug_code) {
++  } else if (v8_flags.debug_code) {
+     __ CompareObjectType(code_obj, r5, r5, CODET_TYPE);
+     __ Assert(eq, AbortReason::kExpectedBaselineData);
+   }
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     AssertCodeIsBaseline(masm, code_obj, r5);
+   }
+ 
+@@ -698,7 +698,7 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
+   }
+ 
+   // Underlying function needs to have bytecode available.
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label is_baseline;
+     __ LoadTaggedPointerField(
+         r5, FieldMemOperand(r6, JSFunction::kSharedFunctionInfoOffset));
+@@ -1298,7 +1298,7 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+ 
+     // Baseline code frames store the feedback vector where interpreter would
+     // store the bytecode offset.
+-    if (FLAG_debug_code) {
++    if (v8_flags.debug_code) {
+       Register scratch = r1;
+       __ CompareObjectType(feedback_vector, scratch, scratch,
+                            FEEDBACK_VECTOR_TYPE);
+@@ -1821,7 +1821,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+   __ LoadU64(kInterpreterBytecodeArrayRegister,
+              MemOperand(fp, InterpreterFrameConstants::kBytecodeArrayFromFp));
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     // Check function data field is actually a BytecodeArray object.
+     __ TestIfSmi(kInterpreterBytecodeArrayRegister);
+     __ Assert(
+@@ -1837,7 +1837,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+              MemOperand(fp, InterpreterFrameConstants::kBytecodeOffsetFromFp));
+   __ SmiUntag(kInterpreterBytecodeOffsetRegister);
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label okay;
+     __ CmpS64(kInterpreterBytecodeOffsetRegister,
+               Operand(BytecodeArray::kHeaderSize - kHeapObjectTag));
+@@ -2232,7 +2232,7 @@ void Builtins::Generate_CallOrConstructVarargs(MacroAssembler* masm,
+ 
+   Register scratch = ip;
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     // Allow r4 to be a FixedArray, or a FixedDoubleArray if r6 == 0.
+     Label ok, fail;
+     __ AssertNotSmi(r4);
+@@ -2977,7 +2977,7 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
+ 
+   // Check that there is no pending exception, otherwise we
+   // should have returned the exception sentinel.
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label okay;
+     ExternalReference pending_exception_address = ExternalReference::Create(
+         IsolateAddressId::kPendingExceptionAddress, masm->isolate());
+@@ -3240,7 +3240,7 @@ static void CallApiFunctionAndReturn(MacroAssembler* masm,
+   // No more valid handles (the result handle was the last one). Restore
+   // previous handle scope.
+   __ StoreU64(r6, MemOperand(r9, kNextOffset));
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     __ LoadU32(r3, MemOperand(r9, kLevelOffset));
+     __ CmpS64(r3, r8);
+     __ Check(eq, AbortReason::kUnexpectedLevelAfterReturnFromApiCall);
+diff --git a/src/builtins/setup-builtins-internal.cc b/src/builtins/setup-builtins-internal.cc
+index 210df4b1f78..a54c2c466cb 100644
+--- a/src/builtins/setup-builtins-internal.cc
++++ b/src/builtins/setup-builtins-internal.cc
+@@ -64,8 +64,8 @@ AssemblerOptions BuiltinAssemblerOptions(Isolate* isolate, Builtin builtin) {
+   if (builtin == Builtin::kInterpreterEntryTrampolineForProfiling) {
+     // InterpreterEntryTrampolineForProfiling must be generated in a position
+     // independent way because it might be necessary to create a copy of the
+-    // builtin in the code space if the FLAG_interpreted_frames_native_stack is
+-    // enabled.
++    // builtin in the code space if the v8_flags.interpreted_frames_native_stack
++    // is enabled.
+     options.builtin_call_jump_mode = BuiltinCallJumpMode::kIndirect;
+   }
+ 
+diff --git a/src/builtins/x64/builtins-x64.cc b/src/builtins/x64/builtins-x64.cc
+index 4a11fab3b9f..1aef16e261a 100644
+--- a/src/builtins/x64/builtins-x64.cc
++++ b/src/builtins/x64/builtins-x64.cc
+@@ -671,7 +671,7 @@ static void GetSharedFunctionInfoBytecodeOrBaseline(MacroAssembler* masm,
+   __ LoadMap(scratch1, sfi_data);
+ 
+   __ CmpInstanceType(scratch1, CODET_TYPE);
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label not_baseline;
+     __ j(not_equal, &not_baseline);
+     AssertCodeTIsBaseline(masm, sfi_data, scratch1);
+@@ -777,7 +777,7 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
+   }
+ 
+   // Underlying function needs to have bytecode available.
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label is_baseline, ok;
+     __ LoadTaggedPointerField(
+         rcx, FieldOperand(rdi, JSFunction::kSharedFunctionInfoOffset));
+@@ -1438,7 +1438,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+   __ movq(kInterpreterBytecodeArrayRegister,
+           Operand(rbp, InterpreterFrameConstants::kBytecodeArrayFromFp));
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     // Check function data field is actually a BytecodeArray object.
+     __ AssertNotSmi(kInterpreterBytecodeArrayRegister);
+     __ CmpObjectType(kInterpreterBytecodeArrayRegister, BYTECODE_ARRAY_TYPE,
+@@ -1453,7 +1453,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+       kInterpreterBytecodeOffsetRegister,
+       Operand(rbp, InterpreterFrameConstants::kBytecodeOffsetFromFp));
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label okay;
+     __ cmpq(kInterpreterBytecodeOffsetRegister,
+             Immediate(BytecodeArray::kHeaderSize - kHeapObjectTag));
+@@ -2044,7 +2044,7 @@ void Builtins::Generate_CallOrConstructVarargs(MacroAssembler* masm,
+   //  -- rsp[0] : return address
+   // -----------------------------------
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     // Allow rbx to be a FixedArray, or a FixedDoubleArray if rcx == 0.
+     Label ok, fail;
+     __ AssertNotSmi(rbx);
+@@ -4254,7 +4254,7 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
+   // r15: argv pointer (C callee-saved).
+ 
+   // Check stack alignment.
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     __ CheckStackAlignment();
+   }
+ 
+@@ -4293,7 +4293,7 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
+ 
+   // Check that there is no pending exception, otherwise we
+   // should have returned the exception sentinel.
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     Label okay;
+     __ LoadRoot(kScratchRegister, RootIndex::kTheHoleValue);
+     ExternalReference pending_exception_address = ExternalReference::Create(
+@@ -5049,12 +5049,12 @@ void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
+ 
+     // Start with baseline code.
+     __ bind(&start_with_baseline);
+-  } else if (FLAG_debug_code) {
++  } else if (v8_flags.debug_code) {
+     __ CmpObjectType(code_obj, CODET_TYPE, kScratchRegister);
+     __ Assert(equal, AbortReason::kExpectedBaselineData);
+   }
+ 
+-  if (FLAG_debug_code) {
++  if (v8_flags.debug_code) {
+     AssertCodeTIsBaseline(masm, code_obj, r11);
+   }
+   if (V8_EXTERNAL_CODE_SPACE_BOOL) {
+-- 
+2.35.1
+

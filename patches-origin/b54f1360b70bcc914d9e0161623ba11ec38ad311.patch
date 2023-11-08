@@ -1,0 +1,1623 @@
+From b54f1360b70bcc914d9e0161623ba11ec38ad311 Mon Sep 17 00:00:00 2001
+From: Victor Gomes <victorgomes@chromium.org>
+Date: Mon, 11 Oct 2021 14:13:31 +0200
+Subject: [PATCH] [baseline] Remove SP-on-the-GC-heap
+
+Compiling Sparkplug on the heap saved 10% of the CompileBaseline
+RCS metric, but that came with too much code complexity.
+Since in the end that corresponds to < 1% of the entire compilation
+time, we decided to revert this project.
+
+This reverts:
+commit e29b2ae48a312b24c610110e613c7fc7841cb1e3
+commit d1f2a83b7d575261d841f62b3318d0e0af36a3cb
+commit 4666e18206726454752b005ea758eda72624481d
+commit a1147408e4d595100f444ad47458211abec2c128
+commit e0d4254f97bfcb06c2f37e91fe7a2a1a412bdac1
+commit 9ab8422da7be452d97662abbfce7d1e7e8e4a249
+commit a3b24ecc51a4c6e3b73eb6683e8de5e9e1ec2345
+commit 1eb87706910dad58d7f18666d7d22ba4561a5a62
+commit fe5c9dfd90cb74ca2f17f0b1439a0a2365b31b90
+commit 7ac3b55a2038a0c6d46816cb6cb9175e341733ad
+commit 7e95f30ec9916f7bee463d9babc098ee2f4c2a56
+commit 323b596212ff43d3dd7796b245105c3d2aba964c
+commit 6bf0b70490445623286c23409923d521fd7de8f4
+commit e82b368b675e391c46b7b24b9ed96bc59b6570db
+commit 5020d83e05f401b0a37312b891931355dbb55601
+commit 642a467338921ab2a19fb15d07fd87c4398c1e29
+commit ec7b99d5c642bf137d41de61366d8871ecf5c387
+commit fb4f89aede6f7acc219e964ac294a291d2280d4e
+commit 208854bb1433f96ed4fb2bd93f39cf20d4e1780f
+commit 63be6dde3140f3b971b37ddfa93cf0610e149ee5
+
+Bug: v8:12158
+Change-Id: I9f2539be6c7d80c6e243c9ab173e3c5bb0dff97d
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3136453
+Auto-Submit: Victor Gomes <victorgomes@chromium.org>
+Commit-Queue: Camillo Bruni <cbruni@chromium.org>
+Reviewed-by: Camillo Bruni <cbruni@chromium.org>
+Reviewed-by: Leszek Swirski <leszeks@chromium.org>
+Reviewed-by: Michael Lippautz <mlippautz@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#77319}
+---
+ src/baseline/baseline-compiler.cc             |  21 +---
+ src/baseline/baseline-compiler.h              |   8 +-
+ src/baseline/baseline.cc                      |  27 +----
+ src/codegen/arm/assembler-arm.cc              |  39 +------
+ src/codegen/arm/assembler-arm.h               |   7 --
+ src/codegen/arm64/assembler-arm64.cc          |  44 -------
+ src/codegen/arm64/assembler-arm64.h           |   6 -
+ src/codegen/arm64/macro-assembler-arm64.cc    |   8 --
+ src/codegen/assembler.cc                      |  58 ---------
+ src/codegen/assembler.h                       |  26 -----
+ src/codegen/constant-pool.cc                  |  11 +-
+ src/codegen/ia32/assembler-ia32-inl.h         |  16 ---
+ src/codegen/ia32/assembler-ia32.cc            |  29 -----
+ src/codegen/ia32/assembler-ia32.h             |   7 --
+ src/codegen/loong64/assembler-loong64.cc      |  29 -----
+ src/codegen/loong64/assembler-loong64.h       |   8 --
+ .../loong64/macro-assembler-loong64.cc        |  12 --
+ src/codegen/mips/assembler-mips.cc            |  29 -----
+ src/codegen/mips/assembler-mips.h             |   8 --
+ src/codegen/mips/macro-assembler-mips.cc      |  11 --
+ src/codegen/mips64/assembler-mips64.cc        |  29 -----
+ src/codegen/mips64/assembler-mips64.h         |   8 --
+ src/codegen/mips64/macro-assembler-mips64.cc  |  13 ---
+ src/codegen/riscv64/assembler-riscv64.cc      |  29 -----
+ src/codegen/riscv64/assembler-riscv64.h       |   8 --
+ .../riscv64/macro-assembler-riscv64.cc        |  10 --
+ src/codegen/x64/assembler-x64-inl.h           |  18 +--
+ src/codegen/x64/assembler-x64.cc              |  39 -------
+ src/codegen/x64/assembler-x64.h               |   7 --
+ src/diagnostics/objects-debug.cc              |  25 ++--
+ src/flags/flag-definitions.h                  |   1 -
+ src/heap/factory.cc                           | 110 ++----------------
+ src/heap/factory.h                            |   4 -
+ src/heap/heap.cc                              |  21 ----
+ src/heap/heap.h                               |   3 -
+ src/heap/incremental-marking.cc               |   7 --
+ src/heap/incremental-marking.h                |   2 -
+ src/objects/code-inl.h                        |  29 +----
+ src/objects/code.cc                           |   9 --
+ src/objects/code.h                            |   7 --
+ src/objects/objects-body-descriptors-inl.h    |  11 +-
+ src/profiler/heap-snapshot-generator.cc       |  11 +-
+ test/mjsunit/baseline/batch-compilation.js    |   4 +-
+ 43 files changed, 44 insertions(+), 765 deletions(-)
+
+diff --git a/src/baseline/baseline-compiler.cc b/src/baseline/baseline-compiler.cc
+index 63d684e733e..e425c7552aa 100644
+--- a/src/baseline/baseline-compiler.cc
++++ b/src/baseline/baseline-compiler.cc
+@@ -243,40 +243,28 @@ namespace {
+ // than pre-allocating a large enough buffer.
+ #ifdef V8_TARGET_ARCH_IA32
+ const int kAverageBytecodeToInstructionRatio = 5;
+-const int kMinimumEstimatedInstructionSize = 200;
+ #else
+ const int kAverageBytecodeToInstructionRatio = 7;
+-const int kMinimumEstimatedInstructionSize = 300;
+ #endif
+ std::unique_ptr<AssemblerBuffer> AllocateBuffer(
+-    Isolate* isolate, Handle<BytecodeArray> bytecodes,
+-    BaselineCompiler::CodeLocation code_location) {
++    Handle<BytecodeArray> bytecodes) {
+   int estimated_size;
+   {
+     DisallowHeapAllocation no_gc;
+     estimated_size = BaselineCompiler::EstimateInstructionSize(*bytecodes);
+   }
+-  Heap* heap = isolate->heap();
+-  // TODO(victorgomes): When compiling on heap, we allocate whatever is left
+-  // over on the page with a minimum of the estimated_size.
+-  if (code_location == BaselineCompiler::kOnHeap &&
+-      Code::SizeFor(estimated_size) <
+-          heap->MaxRegularHeapObjectSize(AllocationType::kCode)) {
+-    return NewOnHeapAssemblerBuffer(isolate, estimated_size);
+-  }
+   return NewAssemblerBuffer(RoundUp(estimated_size, 4 * KB));
+ }
+ }  // namespace
+ 
+ BaselineCompiler::BaselineCompiler(
+     Isolate* isolate, Handle<SharedFunctionInfo> shared_function_info,
+-    Handle<BytecodeArray> bytecode, CodeLocation code_location)
++    Handle<BytecodeArray> bytecode)
+     : local_isolate_(isolate->AsLocalIsolate()),
+       stats_(isolate->counters()->runtime_call_stats()),
+       shared_function_info_(shared_function_info),
+       bytecode_(bytecode),
+-      masm_(isolate, CodeObjectRequired::kNo,
+-            AllocateBuffer(isolate, bytecode, code_location)),
++      masm_(isolate, CodeObjectRequired::kNo, AllocateBuffer(bytecode)),
+       basm_(&masm_),
+       iterator_(bytecode_),
+       zone_(isolate->allocator(), ZONE_NAME),
+@@ -336,8 +324,7 @@ MaybeHandle<Code> BaselineCompiler::Build(Isolate* isolate) {
+ }
+ 
+ int BaselineCompiler::EstimateInstructionSize(BytecodeArray bytecode) {
+-  return bytecode.length() * kAverageBytecodeToInstructionRatio +
+-         kMinimumEstimatedInstructionSize;
++  return bytecode.length() * kAverageBytecodeToInstructionRatio;
+ }
+ 
+ interpreter::Register BaselineCompiler::RegisterOperand(int operand_index) {
+diff --git a/src/baseline/baseline-compiler.h b/src/baseline/baseline-compiler.h
+index 341e7c0822f..45c799a071f 100644
+--- a/src/baseline/baseline-compiler.h
++++ b/src/baseline/baseline-compiler.h
+@@ -51,11 +51,9 @@ class BytecodeOffsetTableBuilder {
+ 
+ class BaselineCompiler {
+  public:
+-  enum CodeLocation { kOffHeap, kOnHeap };
+-  explicit BaselineCompiler(
+-      Isolate* isolate, Handle<SharedFunctionInfo> shared_function_info,
+-      Handle<BytecodeArray> bytecode,
+-      CodeLocation code_location = CodeLocation::kOffHeap);
++  explicit BaselineCompiler(Isolate* isolate,
++                            Handle<SharedFunctionInfo> shared_function_info,
++                            Handle<BytecodeArray> bytecode);
+ 
+   void GenerateCode();
+   MaybeHandle<Code> Build(Isolate* isolate);
+diff --git a/src/baseline/baseline.cc b/src/baseline/baseline.cc
+index 764d2db645a..2647bc8b56f 100644
+--- a/src/baseline/baseline.cc
++++ b/src/baseline/baseline.cc
+@@ -56,34 +56,13 @@ bool CanCompileWithBaseline(Isolate* isolate, SharedFunctionInfo shared) {
+   return true;
+ }
+ 
+-namespace {
+-MaybeHandle<Code> GenerateOnHeapCode(Isolate* isolate,
+-                                     Handle<SharedFunctionInfo> shared,
+-                                     Handle<BytecodeArray> bytecode) {
+-  CodePageCollectionMemoryModificationScope code_allocation(isolate->heap());
+-  baseline::BaselineCompiler compiler(isolate, shared, bytecode,
+-                                      baseline::BaselineCompiler::kOnHeap);
+-  compiler.GenerateCode();
+-  return compiler.Build(isolate);
+-}
+-
+-MaybeHandle<Code> GenerateOffHeapCode(Isolate* isolate,
+-                                      Handle<SharedFunctionInfo> shared,
+-                                      Handle<BytecodeArray> bytecode) {
+-  baseline::BaselineCompiler compiler(isolate, shared, bytecode);
+-  compiler.GenerateCode();
+-  return compiler.Build(isolate);
+-}
+-
+-}  // namespace
+-
+ MaybeHandle<Code> GenerateBaselineCode(Isolate* isolate,
+                                        Handle<SharedFunctionInfo> shared) {
+   RCS_SCOPE(isolate, RuntimeCallCounterId::kCompileBaseline);
+   Handle<BytecodeArray> bytecode(shared->GetBytecodeArray(isolate), isolate);
+-  MaybeHandle<Code> code = FLAG_sparkplug_on_heap
+-                               ? GenerateOnHeapCode(isolate, shared, bytecode)
+-                               : GenerateOffHeapCode(isolate, shared, bytecode);
++  baseline::BaselineCompiler compiler(isolate, shared, bytecode);
++  compiler.GenerateCode();
++  MaybeHandle<Code> code = compiler.Build(isolate);
+   if (FLAG_print_code && !code.is_null()) {
+     code.ToHandleChecked()->Print();
+   }
+diff --git a/src/codegen/arm/assembler-arm.cc b/src/codegen/arm/assembler-arm.cc
+index b49d9ed186d..38d691007f3 100644
+--- a/src/codegen/arm/assembler-arm.cc
++++ b/src/codegen/arm/assembler-arm.cc
+@@ -5172,29 +5172,9 @@ void Assembler::RecordConstPool(int size) {
+   RecordRelocInfo(RelocInfo::CONST_POOL, static_cast<intptr_t>(size));
+ }
+ 
+-void Assembler::FixOnHeapReferences(bool update_embedded_objects) {
+-  if (!update_embedded_objects) return;
+-  Address base = reinterpret_cast<Address>(buffer_->start());
+-  for (auto p : saved_handles_for_raw_object_ptr_) {
+-    Handle<HeapObject> object(reinterpret_cast<Address*>(p.second));
+-    WriteUnalignedValue(base + p.first, *object);
+-  }
+-}
+-
+-void Assembler::FixOnHeapReferencesToHandles() {
+-  Address base = reinterpret_cast<Address>(buffer_->start());
+-  for (auto p : saved_handles_for_raw_object_ptr_) {
+-    WriteUnalignedValue(base + p.first, p.second);
+-  }
+-  saved_handles_for_raw_object_ptr_.clear();
+-}
+-
+ void Assembler::GrowBuffer() {
+   DCHECK_EQ(buffer_start_, buffer_->start());
+ 
+-  bool previously_on_heap = buffer_->IsOnHeap();
+-  int previous_on_heap_gc_count = OnHeapGCCount();
+-
+   // Compute new buffer size.
+   int old_size = buffer_->size();
+   int new_size = std::min(2 * old_size, old_size + 1 * MB);
+@@ -5227,15 +5207,6 @@ void Assembler::GrowBuffer() {
+       reinterpret_cast<Address>(reloc_info_writer.last_pc()) + pc_delta);
+   reloc_info_writer.Reposition(new_reloc_start, new_last_pc);
+ 
+-  // Fix on-heap references.
+-  if (previously_on_heap) {
+-    if (buffer_->IsOnHeap()) {
+-      FixOnHeapReferences(previous_on_heap_gc_count != OnHeapGCCount());
+-    } else {
+-      FixOnHeapReferencesToHandles();
+-    }
+-  }
+-
+   // None of our relocation types are pc relative pointing outside the code
+   // buffer nor pc absolute pointing inside the code buffer, so there is no need
+   // to relocate any emitted relocation entries.
+@@ -5470,15 +5441,7 @@ void Assembler::CheckConstPool(bool force_emit, bool require_jump) {
+       instr_at_put(entry.position(),
+                    SetLdrRegisterImmediateOffset(instr, delta));
+       if (!entry.is_merged()) {
+-        if (IsOnHeap() && RelocInfo::IsEmbeddedObjectMode(entry.rmode())) {
+-          int offset = pc_offset();
+-          saved_handles_for_raw_object_ptr_.emplace_back(offset, entry.value());
+-          Handle<HeapObject> object(reinterpret_cast<Address*>(entry.value()));
+-          emit(object->ptr());
+-          DCHECK(EmbeddedObjectMatches(offset, object));
+-        } else {
+-          emit(entry.value());
+-        }
++        emit(entry.value());
+       }
+     }
+ 
+diff --git a/src/codegen/arm/assembler-arm.h b/src/codegen/arm/assembler-arm.h
+index a34b9e1b662..431d4975a03 100644
+--- a/src/codegen/arm/assembler-arm.h
++++ b/src/codegen/arm/assembler-arm.h
+@@ -1197,13 +1197,6 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+     }
+   }
+ 
+-#ifdef DEBUG
+-  bool EmbeddedObjectMatches(int pc_offset, Handle<Object> object) {
+-    return *reinterpret_cast<uint32_t*>(buffer_->start() + pc_offset) ==
+-           (IsOnHeap() ? object->ptr() : object.address());
+-  }
+-#endif
+-
+   // Move a 32-bit immediate into a register, potentially via the constant pool.
+   void Move32BitImmediate(Register rd, const Operand& x, Condition cond = al);
+ 
+diff --git a/src/codegen/arm64/assembler-arm64.cc b/src/codegen/arm64/assembler-arm64.cc
+index f6a035a9e77..a111a34e78a 100644
+--- a/src/codegen/arm64/assembler-arm64.cc
++++ b/src/codegen/arm64/assembler-arm64.cc
+@@ -4275,42 +4275,7 @@ bool Assembler::IsImmFP64(double imm) {
+   return true;
+ }
+ 
+-void Assembler::FixOnHeapReferences(bool update_embedded_objects) {
+-  Address base = reinterpret_cast<Address>(buffer_->start());
+-  if (update_embedded_objects) {
+-    for (auto p : saved_handles_for_raw_object_ptr_) {
+-      Handle<HeapObject> object = GetEmbeddedObject(p.second);
+-      WriteUnalignedValue(base + p.first, object->ptr());
+-    }
+-  }
+-  for (auto p : saved_offsets_for_runtime_entries_) {
+-    Instruction* instr = reinterpret_cast<Instruction*>(base + p.first);
+-    Address target = p.second * kInstrSize + options().code_range_start;
+-    DCHECK(is_int26(p.second));
+-    DCHECK(instr->IsBranchAndLink() || instr->IsUnconditionalBranch());
+-    instr->SetBranchImmTarget(reinterpret_cast<Instruction*>(target));
+-  }
+-}
+-
+-void Assembler::FixOnHeapReferencesToHandles() {
+-  Address base = reinterpret_cast<Address>(buffer_->start());
+-  for (auto p : saved_handles_for_raw_object_ptr_) {
+-    WriteUnalignedValue(base + p.first, p.second);
+-  }
+-  saved_handles_for_raw_object_ptr_.clear();
+-  for (auto p : saved_offsets_for_runtime_entries_) {
+-    Instruction* instr = reinterpret_cast<Instruction*>(base + p.first);
+-    DCHECK(is_int26(p.second));
+-    DCHECK(instr->IsBranchAndLink() || instr->IsUnconditionalBranch());
+-    instr->SetInstructionBits(instr->Mask(UnconditionalBranchMask) | p.second);
+-  }
+-  saved_offsets_for_runtime_entries_.clear();
+-}
+-
+ void Assembler::GrowBuffer() {
+-  bool previously_on_heap = buffer_->IsOnHeap();
+-  int previous_on_heap_gc_count = OnHeapGCCount();
+-
+   // Compute new buffer size.
+   int old_size = buffer_->size();
+   int new_size = std::min(2 * old_size, old_size + 1 * MB);
+@@ -4353,15 +4318,6 @@ void Assembler::GrowBuffer() {
+     WriteUnalignedValue<intptr_t>(address, internal_ref);
+   }
+ 
+-  // Fix on-heap references.
+-  if (previously_on_heap) {
+-    if (buffer_->IsOnHeap()) {
+-      FixOnHeapReferences(previous_on_heap_gc_count != OnHeapGCCount());
+-    } else {
+-      FixOnHeapReferencesToHandles();
+-    }
+-  }
+-
+   // Pending relocation entries are also relative, no need to relocate.
+ }
+ 
+diff --git a/src/codegen/arm64/assembler-arm64.h b/src/codegen/arm64/assembler-arm64.h
+index 8cdca7bfa83..768cef3a977 100644
+--- a/src/codegen/arm64/assembler-arm64.h
++++ b/src/codegen/arm64/assembler-arm64.h
+@@ -2689,12 +2689,6 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   static size_t GetApproxMaxDistToConstPoolForTesting() {
+     return ConstantPool::kApproxDistToPool64;
+   }
+-
+-  bool EmbeddedObjectMatches(int pc_offset, Handle<Object> object,
+-                             EmbeddedObjectIndex index) {
+-    return *reinterpret_cast<uint64_t*>(buffer_->start() + pc_offset) ==
+-           (IsOnHeap() ? object->ptr() : index);
+-  }
+ #endif
+ 
+   class FarBranchInfo {
+diff --git a/src/codegen/arm64/macro-assembler-arm64.cc b/src/codegen/arm64/macro-assembler-arm64.cc
+index 91d972ea000..eda0aa98888 100644
+--- a/src/codegen/arm64/macro-assembler-arm64.cc
++++ b/src/codegen/arm64/macro-assembler-arm64.cc
+@@ -1843,10 +1843,6 @@ int64_t TurboAssembler::CalculateTargetOffset(Address target,
+ void TurboAssembler::Jump(Address target, RelocInfo::Mode rmode,
+                           Condition cond) {
+   int64_t offset = CalculateTargetOffset(target, rmode, pc_);
+-  if (RelocInfo::IsRuntimeEntry(rmode) && IsOnHeap()) {
+-    saved_offsets_for_runtime_entries_.emplace_back(pc_offset(), offset);
+-    offset = CalculateTargetOffset(target, RelocInfo::NONE, pc_);
+-  }
+   JumpHelper(offset, rmode, cond);
+ }
+ 
+@@ -1891,10 +1887,6 @@ void TurboAssembler::Call(Address target, RelocInfo::Mode rmode) {
+   BlockPoolsScope scope(this);
+   if (CanUseNearCallOrJump(rmode)) {
+     int64_t offset = CalculateTargetOffset(target, rmode, pc_);
+-    if (IsOnHeap() && RelocInfo::IsRuntimeEntry(rmode)) {
+-      saved_offsets_for_runtime_entries_.emplace_back(pc_offset(), offset);
+-      offset = CalculateTargetOffset(target, RelocInfo::NONE, pc_);
+-    }
+     DCHECK(IsNearCallOffset(offset));
+     near_call(static_cast<int>(offset), rmode);
+   } else {
+diff --git a/src/codegen/assembler.cc b/src/codegen/assembler.cc
+index cacbfbd679f..dd5c8b2d9aa 100644
+--- a/src/codegen/assembler.cc
++++ b/src/codegen/assembler.cc
+@@ -140,48 +140,6 @@ class ExternalAssemblerBufferImpl : public AssemblerBuffer {
+   const int size_;
+ };
+ 
+-class OnHeapAssemblerBuffer : public AssemblerBuffer {
+- public:
+-  OnHeapAssemblerBuffer(Isolate* isolate, Handle<Code> code, int size,
+-                        int gc_count)
+-      : isolate_(isolate), code_(code), size_(size), gc_count_(gc_count) {}
+-
+-  byte* start() const override {
+-    return reinterpret_cast<byte*>(code_->raw_instruction_start());
+-  }
+-
+-  int size() const override { return size_; }
+-
+-  std::unique_ptr<AssemblerBuffer> Grow(int new_size) override {
+-    DCHECK_LT(size(), new_size);
+-    Heap* heap = isolate_->heap();
+-    if (Code::SizeFor(new_size) <
+-        heap->MaxRegularHeapObjectSize(AllocationType::kCode)) {
+-      MaybeHandle<Code> code =
+-          isolate_->factory()->NewEmptyCode(CodeKind::BASELINE, new_size);
+-      if (!code.is_null()) {
+-        return std::make_unique<OnHeapAssemblerBuffer>(
+-            isolate_, code.ToHandleChecked(), new_size, heap->gc_count());
+-      }
+-    }
+-    // We fall back to the slow path using the default assembler buffer and
+-    // compile the code off the GC heap.
+-    return std::make_unique<DefaultAssemblerBuffer>(new_size);
+-  }
+-
+-  bool IsOnHeap() const override { return true; }
+-
+-  int OnHeapGCCount() const override { return gc_count_; }
+-
+-  MaybeHandle<Code> code() const override { return code_; }
+-
+- private:
+-  Isolate* isolate_;
+-  Handle<Code> code_;
+-  const int size_;
+-  const int gc_count_;
+-};
+-
+ static thread_local std::aligned_storage_t<sizeof(ExternalAssemblerBufferImpl),
+                                            alignof(ExternalAssemblerBufferImpl)>
+     tls_singleton_storage;
+@@ -218,16 +176,6 @@ std::unique_ptr<AssemblerBuffer> NewAssemblerBuffer(int size) {
+   return std::make_unique<DefaultAssemblerBuffer>(size);
+ }
+ 
+-std::unique_ptr<AssemblerBuffer> NewOnHeapAssemblerBuffer(Isolate* isolate,
+-                                                          int estimated) {
+-  int size = std::max(AssemblerBase::kMinimalBufferSize, estimated);
+-  MaybeHandle<Code> code =
+-      isolate->factory()->NewEmptyCode(CodeKind::BASELINE, size);
+-  if (code.is_null()) return {};
+-  return std::make_unique<OnHeapAssemblerBuffer>(
+-      isolate, code.ToHandleChecked(), size, isolate->heap()->gc_count());
+-}
+-
+ // -----------------------------------------------------------------------------
+ // Implementation of AssemblerBase
+ 
+@@ -248,12 +196,6 @@ AssemblerBase::AssemblerBase(const AssemblerOptions& options,
+   if (!buffer_) buffer_ = NewAssemblerBuffer(kDefaultBufferSize);
+   buffer_start_ = buffer_->start();
+   pc_ = buffer_start_;
+-  if (IsOnHeap()) {
+-    saved_handles_for_raw_object_ptr_.reserve(
+-        kSavedHandleForRawObjectsInitialSize);
+-    saved_offsets_for_runtime_entries_.reserve(
+-        kSavedOffsetForRuntimeEntriesInitialSize);
+-  }
+ }
+ 
+ AssemblerBase::~AssemblerBase() = default;
+diff --git a/src/codegen/assembler.h b/src/codegen/assembler.h
+index f1e5b85f1f6..50711046e6b 100644
+--- a/src/codegen/assembler.h
++++ b/src/codegen/assembler.h
+@@ -202,11 +202,6 @@ class AssemblerBuffer {
+   // destructed), but not written.
+   virtual std::unique_ptr<AssemblerBuffer> Grow(int new_size)
+       V8_WARN_UNUSED_RESULT = 0;
+-  virtual bool IsOnHeap() const { return false; }
+-  virtual MaybeHandle<Code> code() const { return MaybeHandle<Code>(); }
+-  // Return the GC count when the buffer was allocated (only if the buffer is on
+-  // the GC heap).
+-  virtual int OnHeapGCCount() const { return 0; }
+ };
+ 
+ // Allocate an AssemblerBuffer which uses an existing buffer. This buffer cannot
+@@ -219,10 +214,6 @@ std::unique_ptr<AssemblerBuffer> ExternalAssemblerBuffer(void* buffer,
+ V8_EXPORT_PRIVATE
+ std::unique_ptr<AssemblerBuffer> NewAssemblerBuffer(int size);
+ 
+-V8_EXPORT_PRIVATE
+-std::unique_ptr<AssemblerBuffer> NewOnHeapAssemblerBuffer(Isolate* isolate,
+-                                                          int size);
+-
+ class V8_EXPORT_PRIVATE AssemblerBase : public Malloced {
+  public:
+   AssemblerBase(const AssemblerOptions& options,
+@@ -286,15 +277,6 @@ class V8_EXPORT_PRIVATE AssemblerBase : public Malloced {
+ #endif
+   }
+ 
+-  bool IsOnHeap() const { return buffer_->IsOnHeap(); }
+-
+-  int OnHeapGCCount() const { return buffer_->OnHeapGCCount(); }
+-
+-  MaybeHandle<Code> code() const {
+-    DCHECK(IsOnHeap());
+-    return buffer_->code();
+-  }
+-
+   byte* buffer_start() const { return buffer_->start(); }
+   int buffer_size() const { return buffer_->size(); }
+   int instruction_size() const { return pc_offset(); }
+@@ -419,14 +401,6 @@ class V8_EXPORT_PRIVATE AssemblerBase : public Malloced {
+ 
+   CodeCommentsWriter code_comments_writer_;
+ 
+-  // Relocation information when code allocated directly on heap.
+-  // These constants correspond to the 99% percentile of a selected number of JS
+-  // frameworks and benchmarks, including jquery, lodash, d3 and speedometer3.
+-  const int kSavedHandleForRawObjectsInitialSize = 60;
+-  const int kSavedOffsetForRuntimeEntriesInitialSize = 100;
+-  std::vector<std::pair<uint32_t, Address>> saved_handles_for_raw_object_ptr_;
+-  std::vector<std::pair<uint32_t, uint32_t>> saved_offsets_for_runtime_entries_;
+-
+  private:
+   // Before we copy code into the code space, we sometimes cannot encode
+   // call/jump code targets as we normally would, as the difference between the
+diff --git a/src/codegen/constant-pool.cc b/src/codegen/constant-pool.cc
+index 510f59185c7..4f8a6286a46 100644
+--- a/src/codegen/constant-pool.cc
++++ b/src/codegen/constant-pool.cc
+@@ -353,16 +353,7 @@ void ConstantPool::Emit(const ConstantPoolKey& key) {
+   if (key.is_value32()) {
+     assm_->dd(key.value32());
+   } else {
+-    if (assm_->IsOnHeap() && RelocInfo::IsEmbeddedObjectMode(key.rmode())) {
+-      int offset = assm_->pc_offset();
+-      Assembler::EmbeddedObjectIndex index = key.value64();
+-      assm_->saved_handles_for_raw_object_ptr_.emplace_back(offset, index);
+-      Handle<Object> object = assm_->GetEmbeddedObject(index);
+-      assm_->dq(object->ptr());
+-      DCHECK(assm_->EmbeddedObjectMatches(offset, object, index));
+-    } else {
+-      assm_->dq(key.value64());
+-    }
++    assm_->dq(key.value64());
+   }
+ }
+ 
+diff --git a/src/codegen/ia32/assembler-ia32-inl.h b/src/codegen/ia32/assembler-ia32-inl.h
+index 18aa39461d6..b805d160b62 100644
+--- a/src/codegen/ia32/assembler-ia32-inl.h
++++ b/src/codegen/ia32/assembler-ia32-inl.h
+@@ -185,14 +185,6 @@ void Assembler::emit(Handle<HeapObject> handle) {
+ void Assembler::emit(uint32_t x, RelocInfo::Mode rmode) {
+   if (!RelocInfo::IsNone(rmode)) {
+     RecordRelocInfo(rmode);
+-    if (rmode == RelocInfo::FULL_EMBEDDED_OBJECT && IsOnHeap()) {
+-      int offset = pc_offset();
+-      Handle<HeapObject> object(reinterpret_cast<Address*>(x));
+-      saved_handles_for_raw_object_ptr_.push_back(std::make_pair(offset, x));
+-      emit(object->ptr());
+-      DCHECK(EmbeddedObjectMatches(offset, object));
+-      return;
+-    }
+   }
+   emit(x);
+ }
+@@ -213,14 +205,6 @@ void Assembler::emit(const Immediate& x) {
+     emit(0);
+     return;
+   }
+-  if (x.is_embedded_object() && IsOnHeap()) {
+-    int offset = pc_offset();
+-    saved_handles_for_raw_object_ptr_.push_back(
+-        std::make_pair(offset, x.immediate()));
+-    emit(x.embedded_object()->ptr());
+-    DCHECK(EmbeddedObjectMatches(offset, x.embedded_object()));
+-    return;
+-  }
+   emit(x.immediate());
+ }
+ 
+diff --git a/src/codegen/ia32/assembler-ia32.cc b/src/codegen/ia32/assembler-ia32.cc
+index 274c513f352..e14d16c00a7 100644
+--- a/src/codegen/ia32/assembler-ia32.cc
++++ b/src/codegen/ia32/assembler-ia32.cc
+@@ -3275,30 +3275,10 @@ void Assembler::emit_vex_prefix(Register vreg, VectorLength l, SIMDPrefix pp,
+   emit_vex_prefix(ivreg, l, pp, mm, w);
+ }
+ 
+-void Assembler::FixOnHeapReferences(bool update_embedded_objects) {
+-  if (!update_embedded_objects) return;
+-  Address base = reinterpret_cast<Address>(buffer_->start());
+-  for (auto p : saved_handles_for_raw_object_ptr_) {
+-    Handle<HeapObject> object(reinterpret_cast<Address*>(p.second));
+-    WriteUnalignedValue(base + p.first, *object);
+-  }
+-}
+-
+-void Assembler::FixOnHeapReferencesToHandles() {
+-  Address base = reinterpret_cast<Address>(buffer_->start());
+-  for (auto p : saved_handles_for_raw_object_ptr_) {
+-    WriteUnalignedValue<uint32_t>(base + p.first, p.second);
+-  }
+-  saved_handles_for_raw_object_ptr_.clear();
+-}
+-
+ void Assembler::GrowBuffer() {
+   DCHECK(buffer_overflow());
+   DCHECK_EQ(buffer_start_, buffer_->start());
+ 
+-  bool previously_on_heap = buffer_->IsOnHeap();
+-  int previous_on_heap_gc_count = OnHeapGCCount();
+-
+   // Compute new buffer size.
+   int old_size = buffer_->size();
+   int new_size = 2 * old_size;
+@@ -3346,15 +3326,6 @@ void Assembler::GrowBuffer() {
+     it.rinfo()->apply(pc_delta);
+   }
+ 
+-  // Fix on-heap references.
+-  if (previously_on_heap) {
+-    if (buffer_->IsOnHeap()) {
+-      FixOnHeapReferences(previous_on_heap_gc_count != OnHeapGCCount());
+-    } else {
+-      FixOnHeapReferencesToHandles();
+-    }
+-  }
+-
+   DCHECK(!buffer_overflow());
+ }
+ 
+diff --git a/src/codegen/ia32/assembler-ia32.h b/src/codegen/ia32/assembler-ia32.h
+index b099dfcdd3e..5b43ddad411 100644
+--- a/src/codegen/ia32/assembler-ia32.h
++++ b/src/codegen/ia32/assembler-ia32.h
+@@ -408,13 +408,6 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // Unused on this architecture.
+   void MaybeEmitOutOfLineConstantPool() {}
+ 
+-#ifdef DEBUG
+-  bool EmbeddedObjectMatches(int pc_offset, Handle<Object> object) {
+-    return *reinterpret_cast<uint32_t*>(buffer_->start() + pc_offset) ==
+-           (IsOnHeap() ? object->ptr() : object.address());
+-  }
+-#endif
+-
+   // Read/Modify the code target in the branch/call instruction at pc.
+   // The isolate argument is unused (and may be nullptr) when skipping flushing.
+   inline static Address target_address_at(Address pc, Address constant_pool);
+diff --git a/src/codegen/loong64/assembler-loong64.cc b/src/codegen/loong64/assembler-loong64.cc
+index cc1eaa7d123..36b994511cd 100644
+--- a/src/codegen/loong64/assembler-loong64.cc
++++ b/src/codegen/loong64/assembler-loong64.cc
+@@ -2109,27 +2109,7 @@ void Assembler::RelocateRelativeReference(RelocInfo::Mode rmode, Address pc,
+   return;
+ }
+ 
+-void Assembler::FixOnHeapReferences(bool update_embedded_objects) {
+-  if (!update_embedded_objects) return;
+-  for (auto p : saved_handles_for_raw_object_ptr_) {
+-    Address address = reinterpret_cast<Address>(buffer_->start() + p.first);
+-    Handle<HeapObject> object(reinterpret_cast<Address*>(p.second));
+-    set_target_value_at(address, object->ptr());
+-  }
+-}
+-
+-void Assembler::FixOnHeapReferencesToHandles() {
+-  for (auto p : saved_handles_for_raw_object_ptr_) {
+-    Address address = reinterpret_cast<Address>(buffer_->start() + p.first);
+-    set_target_value_at(address, p.second);
+-  }
+-  saved_handles_for_raw_object_ptr_.clear();
+-}
+-
+ void Assembler::GrowBuffer() {
+-  bool previously_on_heap = buffer_->IsOnHeap();
+-  int previous_on_heap_gc_count = OnHeapGCCount();
+-
+   // Compute new buffer size.
+   int old_size = buffer_->size();
+   int new_size = std::min(2 * old_size, old_size + 1 * MB);
+@@ -2174,15 +2154,6 @@ void Assembler::GrowBuffer() {
+       WriteUnalignedValue<intptr_t>(address, internal_ref);
+     }
+   }
+-
+-  // Fix on-heap references.
+-  if (previously_on_heap) {
+-    if (buffer_->IsOnHeap()) {
+-      FixOnHeapReferences(previous_on_heap_gc_count != OnHeapGCCount());
+-    } else {
+-      FixOnHeapReferencesToHandles();
+-    }
+-  }
+ }
+ 
+ void Assembler::db(uint8_t data) {
+diff --git a/src/codegen/loong64/assembler-loong64.h b/src/codegen/loong64/assembler-loong64.h
+index b886b2ef43f..3b1c04fdc2e 100644
+--- a/src/codegen/loong64/assembler-loong64.h
++++ b/src/codegen/loong64/assembler-loong64.h
+@@ -901,14 +901,6 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+ 
+   void set_last_call_pc_(byte* pc) { last_call_pc_ = pc; }
+ 
+-#ifdef DEBUG
+-  bool EmbeddedObjectMatches(int pc_offset, Handle<Object> object) {
+-    return target_address_at(
+-               reinterpret_cast<Address>(buffer_->start() + pc_offset)) ==
+-           (IsOnHeap() ? object->ptr() : object.address());
+-  }
+-#endif
+-
+  private:
+   // Avoid overflows for displacements etc.
+   static const int kMaximalBufferSize = 512 * MB;
+diff --git a/src/codegen/loong64/macro-assembler-loong64.cc b/src/codegen/loong64/macro-assembler-loong64.cc
+index 6c1fa8e7298..b3330d8c8bb 100644
+--- a/src/codegen/loong64/macro-assembler-loong64.cc
++++ b/src/codegen/loong64/macro-assembler-loong64.cc
+@@ -1258,18 +1258,6 @@ void TurboAssembler::li(Register rd, Operand j, LiFlags mode) {
+   BlockTrampolinePoolScope block_trampoline_pool(this);
+   if (!MustUseReg(j.rmode()) && mode == OPTIMIZE_SIZE) {
+     li_optimized(rd, j, mode);
+-  } else if (IsOnHeap() && RelocInfo::IsEmbeddedObjectMode(j.rmode())) {
+-    BlockGrowBufferScope block_growbuffer(this);
+-    int offset = pc_offset();
+-    Address address = j.immediate();
+-    saved_handles_for_raw_object_ptr_.push_back(
+-        std::make_pair(offset, address));
+-    Handle<HeapObject> object(reinterpret_cast<Address*>(address));
+-    int64_t immediate = object->ptr();
+-    RecordRelocInfo(j.rmode(), immediate);
+-    lu12i_w(rd, immediate >> 12 & 0xfffff);
+-    ori(rd, rd, immediate & kImm12Mask);
+-    lu32i_d(rd, immediate >> 32 & 0xfffff);
+   } else if (MustUseReg(j.rmode())) {
+     int64_t immediate;
+     if (j.IsHeapObjectRequest()) {
+diff --git a/src/codegen/mips/assembler-mips.cc b/src/codegen/mips/assembler-mips.cc
+index dde08710fbe..83094f2a05e 100644
+--- a/src/codegen/mips/assembler-mips.cc
++++ b/src/codegen/mips/assembler-mips.cc
+@@ -3536,27 +3536,7 @@ void Assembler::RelocateRelativeReference(RelocInfo::Mode rmode, Address pc,
+   }
+ }
+ 
+-void Assembler::FixOnHeapReferences(bool update_embedded_objects) {
+-  if (!update_embedded_objects) return;
+-  for (auto p : saved_handles_for_raw_object_ptr_) {
+-    Address address = reinterpret_cast<Address>(buffer_->start() + p.first);
+-    Handle<HeapObject> object(reinterpret_cast<Address*>(p.second));
+-    set_target_value_at(address, object->ptr());
+-  }
+-}
+-
+-void Assembler::FixOnHeapReferencesToHandles() {
+-  for (auto p : saved_handles_for_raw_object_ptr_) {
+-    Address address = reinterpret_cast<Address>(buffer_->start() + p.first);
+-    set_target_value_at(address, p.second);
+-  }
+-  saved_handles_for_raw_object_ptr_.clear();
+-}
+-
+ void Assembler::GrowBuffer() {
+-  bool previously_on_heap = buffer_->IsOnHeap();
+-  int previous_on_heap_gc_count = OnHeapGCCount();
+-
+   // Compute new buffer size.
+   int old_size = buffer_->size();
+   int new_size = std::min(2 * old_size, old_size + 1 * MB);
+@@ -3600,15 +3580,6 @@ void Assembler::GrowBuffer() {
+     }
+   }
+ 
+-  // Fix on-heap references.
+-  if (previously_on_heap) {
+-    if (buffer_->IsOnHeap()) {
+-      FixOnHeapReferences(previous_on_heap_gc_count != OnHeapGCCount());
+-    } else {
+-      FixOnHeapReferencesToHandles();
+-    }
+-  }
+-
+   DCHECK(!overflow());
+ }
+ 
+diff --git a/src/codegen/mips/assembler-mips.h b/src/codegen/mips/assembler-mips.h
+index e2c5943ae4f..f316facc99c 100644
+--- a/src/codegen/mips/assembler-mips.h
++++ b/src/codegen/mips/assembler-mips.h
+@@ -1636,14 +1636,6 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+ 
+   void set_last_call_pc_(byte* pc) { last_call_pc_ = pc; }
+ 
+-#ifdef DEBUG
+-  bool EmbeddedObjectMatches(int pc_offset, Handle<Object> object) {
+-    return target_address_at(
+-               reinterpret_cast<Address>(buffer_->start() + pc_offset)) ==
+-           (IsOnHeap() ? object->ptr() : object.address());
+-  }
+-#endif
+-
+  private:
+   // Avoid overflows for displacements etc.
+   static const int kMaximalBufferSize = 512 * MB;
+diff --git a/src/codegen/mips/macro-assembler-mips.cc b/src/codegen/mips/macro-assembler-mips.cc
+index e7bb08ef26c..5da51374196 100644
+--- a/src/codegen/mips/macro-assembler-mips.cc
++++ b/src/codegen/mips/macro-assembler-mips.cc
+@@ -1394,17 +1394,6 @@ void TurboAssembler::li(Register rd, Operand j, LiFlags mode) {
+         ori(rd, rd, (j.immediate() & kImm16Mask));
+       }
+     }
+-  } else if (IsOnHeap() && RelocInfo::IsEmbeddedObjectMode(j.rmode())) {
+-    BlockGrowBufferScope block_growbuffer(this);
+-    int offset = pc_offset();
+-    Address address = j.immediate();
+-    saved_handles_for_raw_object_ptr_.emplace_back(offset, address);
+-    Handle<HeapObject> object(reinterpret_cast<Address*>(address));
+-    int32_t immediate = object->ptr();
+-    RecordRelocInfo(j.rmode(), immediate);
+-    lui(rd, (immediate >> kLuiShift) & kImm16Mask);
+-    ori(rd, rd, (immediate & kImm16Mask));
+-    DCHECK(EmbeddedObjectMatches(offset, object));
+   } else {
+     int32_t immediate;
+     if (j.IsHeapObjectRequest()) {
+diff --git a/src/codegen/mips64/assembler-mips64.cc b/src/codegen/mips64/assembler-mips64.cc
+index 0379cd65cee..471c1c691f1 100644
+--- a/src/codegen/mips64/assembler-mips64.cc
++++ b/src/codegen/mips64/assembler-mips64.cc
+@@ -3736,27 +3736,7 @@ int Assembler::RelocateInternalReference(RelocInfo::Mode rmode, Address pc,
+   }
+ }
+ 
+-void Assembler::FixOnHeapReferences(bool update_embedded_objects) {
+-  if (!update_embedded_objects) return;
+-  for (auto p : saved_handles_for_raw_object_ptr_) {
+-    Address address = reinterpret_cast<Address>(buffer_->start() + p.first);
+-    Handle<HeapObject> object(reinterpret_cast<Address*>(p.second));
+-    set_target_value_at(address, object->ptr());
+-  }
+-}
+-
+-void Assembler::FixOnHeapReferencesToHandles() {
+-  for (auto p : saved_handles_for_raw_object_ptr_) {
+-    Address address = reinterpret_cast<Address>(buffer_->start() + p.first);
+-    set_target_value_at(address, p.second);
+-  }
+-  saved_handles_for_raw_object_ptr_.clear();
+-}
+-
+ void Assembler::GrowBuffer() {
+-  bool previously_on_heap = buffer_->IsOnHeap();
+-  int previous_on_heap_gc_count = OnHeapGCCount();
+-
+   // Compute new buffer size.
+   int old_size = buffer_->size();
+   int new_size = std::min(2 * old_size, old_size + 1 * MB);
+@@ -3799,15 +3779,6 @@ void Assembler::GrowBuffer() {
+     }
+   }
+ 
+-  // Fix on-heap references.
+-  if (previously_on_heap) {
+-    if (buffer_->IsOnHeap()) {
+-      FixOnHeapReferences(previous_on_heap_gc_count != OnHeapGCCount());
+-    } else {
+-      FixOnHeapReferencesToHandles();
+-    }
+-  }
+-
+   DCHECK(!overflow());
+ }
+ 
+diff --git a/src/codegen/mips64/assembler-mips64.h b/src/codegen/mips64/assembler-mips64.h
+index 9f7ffdf8c79..0caeea73dff 100644
+--- a/src/codegen/mips64/assembler-mips64.h
++++ b/src/codegen/mips64/assembler-mips64.h
+@@ -1674,14 +1674,6 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+ 
+   void set_last_call_pc_(byte* pc) { last_call_pc_ = pc; }
+ 
+-#ifdef DEBUG
+-  bool EmbeddedObjectMatches(int pc_offset, Handle<Object> object) {
+-    return target_address_at(
+-               reinterpret_cast<Address>(buffer_->start() + pc_offset)) ==
+-           (IsOnHeap() ? object->ptr() : object.address());
+-  }
+-#endif
+-
+  private:
+   // Avoid overflows for displacements etc.
+   static const int kMaximalBufferSize = 512 * MB;
+diff --git a/src/codegen/mips64/macro-assembler-mips64.cc b/src/codegen/mips64/macro-assembler-mips64.cc
+index 28fd588a7c2..b3865776795 100644
+--- a/src/codegen/mips64/macro-assembler-mips64.cc
++++ b/src/codegen/mips64/macro-assembler-mips64.cc
+@@ -1914,19 +1914,6 @@ void TurboAssembler::li(Register rd, Operand j, LiFlags mode) {
+     } else {
+       li_optimized(rd, j, mode);
+     }
+-  } else if (IsOnHeap() && RelocInfo::IsEmbeddedObjectMode(j.rmode())) {
+-    BlockGrowBufferScope block_growbuffer(this);
+-    int offset = pc_offset();
+-    Address address = j.immediate();
+-    saved_handles_for_raw_object_ptr_.emplace_back(offset, address);
+-    Handle<HeapObject> object(reinterpret_cast<Address*>(address));
+-    int64_t immediate = object->ptr();
+-    RecordRelocInfo(j.rmode(), immediate);
+-    lui(rd, (immediate >> 32) & kImm16Mask);
+-    ori(rd, rd, (immediate >> 16) & kImm16Mask);
+-    dsll(rd, rd, 16);
+-    ori(rd, rd, immediate & kImm16Mask);
+-    DCHECK(EmbeddedObjectMatches(offset, object));
+   } else if (MustUseReg(j.rmode())) {
+     int64_t immediate;
+     if (j.IsHeapObjectRequest()) {
+diff --git a/src/codegen/riscv64/assembler-riscv64.cc b/src/codegen/riscv64/assembler-riscv64.cc
+index 47479cd0160..426e1cd225a 100644
+--- a/src/codegen/riscv64/assembler-riscv64.cc
++++ b/src/codegen/riscv64/assembler-riscv64.cc
+@@ -3486,28 +3486,8 @@ void Assembler::RelocateRelativeReference(RelocInfo::Mode rmode, Address pc,
+   }
+ }
+ 
+-void Assembler::FixOnHeapReferences(bool update_embedded_objects) {
+-  if (!update_embedded_objects) return;
+-  for (auto p : saved_handles_for_raw_object_ptr_) {
+-    Address address = reinterpret_cast<Address>(buffer_->start() + p.first);
+-    Handle<HeapObject> object(reinterpret_cast<Address*>(p.second));
+-    set_target_value_at(address, object->ptr());
+-  }
+-}
+-
+-void Assembler::FixOnHeapReferencesToHandles() {
+-  for (auto p : saved_handles_for_raw_object_ptr_) {
+-    Address address = reinterpret_cast<Address>(buffer_->start() + p.first);
+-    set_target_value_at(address, p.second);
+-  }
+-  saved_handles_for_raw_object_ptr_.clear();
+-}
+-
+ void Assembler::GrowBuffer() {
+   DEBUG_PRINTF("GrowBuffer: %p -> ", buffer_start_);
+-  bool previously_on_heap = buffer_->IsOnHeap();
+-  int previous_on_heap_gc_count = OnHeapGCCount();
+-
+   // Compute new buffer size.
+   int old_size = buffer_->size();
+   int new_size = std::min(2 * old_size, old_size + 1 * MB);
+@@ -3550,15 +3530,6 @@ void Assembler::GrowBuffer() {
+     }
+   }
+ 
+-  // Fix on-heap references.
+-  if (previously_on_heap) {
+-    if (buffer_->IsOnHeap()) {
+-      FixOnHeapReferences(previous_on_heap_gc_count != OnHeapGCCount());
+-    } else {
+-      FixOnHeapReferencesToHandles();
+-    }
+-  }
+-
+   DCHECK(!overflow());
+ }
+ 
+diff --git a/src/codegen/riscv64/assembler-riscv64.h b/src/codegen/riscv64/assembler-riscv64.h
+index e30254aa653..42ba590ab48 100644
+--- a/src/codegen/riscv64/assembler-riscv64.h
++++ b/src/codegen/riscv64/assembler-riscv64.h
+@@ -1335,14 +1335,6 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+ 
+   bool is_buffer_growth_blocked() const { return block_buffer_growth_; }
+ 
+-#ifdef DEBUG
+-  bool EmbeddedObjectMatches(int pc_offset, Handle<Object> object) {
+-    return target_address_at(
+-               reinterpret_cast<Address>(buffer_->start() + pc_offset)) ==
+-           (IsOnHeap() ? object->ptr() : object.address());
+-  }
+-#endif
+-
+  private:
+   // Avoid overflows for displacements etc.
+   static const int kMaximalBufferSize = 512 * MB;
+diff --git a/src/codegen/riscv64/macro-assembler-riscv64.cc b/src/codegen/riscv64/macro-assembler-riscv64.cc
+index 342660bcc01..94ad73747d8 100644
+--- a/src/codegen/riscv64/macro-assembler-riscv64.cc
++++ b/src/codegen/riscv64/macro-assembler-riscv64.cc
+@@ -1670,16 +1670,6 @@ void TurboAssembler::li(Register rd, Operand j, LiFlags mode) {
+         Li(rd, j.immediate());
+       }
+     }
+-  } else if (IsOnHeap() && RelocInfo::IsEmbeddedObjectMode(j.rmode())) {
+-    BlockGrowBufferScope block_growbuffer(this);
+-    int offset = pc_offset();
+-    Address address = j.immediate();
+-    saved_handles_for_raw_object_ptr_.emplace_back(offset, address);
+-    Handle<HeapObject> object(reinterpret_cast<Address*>(address));
+-    int64_t immediate = object->ptr();
+-    RecordRelocInfo(j.rmode(), immediate);
+-    li_ptr(rd, immediate);
+-    DCHECK(EmbeddedObjectMatches(offset, object));
+   } else if (MustUseReg(j.rmode())) {
+     int64_t immediate;
+     if (j.IsHeapObjectRequest()) {
+diff --git a/src/codegen/x64/assembler-x64-inl.h b/src/codegen/x64/assembler-x64-inl.h
+index 851e9c2957e..d170c2ea67e 100644
+--- a/src/codegen/x64/assembler-x64-inl.h
++++ b/src/codegen/x64/assembler-x64-inl.h
+@@ -41,15 +41,7 @@ void Assembler::emit_runtime_entry(Address entry, RelocInfo::Mode rmode) {
+   DCHECK_NE(options().code_range_start, 0);
+   RecordRelocInfo(rmode);
+   uint32_t offset = static_cast<uint32_t>(entry - options().code_range_start);
+-  if (IsOnHeap()) {
+-    saved_offsets_for_runtime_entries_.emplace_back(pc_offset(), offset);
+-    emitl(relative_target_offset(entry, reinterpret_cast<Address>(pc_)));
+-    // We must ensure that `emitl` is not growing the assembler buffer
+-    // and falling back to off-heap compilation.
+-    DCHECK(IsOnHeap());
+-  } else {
+-    emitl(offset);
+-  }
++  emitl(offset);
+ }
+ 
+ void Assembler::emit(Immediate x) {
+@@ -62,14 +54,6 @@ void Assembler::emit(Immediate x) {
+ void Assembler::emit(Immediate64 x) {
+   if (!RelocInfo::IsNone(x.rmode_)) {
+     RecordRelocInfo(x.rmode_);
+-    if (x.rmode_ == RelocInfo::FULL_EMBEDDED_OBJECT && IsOnHeap()) {
+-      int offset = pc_offset();
+-      Handle<HeapObject> object(reinterpret_cast<Address*>(x.value_));
+-      saved_handles_for_raw_object_ptr_.emplace_back(offset, x.value_);
+-      emitq(static_cast<uint64_t>(object->ptr()));
+-      DCHECK(EmbeddedObjectMatches(offset, object));
+-      return;
+-    }
+   }
+   emitq(static_cast<uint64_t>(x.value_));
+ }
+diff --git a/src/codegen/x64/assembler-x64.cc b/src/codegen/x64/assembler-x64.cc
+index 7c1de7db063..d41f9889702 100644
+--- a/src/codegen/x64/assembler-x64.cc
++++ b/src/codegen/x64/assembler-x64.cc
+@@ -540,39 +540,9 @@ bool Assembler::is_optimizable_farjmp(int idx) {
+   return !!(bitmap[idx / 32] & (1 << (idx & 31)));
+ }
+ 
+-void Assembler::FixOnHeapReferences(bool update_embedded_objects) {
+-  Address base = reinterpret_cast<Address>(buffer_->start());
+-  if (update_embedded_objects) {
+-    for (auto p : saved_handles_for_raw_object_ptr_) {
+-      Handle<HeapObject> object(reinterpret_cast<Address*>(p.second));
+-      WriteUnalignedValue(base + p.first, *object);
+-    }
+-  }
+-  for (auto p : saved_offsets_for_runtime_entries_) {
+-    Address pc = base + p.first;
+-    Address target = p.second + options().code_range_start;
+-    WriteUnalignedValue<uint32_t>(pc, relative_target_offset(target, pc));
+-  }
+-}
+-
+-void Assembler::FixOnHeapReferencesToHandles() {
+-  Address base = reinterpret_cast<Address>(buffer_->start());
+-  for (auto p : saved_handles_for_raw_object_ptr_) {
+-    WriteUnalignedValue(base + p.first, p.second);
+-  }
+-  saved_handles_for_raw_object_ptr_.clear();
+-  for (auto p : saved_offsets_for_runtime_entries_) {
+-    WriteUnalignedValue<uint32_t>(base + p.first, p.second);
+-  }
+-  saved_offsets_for_runtime_entries_.clear();
+-}
+-
+ void Assembler::GrowBuffer() {
+   DCHECK(buffer_overflow());
+ 
+-  bool previously_on_heap = buffer_->IsOnHeap();
+-  int previous_on_heap_gc_count = OnHeapGCCount();
+-
+   // Compute new buffer size.
+   DCHECK_EQ(buffer_start_, buffer_->start());
+   int old_size = buffer_->size();
+@@ -610,15 +580,6 @@ void Assembler::GrowBuffer() {
+     WriteUnalignedValue(p, ReadUnalignedValue<intptr_t>(p) + pc_delta);
+   }
+ 
+-  // Fix on-heap references.
+-  if (previously_on_heap) {
+-    if (buffer_->IsOnHeap()) {
+-      FixOnHeapReferences(previous_on_heap_gc_count != OnHeapGCCount());
+-    } else {
+-      FixOnHeapReferencesToHandles();
+-    }
+-  }
+-
+   DCHECK(!buffer_overflow());
+ }
+ 
+diff --git a/src/codegen/x64/assembler-x64.h b/src/codegen/x64/assembler-x64.h
+index fa85f2eedca..c0dad00d3d9 100644
+--- a/src/codegen/x64/assembler-x64.h
++++ b/src/codegen/x64/assembler-x64.h
+@@ -1920,13 +1920,6 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   }
+   void dq(Label* label);
+ 
+-#ifdef DEBUG
+-  bool EmbeddedObjectMatches(int pc_offset, Handle<Object> object) {
+-    return *reinterpret_cast<uint64_t*>(buffer_->start() + pc_offset) ==
+-           (IsOnHeap() ? object->ptr() : object.address());
+-  }
+-#endif
+-
+   // Patch entries for partial constant pool.
+   void PatchConstPool();
+ 
+diff --git a/src/diagnostics/objects-debug.cc b/src/diagnostics/objects-debug.cc
+index e9372179b2e..0901fc13789 100644
+--- a/src/diagnostics/objects-debug.cc
++++ b/src/diagnostics/objects-debug.cc
+@@ -1038,23 +1038,20 @@ void Code::CodeVerify(Isolate* isolate) {
+   // CodeVerify is called halfway through constructing the trampoline and so not
+   // everything is set up.
+   // CHECK_EQ(ReadOnlyHeap::Contains(*this), !IsExecutable());
+-  HeapObject relocation_info = relocation_info_or_undefined();
+-  if (!relocation_info.IsUndefined()) {
+-    ByteArray::cast(relocation_info).ObjectVerify(isolate);
+-    Address last_gc_pc = kNullAddress;
+-    for (RelocIterator it(*this); !it.done(); it.next()) {
+-      it.rinfo()->Verify(isolate);
+-      // Ensure that GC will not iterate twice over the same pointer.
+-      if (RelocInfo::IsGCRelocMode(it.rinfo()->rmode())) {
+-        CHECK(it.rinfo()->pc() != last_gc_pc);
+-        last_gc_pc = it.rinfo()->pc();
+-      }
+-    }
+-  }
+-
++  relocation_info().ObjectVerify(isolate);
+   CHECK(V8_ENABLE_THIRD_PARTY_HEAP_BOOL ||
+         CodeSize() <= MemoryChunkLayout::MaxRegularCodeObjectSize() ||
+         isolate->heap()->InSpace(*this, CODE_LO_SPACE));
++  Address last_gc_pc = kNullAddress;
++
++  for (RelocIterator it(*this); !it.done(); it.next()) {
++    it.rinfo()->Verify(isolate);
++    // Ensure that GC will not iterate twice over the same pointer.
++    if (RelocInfo::IsGCRelocMode(it.rinfo()->rmode())) {
++      CHECK(it.rinfo()->pc() != last_gc_pc);
++      last_gc_pc = it.rinfo()->pc();
++    }
++  }
+ }
+ 
+ void JSArray::JSArrayVerify(Isolate* isolate) {
+diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
+index 259ca435e79..4ff5fc7c58f 100644
+--- a/src/flags/flag-definitions.h
++++ b/src/flags/flag-definitions.h
+@@ -691,7 +691,6 @@ DEFINE_INT(interrupt_budget_scale_factor_for_top_tier, 20,
+ DEFINE_BOOL(sparkplug, ENABLE_SPARKPLUG_BY_DEFAULT,
+             "enable Sparkplug baseline compiler")
+ DEFINE_BOOL(always_sparkplug, false, "directly tier up to Sparkplug code")
+-DEFINE_BOOL(sparkplug_on_heap, false, "compile Sparkplug code directly on heap")
+ #if ENABLE_SPARKPLUG
+ DEFINE_IMPLICATION(always_sparkplug, sparkplug)
+ DEFINE_BOOL(baseline_batch_compilation, true, "batch compile Sparkplug code")
+diff --git a/src/heap/factory.cc b/src/heap/factory.cc
+index b6af221ec77..2d4278fbf58 100644
+--- a/src/heap/factory.cc
++++ b/src/heap/factory.cc
+@@ -132,15 +132,8 @@ MaybeHandle<Code> Factory::CodeBuilder::BuildInternal(
+   CodePageCollectionMemoryModificationScope code_allocation(heap);
+ 
+   Handle<Code> code;
+-  bool code_is_on_heap = code_desc_.origin && code_desc_.origin->IsOnHeap();
+-  if (code_is_on_heap) {
+-    DCHECK(FLAG_sparkplug_on_heap);
+-    DCHECK_EQ(kind_, CodeKind::BASELINE);
+-    code = code_desc_.origin->code().ToHandleChecked();
+-  } else {
+-    if (!AllocateCode(retry_allocation_or_fail).ToHandle(&code)) {
+-      return MaybeHandle<Code>();
+-    }
++  if (!AllocateCode(retry_allocation_or_fail).ToHandle(&code)) {
++    return MaybeHandle<Code>();
+   }
+ 
+   {
+@@ -148,12 +141,9 @@ MaybeHandle<Code> Factory::CodeBuilder::BuildInternal(
+     constexpr bool kIsNotOffHeapTrampoline = false;
+     DisallowGarbageCollection no_gc;
+ 
+-    if (code_is_on_heap) {
+-      heap->NotifyCodeObjectChangeStart(raw_code, no_gc);
+-    }
+-
+     raw_code.set_raw_instruction_size(code_desc_.instruction_size());
+     raw_code.set_raw_metadata_size(code_desc_.metadata_size());
++    raw_code.set_relocation_info(*reloc_info);
+     raw_code.initialize_flags(kind_, is_turbofanned_, stack_slots_,
+                               kIsNotOffHeapTrampoline);
+     raw_code.set_builtin_id(builtin_);
+@@ -201,29 +191,16 @@ MaybeHandle<Code> Factory::CodeBuilder::BuildInternal(
+               handle(on_heap_profiler_data->counts(), isolate_));
+     }
+ 
+-    if (code_is_on_heap) {
+-      FinalizeOnHeapCode(code, *reloc_info);
+-    } else {
+-      // Migrate generated code.
+-      // The generated code can contain embedded objects (typically from
+-      // handles) in a pointer-to-tagged-value format (i.e. with indirection
+-      // like a handle) that are dereferenced during the copy to point directly
+-      // to the actual heap objects. These pointers can include references to
+-      // the code object itself, through the self_reference parameter.
+-      raw_code.CopyFromNoFlush(*reloc_info, heap, code_desc_);
+-    }
++    // Migrate generated code.
++    // The generated code can contain embedded objects (typically from
++    // handles) in a pointer-to-tagged-value format (i.e. with indirection
++    // like a handle) that are dereferenced during the copy to point directly
++    // to the actual heap objects. These pointers can include references to
++    // the code object itself, through the self_reference parameter.
++    raw_code.CopyFromNoFlush(*reloc_info, heap, code_desc_);
+ 
+     raw_code.clear_padding();
+ 
+-    if (code_is_on_heap) {
+-      raw_code.set_relocation_info(*reloc_info, kReleaseStore);
+-      // Now that object is properly initialized, the GC needs to revisit this
+-      // object if marking is on.
+-      heap->NotifyCodeObjectChangeEnd(raw_code, no_gc);
+-    } else {
+-      raw_code.set_relocation_info(*reloc_info);
+-    }
+-
+     if (V8_EXTERNAL_CODE_SPACE_BOOL) {
+       data_container->SetCodeAndEntryPoint(isolate_, raw_code);
+     }
+@@ -290,73 +267,6 @@ MaybeHandle<Code> Factory::CodeBuilder::AllocateCode(
+   return code;
+ }
+ 
+-void Factory::CodeBuilder::FinalizeOnHeapCode(Handle<Code> code,
+-                                              ByteArray reloc_info) {
+-  Heap* heap = isolate_->heap();
+-
+-  // We cannot trim the Code object in CODE_LO_SPACE.
+-  DCHECK(!heap->code_lo_space()->Contains(*code));
+-
+-  code->CopyRelocInfoToByteArray(reloc_info, code_desc_);
+-
+-  if (code_desc_.origin->OnHeapGCCount() != heap->gc_count()) {
+-    // If a GC happens between Code object allocation and now, we might have
+-    // invalid embedded object references.
+-    code_desc_.origin->FixOnHeapReferences();
+-  }
+-
+-#ifdef VERIFY_HEAP
+-  code->VerifyRelocInfo(isolate_, reloc_info);
+-#endif
+-
+-  int old_object_size = Code::SizeFor(code_desc_.origin->buffer_size());
+-  int new_object_size =
+-      Code::SizeFor(code_desc_.instruction_size() + code_desc_.metadata_size());
+-  int size_to_trim = old_object_size - new_object_size;
+-  DCHECK_GE(size_to_trim, 0);
+-  heap->CreateFillerObjectAt(code->address() + new_object_size, size_to_trim,
+-                             ClearRecordedSlots::kNo);
+-}
+-
+-MaybeHandle<Code> Factory::NewEmptyCode(CodeKind kind, int buffer_size) {
+-  STATIC_ASSERT(Code::kOnHeapBodyIsContiguous);
+-  const int object_size = Code::SizeFor(buffer_size);
+-  Heap* heap = isolate()->heap();
+-
+-  HeapObject result = heap->AllocateRawWith<Heap::kLightRetry>(
+-      object_size, AllocationType::kCode, AllocationOrigin::kRuntime);
+-  if (result.is_null()) return MaybeHandle<Code>();
+-
+-  DisallowGarbageCollection no_gc;
+-  result.set_map_after_allocation(*code_map(), SKIP_WRITE_BARRIER);
+-
+-  Code raw_code = Code::cast(result);
+-  constexpr bool kIsNotOffHeapTrampoline = false;
+-  raw_code.set_raw_instruction_size(0);
+-  raw_code.set_raw_metadata_size(buffer_size);
+-  raw_code.set_relocation_info_or_undefined(*undefined_value());
+-  raw_code.initialize_flags(kind, false, 0, kIsNotOffHeapTrampoline);
+-  raw_code.set_builtin_id(Builtin::kNoBuiltinId);
+-  auto code_data_container =
+-      Handle<CodeDataContainer>::cast(trampoline_trivial_code_data_container());
+-  raw_code.set_code_data_container(*code_data_container, kReleaseStore);
+-  raw_code.set_deoptimization_data(*DeoptimizationData::Empty(isolate()));
+-  raw_code.set_bytecode_offset_table(*empty_byte_array());
+-  raw_code.set_handler_table_offset(0);
+-  raw_code.set_constant_pool_offset(0);
+-  raw_code.set_code_comments_offset(0);
+-  raw_code.set_unwinding_info_offset(0);
+-
+-  Handle<Code> code = handle(raw_code, isolate());
+-  DCHECK(IsAligned(code->address(), kCodeAlignment));
+-  DCHECK_IMPLIES(
+-      !V8_ENABLE_THIRD_PARTY_HEAP_BOOL && !heap->code_region().is_empty(),
+-      heap->code_region().contains(code->address()));
+-
+-  DCHECK(heap->code_space()->Contains(raw_code));
+-  return code;
+-}
+-
+ MaybeHandle<Code> Factory::CodeBuilder::TryBuild() {
+   return BuildInternal(false);
+ }
+diff --git a/src/heap/factory.h b/src/heap/factory.h
+index 081558361c0..7246a67333d 100644
+--- a/src/heap/factory.h
++++ b/src/heap/factory.h
+@@ -19,7 +19,6 @@
+ #include "src/heap/heap.h"
+ #include "src/objects/code.h"
+ #include "src/objects/dictionary.h"
+-#include "src/objects/fixed-array.h"
+ #include "src/objects/js-array.h"
+ #include "src/objects/js-regexp.h"
+ #include "src/objects/shared-function-info.h"
+@@ -665,8 +664,6 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
+   Handle<Code> NewOffHeapTrampolineFor(Handle<Code> code,
+                                        Address off_heap_entry);
+ 
+-  MaybeHandle<Code> NewEmptyCode(CodeKind kind, int buffer_size);
+-
+   Handle<Code> CopyCode(Handle<Code> code);
+ 
+   Handle<BytecodeArray> CopyBytecodeArray(Handle<BytecodeArray>);
+@@ -938,7 +935,6 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
+    private:
+     MaybeHandle<Code> BuildInternal(bool retry_allocation_or_fail);
+     MaybeHandle<Code> AllocateCode(bool retry_allocation_or_fail);
+-    void FinalizeOnHeapCode(Handle<Code> code, ByteArray reloc_info);
+ 
+     Isolate* const isolate_;
+     const CodeDesc& code_desc_;
+diff --git a/src/heap/heap.cc b/src/heap/heap.cc
+index 9d5d14510ee..b7b5cef1c98 100644
+--- a/src/heap/heap.cc
++++ b/src/heap/heap.cc
+@@ -3800,27 +3800,6 @@ void Heap::NotifyObjectLayoutChange(
+ #endif
+ }
+ 
+-void Heap::NotifyCodeObjectChangeStart(Code code,
+-                                       const DisallowGarbageCollection&) {
+-  // Updating the code object will also trim the object size, this results in
+-  // free memory which we want to give back to the LAB. Sweeping that object's
+-  // page will ensure that we don't add that memory to the free list as well.
+-  EnsureSweepingCompleted(code);
+-}
+-
+-void Heap::NotifyCodeObjectChangeEnd(Code code,
+-                                     const DisallowGarbageCollection&) {
+-  // Ensure relocation_info is already initialized.
+-  DCHECK(code.relocation_info_or_undefined().IsByteArray());
+-
+-  if (incremental_marking()->IsMarking()) {
+-    // Object might have been marked already without relocation_info. Force
+-    // revisitation of the object such that we find all pointers in the
+-    // instruction stream.
+-    incremental_marking()->MarkBlackAndRevisitObject(code);
+-  }
+-}
+-
+ #ifdef VERIFY_HEAP
+ // Helper class for collecting slot addresses.
+ class SlotCollectingVisitor final : public ObjectVisitor {
+diff --git a/src/heap/heap.h b/src/heap/heap.h
+index 0753c9667cc..45216aae3a8 100644
+--- a/src/heap/heap.h
++++ b/src/heap/heap.h
+@@ -1168,9 +1168,6 @@ class Heap {
+       InvalidateRecordedSlots invalidate_recorded_slots =
+           InvalidateRecordedSlots::kYes);
+ 
+-  void NotifyCodeObjectChangeStart(Code code, const DisallowGarbageCollection&);
+-  void NotifyCodeObjectChangeEnd(Code code, const DisallowGarbageCollection&);
+-
+ #ifdef VERIFY_HEAP
+   // This function checks that either
+   // - the map transition is safe,
+diff --git a/src/heap/incremental-marking.cc b/src/heap/incremental-marking.cc
+index af1e3c6308f..55f2d6998c5 100644
+--- a/src/heap/incremental-marking.cc
++++ b/src/heap/incremental-marking.cc
+@@ -65,13 +65,6 @@ void IncrementalMarking::MarkBlackAndVisitObjectDueToLayoutChange(
+   collector_->VisitObject(obj);
+ }
+ 
+-void IncrementalMarking::MarkBlackAndRevisitObject(Code code) {
+-  TRACE_EVENT0("v8", "V8.GCIncrementalMarkingLayoutChange");
+-  TRACE_GC(heap()->tracer(), GCTracer::Scope::MC_INCREMENTAL_LAYOUT_CHANGE);
+-  marking_state()->WhiteToBlack(code);
+-  collector_->RevisitObject(code);
+-}
+-
+ void IncrementalMarking::MarkBlackBackground(HeapObject obj, int object_size) {
+   MarkBit mark_bit = atomic_marking_state()->MarkBitFrom(obj);
+   Marking::MarkBlack<AccessMode::ATOMIC>(mark_bit);
+diff --git a/src/heap/incremental-marking.h b/src/heap/incremental-marking.h
+index 6bd5ac5be24..40fb9b7dac4 100644
+--- a/src/heap/incremental-marking.h
++++ b/src/heap/incremental-marking.h
+@@ -186,8 +186,6 @@ class V8_EXPORT_PRIVATE IncrementalMarking final {
+   // the concurrent marker.
+   void MarkBlackAndVisitObjectDueToLayoutChange(HeapObject obj);
+ 
+-  void MarkBlackAndRevisitObject(Code code);
+-
+   void MarkBlackBackground(HeapObject obj, int object_size);
+ 
+   bool IsCompacting() { return IsMarking() && is_compacting_; }
+diff --git a/src/objects/code-inl.h b/src/objects/code-inl.h
+index 4cbb1595c96..936477133be 100644
+--- a/src/objects/code-inl.h
++++ b/src/objects/code-inl.h
+@@ -12,12 +12,9 @@
+ #include "src/common/globals.h"
+ #include "src/execution/isolate.h"
+ #include "src/heap/heap-inl.h"
+-#include "src/heap/heap-write-barrier-inl.h"
+ #include "src/interpreter/bytecode-register.h"
+ #include "src/objects/code.h"
+ #include "src/objects/dictionary.h"
+-#include "src/objects/fixed-array.h"
+-#include "src/objects/heap-object.h"
+ #include "src/objects/instance-type-inl.h"
+ #include "src/objects/map-inl.h"
+ #include "src/objects/maybe-object-inl.h"
+@@ -186,25 +183,14 @@ INT_ACCESSORS(Code, raw_metadata_size, kMetadataSizeOffset)
+ INT_ACCESSORS(Code, handler_table_offset, kHandlerTableOffsetOffset)
+ INT_ACCESSORS(Code, code_comments_offset, kCodeCommentsOffsetOffset)
+ INT32_ACCESSORS(Code, unwinding_info_offset, kUnwindingInfoOffsetOffset)
+-#define CODE_ACCESSORS(name, type, offset)            \
+-  ACCESSORS_CHECKED2(Code, name, type, offset,        \
+-                     !ObjectInYoungGeneration(value), \
++#define CODE_ACCESSORS(name, type, offset)           \
++  ACCESSORS_CHECKED2(Code, name, type, offset, true, \
+                      !ObjectInYoungGeneration(value))
+-#define CODE_ACCESSORS_CHECKED(name, type, offset, condition)        \
+-  ACCESSORS_CHECKED2(Code, name, type, offset,                       \
+-                     !ObjectInYoungGeneration(value) && (condition), \
+-                     !ObjectInYoungGeneration(value) && (condition))
+-#define RELEASE_ACQUIRE_CODE_ACCESSORS(name, type, offset)            \
+-  RELEASE_ACQUIRE_ACCESSORS_CHECKED2(Code, name, type, offset,        \
+-                                     !ObjectInYoungGeneration(value), \
++#define RELEASE_ACQUIRE_CODE_ACCESSORS(name, type, offset)           \
++  RELEASE_ACQUIRE_ACCESSORS_CHECKED2(Code, name, type, offset, true, \
+                                      !ObjectInYoungGeneration(value))
+ 
+ CODE_ACCESSORS(relocation_info, ByteArray, kRelocationInfoOffset)
+-RELEASE_ACQUIRE_CODE_ACCESSORS(relocation_info, ByteArray,
+-                               kRelocationInfoOffset)
+-CODE_ACCESSORS_CHECKED(relocation_info_or_undefined, HeapObject,
+-                       kRelocationInfoOffset,
+-                       value.IsUndefined() || value.IsByteArray())
+ 
+ ACCESSORS_CHECKED2(Code, deoptimization_data, FixedArray,
+                    kDeoptimizationDataOrInterpreterDataOffset,
+@@ -230,7 +216,6 @@ ACCESSORS_CHECKED2(Code, bytecode_offset_table, ByteArray, kPositionTableOffset,
+ RELEASE_ACQUIRE_CODE_ACCESSORS(code_data_container, CodeDataContainer,
+                                kCodeDataContainerOffset)
+ #undef CODE_ACCESSORS
+-#undef CODE_ACCESSORS_CHECKED
+ #undef RELEASE_ACQUIRE_CODE_ACCESSORS
+ 
+ CodeDataContainer Code::GCSafeCodeDataContainer(AcquireLoadTag) const {
+@@ -406,12 +391,6 @@ ByteArray Code::unchecked_relocation_info() const {
+       TaggedField<HeapObject, kRelocationInfoOffset>::load(cage_base, *this));
+ }
+ 
+-HeapObject Code::synchronized_unchecked_relocation_info_or_undefined() const {
+-  PtrComprCageBase cage_base = GetPtrComprCageBase(*this);
+-  return TaggedField<HeapObject, kRelocationInfoOffset>::Acquire_Load(cage_base,
+-                                                                      *this);
+-}
+-
+ byte* Code::relocation_start() const {
+   return unchecked_relocation_info().GetDataStartAddress();
+ }
+diff --git a/src/objects/code.cc b/src/objects/code.cc
+index b3f9953be15..6917b5c7ef0 100644
+--- a/src/objects/code.cc
++++ b/src/objects/code.cc
+@@ -139,15 +139,6 @@ void Code::RelocateFromDesc(ByteArray reloc_info, Heap* heap,
+   }
+ }
+ 
+-#ifdef VERIFY_HEAP
+-void Code::VerifyRelocInfo(Isolate* isolate, ByteArray reloc_info) {
+-  const int mode_mask = RelocInfo::PostCodegenRelocationMask();
+-  for (RelocIterator it(*this, reloc_info, mode_mask); !it.done(); it.next()) {
+-    it.rinfo()->Verify(isolate);
+-  }
+-}
+-#endif
+-
+ SafepointEntry Code::GetSafepointEntry(Isolate* isolate, Address pc) {
+   SafepointTable table(isolate, pc, *this);
+   return table.FindEntry(pc);
+diff --git a/src/objects/code.h b/src/objects/code.h
+index 2b2c874d865..7b483cf1cc8 100644
+--- a/src/objects/code.h
++++ b/src/objects/code.h
+@@ -273,8 +273,6 @@ class Code : public HeapObject {
+ 
+   // [relocation_info]: Code relocation information
+   DECL_ACCESSORS(relocation_info, ByteArray)
+-  DECL_RELEASE_ACQUIRE_ACCESSORS(relocation_info, ByteArray)
+-  DECL_ACCESSORS(relocation_info_or_undefined, HeapObject)
+ 
+   // This function should be called only from GC.
+   void ClearEmbeddedObjects(Heap* heap);
+@@ -307,7 +305,6 @@ class Code : public HeapObject {
+ 
+   // Unchecked accessors to be used during GC.
+   inline ByteArray unchecked_relocation_info() const;
+-  inline HeapObject synchronized_unchecked_relocation_info_or_undefined() const;
+ 
+   inline int relocation_size() const;
+ 
+@@ -446,10 +443,6 @@ class Code : public HeapObject {
+   void CopyFromNoFlush(ByteArray reloc_info, Heap* heap, const CodeDesc& desc);
+   void RelocateFromDesc(ByteArray reloc_info, Heap* heap, const CodeDesc& desc);
+ 
+-#ifdef VERIFY_HEAP
+-  void VerifyRelocInfo(Isolate* isolate, ByteArray reloc_info);
+-#endif
+-
+   // Copy the RelocInfo portion of |desc| to |dest|. The ByteArray must be
+   // exactly the same size as the RelocInfo in |desc|.
+   static inline void CopyRelocInfoToByteArray(ByteArray dest,
+diff --git a/src/objects/objects-body-descriptors-inl.h b/src/objects/objects-body-descriptors-inl.h
+index bf64876df4a..60cb8def383 100644
+--- a/src/objects/objects-body-descriptors-inl.h
++++ b/src/objects/objects-body-descriptors-inl.h
+@@ -828,15 +828,8 @@ class Code::BodyDescriptor final : public BodyDescriptorBase {
+     // GC does not visit data/code in the header and in the body directly.
+     IteratePointers(obj, kRelocationInfoOffset, kDataStart, v);
+ 
+-    Code code = Code::cast(obj);
+-    HeapObject relocation_info =
+-        code.synchronized_unchecked_relocation_info_or_undefined();
+-
+-    if (!relocation_info.IsUndefined()) {
+-      RelocIterator it(code, ByteArray::unchecked_cast(relocation_info),
+-                       kRelocModeMask);
+-      v->VisitRelocInfo(&it);
+-    }
++    RelocIterator it(Code::cast(obj), kRelocModeMask);
++    v->VisitRelocInfo(&it);
+   }
+ 
+   template <typename ObjectVisitor>
+diff --git a/src/profiler/heap-snapshot-generator.cc b/src/profiler/heap-snapshot-generator.cc
+index 13c587dd760..fe57e707196 100644
+--- a/src/profiler/heap-snapshot-generator.cc
++++ b/src/profiler/heap-snapshot-generator.cc
+@@ -1215,16 +1215,9 @@ void V8HeapExplorer::TagBuiltinCodeObject(Code code, const char* name) {
+ }
+ 
+ void V8HeapExplorer::ExtractCodeReferences(HeapEntry* entry, Code code) {
+-  Object reloc_info_or_undefined = code.relocation_info_or_undefined();
+-  TagObject(reloc_info_or_undefined, "(code relocation info)");
+-  SetInternalReference(entry, "relocation_info", reloc_info_or_undefined,
++  TagObject(code.relocation_info(), "(code relocation info)");
++  SetInternalReference(entry, "relocation_info", code.relocation_info(),
+                        Code::kRelocationInfoOffset);
+-  if (reloc_info_or_undefined.IsUndefined()) {
+-    // The code object was compiled directly on the heap, but it was not
+-    // finalized.
+-    DCHECK(code.kind() == CodeKind::BASELINE);
+-    return;
+-  }
+ 
+   if (code.kind() == CodeKind::BASELINE) {
+     TagObject(code.bytecode_or_interpreter_data(), "(interpreter data)");
+diff --git a/test/mjsunit/baseline/batch-compilation.js b/test/mjsunit/baseline/batch-compilation.js
+index 279a24f4f03..827d6dcc81a 100644
+--- a/test/mjsunit/baseline/batch-compilation.js
++++ b/test/mjsunit/baseline/batch-compilation.js
+@@ -4,8 +4,8 @@
+ 
+ // Flags: --sparkplug --no-always-sparkplug --sparkplug-filter="test*"
+ // Flags: --allow-natives-syntax --expose-gc --no-always-opt
+-// Flags: --baseline-batch-compilation --baseline-batch-compilation-threshold=500
+-// Flags: --scale-factor-for-feedback-allocation=2
++// Flags: --baseline-batch-compilation --baseline-batch-compilation-threshold=200
++// Flags: --scale-factor-for-feedback-allocation=4
+ 
+ // Flags to drive Fuzzers into the right direction
+ // TODO(v8:11853): Remove these flags once fuzzers handle flag implications
+-- 
+2.35.1
+

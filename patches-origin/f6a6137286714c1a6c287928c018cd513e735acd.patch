@@ -1,0 +1,52 @@
+From f6a6137286714c1a6c287928c018cd513e735acd Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Mon, 19 Sep 2022 08:49:37 +0800
+Subject: [PATCH] [riscv] Don't cover when node is Trap and uint32 compare
+
+If trap cover 32bit compare, it will emit 3 archopcode(shl shl trap) and  don't emit right source position on Trap opcode.
+
+Change-Id: I5dd1a89d133688ca315360b8d8123d561782d623
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3903733
+Reviewed-by: ji qiu <qiuji@iscas.ac.cn>
+Commit-Queue: ji qiu <qiuji@iscas.ac.cn>
+Auto-Submit: Yahan Lu <yahan@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#83287}
+---
+ .../backend/riscv/instruction-selector-riscv64.cc  | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/src/compiler/backend/riscv/instruction-selector-riscv64.cc b/src/compiler/backend/riscv/instruction-selector-riscv64.cc
+index cffbfcb4102..0c3b73cbb0b 100644
+--- a/src/compiler/backend/riscv/instruction-selector-riscv64.cc
++++ b/src/compiler/backend/riscv/instruction-selector-riscv64.cc
+@@ -1610,6 +1610,18 @@ void InstructionSelector::VisitStackPointerGreaterThan(
+                        temp_count, temps, cont);
+ }
+ 
++bool CanCoverTrap(Node* user, Node* value) {
++  if (user->opcode() != IrOpcode::kTrapUnless &&
++      user->opcode() != IrOpcode::kTrapIf)
++    return true;
++  if (value->opcode() == IrOpcode::kWord32Equal ||
++      value->opcode() == IrOpcode::kInt32LessThanOrEqual ||
++      value->opcode() == IrOpcode::kInt32LessThanOrEqual ||
++      value->opcode() == IrOpcode::kUint32LessThan ||
++      value->opcode() == IrOpcode::kUint32LessThanOrEqual)
++    return false;
++  return true;
++}
+ // Shared routine for word comparisons against zero.
+ void InstructionSelector::VisitWordCompareZero(Node* user, Node* value,
+                                                FlagsContinuation* cont) {
+@@ -1632,7 +1644,7 @@ void InstructionSelector::VisitWordCompareZero(Node* user, Node* value,
+     cont->Negate();
+   }
+ 
+-  if (CanCover(user, value)) {
++  if (CanCoverTrap(user, value) && CanCover(user, value)) {
+     switch (value->opcode()) {
+       case IrOpcode::kWord32Equal:
+         cont->OverwriteAndNegateIfEqual(kEqual);
+-- 
+2.35.1
+

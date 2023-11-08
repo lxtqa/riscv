@@ -1,0 +1,927 @@
+From 9cbe97746ebe775f05d43e2d5ff4b969e5f7a3d2 Mon Sep 17 00:00:00 2001
+From: Hao Xu <hao.a.xu@intel.com>
+Date: Fri, 28 Jan 2022 21:07:20 +0800
+Subject: [PATCH] [baseline] Improve register allocation in Baseline
+ CallBuiltin
+
+The Descriptor of Builtin defines the allocated machine registers for
+its parameters. However, when an argument is in
+InterpreterAccumulatorRegister, the Descriptor might require another
+machine register holding the the value of this argument and result in a
+redundant register-to-register move. This CL avoids this move by
+allocating a same register for such argument. It also changes the
+assigned registers for Typeof, KeyedLoadIC and KeyedHasIC to align the
+use in Baseline Builtins.
+
+Change-Id: I14004d8e44c4c45f2a1bea2c09b06160f615709b
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3416544
+Reviewed-by: Leszek Swirski <leszeks@chromium.org>
+Commit-Queue: Leszek Swirski <leszeks@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#78833}
+---
+ src/builtins/builtins-definitions.h           | 40 ++++----
+ .../arm/interface-descriptors-arm-inl.h       | 40 +++++++-
+ .../arm64/interface-descriptors-arm64-inl.h   | 40 +++++++-
+ .../ia32/interface-descriptors-ia32-inl.h     | 37 +++++++-
+ src/codegen/interface-descriptors-inl.h       | 31 ++++++
+ src/codegen/interface-descriptors.h           | 94 ++++++++++++++++++-
+ .../interface-descriptors-loong64-inl.h       | 40 +++++++-
+ .../mips/interface-descriptors-mips-inl.h     | 38 +++++++-
+ .../mips64/interface-descriptors-mips64-inl.h | 40 +++++++-
+ .../ppc/interface-descriptors-ppc-inl.h       | 38 +++++++-
+ .../interface-descriptors-riscv64-inl.h       | 40 +++++++-
+ .../s390/interface-descriptors-s390-inl.h     | 37 +++++++-
+ .../x64/interface-descriptors-x64-inl.h       | 37 +++++++-
+ 13 files changed, 521 insertions(+), 31 deletions(-)
+
+diff --git a/src/builtins/builtins-definitions.h b/src/builtins/builtins-definitions.h
+index 5ffb448738c..5250070a95b 100644
+--- a/src/builtins/builtins-definitions.h
++++ b/src/builtins/builtins-definitions.h
+@@ -624,11 +624,11 @@ namespace internal {
+   TFH(LoadICTrampoline_Megamorphic, Load)                                      \
+   TFH(LoadSuperIC, LoadWithReceiverAndVector)                                  \
+   TFH(LoadSuperICBaseline, LoadWithReceiverBaseline)                           \
+-  TFH(KeyedLoadIC, LoadWithVector)                                             \
+-  TFH(KeyedLoadIC_Megamorphic, LoadWithVector)                                 \
+-  TFH(KeyedLoadICTrampoline, Load)                                             \
+-  TFH(KeyedLoadICBaseline, LoadBaseline)                                       \
+-  TFH(KeyedLoadICTrampoline_Megamorphic, Load)                                 \
++  TFH(KeyedLoadIC, KeyedLoadWithVector)                                        \
++  TFH(KeyedLoadIC_Megamorphic, KeyedLoadWithVector)                            \
++  TFH(KeyedLoadICTrampoline, KeyedLoad)                                        \
++  TFH(KeyedLoadICBaseline, KeyedLoadBaseline)                                  \
++  TFH(KeyedLoadICTrampoline_Megamorphic, KeyedLoad)                            \
+   TFH(StoreGlobalIC, StoreGlobalWithVector)                                    \
+   TFH(StoreGlobalICTrampoline, StoreGlobal)                                    \
+   TFH(StoreGlobalICBaseline, StoreGlobalBaseline)                              \
+@@ -659,9 +659,9 @@ namespace internal {
+   TFH(CloneObjectIC, CloneObjectWithVector)                                    \
+   TFH(CloneObjectICBaseline, CloneObjectBaseline)                              \
+   TFH(CloneObjectIC_Slow, CloneObjectWithVector)                               \
+-  TFH(KeyedHasIC, LoadWithVector)                                              \
+-  TFH(KeyedHasICBaseline, LoadBaseline)                                        \
+-  TFH(KeyedHasIC_Megamorphic, LoadWithVector)                                  \
++  TFH(KeyedHasIC, KeyedHasICWithVector)                                        \
++  TFH(KeyedHasICBaseline, KeyedHasICBaseline)                                  \
++  TFH(KeyedHasIC_Megamorphic, KeyedHasICWithVector)                            \
+                                                                                \
+   /* IterableToList */                                                         \
+   /* ES #sec-iterabletolist */                                                 \
+@@ -707,29 +707,29 @@ namespace internal {
+                                                                                \
+   /* Binary ops with feedback collection */                                    \
+   TFC(Add_Baseline, BinaryOp_Baseline)                                         \
+-  TFC(AddSmi_Baseline, BinaryOp_Baseline)                                      \
++  TFC(AddSmi_Baseline, BinarySmiOp_Baseline)                                   \
+   TFC(Subtract_Baseline, BinaryOp_Baseline)                                    \
+-  TFC(SubtractSmi_Baseline, BinaryOp_Baseline)                                 \
++  TFC(SubtractSmi_Baseline, BinarySmiOp_Baseline)                              \
+   TFC(Multiply_Baseline, BinaryOp_Baseline)                                    \
+-  TFC(MultiplySmi_Baseline, BinaryOp_Baseline)                                 \
++  TFC(MultiplySmi_Baseline, BinarySmiOp_Baseline)                              \
+   TFC(Divide_Baseline, BinaryOp_Baseline)                                      \
+-  TFC(DivideSmi_Baseline, BinaryOp_Baseline)                                   \
++  TFC(DivideSmi_Baseline, BinarySmiOp_Baseline)                                \
+   TFC(Modulus_Baseline, BinaryOp_Baseline)                                     \
+-  TFC(ModulusSmi_Baseline, BinaryOp_Baseline)                                  \
++  TFC(ModulusSmi_Baseline, BinarySmiOp_Baseline)                               \
+   TFC(Exponentiate_Baseline, BinaryOp_Baseline)                                \
+-  TFC(ExponentiateSmi_Baseline, BinaryOp_Baseline)                             \
++  TFC(ExponentiateSmi_Baseline, BinarySmiOp_Baseline)                          \
+   TFC(BitwiseAnd_Baseline, BinaryOp_Baseline)                                  \
+-  TFC(BitwiseAndSmi_Baseline, BinaryOp_Baseline)                               \
++  TFC(BitwiseAndSmi_Baseline, BinarySmiOp_Baseline)                            \
+   TFC(BitwiseOr_Baseline, BinaryOp_Baseline)                                   \
+-  TFC(BitwiseOrSmi_Baseline, BinaryOp_Baseline)                                \
++  TFC(BitwiseOrSmi_Baseline, BinarySmiOp_Baseline)                             \
+   TFC(BitwiseXor_Baseline, BinaryOp_Baseline)                                  \
+-  TFC(BitwiseXorSmi_Baseline, BinaryOp_Baseline)                               \
++  TFC(BitwiseXorSmi_Baseline, BinarySmiOp_Baseline)                            \
+   TFC(ShiftLeft_Baseline, BinaryOp_Baseline)                                   \
+-  TFC(ShiftLeftSmi_Baseline, BinaryOp_Baseline)                                \
++  TFC(ShiftLeftSmi_Baseline, BinarySmiOp_Baseline)                             \
+   TFC(ShiftRight_Baseline, BinaryOp_Baseline)                                  \
+-  TFC(ShiftRightSmi_Baseline, BinaryOp_Baseline)                               \
++  TFC(ShiftRightSmi_Baseline, BinarySmiOp_Baseline)                            \
+   TFC(ShiftRightLogical_Baseline, BinaryOp_Baseline)                           \
+-  TFC(ShiftRightLogicalSmi_Baseline, BinaryOp_Baseline)                        \
++  TFC(ShiftRightLogicalSmi_Baseline, BinarySmiOp_Baseline)                     \
+                                                                                \
+   TFC(Add_WithFeedback, BinaryOp_WithFeedback)                                 \
+   TFC(Subtract_WithFeedback, BinaryOp_WithFeedback)                            \
+diff --git a/src/codegen/arm/interface-descriptors-arm-inl.h b/src/codegen/arm/interface-descriptors-arm-inl.h
+index 14960a3193b..5376a719852 100644
+--- a/src/codegen/arm/interface-descriptors-arm-inl.h
++++ b/src/codegen/arm/interface-descriptors-arm-inl.h
+@@ -63,6 +63,36 @@ constexpr Register LoadDescriptor::SlotRegister() { return r0; }
+ // static
+ constexpr Register LoadWithVectorDescriptor::VectorRegister() { return r3; }
+ 
++// static
++constexpr Register KeyedLoadBaselineDescriptor::ReceiverRegister() {
++  return r1;
++}
++// static
++constexpr Register KeyedLoadBaselineDescriptor::NameRegister() {
++  return kInterpreterAccumulatorRegister;
++}
++// static
++constexpr Register KeyedLoadBaselineDescriptor::SlotRegister() { return r2; }
++
++// static
++constexpr Register KeyedLoadWithVectorDescriptor::VectorRegister() {
++  return r3;
++}
++
++// static
++constexpr Register KeyedHasICBaselineDescriptor::ReceiverRegister() {
++  return kInterpreterAccumulatorRegister;
++}
++// static
++constexpr Register KeyedHasICBaselineDescriptor::NameRegister() { return r1; }
++// static
++constexpr Register KeyedHasICBaselineDescriptor::SlotRegister() { return r2; }
++
++// static
++constexpr Register KeyedHasICWithVectorDescriptor::VectorRegister() {
++  return r3;
++}
++
+ // static
+ constexpr Register
+ LoadWithReceiverAndVectorDescriptor::LookupStartObjectRegister() {
+@@ -106,7 +136,7 @@ constexpr Register BaselineLeaveFrameDescriptor::WeightRegister() { return r4; }
+ constexpr Register TypeConversionDescriptor::ArgumentRegister() { return r0; }
+ 
+ // static
+-constexpr auto TypeofDescriptor::registers() { return RegisterArray(r3); }
++constexpr auto TypeofDescriptor::registers() { return RegisterArray(r0); }
+ 
+ // static
+ constexpr auto CallTrampolineDescriptor::registers() {
+@@ -224,6 +254,14 @@ constexpr auto BinaryOp_BaselineDescriptor::registers() {
+   return RegisterArray(r1, r0, r2);
+ }
+ 
++// static
++constexpr auto BinarySmiOp_BaselineDescriptor::registers() {
++  // r0: left operand
++  // r1: right operand
++  // r2: feedback slot
++  return RegisterArray(r0, r1, r2);
++}
++
+ // static
+ constexpr auto ApiCallbackDescriptor::registers() {
+   return RegisterArray(r1,   // kApiFunctionAddress
+diff --git a/src/codegen/arm64/interface-descriptors-arm64-inl.h b/src/codegen/arm64/interface-descriptors-arm64-inl.h
+index f1fa16673c1..337ba205a00 100644
+--- a/src/codegen/arm64/interface-descriptors-arm64-inl.h
++++ b/src/codegen/arm64/interface-descriptors-arm64-inl.h
+@@ -63,6 +63,36 @@ constexpr Register LoadDescriptor::SlotRegister() { return x0; }
+ // static
+ constexpr Register LoadWithVectorDescriptor::VectorRegister() { return x3; }
+ 
++// static
++constexpr Register KeyedLoadBaselineDescriptor::ReceiverRegister() {
++  return x1;
++}
++// static
++constexpr Register KeyedLoadBaselineDescriptor::NameRegister() {
++  return kInterpreterAccumulatorRegister;
++}
++// static
++constexpr Register KeyedLoadBaselineDescriptor::SlotRegister() { return x2; }
++
++// static
++constexpr Register KeyedLoadWithVectorDescriptor::VectorRegister() {
++  return x3;
++}
++
++// static
++constexpr Register KeyedHasICBaselineDescriptor::ReceiverRegister() {
++  return kInterpreterAccumulatorRegister;
++}
++// static
++constexpr Register KeyedHasICBaselineDescriptor::NameRegister() { return x1; }
++// static
++constexpr Register KeyedHasICBaselineDescriptor::SlotRegister() { return x2; }
++
++// static
++constexpr Register KeyedHasICWithVectorDescriptor::VectorRegister() {
++  return x3;
++}
++
+ // static
+ constexpr Register
+ LoadWithReceiverAndVectorDescriptor::LookupStartObjectRegister() {
+@@ -106,7 +136,7 @@ constexpr Register BaselineLeaveFrameDescriptor::WeightRegister() { return x4; }
+ constexpr Register TypeConversionDescriptor::ArgumentRegister() { return x0; }
+ 
+ // static
+-constexpr auto TypeofDescriptor::registers() { return RegisterArray(x3); }
++constexpr auto TypeofDescriptor::registers() { return RegisterArray(x0); }
+ 
+ // static
+ constexpr auto CallTrampolineDescriptor::registers() {
+@@ -232,6 +262,14 @@ constexpr auto BinaryOp_BaselineDescriptor::registers() {
+   return RegisterArray(x1, x0, x2);
+ }
+ 
++// static
++constexpr auto BinarySmiOp_BaselineDescriptor::registers() {
++  // x0: left operand
++  // x1: right operand
++  // x2: feedback slot
++  return RegisterArray(x0, x1, x2);
++}
++
+ // static
+ constexpr auto ApiCallbackDescriptor::registers() {
+   return RegisterArray(x1,   // kApiFunctionAddress
+diff --git a/src/codegen/ia32/interface-descriptors-ia32-inl.h b/src/codegen/ia32/interface-descriptors-ia32-inl.h
+index 4b20fd7bca3..0b36251e777 100644
+--- a/src/codegen/ia32/interface-descriptors-ia32-inl.h
++++ b/src/codegen/ia32/interface-descriptors-ia32-inl.h
+@@ -59,6 +59,36 @@ constexpr Register LoadDescriptor::SlotRegister() { return eax; }
+ // static
+ constexpr Register LoadWithVectorDescriptor::VectorRegister() { return no_reg; }
+ 
++// static
++constexpr Register KeyedLoadBaselineDescriptor::ReceiverRegister() {
++  return edx;
++}
++// static
++constexpr Register KeyedLoadBaselineDescriptor::NameRegister() {
++  return kInterpreterAccumulatorRegister;
++}
++// static
++constexpr Register KeyedLoadBaselineDescriptor::SlotRegister() { return ecx; }
++
++// static
++constexpr Register KeyedLoadWithVectorDescriptor::VectorRegister() {
++  return no_reg;
++}
++
++// static
++constexpr Register KeyedHasICBaselineDescriptor::ReceiverRegister() {
++  return kInterpreterAccumulatorRegister;
++}
++// static
++constexpr Register KeyedHasICBaselineDescriptor::NameRegister() { return edx; }
++// static
++constexpr Register KeyedHasICBaselineDescriptor::SlotRegister() { return ecx; }
++
++// static
++constexpr Register KeyedHasICWithVectorDescriptor::VectorRegister() {
++  return no_reg;
++}
++
+ // static
+ constexpr Register
+ LoadWithReceiverAndVectorDescriptor::LookupStartObjectRegister() {
+@@ -105,7 +135,7 @@ constexpr Register BaselineLeaveFrameDescriptor::WeightRegister() {
+ constexpr Register TypeConversionDescriptor::ArgumentRegister() { return eax; }
+ 
+ // static
+-constexpr auto TypeofDescriptor::registers() { return RegisterArray(ecx); }
++constexpr auto TypeofDescriptor::registers() { return RegisterArray(eax); }
+ 
+ // static
+ constexpr auto CallTrampolineDescriptor::registers() {
+@@ -222,6 +252,11 @@ constexpr auto BinaryOp_BaselineDescriptor::registers() {
+   return RegisterArray(edx, eax, ecx);
+ }
+ 
++// static
++constexpr auto BinarySmiOp_BaselineDescriptor::registers() {
++  return RegisterArray(eax, edx, ecx);
++}
++
+ // static
+ constexpr auto ApiCallbackDescriptor::registers() {
+   return RegisterArray(edx,   // kApiFunctionAddress
+diff --git a/src/codegen/interface-descriptors-inl.h b/src/codegen/interface-descriptors-inl.h
+index d5a8ccf6e4a..2e2b8d92e5b 100644
+--- a/src/codegen/interface-descriptors-inl.h
++++ b/src/codegen/interface-descriptors-inl.h
+@@ -456,6 +456,37 @@ constexpr auto LoadWithVectorDescriptor::registers() {
+                        LoadDescriptor::SlotRegister(), VectorRegister());
+ }
+ 
++// static
++constexpr auto KeyedLoadBaselineDescriptor::registers() {
++  return RegisterArray(ReceiverRegister(), NameRegister(), SlotRegister());
++}
++
++// static
++constexpr auto KeyedLoadDescriptor::registers() {
++  return KeyedLoadBaselineDescriptor::registers();
++}
++
++// static
++constexpr auto KeyedLoadWithVectorDescriptor::registers() {
++  return RegisterArray(KeyedLoadBaselineDescriptor::ReceiverRegister(),
++                       KeyedLoadBaselineDescriptor::NameRegister(),
++                       KeyedLoadBaselineDescriptor::SlotRegister(),
++                       VectorRegister());
++}
++
++// static
++constexpr auto KeyedHasICBaselineDescriptor::registers() {
++  return RegisterArray(ReceiverRegister(), NameRegister(), SlotRegister());
++}
++
++// static
++constexpr auto KeyedHasICWithVectorDescriptor::registers() {
++  return RegisterArray(KeyedHasICBaselineDescriptor::ReceiverRegister(),
++                       KeyedHasICBaselineDescriptor::NameRegister(),
++                       KeyedHasICBaselineDescriptor::SlotRegister(),
++                       VectorRegister());
++}
++
+ // static
+ constexpr auto StoreWithVectorDescriptor::registers() {
+   return RegisterArray(StoreDescriptor::ReceiverRegister(),
+diff --git a/src/codegen/interface-descriptors.h b/src/codegen/interface-descriptors.h
+index 5c3abba92df..b69e2628efe 100644
+--- a/src/codegen/interface-descriptors.h
++++ b/src/codegen/interface-descriptors.h
+@@ -35,6 +35,7 @@ namespace internal {
+   V(BigIntToI64)                         \
+   V(BinaryOp)                            \
+   V(BinaryOp_Baseline)                   \
++  V(BinarySmiOp_Baseline)                \
+   V(BinaryOp_WithFeedback)               \
+   V(CallForwardVarargs)                  \
+   V(CallFunctionTemplate)                \
+@@ -91,6 +92,11 @@ namespace internal {
+   V(LoadGlobalWithVector)                \
+   V(LoadNoFeedback)                      \
+   V(LoadWithVector)                      \
++  V(KeyedLoad)                           \
++  V(KeyedLoadBaseline)                   \
++  V(KeyedLoadWithVector)                 \
++  V(KeyedHasICBaseline)                  \
++  V(KeyedHasICWithVector)                \
+   V(LoadWithReceiverAndVector)           \
+   V(LoadWithReceiverBaseline)            \
+   V(LookupBaseline)                      \
+@@ -726,7 +732,7 @@ class NoContextDescriptor
+   static constexpr auto registers();
+ };
+ 
+-// LoadDescriptor is used by all stubs that implement Load/KeyedLoad ICs.
++// LoadDescriptor is used by all stubs that implement Load ICs.
+ class LoadDescriptor : public StaticCallInterfaceDescriptor<LoadDescriptor> {
+  public:
+   DEFINE_PARAMETERS(kReceiver, kName, kSlot)
+@@ -932,6 +938,80 @@ class LoadWithVectorDescriptor
+   static constexpr auto registers();
+ };
+ 
++class KeyedLoadBaselineDescriptor
++    : public StaticCallInterfaceDescriptor<KeyedLoadBaselineDescriptor> {
++ public:
++  DEFINE_PARAMETERS_NO_CONTEXT(kReceiver, kName, kSlot)
++  DEFINE_PARAMETER_TYPES(MachineType::AnyTagged(),     // kReceiver
++                         MachineType::AnyTagged(),     // kName
++                         MachineType::TaggedSigned())  // kSlot
++  DECLARE_DESCRIPTOR(KeyedLoadBaselineDescriptor)
++
++  static constexpr inline Register ReceiverRegister();
++  static constexpr inline Register NameRegister();
++  static constexpr inline Register SlotRegister();
++
++  static constexpr auto registers();
++};
++
++class KeyedLoadDescriptor
++    : public StaticCallInterfaceDescriptor<KeyedLoadDescriptor> {
++ public:
++  DEFINE_PARAMETERS(kReceiver, kName, kSlot)
++  DEFINE_PARAMETER_TYPES(MachineType::AnyTagged(),     // kReceiver
++                         MachineType::AnyTagged(),     // kName
++                         MachineType::TaggedSigned())  // kSlot
++  DECLARE_DESCRIPTOR(KeyedLoadDescriptor)
++
++  static constexpr auto registers();
++};
++
++class KeyedLoadWithVectorDescriptor
++    : public StaticCallInterfaceDescriptor<KeyedLoadWithVectorDescriptor> {
++ public:
++  DEFINE_PARAMETERS(kReceiver, kName, kSlot, kVector)
++  DEFINE_PARAMETER_TYPES(MachineType::AnyTagged(),     // kReceiver
++                         MachineType::AnyTagged(),     // kName
++                         MachineType::TaggedSigned(),  // kSlot
++                         MachineType::AnyTagged())     // kVector
++  DECLARE_DESCRIPTOR(KeyedLoadWithVectorDescriptor)
++
++  static constexpr inline Register VectorRegister();
++
++  static constexpr auto registers();
++};
++
++class KeyedHasICBaselineDescriptor
++    : public StaticCallInterfaceDescriptor<KeyedHasICBaselineDescriptor> {
++ public:
++  DEFINE_PARAMETERS_NO_CONTEXT(kReceiver, kName, kSlot)
++  DEFINE_PARAMETER_TYPES(MachineType::AnyTagged(),     // kReceiver
++                         MachineType::AnyTagged(),     // kName
++                         MachineType::TaggedSigned())  // kSlot
++  DECLARE_DESCRIPTOR(KeyedHasICBaselineDescriptor)
++
++  static constexpr inline Register ReceiverRegister();
++  static constexpr inline Register NameRegister();
++  static constexpr inline Register SlotRegister();
++
++  static constexpr auto registers();
++};
++
++class KeyedHasICWithVectorDescriptor
++    : public StaticCallInterfaceDescriptor<KeyedHasICWithVectorDescriptor> {
++ public:
++  DEFINE_PARAMETERS(kReceiver, kName, kSlot, kVector)
++  DEFINE_PARAMETER_TYPES(MachineType::AnyTagged(),     // kReceiver
++                         MachineType::AnyTagged(),     // kName
++                         MachineType::TaggedSigned(),  // kSlot
++                         MachineType::AnyTagged())     // kVector
++  DECLARE_DESCRIPTOR(KeyedHasICWithVectorDescriptor)
++
++  static constexpr inline Register VectorRegister();
++
++  static constexpr auto registers();
++};
++
+ // Like LoadWithVectorDescriptor, except we pass the receiver (the object which
+ // should be used as the receiver for accessor function calls) and the lookup
+ // start object separately.
+@@ -1469,6 +1549,18 @@ class BinaryOp_BaselineDescriptor
+   static constexpr inline auto registers();
+ };
+ 
++class BinarySmiOp_BaselineDescriptor
++    : public StaticCallInterfaceDescriptor<BinarySmiOp_BaselineDescriptor> {
++ public:
++  DEFINE_PARAMETERS_NO_CONTEXT(kLeft, kRight, kSlot)
++  DEFINE_PARAMETER_TYPES(MachineType::AnyTagged(),     // kLeft
++                         MachineType::TaggedSigned(),  // kRight
++                         MachineType::UintPtr())       // kSlot
++  DECLARE_DESCRIPTOR(BinarySmiOp_BaselineDescriptor)
++
++  static constexpr inline auto registers();
++};
++
+ // This desciptor is shared among String.p.charAt/charCodeAt/codePointAt
+ // as they all have the same interface.
+ class StringAtDescriptor final
+diff --git a/src/codegen/loong64/interface-descriptors-loong64-inl.h b/src/codegen/loong64/interface-descriptors-loong64-inl.h
+index f0fc3ac4737..9beccb5c440 100644
+--- a/src/codegen/loong64/interface-descriptors-loong64-inl.h
++++ b/src/codegen/loong64/interface-descriptors-loong64-inl.h
+@@ -63,6 +63,36 @@ constexpr Register LoadDescriptor::SlotRegister() { return a0; }
+ // static
+ constexpr Register LoadWithVectorDescriptor::VectorRegister() { return a3; }
+ 
++// static
++constexpr Register KeyedLoadBaselineDescriptor::ReceiverRegister() {
++  return a1;
++}
++// static
++constexpr Register KeyedLoadBaselineDescriptor::NameRegister() {
++  return kInterpreterAccumulatorRegister;
++}
++// static
++constexpr Register KeyedLoadBaselineDescriptor::SlotRegister() { return a2; }
++
++// static
++constexpr Register KeyedLoadWithVectorDescriptor::VectorRegister() {
++  return a3;
++}
++
++// static
++constexpr Register KeyedHasICBaselineDescriptor::ReceiverRegister() {
++  return kInterpreterAccumulatorRegister;
++}
++// static
++constexpr Register KeyedHasICBaselineDescriptor::NameRegister() { return a1; }
++// static
++constexpr Register KeyedHasICBaselineDescriptor::SlotRegister() { return a2; }
++
++// static
++constexpr Register KeyedHasICWithVectorDescriptor::VectorRegister() {
++  return a3;
++}
++
+ // static
+ constexpr Register
+ LoadWithReceiverAndVectorDescriptor::LookupStartObjectRegister() {
+@@ -106,7 +136,7 @@ constexpr Register BaselineLeaveFrameDescriptor::WeightRegister() { return a3; }
+ constexpr Register TypeConversionDescriptor::ArgumentRegister() { return a0; }
+ 
+ // static
+-constexpr auto TypeofDescriptor::registers() { return RegisterArray(a3); }
++constexpr auto TypeofDescriptor::registers() { return RegisterArray(a0); }
+ 
+ // static
+ constexpr auto CallTrampolineDescriptor::registers() {
+@@ -224,6 +254,14 @@ constexpr auto BinaryOp_BaselineDescriptor::registers() {
+   return RegisterArray(a1, a0, a2);
+ }
+ 
++// static
++constexpr auto BinarySmiOp_BaselineDescriptor::registers() {
++  // a0: left operand
++  // a1: right operand
++  // a2: feedback slot
++  return RegisterArray(a0, a1, a2);
++}
++
+ // static
+ constexpr auto ApiCallbackDescriptor::registers() {
+   // a1 : kApiFunctionAddress
+diff --git a/src/codegen/mips/interface-descriptors-mips-inl.h b/src/codegen/mips/interface-descriptors-mips-inl.h
+index bdd168d8316..96db0ea2a45 100644
+--- a/src/codegen/mips/interface-descriptors-mips-inl.h
++++ b/src/codegen/mips/interface-descriptors-mips-inl.h
+@@ -59,6 +59,36 @@ constexpr Register LoadDescriptor::SlotRegister() { return a0; }
+ // static
+ constexpr Register LoadWithVectorDescriptor::VectorRegister() { return a3; }
+ 
++// static
++constexpr Register KeyedLoadBaselineDescriptor::ReceiverRegister() {
++  return a1;
++}
++// static
++constexpr Register KeyedLoadBaselineDescriptor::NameRegister() {
++  return kInterpreterAccumulatorRegister;
++}
++// static
++constexpr Register KeyedLoadBaselineDescriptor::SlotRegister() { return a2; }
++
++// static
++constexpr Register KeyedLoadWithVectorDescriptor::VectorRegister() {
++  return a3;
++}
++
++// static
++constexpr Register KeyedHasICBaselineDescriptor::ReceiverRegister() {
++  return kInterpreterAccumulatorRegister;
++}
++// static
++constexpr Register KeyedHasICBaselineDescriptor::NameRegister() { return a1; }
++// static
++constexpr Register KeyedHasICBaselineDescriptor::SlotRegister() { return a2; }
++
++// static
++constexpr Register KeyedHasICWithVectorDescriptor::VectorRegister() {
++  return a3;
++}
++
+ // static
+ constexpr Register
+ LoadWithReceiverAndVectorDescriptor::LookupStartObjectRegister() {
+@@ -105,7 +135,7 @@ constexpr Register BaselineLeaveFrameDescriptor::WeightRegister() {
+ constexpr Register TypeConversionDescriptor::ArgumentRegister() { return a0; }
+ 
+ // static
+-constexpr auto TypeofDescriptor::registers() { return RegisterArray(a3); }
++constexpr auto TypeofDescriptor::registers() { return RegisterArray(a0); }
+ 
+ // static
+ constexpr auto CallTrampolineDescriptor::registers() {
+@@ -221,6 +251,12 @@ constexpr auto BinaryOp_BaselineDescriptor::registers() {
+   return RegisterArray(a1, a0, a2);
+ }
+ 
++// static
++constexpr auto BinarySmiOp_BaselineDescriptor::registers() {
++  // TODO(v8:11421): Implement on this platform.
++  return RegisterArray(a0, a1, a2);
++}
++
+ // static
+ constexpr auto ApiCallbackDescriptor::registers() {
+   // a1 : kApiFunctionAddress
+diff --git a/src/codegen/mips64/interface-descriptors-mips64-inl.h b/src/codegen/mips64/interface-descriptors-mips64-inl.h
+index 0c928989397..9ce46c1baeb 100644
+--- a/src/codegen/mips64/interface-descriptors-mips64-inl.h
++++ b/src/codegen/mips64/interface-descriptors-mips64-inl.h
+@@ -63,6 +63,36 @@ constexpr Register LoadDescriptor::SlotRegister() { return a0; }
+ // static
+ constexpr Register LoadWithVectorDescriptor::VectorRegister() { return a3; }
+ 
++// static
++constexpr Register KeyedLoadBaselineDescriptor::ReceiverRegister() {
++  return a1;
++}
++// static
++constexpr Register KeyedLoadBaselineDescriptor::NameRegister() {
++  return kInterpreterAccumulatorRegister;
++}
++// static
++constexpr Register KeyedLoadBaselineDescriptor::SlotRegister() { return a2; }
++
++// static
++constexpr Register KeyedLoadWithVectorDescriptor::VectorRegister() {
++  return a3;
++}
++
++// static
++constexpr Register KeyedHasICBaselineDescriptor::ReceiverRegister() {
++  return kInterpreterAccumulatorRegister;
++}
++// static
++constexpr Register KeyedHasICBaselineDescriptor::NameRegister() { return a1; }
++// static
++constexpr Register KeyedHasICBaselineDescriptor::SlotRegister() { return a2; }
++
++// static
++constexpr Register KeyedHasICWithVectorDescriptor::VectorRegister() {
++  return a3;
++}
++
+ // static
+ constexpr Register
+ LoadWithReceiverAndVectorDescriptor::LookupStartObjectRegister() {
+@@ -106,7 +136,7 @@ constexpr Register BaselineLeaveFrameDescriptor::WeightRegister() { return a3; }
+ constexpr Register TypeConversionDescriptor::ArgumentRegister() { return a0; }
+ 
+ // static
+-constexpr auto TypeofDescriptor::registers() { return RegisterArray(a3); }
++constexpr auto TypeofDescriptor::registers() { return RegisterArray(a0); }
+ 
+ // static
+ constexpr auto CallTrampolineDescriptor::registers() {
+@@ -224,6 +254,14 @@ constexpr auto BinaryOp_BaselineDescriptor::registers() {
+   return RegisterArray(a1, a0, a2);
+ }
+ 
++// static
++constexpr auto BinarySmiOp_BaselineDescriptor::registers() {
++  // a0: left operand
++  // a1: right operand
++  // a2: feedback slot
++  return RegisterArray(a0, a1, a2);
++}
++
+ // static
+ constexpr auto ApiCallbackDescriptor::registers() {
+   // a1 : kApiFunctionAddress
+diff --git a/src/codegen/ppc/interface-descriptors-ppc-inl.h b/src/codegen/ppc/interface-descriptors-ppc-inl.h
+index f3359d3ca81..50ca6c25821 100644
+--- a/src/codegen/ppc/interface-descriptors-ppc-inl.h
++++ b/src/codegen/ppc/interface-descriptors-ppc-inl.h
+@@ -63,6 +63,36 @@ constexpr Register LoadDescriptor::SlotRegister() { return r3; }
+ // static
+ constexpr Register LoadWithVectorDescriptor::VectorRegister() { return r6; }
+ 
++// static
++constexpr Register KeyedLoadBaselineDescriptor::ReceiverRegister() {
++  return r4;
++}
++// static
++constexpr Register KeyedLoadBaselineDescriptor::NameRegister() {
++  return kInterpreterAccumulatorRegister;
++}
++// static
++constexpr Register KeyedLoadBaselineDescriptor::SlotRegister() { return r5; }
++
++// static
++constexpr Register KeyedLoadWithVectorDescriptor::VectorRegister() {
++  return r6;
++}
++
++// static
++constexpr Register KeyedHasICBaselineDescriptor::ReceiverRegister() {
++  return kInterpreterAccumulatorRegister;
++}
++// static
++constexpr Register KeyedHasICBaselineDescriptor::NameRegister() { return r4; }
++// static
++constexpr Register KeyedHasICBaselineDescriptor::SlotRegister() { return r5; }
++
++// static
++constexpr Register KeyedHasICWithVectorDescriptor::VectorRegister() {
++  return r6;
++}
++
+ // static
+ constexpr Register
+ LoadWithReceiverAndVectorDescriptor::LookupStartObjectRegister() {
+@@ -110,7 +140,7 @@ constexpr Register BaselineLeaveFrameDescriptor::WeightRegister() {
+ constexpr Register TypeConversionDescriptor::ArgumentRegister() { return r3; }
+ 
+ // static
+-constexpr auto TypeofDescriptor::registers() { return RegisterArray(r6); }
++constexpr auto TypeofDescriptor::registers() { return RegisterArray(r3); }
+ 
+ // static
+ constexpr auto CallTrampolineDescriptor::registers() {
+@@ -224,6 +254,12 @@ constexpr auto BinaryOp_BaselineDescriptor::registers() {
+   return DefaultRegisterArray();
+ }
+ 
++// static
++constexpr auto BinarySmiOp_BaselineDescriptor::registers() {
++  // TODO(v8:11421): Implement on this platform.
++  return DefaultRegisterArray();
++}
++
+ // static
+ constexpr auto ApiCallbackDescriptor::registers() {
+   return RegisterArray(r4,   // kApiFunctionAddress
+diff --git a/src/codegen/riscv64/interface-descriptors-riscv64-inl.h b/src/codegen/riscv64/interface-descriptors-riscv64-inl.h
+index d86cbef0c0c..5c840fc3a02 100644
+--- a/src/codegen/riscv64/interface-descriptors-riscv64-inl.h
++++ b/src/codegen/riscv64/interface-descriptors-riscv64-inl.h
+@@ -64,6 +64,36 @@ constexpr Register LoadDescriptor::SlotRegister() { return a0; }
+ // static
+ constexpr Register LoadWithVectorDescriptor::VectorRegister() { return a3; }
+ 
++// static
++constexpr Register KeyedLoadBaselineDescriptor::ReceiverRegister() {
++  return a1;
++}
++// static
++constexpr Register KeyedLoadBaselineDescriptor::NameRegister() {
++  return kInterpreterAccumulatorRegister;
++}
++// static
++constexpr Register KeyedLoadBaselineDescriptor::SlotRegister() { return a2; }
++
++// static
++constexpr Register KeyedLoadWithVectorDescriptor::VectorRegister() {
++  return a3;
++}
++
++// static
++constexpr Register KeyedHasICBaselineDescriptor::ReceiverRegister() {
++  return kInterpreterAccumulatorRegister;
++}
++// static
++constexpr Register KeyedHasICBaselineDescriptor::NameRegister() { return a1; }
++// static
++constexpr Register KeyedHasICBaselineDescriptor::SlotRegister() { return a2; }
++
++// static
++constexpr Register KeyedHasICWithVectorDescriptor::VectorRegister() {
++  return a3;
++}
++
+ // static
+ constexpr Register
+ LoadWithReceiverAndVectorDescriptor::LookupStartObjectRegister() {
+@@ -107,7 +137,7 @@ constexpr Register BaselineLeaveFrameDescriptor::WeightRegister() { return a3; }
+ constexpr Register TypeConversionDescriptor::ArgumentRegister() { return a0; }
+ 
+ // static
+-constexpr auto TypeofDescriptor::registers() { return RegisterArray(a3); }
++constexpr auto TypeofDescriptor::registers() { return RegisterArray(a0); }
+ 
+ // static
+ constexpr auto CallTrampolineDescriptor::registers() {
+@@ -233,6 +263,14 @@ constexpr auto BinaryOp_BaselineDescriptor::registers() {
+   return RegisterArray(a1, a0, a2);
+ }
+ 
++// static
++constexpr auto BinarySmiOp_BaselineDescriptor::registers() {
++  // a0: left operand
++  // a1: right operand
++  // a2: feedback slot
++  return RegisterArray(a0, a1, a2);
++}
++
+ // static
+ constexpr auto ApiCallbackDescriptor::registers() {
+   return RegisterArray(a1,   // kApiFunctionAddress
+diff --git a/src/codegen/s390/interface-descriptors-s390-inl.h b/src/codegen/s390/interface-descriptors-s390-inl.h
+index 398637c40a8..a0d1d820fd1 100644
+--- a/src/codegen/s390/interface-descriptors-s390-inl.h
++++ b/src/codegen/s390/interface-descriptors-s390-inl.h
+@@ -63,6 +63,36 @@ constexpr Register LoadDescriptor::SlotRegister() { return r2; }
+ // static
+ constexpr Register LoadWithVectorDescriptor::VectorRegister() { return r5; }
+ 
++// static
++constexpr Register KeyedLoadBaselineDescriptor::ReceiverRegister() {
++  return r3;
++}
++// static
++constexpr Register KeyedLoadBaselineDescriptor::NameRegister() {
++  return kInterpreterAccumulatorRegister;
++}
++// static
++constexpr Register KeyedLoadBaselineDescriptor::SlotRegister() { return r4; }
++
++// static
++constexpr Register KeyedLoadWithVectorDescriptor::VectorRegister() {
++  return r5;
++}
++
++// static
++constexpr Register KeyedHasICBaselineDescriptor::ReceiverRegister() {
++  return kInterpreterAccumulatorRegister;
++}
++// static
++constexpr Register KeyedHasICBaselineDescriptor::NameRegister() { return r3; }
++// static
++constexpr Register KeyedHasICBaselineDescriptor::SlotRegister() { return r4; }
++
++// static
++constexpr Register KeyedHasICWithVectorDescriptor::VectorRegister() {
++  return r5;
++}
++
+ // static
+ constexpr Register
+ LoadWithReceiverAndVectorDescriptor::LookupStartObjectRegister() {
+@@ -110,7 +140,7 @@ constexpr Register BaselineLeaveFrameDescriptor::WeightRegister() {
+ constexpr Register TypeConversionDescriptor::ArgumentRegister() { return r2; }
+ 
+ // static
+-constexpr auto TypeofDescriptor::registers() { return RegisterArray(r5); }
++constexpr auto TypeofDescriptor::registers() { return RegisterArray(r2); }
+ 
+ // static
+ constexpr auto CallTrampolineDescriptor::registers() {
+@@ -222,6 +252,11 @@ constexpr auto BinaryOp_BaselineDescriptor::registers() {
+   return RegisterArray(r3, r2, r4);
+ }
+ 
++// static
++constexpr auto BinarySmiOp_BaselineDescriptor::registers() {
++  return RegisterArray(r2, r3, r4);
++}
++
+ // static
+ constexpr auto ApiCallbackDescriptor::registers() {
+   return RegisterArray(r3,   // kApiFunctionAddress
+diff --git a/src/codegen/x64/interface-descriptors-x64-inl.h b/src/codegen/x64/interface-descriptors-x64-inl.h
+index a016f6f9eff..f9e63e2b224 100644
+--- a/src/codegen/x64/interface-descriptors-x64-inl.h
++++ b/src/codegen/x64/interface-descriptors-x64-inl.h
+@@ -87,6 +87,36 @@ constexpr Register LoadDescriptor::SlotRegister() { return rax; }
+ // static
+ constexpr Register LoadWithVectorDescriptor::VectorRegister() { return rbx; }
+ 
++// static
++constexpr Register KeyedLoadBaselineDescriptor::ReceiverRegister() {
++  return rdx;
++}
++// static
++constexpr Register KeyedLoadBaselineDescriptor::NameRegister() {
++  return kInterpreterAccumulatorRegister;
++}
++// static
++constexpr Register KeyedLoadBaselineDescriptor::SlotRegister() { return rcx; }
++
++// static
++constexpr Register KeyedLoadWithVectorDescriptor::VectorRegister() {
++  return rbx;
++}
++
++// static
++constexpr Register KeyedHasICBaselineDescriptor::ReceiverRegister() {
++  return kInterpreterAccumulatorRegister;
++}
++// static
++constexpr Register KeyedHasICBaselineDescriptor::NameRegister() { return rdx; }
++// static
++constexpr Register KeyedHasICBaselineDescriptor::SlotRegister() { return rcx; }
++
++// static
++constexpr Register KeyedHasICWithVectorDescriptor::VectorRegister() {
++  return rbx;
++}
++
+ // static
+ constexpr Register
+ LoadWithReceiverAndVectorDescriptor::LookupStartObjectRegister() {
+@@ -131,7 +161,7 @@ constexpr Register BaselineLeaveFrameDescriptor::WeightRegister() {
+ constexpr Register TypeConversionDescriptor::ArgumentRegister() { return rax; }
+ 
+ // static
+-constexpr auto TypeofDescriptor::registers() { return RegisterArray(rbx); }
++constexpr auto TypeofDescriptor::registers() { return RegisterArray(rax); }
+ 
+ // static
+ constexpr auto CallTrampolineDescriptor::registers() {
+@@ -247,6 +277,11 @@ constexpr auto BinaryOp_BaselineDescriptor::registers() {
+   return RegisterArray(rdx, rax, rbx);
+ }
+ 
++// static
++constexpr auto BinarySmiOp_BaselineDescriptor::registers() {
++  return RegisterArray(rax, rdx, rbx);
++}
++
+ // static
+ constexpr auto ApiCallbackDescriptor::registers() {
+   return RegisterArray(rdx,   // api function address
+-- 
+2.35.1
+

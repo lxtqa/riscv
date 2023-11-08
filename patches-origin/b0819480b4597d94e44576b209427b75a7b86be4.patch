@@ -1,0 +1,778 @@
+From b0819480b4597d94e44576b209427b75a7b86be4 Mon Sep 17 00:00:00 2001
+From: Deepti Gandluri <gdeepti@chromium.org>
+Date: Wed, 20 Apr 2022 15:50:10 -0700
+Subject: [PATCH] [wasm-simd] Remove F32x4RecipApprox and F32x4RecipSqrtApprox
+
+These were originally proposed as a part of the fixed-width SIMD
+proposal, and were then migrated to the relaxed-simd proposal
+which also deems these operations out of scope.
+
+Github issue: https://github.com/WebAssembly/relaxed-simd/issues/4
+
+Bug: v8:12284
+Change-Id: I65ceb6dfd25c43cf49bd7ec5b5ecd6b32cc3516a
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3595970
+Reviewed-by: Thibaud Michaud <thibaudm@chromium.org>
+Commit-Queue: Deepti Gandluri <gdeepti@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#80125}
+---
+ .../backend/arm/code-generator-arm.cc         |  8 -------
+ .../backend/arm/instruction-codes-arm.h       |  2 --
+ .../backend/arm/instruction-scheduler-arm.cc  |  2 --
+ .../backend/arm/instruction-selector-arm.cc   |  2 --
+ .../backend/arm64/code-generator-arm64.cc     |  2 --
+ .../backend/arm64/instruction-codes-arm64.h   |  2 --
+ .../arm64/instruction-scheduler-arm64.cc      |  2 --
+ .../arm64/instruction-selector-arm64.cc       |  2 --
+ .../backend/ia32/code-generator-ia32.cc       |  8 -------
+ .../backend/ia32/instruction-codes-ia32.h     |  2 --
+ .../ia32/instruction-scheduler-ia32.cc        |  2 --
+ .../backend/ia32/instruction-selector-ia32.cc |  2 --
+ src/compiler/backend/instruction-selector.cc  |  4 ----
+ .../loong64/instruction-codes-loong64.h       |  2 --
+ .../loong64/instruction-selector-loong64.cc   |  2 --
+ .../backend/mips/code-generator-mips.cc       | 10 ---------
+ .../backend/mips/instruction-codes-mips.h     |  2 --
+ .../mips/instruction-scheduler-mips.cc        |  2 --
+ .../backend/mips/instruction-selector-mips.cc |  2 --
+ .../backend/mips64/code-generator-mips64.cc   | 10 ---------
+ .../backend/mips64/instruction-codes-mips64.h |  2 --
+ .../mips64/instruction-scheduler-mips64.cc    |  2 --
+ .../mips64/instruction-selector-mips64.cc     |  2 --
+ .../backend/ppc/code-generator-ppc.cc         |  8 -------
+ .../backend/ppc/instruction-codes-ppc.h       |  2 --
+ .../backend/ppc/instruction-scheduler-ppc.cc  |  2 --
+ .../backend/ppc/instruction-selector-ppc.cc   |  2 --
+ .../backend/riscv64/code-generator-riscv64.cc | 10 ---------
+ .../riscv64/instruction-codes-riscv64.h       |  2 --
+ .../riscv64/instruction-scheduler-riscv64.cc  |  2 --
+ .../riscv64/instruction-selector-riscv64.cc   |  2 --
+ .../backend/s390/code-generator-s390.cc       | 21 -------------------
+ .../backend/s390/instruction-codes-s390.h     |  2 --
+ .../s390/instruction-scheduler-s390.cc        |  2 --
+ .../backend/s390/instruction-selector-s390.cc |  2 --
+ .../backend/x64/code-generator-x64.cc         |  8 -------
+ .../backend/x64/instruction-codes-x64.h       |  2 --
+ .../backend/x64/instruction-scheduler-x64.cc  |  2 --
+ .../backend/x64/instruction-selector-x64.cc   |  2 --
+ src/compiler/machine-operator.cc              |  2 --
+ src/compiler/machine-operator.h               |  2 --
+ src/compiler/opcodes.h                        |  2 --
+ src/compiler/wasm-compiler.cc                 |  6 ------
+ src/wasm/wasm-opcodes-inl.h                   |  2 --
+ src/wasm/wasm-opcodes.h                       |  4 +---
+ test/cctest/cctest.status                     |  2 --
+ .../cctest/wasm/test-run-wasm-relaxed-simd.cc | 10 ---------
+ test/common/wasm/wasm-interpreter.cc          |  2 --
+ 48 files changed, 1 insertion(+), 178 deletions(-)
+
+diff --git a/src/compiler/backend/arm/code-generator-arm.cc b/src/compiler/backend/arm/code-generator-arm.cc
+index d88aefcf6ba..59216cbd727 100644
+--- a/src/compiler/backend/arm/code-generator-arm.cc
++++ b/src/compiler/backend/arm/code-generator-arm.cc
+@@ -2206,14 +2206,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+ #undef S_FROM_Q
+       break;
+     }
+-    case kArmF32x4RecipApprox: {
+-      __ vrecpe(i.OutputSimd128Register(), i.InputSimd128Register(0));
+-      break;
+-    }
+-    case kArmF32x4RecipSqrtApprox: {
+-      __ vrsqrte(i.OutputSimd128Register(), i.InputSimd128Register(0));
+-      break;
+-    }
+     case kArmF32x4Add: {
+       __ vadd(i.OutputSimd128Register(), i.InputSimd128Register(0),
+               i.InputSimd128Register(1));
+diff --git a/src/compiler/backend/arm/instruction-codes-arm.h b/src/compiler/backend/arm/instruction-codes-arm.h
+index 24e43834f06..75f6aee953c 100644
+--- a/src/compiler/backend/arm/instruction-codes-arm.h
++++ b/src/compiler/backend/arm/instruction-codes-arm.h
+@@ -167,8 +167,6 @@ namespace compiler {
+   V(ArmF32x4Abs)                   \
+   V(ArmF32x4Neg)                   \
+   V(ArmF32x4Sqrt)                  \
+-  V(ArmF32x4RecipApprox)           \
+-  V(ArmF32x4RecipSqrtApprox)       \
+   V(ArmF32x4Add)                   \
+   V(ArmF32x4Sub)                   \
+   V(ArmF32x4Mul)                   \
+diff --git a/src/compiler/backend/arm/instruction-scheduler-arm.cc b/src/compiler/backend/arm/instruction-scheduler-arm.cc
+index 7780743a3c8..8b4a623cc32 100644
+--- a/src/compiler/backend/arm/instruction-scheduler-arm.cc
++++ b/src/compiler/backend/arm/instruction-scheduler-arm.cc
+@@ -146,8 +146,6 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kArmF32x4Abs:
+     case kArmF32x4Neg:
+     case kArmF32x4Sqrt:
+-    case kArmF32x4RecipApprox:
+-    case kArmF32x4RecipSqrtApprox:
+     case kArmF32x4Add:
+     case kArmF32x4Sub:
+     case kArmF32x4Mul:
+diff --git a/src/compiler/backend/arm/instruction-selector-arm.cc b/src/compiler/backend/arm/instruction-selector-arm.cc
+index 5b265360d0e..add76504387 100644
+--- a/src/compiler/backend/arm/instruction-selector-arm.cc
++++ b/src/compiler/backend/arm/instruction-selector-arm.cc
+@@ -2585,8 +2585,6 @@ void InstructionSelector::VisitWord32AtomicPairCompareExchange(Node* node) {
+   V(F32x4UConvertI32x4, kArmF32x4UConvertI32x4)         \
+   V(F32x4Abs, kArmF32x4Abs)                             \
+   V(F32x4Neg, kArmF32x4Neg)                             \
+-  V(F32x4RecipApprox, kArmF32x4RecipApprox)             \
+-  V(F32x4RecipSqrtApprox, kArmF32x4RecipSqrtApprox)     \
+   V(I64x2Abs, kArmI64x2Abs)                             \
+   V(I64x2SConvertI32x4Low, kArmI64x2SConvertI32x4Low)   \
+   V(I64x2SConvertI32x4High, kArmI64x2SConvertI32x4High) \
+diff --git a/src/compiler/backend/arm64/code-generator-arm64.cc b/src/compiler/backend/arm64/code-generator-arm64.cc
+index 4056c19fbd5..070edfaa4fe 100644
+--- a/src/compiler/backend/arm64/code-generator-arm64.cc
++++ b/src/compiler/backend/arm64/code-generator-arm64.cc
+@@ -2298,8 +2298,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+     }
+       SIMD_UNOP_CASE(kArm64F32x4SConvertI32x4, Scvtf, 4S);
+       SIMD_UNOP_CASE(kArm64F32x4UConvertI32x4, Ucvtf, 4S);
+-      SIMD_UNOP_CASE(kArm64F32x4RecipApprox, Frecpe, 4S);
+-      SIMD_UNOP_CASE(kArm64F32x4RecipSqrtApprox, Frsqrte, 4S);
+     case kArm64FMulElement: {
+       VectorFormat s_f =
+           ScalarFormatFromLaneSize(LaneSizeField::decode(opcode));
+diff --git a/src/compiler/backend/arm64/instruction-codes-arm64.h b/src/compiler/backend/arm64/instruction-codes-arm64.h
+index f52c9991064..91ec6854f4f 100644
+--- a/src/compiler/backend/arm64/instruction-codes-arm64.h
++++ b/src/compiler/backend/arm64/instruction-codes-arm64.h
+@@ -237,8 +237,6 @@ namespace compiler {
+   V(Arm64F64x2PromoteLowF32x4)                       \
+   V(Arm64F32x4SConvertI32x4)                         \
+   V(Arm64F32x4UConvertI32x4)                         \
+-  V(Arm64F32x4RecipApprox)                           \
+-  V(Arm64F32x4RecipSqrtApprox)                       \
+   V(Arm64F32x4Qfma)                                  \
+   V(Arm64F32x4Qfms)                                  \
+   V(Arm64F32x4Pmin)                                  \
+diff --git a/src/compiler/backend/arm64/instruction-scheduler-arm64.cc b/src/compiler/backend/arm64/instruction-scheduler-arm64.cc
+index a21f454c8b8..f8a3f67d44a 100644
+--- a/src/compiler/backend/arm64/instruction-scheduler-arm64.cc
++++ b/src/compiler/backend/arm64/instruction-scheduler-arm64.cc
+@@ -181,8 +181,6 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kArm64F64x2PromoteLowF32x4:
+     case kArm64F32x4SConvertI32x4:
+     case kArm64F32x4UConvertI32x4:
+-    case kArm64F32x4RecipApprox:
+-    case kArm64F32x4RecipSqrtApprox:
+     case kArm64F32x4Qfma:
+     case kArm64F32x4Qfms:
+     case kArm64F32x4Pmin:
+diff --git a/src/compiler/backend/arm64/instruction-selector-arm64.cc b/src/compiler/backend/arm64/instruction-selector-arm64.cc
+index 8633ebfaa62..f76ab0012db 100644
+--- a/src/compiler/backend/arm64/instruction-selector-arm64.cc
++++ b/src/compiler/backend/arm64/instruction-selector-arm64.cc
+@@ -3477,8 +3477,6 @@ void InstructionSelector::VisitInt64AbsWithOverflow(Node* node) {
+   V(F64x2PromoteLowF32x4, kArm64F64x2PromoteLowF32x4)           \
+   V(F32x4SConvertI32x4, kArm64F32x4SConvertI32x4)               \
+   V(F32x4UConvertI32x4, kArm64F32x4UConvertI32x4)               \
+-  V(F32x4RecipApprox, kArm64F32x4RecipApprox)                   \
+-  V(F32x4RecipSqrtApprox, kArm64F32x4RecipSqrtApprox)           \
+   V(F32x4DemoteF64x2Zero, kArm64F32x4DemoteF64x2Zero)           \
+   V(I64x2BitMask, kArm64I64x2BitMask)                           \
+   V(I32x4SConvertF32x4, kArm64I32x4SConvertF32x4)               \
+diff --git a/src/compiler/backend/ia32/code-generator-ia32.cc b/src/compiler/backend/ia32/code-generator-ia32.cc
+index e4d47e0d314..84c1178acff 100644
+--- a/src/compiler/backend/ia32/code-generator-ia32.cc
++++ b/src/compiler/backend/ia32/code-generator-ia32.cc
+@@ -2138,14 +2138,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       __ Sqrtps(i.OutputSimd128Register(), i.InputSimd128Register(0));
+       break;
+     }
+-    case kIA32F32x4RecipApprox: {
+-      __ Rcpps(i.OutputSimd128Register(), i.InputOperand(0));
+-      break;
+-    }
+-    case kIA32F32x4RecipSqrtApprox: {
+-      __ Rsqrtps(i.OutputSimd128Register(), i.InputOperand(0));
+-      break;
+-    }
+     case kIA32F32x4Add: {
+       __ Addps(i.OutputSimd128Register(), i.InputSimd128Register(0),
+                i.InputOperand(1));
+diff --git a/src/compiler/backend/ia32/instruction-codes-ia32.h b/src/compiler/backend/ia32/instruction-codes-ia32.h
+index 8125f25b218..19d19f44828 100644
+--- a/src/compiler/backend/ia32/instruction-codes-ia32.h
++++ b/src/compiler/backend/ia32/instruction-codes-ia32.h
+@@ -161,8 +161,6 @@ namespace compiler {
+   V(IA32F32x4SConvertI32x4)        \
+   V(IA32F32x4UConvertI32x4)        \
+   V(IA32F32x4Sqrt)                 \
+-  V(IA32F32x4RecipApprox)          \
+-  V(IA32F32x4RecipSqrtApprox)      \
+   V(IA32F32x4Add)                  \
+   V(IA32F32x4Sub)                  \
+   V(IA32F32x4Mul)                  \
+diff --git a/src/compiler/backend/ia32/instruction-scheduler-ia32.cc b/src/compiler/backend/ia32/instruction-scheduler-ia32.cc
+index 4c95f05fdc3..17ccb2c4a14 100644
+--- a/src/compiler/backend/ia32/instruction-scheduler-ia32.cc
++++ b/src/compiler/backend/ia32/instruction-scheduler-ia32.cc
+@@ -145,8 +145,6 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kIA32F32x4SConvertI32x4:
+     case kIA32F32x4UConvertI32x4:
+     case kIA32F32x4Sqrt:
+-    case kIA32F32x4RecipApprox:
+-    case kIA32F32x4RecipSqrtApprox:
+     case kIA32F32x4Add:
+     case kIA32F32x4Sub:
+     case kIA32F32x4Mul:
+diff --git a/src/compiler/backend/ia32/instruction-selector-ia32.cc b/src/compiler/backend/ia32/instruction-selector-ia32.cc
+index 07e20494452..7cd9297efbd 100644
+--- a/src/compiler/backend/ia32/instruction-selector-ia32.cc
++++ b/src/compiler/backend/ia32/instruction-selector-ia32.cc
+@@ -2371,8 +2371,6 @@ void InstructionSelector::VisitWord32AtomicPairCompareExchange(Node* node) {
+   V(F32x4DemoteF64x2Zero)   \
+   V(F32x4Sqrt)              \
+   V(F32x4SConvertI32x4)     \
+-  V(F32x4RecipApprox)       \
+-  V(F32x4RecipSqrtApprox)   \
+   V(I64x2BitMask)           \
+   V(I64x2SConvertI32x4Low)  \
+   V(I64x2SConvertI32x4High) \
+diff --git a/src/compiler/backend/instruction-selector.cc b/src/compiler/backend/instruction-selector.cc
+index cee4a4fe34e..d5759f364c2 100644
+--- a/src/compiler/backend/instruction-selector.cc
++++ b/src/compiler/backend/instruction-selector.cc
+@@ -2013,10 +2013,6 @@ void InstructionSelector::VisitNode(Node* node) {
+       return MarkAsSimd128(node), VisitF32x4Neg(node);
+     case IrOpcode::kF32x4Sqrt:
+       return MarkAsSimd128(node), VisitF32x4Sqrt(node);
+-    case IrOpcode::kF32x4RecipApprox:
+-      return MarkAsSimd128(node), VisitF32x4RecipApprox(node);
+-    case IrOpcode::kF32x4RecipSqrtApprox:
+-      return MarkAsSimd128(node), VisitF32x4RecipSqrtApprox(node);
+     case IrOpcode::kF32x4Add:
+       return MarkAsSimd128(node), VisitF32x4Add(node);
+     case IrOpcode::kF32x4Sub:
+diff --git a/src/compiler/backend/loong64/instruction-codes-loong64.h b/src/compiler/backend/loong64/instruction-codes-loong64.h
+index 0cbd163059b..67d0517bc41 100644
+--- a/src/compiler/backend/loong64/instruction-codes-loong64.h
++++ b/src/compiler/backend/loong64/instruction-codes-loong64.h
+@@ -212,8 +212,6 @@ namespace compiler {
+   V(Loong64F32x4Abs)                   \
+   V(Loong64F32x4Neg)                   \
+   V(Loong64F32x4Sqrt)                  \
+-  V(Loong64F32x4RecipApprox)           \
+-  V(Loong64F32x4RecipSqrtApprox)       \
+   V(Loong64F32x4Add)                   \
+   V(Loong64F32x4Sub)                   \
+   V(Loong64F32x4Mul)                   \
+diff --git a/src/compiler/backend/loong64/instruction-selector-loong64.cc b/src/compiler/backend/loong64/instruction-selector-loong64.cc
+index 90bd3ff4f70..c6c809c1c59 100644
+--- a/src/compiler/backend/loong64/instruction-selector-loong64.cc
++++ b/src/compiler/backend/loong64/instruction-selector-loong64.cc
+@@ -2669,8 +2669,6 @@ void InstructionSelector::VisitInt64AbsWithOverflow(Node* node) {
+   V(F32x4Abs, kLoong64F32x4Abs)                               \
+   V(F32x4Neg, kLoong64F32x4Neg)                               \
+   V(F32x4Sqrt, kLoong64F32x4Sqrt)                             \
+-  V(F32x4RecipApprox, kLoong64F32x4RecipApprox)               \
+-  V(F32x4RecipSqrtApprox, kLoong64F32x4RecipSqrtApprox)       \
+   V(F32x4Ceil, kLoong64F32x4Ceil)                             \
+   V(F32x4Floor, kLoong64F32x4Floor)                           \
+   V(F32x4Trunc, kLoong64F32x4Trunc)                           \
+diff --git a/src/compiler/backend/mips/code-generator-mips.cc b/src/compiler/backend/mips/code-generator-mips.cc
+index 4dd0d5cd324..9ac309b00d2 100644
+--- a/src/compiler/backend/mips/code-generator-mips.cc
++++ b/src/compiler/backend/mips/code-generator-mips.cc
+@@ -2495,16 +2495,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       __ fsqrt_w(i.OutputSimd128Register(), i.InputSimd128Register(0));
+       break;
+     }
+-    case kMipsF32x4RecipApprox: {
+-      CpuFeatureScope msa_scope(tasm(), MIPS_SIMD);
+-      __ frcp_w(i.OutputSimd128Register(), i.InputSimd128Register(0));
+-      break;
+-    }
+-    case kMipsF32x4RecipSqrtApprox: {
+-      CpuFeatureScope msa_scope(tasm(), MIPS_SIMD);
+-      __ frsqrt_w(i.OutputSimd128Register(), i.InputSimd128Register(0));
+-      break;
+-    }
+     case kMipsF32x4Add: {
+       CpuFeatureScope msa_scope(tasm(), MIPS_SIMD);
+       __ fadd_w(i.OutputSimd128Register(), i.InputSimd128Register(0),
+diff --git a/src/compiler/backend/mips/instruction-codes-mips.h b/src/compiler/backend/mips/instruction-codes-mips.h
+index a0e00d0e456..66bccbe6076 100644
+--- a/src/compiler/backend/mips/instruction-codes-mips.h
++++ b/src/compiler/backend/mips/instruction-codes-mips.h
+@@ -206,8 +206,6 @@ namespace compiler {
+   V(MipsF32x4Abs)                  \
+   V(MipsF32x4Neg)                  \
+   V(MipsF32x4Sqrt)                 \
+-  V(MipsF32x4RecipApprox)          \
+-  V(MipsF32x4RecipSqrtApprox)      \
+   V(MipsF32x4Add)                  \
+   V(MipsF32x4Sub)                  \
+   V(MipsF32x4Mul)                  \
+diff --git a/src/compiler/backend/mips/instruction-scheduler-mips.cc b/src/compiler/backend/mips/instruction-scheduler-mips.cc
+index d59392b40a3..83b80e99338 100644
+--- a/src/compiler/backend/mips/instruction-scheduler-mips.cc
++++ b/src/compiler/backend/mips/instruction-scheduler-mips.cc
+@@ -100,8 +100,6 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kMipsF32x4Ne:
+     case kMipsF32x4Neg:
+     case kMipsF32x4Sqrt:
+-    case kMipsF32x4RecipApprox:
+-    case kMipsF32x4RecipSqrtApprox:
+     case kMipsF32x4ReplaceLane:
+     case kMipsF32x4SConvertI32x4:
+     case kMipsF32x4Splat:
+diff --git a/src/compiler/backend/mips/instruction-selector-mips.cc b/src/compiler/backend/mips/instruction-selector-mips.cc
+index 7269fd6aed2..4d22056ddee 100644
+--- a/src/compiler/backend/mips/instruction-selector-mips.cc
++++ b/src/compiler/backend/mips/instruction-selector-mips.cc
+@@ -2154,8 +2154,6 @@ void InstructionSelector::VisitInt64AbsWithOverflow(Node* node) {
+   V(F32x4Abs, kMipsF32x4Abs)                                   \
+   V(F32x4Neg, kMipsF32x4Neg)                                   \
+   V(F32x4Sqrt, kMipsF32x4Sqrt)                                 \
+-  V(F32x4RecipApprox, kMipsF32x4RecipApprox)                   \
+-  V(F32x4RecipSqrtApprox, kMipsF32x4RecipSqrtApprox)           \
+   V(F32x4Ceil, kMipsF32x4Ceil)                                 \
+   V(F32x4Floor, kMipsF32x4Floor)                               \
+   V(F32x4Trunc, kMipsF32x4Trunc)                               \
+diff --git a/src/compiler/backend/mips64/code-generator-mips64.cc b/src/compiler/backend/mips64/code-generator-mips64.cc
+index 38d1e071f69..da249e458d8 100644
+--- a/src/compiler/backend/mips64/code-generator-mips64.cc
++++ b/src/compiler/backend/mips64/code-generator-mips64.cc
+@@ -2606,16 +2606,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       __ bnegi_w(i.OutputSimd128Register(), i.InputSimd128Register(0), 31);
+       break;
+     }
+-    case kMips64F32x4RecipApprox: {
+-      CpuFeatureScope msa_scope(tasm(), MIPS_SIMD);
+-      __ frcp_w(i.OutputSimd128Register(), i.InputSimd128Register(0));
+-      break;
+-    }
+-    case kMips64F32x4RecipSqrtApprox: {
+-      CpuFeatureScope msa_scope(tasm(), MIPS_SIMD);
+-      __ frsqrt_w(i.OutputSimd128Register(), i.InputSimd128Register(0));
+-      break;
+-    }
+     case kMips64F32x4Add: {
+       CpuFeatureScope msa_scope(tasm(), MIPS_SIMD);
+       __ fadd_w(i.OutputSimd128Register(), i.InputSimd128Register(0),
+diff --git a/src/compiler/backend/mips64/instruction-codes-mips64.h b/src/compiler/backend/mips64/instruction-codes-mips64.h
+index a99726bae5c..5e05046feba 100644
+--- a/src/compiler/backend/mips64/instruction-codes-mips64.h
++++ b/src/compiler/backend/mips64/instruction-codes-mips64.h
+@@ -239,8 +239,6 @@ namespace compiler {
+   V(Mips64F32x4Abs)                   \
+   V(Mips64F32x4Neg)                   \
+   V(Mips64F32x4Sqrt)                  \
+-  V(Mips64F32x4RecipApprox)           \
+-  V(Mips64F32x4RecipSqrtApprox)       \
+   V(Mips64F32x4Add)                   \
+   V(Mips64F32x4Sub)                   \
+   V(Mips64F32x4Mul)                   \
+diff --git a/src/compiler/backend/mips64/instruction-scheduler-mips64.cc b/src/compiler/backend/mips64/instruction-scheduler-mips64.cc
+index 734009ca309..597bb175701 100644
+--- a/src/compiler/backend/mips64/instruction-scheduler-mips64.cc
++++ b/src/compiler/backend/mips64/instruction-scheduler-mips64.cc
+@@ -127,8 +127,6 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kMips64F32x4Ne:
+     case kMips64F32x4Neg:
+     case kMips64F32x4Sqrt:
+-    case kMips64F32x4RecipApprox:
+-    case kMips64F32x4RecipSqrtApprox:
+     case kMips64F32x4ReplaceLane:
+     case kMips64F32x4SConvertI32x4:
+     case kMips64F32x4Splat:
+diff --git a/src/compiler/backend/mips64/instruction-selector-mips64.cc b/src/compiler/backend/mips64/instruction-selector-mips64.cc
+index 880d7f724ec..ddfda59803f 100644
+--- a/src/compiler/backend/mips64/instruction-selector-mips64.cc
++++ b/src/compiler/backend/mips64/instruction-selector-mips64.cc
+@@ -2911,8 +2911,6 @@ void InstructionSelector::VisitInt64AbsWithOverflow(Node* node) {
+   V(F32x4Abs, kMips64F32x4Abs)                               \
+   V(F32x4Neg, kMips64F32x4Neg)                               \
+   V(F32x4Sqrt, kMips64F32x4Sqrt)                             \
+-  V(F32x4RecipApprox, kMips64F32x4RecipApprox)               \
+-  V(F32x4RecipSqrtApprox, kMips64F32x4RecipSqrtApprox)       \
+   V(F32x4Ceil, kMips64F32x4Ceil)                             \
+   V(F32x4Floor, kMips64F32x4Floor)                           \
+   V(F32x4Trunc, kMips64F32x4Trunc)                           \
+diff --git a/src/compiler/backend/ppc/code-generator-ppc.cc b/src/compiler/backend/ppc/code-generator-ppc.cc
+index 905ae6f301f..7a68a9f05b4 100644
+--- a/src/compiler/backend/ppc/code-generator-ppc.cc
++++ b/src/compiler/backend/ppc/code-generator-ppc.cc
+@@ -2833,14 +2833,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       __ xvnegsp(i.OutputSimd128Register(), i.InputSimd128Register(0));
+       break;
+     }
+-    case kPPC_F32x4RecipApprox: {
+-      __ xvresp(i.OutputSimd128Register(), i.InputSimd128Register(0));
+-      break;
+-    }
+-    case kPPC_F32x4RecipSqrtApprox: {
+-      __ xvrsqrtesp(i.OutputSimd128Register(), i.InputSimd128Register(0));
+-      break;
+-    }
+     case kPPC_F32x4Sqrt: {
+       __ xvsqrtsp(i.OutputSimd128Register(), i.InputSimd128Register(0));
+       break;
+diff --git a/src/compiler/backend/ppc/instruction-codes-ppc.h b/src/compiler/backend/ppc/instruction-codes-ppc.h
+index 03e936c8310..8ca4b0c8520 100644
+--- a/src/compiler/backend/ppc/instruction-codes-ppc.h
++++ b/src/compiler/backend/ppc/instruction-codes-ppc.h
+@@ -225,8 +225,6 @@ namespace compiler {
+   V(PPC_F32x4Le)                     \
+   V(PPC_F32x4Abs)                    \
+   V(PPC_F32x4Neg)                    \
+-  V(PPC_F32x4RecipApprox)            \
+-  V(PPC_F32x4RecipSqrtApprox)        \
+   V(PPC_F32x4Sqrt)                   \
+   V(PPC_F32x4SConvertI32x4)          \
+   V(PPC_F32x4UConvertI32x4)          \
+diff --git a/src/compiler/backend/ppc/instruction-scheduler-ppc.cc b/src/compiler/backend/ppc/instruction-scheduler-ppc.cc
+index 0270dc401eb..52d82b68029 100644
+--- a/src/compiler/backend/ppc/instruction-scheduler-ppc.cc
++++ b/src/compiler/backend/ppc/instruction-scheduler-ppc.cc
+@@ -150,8 +150,6 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kPPC_F32x4Le:
+     case kPPC_F32x4Abs:
+     case kPPC_F32x4Neg:
+-    case kPPC_F32x4RecipApprox:
+-    case kPPC_F32x4RecipSqrtApprox:
+     case kPPC_F32x4Sqrt:
+     case kPPC_F32x4SConvertI32x4:
+     case kPPC_F32x4UConvertI32x4:
+diff --git a/src/compiler/backend/ppc/instruction-selector-ppc.cc b/src/compiler/backend/ppc/instruction-selector-ppc.cc
+index 1e8bfc6f52c..9dc51a149c3 100644
+--- a/src/compiler/backend/ppc/instruction-selector-ppc.cc
++++ b/src/compiler/backend/ppc/instruction-selector-ppc.cc
+@@ -2325,8 +2325,6 @@ void InstructionSelector::VisitInt64AbsWithOverflow(Node* node) {
+   V(F64x2PromoteLowF32x4)      \
+   V(F32x4Abs)                  \
+   V(F32x4Neg)                  \
+-  V(F32x4RecipApprox)          \
+-  V(F32x4RecipSqrtApprox)      \
+   V(F32x4Sqrt)                 \
+   V(F32x4SConvertI32x4)        \
+   V(F32x4UConvertI32x4)        \
+diff --git a/src/compiler/backend/riscv64/code-generator-riscv64.cc b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+index 56a45b34454..18a7e32d2a4 100644
+--- a/src/compiler/backend/riscv64/code-generator-riscv64.cc
++++ b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+@@ -3175,16 +3175,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       __ vmv_vv(i.OutputSimd128Register(), kSimd128ScratchReg);
+       break;
+     }
+-    case kRiscvF32x4RecipApprox: {
+-      __ VU.set(kScratchReg, E32, m1);
+-      __ vfrec7_v(i.OutputSimd128Register(), i.InputSimd128Register(0));
+-      break;
+-    }
+-    case kRiscvF32x4RecipSqrtApprox: {
+-      __ VU.set(kScratchReg, E32, m1);
+-      __ vfrsqrt7_v(i.OutputSimd128Register(), i.InputSimd128Register(0));
+-      break;
+-    }
+     case kRiscvF32x4Qfma: {
+       __ VU.set(kScratchReg, E32, m1);
+       __ vfmadd_vv(i.InputSimd128Register(1), i.InputSimd128Register(2),
+diff --git a/src/compiler/backend/riscv64/instruction-codes-riscv64.h b/src/compiler/backend/riscv64/instruction-codes-riscv64.h
+index aa0d446d22b..b7f9202c4ee 100644
+--- a/src/compiler/backend/riscv64/instruction-codes-riscv64.h
++++ b/src/compiler/backend/riscv64/instruction-codes-riscv64.h
+@@ -235,8 +235,6 @@ namespace compiler {
+   V(RiscvF32x4Abs)                          \
+   V(RiscvF32x4Neg)                          \
+   V(RiscvF32x4Sqrt)                         \
+-  V(RiscvF32x4RecipApprox)                  \
+-  V(RiscvF32x4RecipSqrtApprox)              \
+   V(RiscvF32x4Qfma)                         \
+   V(RiscvF32x4Qfms)                         \
+   V(RiscvF64x2Qfma)                         \
+diff --git a/src/compiler/backend/riscv64/instruction-scheduler-riscv64.cc b/src/compiler/backend/riscv64/instruction-scheduler-riscv64.cc
+index 23e06507d9d..a9e2acbffa0 100644
+--- a/src/compiler/backend/riscv64/instruction-scheduler-riscv64.cc
++++ b/src/compiler/backend/riscv64/instruction-scheduler-riscv64.cc
+@@ -119,8 +119,6 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kRiscvF32x4Ne:
+     case kRiscvF32x4Neg:
+     case kRiscvF32x4Sqrt:
+-    case kRiscvF32x4RecipApprox:
+-    case kRiscvF32x4RecipSqrtApprox:
+     case kRiscvF64x2Qfma:
+     case kRiscvF64x2Qfms:
+     case kRiscvF32x4Qfma:
+diff --git a/src/compiler/backend/riscv64/instruction-selector-riscv64.cc b/src/compiler/backend/riscv64/instruction-selector-riscv64.cc
+index 84f148041ed..b6e3b51b4ff 100644
+--- a/src/compiler/backend/riscv64/instruction-selector-riscv64.cc
++++ b/src/compiler/backend/riscv64/instruction-selector-riscv64.cc
+@@ -2877,8 +2877,6 @@ void InstructionSelector::VisitInt64AbsWithOverflow(Node* node) {
+   V(F32x4Abs, kRiscvF32x4Abs)                                   \
+   V(F32x4Neg, kRiscvF32x4Neg)                                   \
+   V(F32x4Sqrt, kRiscvF32x4Sqrt)                                 \
+-  V(F32x4RecipApprox, kRiscvF32x4RecipApprox)                   \
+-  V(F32x4RecipSqrtApprox, kRiscvF32x4RecipSqrtApprox)           \
+   V(F32x4DemoteF64x2Zero, kRiscvF32x4DemoteF64x2Zero)           \
+   V(F32x4Ceil, kRiscvF32x4Ceil)                                 \
+   V(F32x4Floor, kRiscvF32x4Floor)                               \
+diff --git a/src/compiler/backend/s390/code-generator-s390.cc b/src/compiler/backend/s390/code-generator-s390.cc
+index 480131f7c02..8fbe20f4491 100644
+--- a/src/compiler/backend/s390/code-generator-s390.cc
++++ b/src/compiler/backend/s390/code-generator-s390.cc
+@@ -2872,27 +2872,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       __ I8x16GeU(i.OutputSimd128Register(), i.InputSimd128Register(0),
+                   i.InputSimd128Register(1), kScratchDoubleReg);
+       break;
+-    }
+-      // vector unary ops
+-    case kS390_F32x4RecipApprox: {
+-      __ mov(kScratchReg, Operand(1));
+-      __ ConvertIntToFloat(kScratchDoubleReg, kScratchReg);
+-      __ vrep(kScratchDoubleReg, kScratchDoubleReg, Operand(0), Condition(2));
+-      __ vfd(i.OutputSimd128Register(), kScratchDoubleReg,
+-             i.InputSimd128Register(0), Condition(0), Condition(0),
+-             Condition(2));
+-      break;
+-    }
+-    case kS390_F32x4RecipSqrtApprox: {
+-      Simd128Register dst = i.OutputSimd128Register();
+-      __ vfsq(dst, i.InputSimd128Register(0), Condition(0), Condition(0),
+-              Condition(2));
+-      __ mov(kScratchReg, Operand(1));
+-      __ ConvertIntToFloat(kScratchDoubleReg, kScratchReg);
+-      __ vrep(kScratchDoubleReg, kScratchDoubleReg, Operand(0), Condition(2));
+-      __ vfd(dst, kScratchDoubleReg, dst, Condition(0), Condition(0),
+-             Condition(2));
+-      break;
+     }
+     // vector boolean unops
+     case kS390_V128AnyTrue: {
+diff --git a/src/compiler/backend/s390/instruction-codes-s390.h b/src/compiler/backend/s390/instruction-codes-s390.h
+index 912c31b0fe3..45502c89422 100644
+--- a/src/compiler/backend/s390/instruction-codes-s390.h
++++ b/src/compiler/backend/s390/instruction-codes-s390.h
+@@ -208,8 +208,6 @@ namespace compiler {
+   V(S390_F32x4Le)                           \
+   V(S390_F32x4Abs)                          \
+   V(S390_F32x4Neg)                          \
+-  V(S390_F32x4RecipApprox)                  \
+-  V(S390_F32x4RecipSqrtApprox)              \
+   V(S390_F32x4SConvertI32x4)                \
+   V(S390_F32x4UConvertI32x4)                \
+   V(S390_F32x4Sqrt)                         \
+diff --git a/src/compiler/backend/s390/instruction-scheduler-s390.cc b/src/compiler/backend/s390/instruction-scheduler-s390.cc
+index d7046507c71..320c12574df 100644
+--- a/src/compiler/backend/s390/instruction-scheduler-s390.cc
++++ b/src/compiler/backend/s390/instruction-scheduler-s390.cc
+@@ -174,8 +174,6 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kS390_F32x4Le:
+     case kS390_F32x4Abs:
+     case kS390_F32x4Neg:
+-    case kS390_F32x4RecipApprox:
+-    case kS390_F32x4RecipSqrtApprox:
+     case kS390_F32x4SConvertI32x4:
+     case kS390_F32x4UConvertI32x4:
+     case kS390_F32x4Sqrt:
+diff --git a/src/compiler/backend/s390/instruction-selector-s390.cc b/src/compiler/backend/s390/instruction-selector-s390.cc
+index 28ca621d83e..578e769ea8a 100644
+--- a/src/compiler/backend/s390/instruction-selector-s390.cc
++++ b/src/compiler/backend/s390/instruction-selector-s390.cc
+@@ -2548,8 +2548,6 @@ void InstructionSelector::VisitWord64AtomicStore(Node* node) {
+   V(F64x2Splat)              \
+   V(F32x4Abs)                \
+   V(F32x4Neg)                \
+-  V(F32x4RecipApprox)        \
+-  V(F32x4RecipSqrtApprox)    \
+   V(F32x4Sqrt)               \
+   V(F32x4Ceil)               \
+   V(F32x4Floor)              \
+diff --git a/src/compiler/backend/x64/code-generator-x64.cc b/src/compiler/backend/x64/code-generator-x64.cc
+index 5ec6fb20404..327424bacbb 100644
+--- a/src/compiler/backend/x64/code-generator-x64.cc
++++ b/src/compiler/backend/x64/code-generator-x64.cc
+@@ -2924,14 +2924,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       __ Sqrtps(i.OutputSimd128Register(), i.InputSimd128Register(0));
+       break;
+     }
+-    case kX64F32x4RecipApprox: {
+-      __ Rcpps(i.OutputSimd128Register(), i.InputSimd128Register(0));
+-      break;
+-    }
+-    case kX64F32x4RecipSqrtApprox: {
+-      __ Rsqrtps(i.OutputSimd128Register(), i.InputSimd128Register(0));
+-      break;
+-    }
+     case kX64F32x4Add: {
+       ASSEMBLE_SIMD_BINOP(addps);
+       break;
+diff --git a/src/compiler/backend/x64/instruction-codes-x64.h b/src/compiler/backend/x64/instruction-codes-x64.h
+index c2c6ca946ea..dd0c7404fb4 100644
+--- a/src/compiler/backend/x64/instruction-codes-x64.h
++++ b/src/compiler/backend/x64/instruction-codes-x64.h
+@@ -211,8 +211,6 @@ namespace compiler {
+   V(X64F32x4Abs)                                     \
+   V(X64F32x4Neg)                                     \
+   V(X64F32x4Sqrt)                                    \
+-  V(X64F32x4RecipApprox)                             \
+-  V(X64F32x4RecipSqrtApprox)                         \
+   V(X64F32x4Add)                                     \
+   V(X64F32x4Sub)                                     \
+   V(X64F32x4Mul)                                     \
+diff --git a/src/compiler/backend/x64/instruction-scheduler-x64.cc b/src/compiler/backend/x64/instruction-scheduler-x64.cc
+index 4cc187ae06a..373566820f8 100644
+--- a/src/compiler/backend/x64/instruction-scheduler-x64.cc
++++ b/src/compiler/backend/x64/instruction-scheduler-x64.cc
+@@ -159,8 +159,6 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kX64F32x4ReplaceLane:
+     case kX64F32x4SConvertI32x4:
+     case kX64F32x4UConvertI32x4:
+-    case kX64F32x4RecipApprox:
+-    case kX64F32x4RecipSqrtApprox:
+     case kX64F32x4Abs:
+     case kX64F32x4Neg:
+     case kX64F32x4Sqrt:
+diff --git a/src/compiler/backend/x64/instruction-selector-x64.cc b/src/compiler/backend/x64/instruction-selector-x64.cc
+index 2f7e20d9ef9..089b3afdabf 100644
+--- a/src/compiler/backend/x64/instruction-selector-x64.cc
++++ b/src/compiler/backend/x64/instruction-selector-x64.cc
+@@ -3151,8 +3151,6 @@ VISIT_ATOMIC_BINOP(Xor)
+   V(F32x4Abs)               \
+   V(F32x4Neg)               \
+   V(F32x4Sqrt)              \
+-  V(F32x4RecipApprox)       \
+-  V(F32x4RecipSqrtApprox)   \
+   V(F32x4DemoteF64x2Zero)   \
+   V(I64x2BitMask)           \
+   V(I64x2SConvertI32x4Low)  \
+diff --git a/src/compiler/machine-operator.cc b/src/compiler/machine-operator.cc
+index 26513dd05d2..7efdab05121 100644
+--- a/src/compiler/machine-operator.cc
++++ b/src/compiler/machine-operator.cc
+@@ -442,8 +442,6 @@ std::ostream& operator<<(std::ostream& os, TruncateKind kind) {
+   V(F32x4Abs, Operator::kNoProperties, 1, 0, 1)                            \
+   V(F32x4Neg, Operator::kNoProperties, 1, 0, 1)                            \
+   V(F32x4Sqrt, Operator::kNoProperties, 1, 0, 1)                           \
+-  V(F32x4RecipApprox, Operator::kNoProperties, 1, 0, 1)                    \
+-  V(F32x4RecipSqrtApprox, Operator::kNoProperties, 1, 0, 1)                \
+   V(F32x4Add, Operator::kCommutative, 2, 0, 1)                             \
+   V(F32x4Sub, Operator::kNoProperties, 2, 0, 1)                            \
+   V(F32x4Mul, Operator::kCommutative, 2, 0, 1)                             \
+diff --git a/src/compiler/machine-operator.h b/src/compiler/machine-operator.h
+index 39d23a26501..640c53e5ae7 100644
+--- a/src/compiler/machine-operator.h
++++ b/src/compiler/machine-operator.h
+@@ -732,8 +732,6 @@ class V8_EXPORT_PRIVATE MachineOperatorBuilder final
+   const Operator* F32x4Abs();
+   const Operator* F32x4Neg();
+   const Operator* F32x4Sqrt();
+-  const Operator* F32x4RecipApprox();
+-  const Operator* F32x4RecipSqrtApprox();
+   const Operator* F32x4Add();
+   const Operator* F32x4Sub();
+   const Operator* F32x4Mul();
+diff --git a/src/compiler/opcodes.h b/src/compiler/opcodes.h
+index 4c3197cf935..43b06da43cd 100644
+--- a/src/compiler/opcodes.h
++++ b/src/compiler/opcodes.h
+@@ -804,8 +804,6 @@
+   V(F32x4Abs)                    \
+   V(F32x4Neg)                    \
+   V(F32x4Sqrt)                   \
+-  V(F32x4RecipApprox)            \
+-  V(F32x4RecipSqrtApprox)        \
+   V(F32x4Add)                    \
+   V(F32x4Sub)                    \
+   V(F32x4Mul)                    \
+diff --git a/src/compiler/wasm-compiler.cc b/src/compiler/wasm-compiler.cc
+index ee64ed149db..9d1593aa4b2 100644
+--- a/src/compiler/wasm-compiler.cc
++++ b/src/compiler/wasm-compiler.cc
+@@ -4544,12 +4544,6 @@ Node* WasmGraphBuilder::SimdOp(wasm::WasmOpcode opcode, Node* const* inputs) {
+       return graph()->NewNode(mcgraph()->machine()->F32x4Neg(), inputs[0]);
+     case wasm::kExprF32x4Sqrt:
+       return graph()->NewNode(mcgraph()->machine()->F32x4Sqrt(), inputs[0]);
+-    case wasm::kExprF32x4RecipApprox:
+-      return graph()->NewNode(mcgraph()->machine()->F32x4RecipApprox(),
+-                              inputs[0]);
+-    case wasm::kExprF32x4RecipSqrtApprox:
+-      return graph()->NewNode(mcgraph()->machine()->F32x4RecipSqrtApprox(),
+-                              inputs[0]);
+     case wasm::kExprF32x4Add:
+       return graph()->NewNode(mcgraph()->machine()->F32x4Add(), inputs[0],
+                               inputs[1]);
+diff --git a/src/wasm/wasm-opcodes-inl.h b/src/wasm/wasm-opcodes-inl.h
+index 50504213dd6..4cc8cdf0b99 100644
+--- a/src/wasm/wasm-opcodes-inl.h
++++ b/src/wasm/wasm-opcodes-inl.h
+@@ -363,8 +363,6 @@ constexpr const char* WasmOpcodes::OpcodeName(WasmOpcode opcode) {
+     CASE_F64x2_OP(PromoteLowF32x4, "promote_low_f32x4")
+ 
+     // Relaxed SIMD opcodes.
+-    CASE_F32x4_OP(RecipApprox, "recip_approx")
+-    CASE_F32x4_OP(RecipSqrtApprox, "recip_sqrt_approx")
+     CASE_SIMDF_OP(Qfma, "qfma")
+     CASE_SIMDF_OP(Qfms, "qfms")
+     CASE_I8x16_OP(RelaxedSwizzle, "relaxed_swizzle");
+diff --git a/src/wasm/wasm-opcodes.h b/src/wasm/wasm-opcodes.h
+index c758a119a13..6416c796f7c 100644
+--- a/src/wasm/wasm-opcodes.h
++++ b/src/wasm/wasm-opcodes.h
+@@ -540,9 +540,7 @@ bool V8_EXPORT_PRIVATE IsJSCompatibleSignature(const FunctionSig* sig,
+   V(I32x4RelaxedTruncF32x4S, 0xfda5, s_s)     \
+   V(I32x4RelaxedTruncF32x4U, 0xfda6, s_s)     \
+   V(I32x4RelaxedTruncF64x2SZero, 0xfdc5, s_s) \
+-  V(I32x4RelaxedTruncF64x2UZero, 0xfdc6, s_s) \
+-  V(F32x4RecipApprox, 0xfdbb, s_s)            \
+-  V(F32x4RecipSqrtApprox, 0xfdc2, s_s)
++  V(I32x4RelaxedTruncF64x2UZero, 0xfdc6, s_s)
+ 
+ #define FOREACH_SIMD_1_OPERAND_1_PARAM_OPCODE(V) \
+   V(I8x16ExtractLaneS, 0xfd15, _)                \
+diff --git a/test/cctest/cctest.status b/test/cctest/cctest.status
+index 4783d4223eb..3fbc2c08c09 100644
+--- a/test/cctest/cctest.status
++++ b/test/cctest/cctest.status
+@@ -152,8 +152,6 @@
+   'test-run-wasm-relaxed-simd/RunWasm_I32x4RelaxedTruncF32x4U_liftoff': [SKIP],
+   'test-run-wasm-relaxed-simd/RunWasm_I32x4RelaxedTruncF64x2SZero_liftoff': [SKIP],
+   'test-run-wasm-relaxed-simd/RunWasm_I32x4RelaxedTruncF64x2UZero_liftoff': [SKIP],
+-  'test-run-wasm-relaxed-simd/RunWasm_F32x4RecipApprox_liftoff': [SKIP],
+-  'test-run-wasm-relaxed-simd/RunWasm_F32x4RecipSqrtApprox_liftoff': [SKIP],
+ }],  # ALWAYS
+ 
+ ##############################################################################
+diff --git a/test/cctest/wasm/test-run-wasm-relaxed-simd.cc b/test/cctest/wasm/test-run-wasm-relaxed-simd.cc
+index d3c459b9a46..b1be2d8e026 100644
+--- a/test/cctest/wasm/test-run-wasm-relaxed-simd.cc
++++ b/test/cctest/wasm/test-run-wasm-relaxed-simd.cc
+@@ -229,16 +229,6 @@ WASM_RELAXED_SIMD_TEST(F64x2Qfms) {
+ #endif  // V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_S390X ||
+         // V8_TARGET_ARCH_PPC64 || V8_TARGET_ARCH_IA32 || V8_TARGET_ARCH_RISCV64
+ 
+-WASM_RELAXED_SIMD_TEST(F32x4RecipApprox) {
+-  RunF32x4UnOpTest(execution_tier, kExprF32x4RecipApprox, base::Recip,
+-                   false /* !exact */);
+-}
+-
+-WASM_RELAXED_SIMD_TEST(F32x4RecipSqrtApprox) {
+-  RunF32x4UnOpTest(execution_tier, kExprF32x4RecipSqrtApprox, base::RecipSqrt,
+-                   false /* !exact */);
+-}
+-
+ #if V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_IA32 || V8_TARGET_ARCH_ARM64 || \
+     V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_RISCV64
+ namespace {
+diff --git a/test/common/wasm/wasm-interpreter.cc b/test/common/wasm/wasm-interpreter.cc
+index 721118ea370..1c22129d327 100644
+--- a/test/common/wasm/wasm-interpreter.cc
++++ b/test/common/wasm/wasm-interpreter.cc
+@@ -2437,8 +2437,6 @@ class WasmInterpreterInternals {
+       UNOP_CASE(F32x4Abs, f32x4, float4, 4, std::abs(a))
+       UNOP_CASE(F32x4Neg, f32x4, float4, 4, -a)
+       UNOP_CASE(F32x4Sqrt, f32x4, float4, 4, std::sqrt(a))
+-      UNOP_CASE(F32x4RecipApprox, f32x4, float4, 4, base::Recip(a))
+-      UNOP_CASE(F32x4RecipSqrtApprox, f32x4, float4, 4, base::RecipSqrt(a))
+       UNOP_CASE(F32x4Ceil, f32x4, float4, 4,
+                 (AixFpOpWorkaround<float, &ceilf>(a)))
+       UNOP_CASE(F32x4Floor, f32x4, float4, 4,
+-- 
+2.35.1
+

@@ -1,0 +1,496 @@
+From e1edd701a6601674b741b16f71c813757a40aa97 Mon Sep 17 00:00:00 2001
+From: Manos Koukoutos <manoskouk@chromium.org>
+Date: Fri, 3 Mar 2023 17:04:20 +0100
+Subject: [PATCH] [backend] Refactor instruction codes
+
+- Use BitField::Next for InstructionCode fields.
+- Introduce RecordWriteModeField to use along AccessModeField; these
+  two should not overlap.
+- Add a small explainer comment about field overlaps.
+
+Change-Id: I01e731fdad7a58f674a781d3e0f573cb967ee2a8
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4306801
+Reviewed-by: Nico Hartmann <nicohartmann@chromium.org>
+Commit-Queue: Manos Koukoutos <manoskouk@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#86254}
+---
+ .../backend/arm/code-generator-arm.cc         |   2 +-
+ .../backend/arm/instruction-selector-arm.cc   |   2 +-
+ .../backend/arm64/code-generator-arm64.cc     |   6 +-
+ .../arm64/instruction-selector-arm64.cc       |   6 +-
+ .../backend/ia32/code-generator-ia32.cc       |   3 +-
+ .../backend/ia32/instruction-selector-ia32.cc |   2 +-
+ src/compiler/backend/instruction-codes.h      | 123 ++++++++++++------
+ .../backend/loong64/code-generator-loong64.cc |   6 +-
+ .../loong64/instruction-selector-loong64.cc   |   4 +-
+ .../backend/mips64/code-generator-mips64.cc   |   3 +-
+ .../mips64/instruction-selector-mips64.cc     |   2 +-
+ .../backend/ppc/code-generator-ppc.cc         |   3 +-
+ .../backend/ppc/instruction-selector-ppc.cc   |   2 +-
+ .../backend/riscv/code-generator-riscv.cc     |   3 +-
+ .../riscv/instruction-selector-riscv32.cc     |   2 +-
+ .../riscv/instruction-selector-riscv64.cc     |   2 +-
+ .../backend/s390/code-generator-s390.cc       |   3 +-
+ .../backend/s390/instruction-selector-s390.cc |   2 +-
+ .../backend/x64/code-generator-x64.cc         |   3 +-
+ .../backend/x64/instruction-selector-x64.cc   |   4 +-
+ 20 files changed, 104 insertions(+), 79 deletions(-)
+
+diff --git a/src/compiler/backend/arm/code-generator-arm.cc b/src/compiler/backend/arm/code-generator-arm.cc
+index 75c4f7a2e37..1fa882fc4ee 100644
+--- a/src/compiler/backend/arm/code-generator-arm.cc
++++ b/src/compiler/backend/arm/code-generator-arm.cc
+@@ -929,7 +929,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+     case kArchAtomicStoreWithWriteBarrier: {
+       RecordWriteMode mode;
+       if (arch_opcode == kArchStoreWithWriteBarrier) {
+-        mode = static_cast<RecordWriteMode>(MiscField::decode(instr->opcode()));
++        mode = RecordWriteModeField::decode(instr->opcode());
+       } else {
+         mode = AtomicStoreRecordWriteModeField::decode(instr->opcode());
+       }
+diff --git a/src/compiler/backend/arm/instruction-selector-arm.cc b/src/compiler/backend/arm/instruction-selector-arm.cc
+index 92e8ae0d613..1a19523d029 100644
+--- a/src/compiler/backend/arm/instruction-selector-arm.cc
++++ b/src/compiler/backend/arm/instruction-selector-arm.cc
+@@ -735,7 +735,7 @@ void VisitStoreCommon(InstructionSelector* selector, Node* node,
+     InstructionCode code;
+     if (!atomic_order) {
+       code = kArchStoreWithWriteBarrier;
+-      code |= MiscField::encode(static_cast<int>(record_write_mode));
++      code |= RecordWriteModeField::encode(record_write_mode);
+     } else {
+       code = kArchAtomicStoreWithWriteBarrier;
+       code |= AtomicMemoryOrderField::encode(*atomic_order);
+diff --git a/src/compiler/backend/arm64/code-generator-arm64.cc b/src/compiler/backend/arm64/code-generator-arm64.cc
+index 740810907c9..77e52bd36fa 100644
+--- a/src/compiler/backend/arm64/code-generator-arm64.cc
++++ b/src/compiler/backend/arm64/code-generator-arm64.cc
+@@ -1015,8 +1015,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+ 
+       break;
+     case kArchStoreWithWriteBarrier: {
+-      RecordWriteMode mode =
+-          static_cast<RecordWriteMode>(MiscField::decode(instr->opcode()));
++      RecordWriteMode mode = RecordWriteModeField::decode(instr->opcode());
+       AddressingMode addressing_mode =
+           AddressingModeField::decode(instr->opcode());
+       Register object = i.InputRegister(0);
+@@ -1051,8 +1050,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+     }
+     case kArchAtomicStoreWithWriteBarrier: {
+       DCHECK_EQ(AddressingModeField::decode(instr->opcode()), kMode_MRR);
+-      RecordWriteMode mode =
+-          static_cast<RecordWriteMode>(MiscField::decode(instr->opcode()));
++      RecordWriteMode mode = RecordWriteModeField::decode(instr->opcode());
+       Register object = i.InputRegister(0);
+       Register offset = i.InputRegister(1);
+       Register value = i.InputRegister(2);
+diff --git a/src/compiler/backend/arm64/instruction-selector-arm64.cc b/src/compiler/backend/arm64/instruction-selector-arm64.cc
+index b9944efee1d..f8cbca8b5e9 100644
+--- a/src/compiler/backend/arm64/instruction-selector-arm64.cc
++++ b/src/compiler/backend/arm64/instruction-selector-arm64.cc
+@@ -946,9 +946,7 @@ void InstructionSelector::VisitStore(Node* node) {
+         WriteBarrierKindToRecordWriteMode(write_barrier_kind);
+     InstructionCode code = kArchStoreWithWriteBarrier;
+     code |= AddressingModeField::encode(addressing_mode);
+-    // TODO(manoskouk): These two overlap. Introduce a more specialized smaller
+-    // field for {RecordWriteMode}.
+-    code |= MiscField::encode(static_cast<int>(record_write_mode));
++    code |= RecordWriteModeField::encode(record_write_mode);
+     if (node->opcode() == IrOpcode::kStoreTrapOnNull) {
+       code |= AccessModeField::encode(kMemoryAccessProtectedNullDereference);
+     }
+@@ -2897,7 +2895,7 @@ void VisitAtomicStore(InstructionSelector* selector, Node* node,
+     RecordWriteMode record_write_mode =
+         WriteBarrierKindToRecordWriteMode(write_barrier_kind);
+     code = kArchAtomicStoreWithWriteBarrier;
+-    code |= MiscField::encode(static_cast<int>(record_write_mode));
++    code |= RecordWriteModeField::encode(record_write_mode);
+   } else {
+     switch (rep) {
+       case MachineRepresentation::kWord8:
+diff --git a/src/compiler/backend/ia32/code-generator-ia32.cc b/src/compiler/backend/ia32/code-generator-ia32.cc
+index 768207a959d..3f97b94d9c5 100644
+--- a/src/compiler/backend/ia32/code-generator-ia32.cc
++++ b/src/compiler/backend/ia32/code-generator-ia32.cc
+@@ -950,8 +950,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+     }
+     case kArchStoreWithWriteBarrier:  // Fall thrugh.
+     case kArchAtomicStoreWithWriteBarrier: {
+-      RecordWriteMode mode =
+-          static_cast<RecordWriteMode>(MiscField::decode(instr->opcode()));
++      RecordWriteMode mode = RecordWriteModeField::decode(instr->opcode());
+       Register object = i.InputRegister(0);
+       size_t index = 0;
+       Operand operand = i.MemoryOperand(&index);
+diff --git a/src/compiler/backend/ia32/instruction-selector-ia32.cc b/src/compiler/backend/ia32/instruction-selector-ia32.cc
+index ae063b21ec9..eb9195b0d12 100644
+--- a/src/compiler/backend/ia32/instruction-selector-ia32.cc
++++ b/src/compiler/backend/ia32/instruction-selector-ia32.cc
+@@ -721,7 +721,7 @@ void VisitStoreCommon(InstructionSelector* selector, Node* node,
+     InstructionCode code = is_seqcst ? kArchAtomicStoreWithWriteBarrier
+                                      : kArchStoreWithWriteBarrier;
+     code |= AddressingModeField::encode(addressing_mode);
+-    code |= MiscField::encode(static_cast<int>(record_write_mode));
++    code |= RecordWriteModeField::encode(record_write_mode);
+     selector->Emit(code, 0, nullptr, arraysize(inputs), inputs, temp_count,
+                    temps);
+   } else if (is_seqcst) {
+diff --git a/src/compiler/backend/instruction-codes.h b/src/compiler/backend/instruction-codes.h
+index 3542b8aac02..87adf068bbf 100644
+--- a/src/compiler/backend/instruction-codes.h
++++ b/src/compiler/backend/instruction-codes.h
+@@ -279,43 +279,89 @@ inline size_t AtomicWidthSize(AtomicWidth width) {
+   UNREACHABLE();
+ }
+ 
+-// The InstructionCode is an opaque, target-specific integer that encodes
+-// what code to emit for an instruction in the code generator. It is not
+-// interesting to the register allocator, as the inputs and flags on the
+-// instructions specify everything of interest.
++// The InstructionCode is an opaque, target-specific integer that encodes what
++// code to emit for an instruction in the code generator. It is not interesting
++// to the register allocator, as the inputs and flags on the instructions
++// specify everything of interest.
+ using InstructionCode = uint32_t;
+ 
+ // Helpers for encoding / decoding InstructionCode into the fields needed
+-// for code generation. We encode the instruction, addressing mode, and flags
+-// continuation into a single InstructionCode which is stored as part of
+-// the instruction.
++// for code generation. We encode the instruction, addressing mode, flags, and
++// other information into a single InstructionCode which is stored as part of
++// the instruction. Some fields in the layout of InstructionCode overlap as
++// follows:
++//                              ArchOpcodeField
++//                              AddressingModeField
++//                              FlagsModeField
++//                              FlagsConditionField
++// AtomicWidthField                 | RecordWriteModeField | LaneSizeField
++// AtomicMemoryOrderField           |                      | VectorLengthField
++// AtomicStoreRecordWriteModeField  |                      |
++//                              AccessModeField
++//
++// or,
++//
++//                              ArchOpcodeField
++//                              AddressingModeField
++//                              FlagsModeField
++//                              FlagsConditionField
++// DeoptImmedArgsCountField    | ParamField   | MiscField
++// DeoptFrameStateOffsetField  | FPParamField |
++//
++// Notably, AccessModeField can follow any of several sequences of fields.
++
+ using ArchOpcodeField = base::BitField<ArchOpcode, 0, 9>;
+ static_assert(ArchOpcodeField::is_valid(kLastArchOpcode),
+               "All opcodes must fit in the 9-bit ArchOpcodeField.");
+-using AddressingModeField = base::BitField<AddressingMode, 9, 5>;
++using AddressingModeField = ArchOpcodeField::Next<AddressingMode, 5>;
+ static_assert(
+     AddressingModeField::is_valid(kLastAddressingMode),
+     "All addressing modes must fit in the 5-bit AddressingModeField.");
+-using FlagsModeField = base::BitField<FlagsMode, 14, 3>;
+-using FlagsConditionField = base::BitField<FlagsCondition, 17, 5>;
+-using MiscField = base::BitField<int, 22, 10>;
+-
+-// {MiscField} is used for a variety of things, depending on the opcode.
+-// TODO(turbofan): There should be an abstraction that ensures safe encoding and
+-// decoding. {HasMemoryAccessMode} and its uses are a small step in that
+-// direction.
++using FlagsModeField = AddressingModeField::Next<FlagsMode, 3>;
++using FlagsConditionField = FlagsModeField::Next<FlagsCondition, 5>;
++
++// AtomicWidthField is used for the various Atomic opcodes. Only used on 64bit
++// architectures. All atomic instructions on 32bit architectures are assumed to
++// be 32bit wide.
++using AtomicWidthField = FlagsConditionField::Next<AtomicWidth, 2>;
++// AtomicMemoryOrderField is used for the various Atomic opcodes. This field is
++// not used on all architectures. It is used on architectures where the codegen
++// for kSeqCst and kAcqRel differ only by emitting fences.
++using AtomicMemoryOrderField = AtomicWidthField::Next<AtomicMemoryOrder, 2>;
++using AtomicStoreRecordWriteModeField =
++    AtomicMemoryOrderField::Next<RecordWriteMode, 4>;
++
++// Write modes for writes with barrier.
++using RecordWriteModeField = FlagsConditionField::Next<RecordWriteMode, 2>;
+ 
+ // LaneSizeField and AccessModeField are helper types to encode/decode a lane
+ // size, an access mode, or both inside the overlapping MiscField.
+ #ifdef V8_TARGET_ARCH_X64
+ enum LaneSize { kL8 = 0, kL16 = 1, kL32 = 2, kL64 = 3 };
+ enum VectorLength { kV128 = 0, kV256 = 1, kV512 = 3 };
+-using LaneSizeField = base::BitField<LaneSize, 22, 2>;
+-using VectorLengthField = base::BitField<VectorLength, 24, 2>;
++using LaneSizeField = FlagsConditionField::Next<LaneSize, 2>;
++using VectorLengthField = LaneSizeField::Next<VectorLength, 2>;
+ #else
+-using LaneSizeField = base::BitField<int, 22, 8>;
++using LaneSizeField = FlagsConditionField::Next<int, 8>;
+ #endif  // V8_TARGET_ARCH_X64
+-using AccessModeField = base::BitField<MemoryAccessMode, 30, 2>;
++
++// Denotes whether the instruction needs to emit an accompanying landing pad for
++// the trap handler.
++using AccessModeField =
++    AtomicStoreRecordWriteModeField::Next<MemoryAccessMode, 2>;
++
++// Since AccessModeField is defined in terms of atomics, this assert ensures it
++// does not overlap with other fields it is used with.
++static_assert(AtomicStoreRecordWriteModeField::kLastUsedBit >=
++              RecordWriteModeField::kLastUsedBit);
++#ifdef V8_TARGET_ARCH_X64
++static_assert(AtomicStoreRecordWriteModeField::kLastUsedBit >=
++              VectorLengthField::kLastUsedBit);
++#else
++static_assert(AtomicStoreRecordWriteModeField::kLastUsedBit >=
++              LaneSizeField::kLastUsedBit);
++#endif
++
+ // TODO(turbofan): {HasMemoryAccessMode} is currently only used to guard
+ // decoding (in CodeGenerator and InstructionScheduler). Encoding (in
+ // InstructionSelector) is not yet guarded. There are in fact instructions for
+@@ -340,28 +386,21 @@ inline bool HasMemoryAccessMode(ArchOpcode opcode) {
+ #endif
+ }
+ 
+-using DeoptImmedArgsCountField = base::BitField<int, 22, 2>;
+-using DeoptFrameStateOffsetField = base::BitField<int, 24, 8>;
+-
+-// AtomicWidthField overlaps with MiscField and is used for the various Atomic
+-// opcodes. Only used on 64bit architectures. All atomic instructions on 32bit
+-// architectures are assumed to be 32bit wide.
+-using AtomicWidthField = base::BitField<AtomicWidth, 22, 2>;
+-
+-// AtomicMemoryOrderField overlaps with MiscField and is used for the various
+-// Atomic opcodes. This field is not used on all architectures. It is used on
+-// architectures where the codegen for kSeqCst and kAcqRel differ only by
+-// emitting fences.
+-using AtomicMemoryOrderField = base::BitField<AtomicMemoryOrder, 24, 2>;
+-using AtomicStoreRecordWriteModeField = base::BitField<RecordWriteMode, 26, 4>;
+-
+-// ParamField and FPParamField overlap with MiscField, as the latter is never
+-// used for Call instructions. These 2 fields represent the general purpose
+-// and floating point parameter counts of a direct call into C and are given 5
+-// bits each, which allow storing a number up to the current maximum parameter
+-// count, which is 20 (see kMaxCParameters defined in macro-assembler.h).
+-using ParamField = base::BitField<int, 22, 5>;
+-using FPParamField = base::BitField<int, 27, 5>;
++using DeoptImmedArgsCountField = FlagsConditionField::Next<int, 2>;
++using DeoptFrameStateOffsetField = DeoptImmedArgsCountField::Next<int, 8>;
++
++// ParamField and FPParamField represent the general purpose and floating point
++// parameter counts of a direct call into C and are given 5 bits each, which
++// allow storing a number up to the current maximum parameter count, which is 20
++// (see kMaxCParameters defined in macro-assembler.h).
++using ParamField = FlagsConditionField::Next<int, 5>;
++using FPParamField = ParamField::Next<int, 5>;
++
++// {MiscField} is used for a variety of things, depending on the opcode.
++// TODO(turbofan): There should be an abstraction that ensures safe encoding and
++// decoding. {HasMemoryAccessMode} and its uses are a small step in that
++// direction.
++using MiscField = FlagsConditionField::Next<int, 10>;
+ 
+ // This static assertion serves as an early warning if we are about to exhaust
+ // the available opcode space. If we are about to exhaust it, we should start
+diff --git a/src/compiler/backend/loong64/code-generator-loong64.cc b/src/compiler/backend/loong64/code-generator-loong64.cc
+index de7b53c0c90..7ca44e91c62 100644
+--- a/src/compiler/backend/loong64/code-generator-loong64.cc
++++ b/src/compiler/backend/loong64/code-generator-loong64.cc
+@@ -806,8 +806,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+                            i.InputDoubleRegister(0), DetermineStubCallMode());
+       break;
+     case kArchStoreWithWriteBarrier: {  // Fall through.
+-      RecordWriteMode mode =
+-          static_cast<RecordWriteMode>(MiscField::decode(instr->opcode()));
++      RecordWriteMode mode = RecordWriteModeField::decode(instr->opcode());
+       AddressingMode addressing_mode =
+           AddressingModeField::decode(instr->opcode());
+       Register object = i.InputRegister(0);
+@@ -843,8 +842,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       break;
+     }
+     case kArchAtomicStoreWithWriteBarrier: {
+-      RecordWriteMode mode =
+-          static_cast<RecordWriteMode>(MiscField::decode(instr->opcode()));
++      RecordWriteMode mode = RecordWriteModeField::decode(instr->opcode());
+       Register object = i.InputRegister(0);
+       int64_t offset = i.InputInt64(1);
+       Register value = i.InputRegister(2);
+diff --git a/src/compiler/backend/loong64/instruction-selector-loong64.cc b/src/compiler/backend/loong64/instruction-selector-loong64.cc
+index e9a4717a4f9..69b10e29a98 100644
+--- a/src/compiler/backend/loong64/instruction-selector-loong64.cc
++++ b/src/compiler/backend/loong64/instruction-selector-loong64.cc
+@@ -551,7 +551,7 @@ void InstructionSelector::VisitStore(Node* node) {
+         WriteBarrierKindToRecordWriteMode(write_barrier_kind);
+     InstructionCode code = kArchStoreWithWriteBarrier;
+     code |= AddressingModeField::encode(addressing_mode);
+-    code |= MiscField::encode(static_cast<int>(record_write_mode));
++    code |= RecordWriteModeField::encode(record_write_mode);
+     Emit(code, 0, nullptr, input_count, inputs);
+   } else {
+     ArchOpcode opcode;
+@@ -2147,7 +2147,7 @@ void VisitAtomicStore(InstructionSelector* selector, Node* node,
+     RecordWriteMode record_write_mode =
+         WriteBarrierKindToRecordWriteMode(write_barrier_kind);
+     code = kArchAtomicStoreWithWriteBarrier;
+-    code |= MiscField::encode(static_cast<int>(record_write_mode));
++    code |= RecordWriteModeField::encode(record_write_mode);
+   } else {
+     switch (rep) {
+       case MachineRepresentation::kWord8:
+diff --git a/src/compiler/backend/mips64/code-generator-mips64.cc b/src/compiler/backend/mips64/code-generator-mips64.cc
+index b8101e98930..a6d49b59fb4 100644
+--- a/src/compiler/backend/mips64/code-generator-mips64.cc
++++ b/src/compiler/backend/mips64/code-generator-mips64.cc
+@@ -822,8 +822,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       break;
+     case kArchStoreWithWriteBarrier:  // Fall through.
+     case kArchAtomicStoreWithWriteBarrier: {
+-      RecordWriteMode mode =
+-          static_cast<RecordWriteMode>(MiscField::decode(instr->opcode()));
++      RecordWriteMode mode = RecordWriteModeField::decode(instr->opcode());
+       Register object = i.InputRegister(0);
+       Register index = i.InputRegister(1);
+       Register value = i.InputRegister(2);
+diff --git a/src/compiler/backend/mips64/instruction-selector-mips64.cc b/src/compiler/backend/mips64/instruction-selector-mips64.cc
+index e416db6ea90..70d19dc4c18 100644
+--- a/src/compiler/backend/mips64/instruction-selector-mips64.cc
++++ b/src/compiler/backend/mips64/instruction-selector-mips64.cc
+@@ -2313,7 +2313,7 @@ void VisitAtomicStore(InstructionSelector* selector, Node* node,
+     InstructionOperand temps[] = {g.TempRegister(), g.TempRegister()};
+     size_t const temp_count = arraysize(temps);
+     code = kArchAtomicStoreWithWriteBarrier;
+-    code |= MiscField::encode(static_cast<int>(record_write_mode));
++    code |= RecordWriteModeField::encode(record_write_mode);
+     selector->Emit(code, 0, nullptr, input_count, inputs, temp_count, temps);
+   } else {
+     switch (rep) {
+diff --git a/src/compiler/backend/ppc/code-generator-ppc.cc b/src/compiler/backend/ppc/code-generator-ppc.cc
+index ecc34aeea91..77c23539451 100644
+--- a/src/compiler/backend/ppc/code-generator-ppc.cc
++++ b/src/compiler/backend/ppc/code-generator-ppc.cc
+@@ -1128,8 +1128,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       DCHECK_EQ(LeaveRC, i.OutputRCBit());
+       break;
+     case kArchStoreWithWriteBarrier: {
+-      RecordWriteMode mode =
+-          static_cast<RecordWriteMode>(MiscField::decode(instr->opcode()));
++      RecordWriteMode mode = RecordWriteModeField::decode(instr->opcode());
+       Register object = i.InputRegister(0);
+       Register value = i.InputRegister(2);
+       Register scratch0 = i.TempRegister(0);
+diff --git a/src/compiler/backend/ppc/instruction-selector-ppc.cc b/src/compiler/backend/ppc/instruction-selector-ppc.cc
+index 4a3542a5769..87be6d6c529 100644
+--- a/src/compiler/backend/ppc/instruction-selector-ppc.cc
++++ b/src/compiler/backend/ppc/instruction-selector-ppc.cc
+@@ -322,7 +322,7 @@ void VisitStoreCommon(InstructionSelector* selector, Node* node,
+     size_t const temp_count = arraysize(temps);
+     InstructionCode code = kArchStoreWithWriteBarrier;
+     code |= AddressingModeField::encode(addressing_mode);
+-    code |= MiscField::encode(static_cast<int>(record_write_mode));
++    code |= RecordWriteModeField::encode(record_write_mode);
+     CHECK_EQ(is_atomic, false);
+     selector->Emit(code, 0, nullptr, input_count, inputs, temp_count, temps);
+   } else {
+diff --git a/src/compiler/backend/riscv/code-generator-riscv.cc b/src/compiler/backend/riscv/code-generator-riscv.cc
+index 8718be0d5f6..0e041c50f3a 100644
+--- a/src/compiler/backend/riscv/code-generator-riscv.cc
++++ b/src/compiler/backend/riscv/code-generator-riscv.cc
+@@ -873,8 +873,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+                            i.InputDoubleRegister(0), DetermineStubCallMode());
+       break;
+     case kArchStoreWithWriteBarrier: {
+-      RecordWriteMode mode =
+-          static_cast<RecordWriteMode>(MiscField::decode(instr->opcode()));
++      RecordWriteMode mode = RecordWriteModeField::decode(instr->opcode());
+       Register object = i.InputRegister(0);
+       Register index = i.InputRegister(1);
+       Register value = i.InputRegister(2);
+diff --git a/src/compiler/backend/riscv/instruction-selector-riscv32.cc b/src/compiler/backend/riscv/instruction-selector-riscv32.cc
+index e908fab0660..5e494aa3aba 100644
+--- a/src/compiler/backend/riscv/instruction-selector-riscv32.cc
++++ b/src/compiler/backend/riscv/instruction-selector-riscv32.cc
+@@ -223,7 +223,7 @@ void InstructionSelector::VisitStore(Node* node) {
+     InstructionOperand temps[] = {g.TempRegister(), g.TempRegister()};
+     size_t const temp_count = arraysize(temps);
+     InstructionCode code = kArchStoreWithWriteBarrier;
+-    code |= MiscField::encode(static_cast<int>(record_write_mode));
++    code |= RecordWriteModeField::encode(record_write_mode);
+     Emit(code, 0, nullptr, input_count, inputs, temp_count, temps);
+   } else {
+     ArchOpcode opcode;
+diff --git a/src/compiler/backend/riscv/instruction-selector-riscv64.cc b/src/compiler/backend/riscv/instruction-selector-riscv64.cc
+index 9fac9a67bd8..130831675fd 100644
+--- a/src/compiler/backend/riscv/instruction-selector-riscv64.cc
++++ b/src/compiler/backend/riscv/instruction-selector-riscv64.cc
+@@ -345,7 +345,7 @@ void InstructionSelector::VisitStore(Node* node) {
+     InstructionOperand temps[] = {g.TempRegister(), g.TempRegister()};
+     size_t const temp_count = arraysize(temps);
+     InstructionCode code = kArchStoreWithWriteBarrier;
+-    code |= MiscField::encode(static_cast<int>(record_write_mode));
++    code |= RecordWriteModeField::encode(record_write_mode);
+     Emit(code, 0, nullptr, input_count, inputs, temp_count, temps);
+   } else {
+     ArchOpcode opcode;
+diff --git a/src/compiler/backend/s390/code-generator-s390.cc b/src/compiler/backend/s390/code-generator-s390.cc
+index b16b19026a0..aff5a04082c 100644
+--- a/src/compiler/backend/s390/code-generator-s390.cc
++++ b/src/compiler/backend/s390/code-generator-s390.cc
+@@ -1411,8 +1411,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+                            i.InputDoubleRegister(0), DetermineStubCallMode());
+       break;
+     case kArchStoreWithWriteBarrier: {
+-      RecordWriteMode mode =
+-          static_cast<RecordWriteMode>(MiscField::decode(instr->opcode()));
++      RecordWriteMode mode = RecordWriteModeField::decode(instr->opcode());
+       Register object = i.InputRegister(0);
+       Register value = i.InputRegister(2);
+       Register scratch0 = i.TempRegister(0);
+diff --git a/src/compiler/backend/s390/instruction-selector-s390.cc b/src/compiler/backend/s390/instruction-selector-s390.cc
+index 47666ce2b45..52d844c82e3 100644
+--- a/src/compiler/backend/s390/instruction-selector-s390.cc
++++ b/src/compiler/backend/s390/instruction-selector-s390.cc
+@@ -754,7 +754,7 @@ static void VisitGeneralStore(
+     size_t const temp_count = arraysize(temps);
+     InstructionCode code = kArchStoreWithWriteBarrier;
+     code |= AddressingModeField::encode(addressing_mode);
+-    code |= MiscField::encode(static_cast<int>(record_write_mode));
++    code |= RecordWriteModeField::encode(record_write_mode);
+     selector->Emit(code, 0, nullptr, input_count, inputs, temp_count, temps);
+   } else {
+     ArchOpcode opcode;
+diff --git a/src/compiler/backend/x64/code-generator-x64.cc b/src/compiler/backend/x64/code-generator-x64.cc
+index 2bb3da9003f..d44a464dfd1 100644
+--- a/src/compiler/backend/x64/code-generator-x64.cc
++++ b/src/compiler/backend/x64/code-generator-x64.cc
+@@ -1561,8 +1561,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+     case kArchStoreWithWriteBarrier:  // Fall through.
+     case kArchAtomicStoreWithWriteBarrier: {
+       // {EmitTSANAwareStore} calls EmitOOLTrapIfNeeded. No need to do it here.
+-      RecordWriteMode mode =
+-          static_cast<RecordWriteMode>(MiscField::decode(instr->opcode()));
++      RecordWriteMode mode = RecordWriteModeField::decode(instr->opcode());
+       Register object = i.InputRegister(0);
+       size_t index = 0;
+       Operand operand = i.MemoryOperand(&index);
+diff --git a/src/compiler/backend/x64/instruction-selector-x64.cc b/src/compiler/backend/x64/instruction-selector-x64.cc
+index 3f2fb8cae1c..f75dd688dc4 100644
+--- a/src/compiler/backend/x64/instruction-selector-x64.cc
++++ b/src/compiler/backend/x64/instruction-selector-x64.cc
+@@ -684,9 +684,7 @@ void VisitStoreCommon(InstructionSelector* selector, Node* node,
+     InstructionCode code = is_seqcst ? kArchAtomicStoreWithWriteBarrier
+                                      : kArchStoreWithWriteBarrier;
+     code |= AddressingModeField::encode(addressing_mode);
+-    // TODO(manoskouk): These two overlap. Introduce a more specialized smaller
+-    // field for {RecordWriteMode}.
+-    code |= MiscField::encode(static_cast<int>(record_write_mode));
++    code |= RecordWriteModeField::encode(record_write_mode);
+     code |= AccessModeField::encode(access_mode);
+     selector->Emit(code, 0, nullptr, arraysize(inputs), inputs,
+                    arraysize(temps), temps);
+-- 
+2.35.1
+

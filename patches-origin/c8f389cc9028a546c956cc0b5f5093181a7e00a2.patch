@@ -1,0 +1,732 @@
+From c8f389cc9028a546c956cc0b5f5093181a7e00a2 Mon Sep 17 00:00:00 2001
+From: Leszek Swirski <leszeks@chromium.org>
+Date: Tue, 28 Feb 2023 15:12:41 +0000
+Subject: [PATCH] Revert "[ptr-compr] Improve ptr decompress(compress(...)) in
+ C++"
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+This reverts commit f174ba6c397f21fb6a2557011d8313f26b51d662.
+
+Reason for revert: Blocking roll (https://ci.chromium.org/ui/p/chromium/builders/try/fuchsia-arm64-rel/119507/overview)
+
+Original change's description:
+> [ptr-compr] Improve ptr decompress(compress(...)) in C++
+>
+> We can help the compiler by assuming that cast off bytes are actually
+> the cage base. This helps e.g. with `decompress(compress(..))`. The
+> limitation here is that it does not work for smi's, since actually
+> `decompress(compress(smi)) != smi`, as the higher bits are
+> destructively modified. Also we need to ensure that we only compress
+> valid pointers.
+>
+> Additionally, this CL simplifies again the `decompress` method. It
+> turns out that both need to be designed in tandem to work well with
+> several gadgets, that we would like to have optimized by clang. Overall
+> this new combination of compress/decompress is more robust around
+> comparing against constants and produces the best code so far for all
+> gadgets in https://godbolt.org/z/sbqb3TfnE.
+>
+>
+> Bug: v8:9353
+> Change-Id: Iaa37e24fb709ce2c3cc59e6c29078728fad5dd99
+> Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4165080
+> Reviewed-by: Dominik Inführ <dinfuehr@chromium.org>
+> Reviewed-by: Igor Sheludko <ishell@chromium.org>
+> Commit-Queue: Olivier Flückiger <olivf@chromium.org>
+> Cr-Commit-Position: refs/heads/main@{#86114}
+
+Bug: v8:9353
+Change-Id: I9d76788bd8102fbf051cba83f4e6f30da18eb270
+No-Presubmit: true
+No-Tree-Checks: true
+No-Try: true
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4295322
+Commit-Queue: Rubber Stamper <rubber-stamper@appspot.gserviceaccount.com>
+Bot-Commit: Rubber Stamper <rubber-stamper@appspot.gserviceaccount.com>
+Auto-Submit: Leszek Swirski <leszeks@chromium.org>
+Owners-Override: Leszek Swirski <leszeks@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#86148}
+---
+ src/codegen/arm64/assembler-arm64-inl.h |  2 +-
+ src/codegen/macro-assembler-base.cc     |  2 +-
+ src/codegen/ppc/assembler-ppc-inl.h     |  2 +-
+ src/codegen/riscv/assembler-riscv-inl.h |  2 +-
+ src/codegen/s390/assembler-s390-inl.h   |  2 +-
+ src/codegen/x64/assembler-x64-inl.h     |  4 +-
+ src/common/ptr-compr-inl.h              | 61 ++++++++++---------------
+ src/common/ptr-compr.h                  | 14 +-----
+ src/execution/frames.cc                 |  2 +-
+ src/execution/isolate.cc                |  6 +--
+ src/heap/heap-inl.h                     |  2 +-
+ src/heap/read-only-spaces.cc            |  4 +-
+ src/heap/remembered-set-inl.h           |  2 +-
+ src/heap/setup-heap-internal.cc         |  2 +-
+ src/objects/compressed-slots-inl.h      | 32 ++++++-------
+ src/objects/instance-type-inl.h         |  4 +-
+ src/objects/objects-inl.h               |  2 +-
+ src/objects/slots-inl.h                 |  3 +-
+ src/objects/tagged-field-inl.h          |  8 ++--
+ src/objects/tagged-value-inl.h          |  4 +-
+ src/snapshot/read-only-serializer.cc    |  2 +-
+ src/snapshot/static-roots-gen.cc        |  2 +-
+ src/wasm/wasm-engine.cc                 |  2 +-
+ test/cctest/test-mementos.cc            |  8 ++--
+ test/mkgrokdump/mkgrokdump.cc           |  2 +-
+ 25 files changed, 75 insertions(+), 101 deletions(-)
+
+diff --git a/src/codegen/arm64/assembler-arm64-inl.h b/src/codegen/arm64/assembler-arm64-inl.h
+index 78becf936a9..525bc53525c 100644
+--- a/src/codegen/arm64/assembler-arm64-inl.h
++++ b/src/codegen/arm64/assembler-arm64-inl.h
+@@ -689,7 +689,7 @@ void RelocInfo::set_target_object(Heap* heap, HeapObject target,
+   if (IsCompressedEmbeddedObject(rmode_)) {
+     Assembler::set_target_compressed_address_at(
+         pc_, constant_pool_,
+-        V8HeapCompressionScheme::CompressObject(target.ptr()),
++        V8HeapCompressionScheme::CompressTagged(target.ptr()),
+         icache_flush_mode);
+   } else {
+     DCHECK(IsFullEmbeddedObject(rmode_));
+diff --git a/src/codegen/macro-assembler-base.cc b/src/codegen/macro-assembler-base.cc
+index 899f67830f4..6799610bc9c 100644
+--- a/src/codegen/macro-assembler-base.cc
++++ b/src/codegen/macro-assembler-base.cc
+@@ -132,7 +132,7 @@ Tagged_t MacroAssemblerBase::ReadOnlyRootPtr(RootIndex index,
+   DCHECK(CanBeImmediate(index));
+   Object obj = isolate->root(index);
+   CHECK(obj.IsHeapObject());
+-  return V8HeapCompressionScheme::CompressObject(obj.ptr());
++  return V8HeapCompressionScheme::CompressTagged(obj.ptr());
+ }
+ 
+ Tagged_t MacroAssemblerBase::ReadOnlyRootPtr(RootIndex index) {
+diff --git a/src/codegen/ppc/assembler-ppc-inl.h b/src/codegen/ppc/assembler-ppc-inl.h
+index 1803ee03bca..0d6f2b46db6 100644
+--- a/src/codegen/ppc/assembler-ppc-inl.h
++++ b/src/codegen/ppc/assembler-ppc-inl.h
+@@ -183,7 +183,7 @@ void RelocInfo::set_target_object(Heap* heap, HeapObject target,
+   if (IsCompressedEmbeddedObject(rmode_)) {
+     Assembler::set_target_compressed_address_at(
+         pc_, constant_pool_,
+-        V8HeapCompressionScheme::CompressObject(target.ptr()),
++        V8HeapCompressionScheme::CompressTagged(target.ptr()),
+         icache_flush_mode);
+   } else {
+     DCHECK(IsFullEmbeddedObject(rmode_));
+diff --git a/src/codegen/riscv/assembler-riscv-inl.h b/src/codegen/riscv/assembler-riscv-inl.h
+index 6589aaca162..b9efcf502c5 100644
+--- a/src/codegen/riscv/assembler-riscv-inl.h
++++ b/src/codegen/riscv/assembler-riscv-inl.h
+@@ -193,7 +193,7 @@ void RelocInfo::set_target_object(Heap* heap, HeapObject target,
+   if (IsCompressedEmbeddedObject(rmode_)) {
+     Assembler::set_target_compressed_address_at(
+         pc_, constant_pool_,
+-        V8HeapCompressionScheme::CompressObject(target.ptr()),
++        V8HeapCompressionScheme::CompressTagged(target.ptr()),
+         icache_flush_mode);
+   } else {
+     DCHECK(IsFullEmbeddedObject(rmode_));
+diff --git a/src/codegen/s390/assembler-s390-inl.h b/src/codegen/s390/assembler-s390-inl.h
+index 8de48974408..422b92455ba 100644
+--- a/src/codegen/s390/assembler-s390-inl.h
++++ b/src/codegen/s390/assembler-s390-inl.h
+@@ -177,7 +177,7 @@ void RelocInfo::set_target_object(Heap* heap, HeapObject target,
+   if (IsCompressedEmbeddedObject(rmode_)) {
+     Assembler::set_target_compressed_address_at(
+         pc_, constant_pool_,
+-        V8HeapCompressionScheme::CompressObject(target.ptr()),
++        V8HeapCompressionScheme::CompressTagged(target.ptr()),
+         icache_flush_mode);
+   } else {
+     DCHECK(IsFullEmbeddedObject(rmode_));
+diff --git a/src/codegen/x64/assembler-x64-inl.h b/src/codegen/x64/assembler-x64-inl.h
+index 46a68ce0662..a65f72c961b 100644
+--- a/src/codegen/x64/assembler-x64-inl.h
++++ b/src/codegen/x64/assembler-x64-inl.h
+@@ -339,7 +339,7 @@ void RelocInfo::set_target_object(Heap* heap, HeapObject target,
+   DCHECK(IsCodeTarget(rmode_) || IsEmbeddedObjectMode(rmode_));
+   if (IsCompressedEmbeddedObject(rmode_)) {
+     DCHECK(COMPRESS_POINTERS_BOOL);
+-    Tagged_t tagged = V8HeapCompressionScheme::CompressObject(target.ptr());
++    Tagged_t tagged = V8HeapCompressionScheme::CompressTagged(target.ptr());
+     WriteUnalignedValue(pc_, tagged);
+   } else {
+     DCHECK(IsFullEmbeddedObject(rmode_));
+@@ -370,7 +370,7 @@ void RelocInfo::WipeOut() {
+   } else if (IsCompressedEmbeddedObject(rmode_)) {
+     Address smi_address = Smi::FromInt(0).ptr();
+     WriteUnalignedValue(pc_,
+-                        V8HeapCompressionScheme::CompressObject(smi_address));
++                        V8HeapCompressionScheme::CompressTagged(smi_address));
+   } else if (IsCodeTarget(rmode_) || IsNearBuiltinEntry(rmode_)) {
+     // Effectively write zero into the relocation.
+     Assembler::set_target_address_at(pc_, constant_pool_,
+diff --git a/src/common/ptr-compr-inl.h b/src/common/ptr-compr-inl.h
+index 82ab6d6c018..f4590ef374d 100644
+--- a/src/common/ptr-compr-inl.h
++++ b/src/common/ptr-compr-inl.h
+@@ -23,8 +23,6 @@ PtrComprCageBase::PtrComprCageBase(const LocalIsolate* isolate)
+ // V8HeapCompressionScheme
+ //
+ 
+-constexpr Address kPtrComprCageBaseMask = ~(kPtrComprCageBaseAlignment - 1);
+-
+ // static
+ Address V8HeapCompressionScheme::GetPtrComprCageBaseAddress(
+     Address on_heap_addr) {
+@@ -35,7 +33,6 @@ Address V8HeapCompressionScheme::GetPtrComprCageBaseAddress(
+ Address V8HeapCompressionScheme::GetPtrComprCageBaseAddress(
+     PtrComprCageBase cage_base) {
+   Address base = cage_base.address();
+-  V8_ASSUME((base & kPtrComprCageBaseMask) == base);
+   base = reinterpret_cast<Address>(V8_ASSUME_ALIGNED(
+       reinterpret_cast<void*>(base), kPtrComprCageBaseAlignment));
+   return base;
+@@ -49,11 +46,10 @@ void V8HeapCompressionScheme::InitBase(Address base) {
+   base_ = base;
+ }
+ 
++constexpr Address kPtrComprCageBaseMask = ~(kPtrComprCageBaseAlignment - 1);
++
+ // static
+ V8_CONST Address V8HeapCompressionScheme::base() {
+-  // V8_ASSUME_ALIGNED is often not preserved across ptr-to-int casts (i.e. when
+-  // casting to an Address). To increase our chances we additionally encode the
+-  // same information in this V8_ASSUME.
+   V8_ASSUME((base_ & kPtrComprCageBaseMask) == base_);
+   return reinterpret_cast<Address>(V8_ASSUME_ALIGNED(
+       reinterpret_cast<void*>(base_), kPtrComprCageBaseAlignment));
+@@ -61,15 +57,7 @@ V8_CONST Address V8HeapCompressionScheme::base() {
+ #endif  // V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+ 
+ // static
+-Tagged_t V8HeapCompressionScheme::CompressObject(Address tagged) {
+-  // This is used to help clang produce better code. Values which could be
+-  // invalid pointers need to be compressed with CompressAny.
+-  V8_ASSUME((tagged & kPtrComprCageBaseMask) == base_ || HAS_SMI_TAG(tagged));
+-  return static_cast<Tagged_t>(static_cast<uint32_t>(tagged));
+-}
+-
+-// static
+-Tagged_t V8HeapCompressionScheme::CompressAny(Address tagged) {
++Tagged_t V8HeapCompressionScheme::CompressTagged(Address tagged) {
+   return static_cast<Tagged_t>(static_cast<uint32_t>(tagged));
+ }
+ 
+@@ -85,12 +73,20 @@ Address V8HeapCompressionScheme::DecompressTagged(TOnHeapAddress on_heap_addr,
+                                                   Tagged_t raw_value) {
+ #if defined(V8_COMPRESS_POINTERS_IN_SHARED_CAGE) && \
+     !defined(V8_COMPRESS_POINTERS_DONT_USE_GLOBAL_BASE)
+-  Address cage_base = base();
++  V8_ASSUME((base_ & kPtrComprCageBaseMask) == base_);
++  byte* cage_base = reinterpret_cast<byte*>(V8_ASSUME_ALIGNED(
++      reinterpret_cast<void*>(base_), kPtrComprCageBaseAlignment));
++  // For V8_ASSUME_ALIGNED to be considered for optimizations the following
++  // addition has to happen on a pointer type.
++  Address result = reinterpret_cast<Address>(cage_base + raw_value);
+ #else
+   Address cage_base = GetPtrComprCageBaseAddress(on_heap_addr);
+-#endif
+   Address result = cage_base + static_cast<Address>(raw_value);
++#endif
++  // Allows to remove compress(decompress(...))
+   V8_ASSUME(static_cast<uint32_t>(result) == raw_value);
++  // Allows to remove SMI checks when the result is compared against a constant.
++  V8_ASSUME(HAS_SMI_TAG(result) == HAS_SMI_TAG(raw_value));
+   return result;
+ }
+ 
+@@ -127,7 +123,6 @@ Address ExternalCodeCompressionScheme::PrepareCageBaseAddress(
+ Address ExternalCodeCompressionScheme::GetPtrComprCageBaseAddress(
+     PtrComprCageBase cage_base) {
+   Address base = cage_base.address();
+-  V8_ASSUME((base & kPtrComprCageBaseMask) == base);
+   base = reinterpret_cast<Address>(V8_ASSUME_ALIGNED(
+       reinterpret_cast<void*>(base), kPtrComprCageBaseAlignment));
+   return base;
+@@ -143,9 +138,6 @@ void ExternalCodeCompressionScheme::InitBase(Address base) {
+ 
+ // static
+ V8_CONST Address ExternalCodeCompressionScheme::base() {
+-  // V8_ASSUME_ALIGNED is often not preserved across ptr-to-int casts (i.e. when
+-  // casting to an Address). To increase our chances we additionally encode the
+-  // same information in this V8_ASSUME.
+   V8_ASSUME((base_ & kPtrComprCageBaseMask) == base_);
+   return reinterpret_cast<Address>(V8_ASSUME_ALIGNED(
+       reinterpret_cast<void*>(base_), kPtrComprCageBaseAlignment));
+@@ -153,15 +145,7 @@ V8_CONST Address ExternalCodeCompressionScheme::base() {
+ #endif  // V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+ 
+ // static
+-Tagged_t ExternalCodeCompressionScheme::CompressObject(Address tagged) {
+-  // This is used to help clang produce better code. Values which could be
+-  // invalid pointers need to be compressed with CompressAny.
+-  V8_ASSUME((tagged & kPtrComprCageBaseMask) == base_ || HAS_SMI_TAG(tagged));
+-  return static_cast<Tagged_t>(static_cast<uint32_t>(tagged));
+-}
+-
+-// static
+-Tagged_t ExternalCodeCompressionScheme::CompressAny(Address tagged) {
++Tagged_t ExternalCodeCompressionScheme::CompressTagged(Address tagged) {
+   return static_cast<Tagged_t>(static_cast<uint32_t>(tagged));
+ }
+ 
+@@ -178,12 +162,20 @@ Address ExternalCodeCompressionScheme::DecompressTagged(
+     TOnHeapAddress on_heap_addr, Tagged_t raw_value) {
+ #if defined(V8_COMPRESS_POINTERS_IN_SHARED_CAGE) && \
+     !defined(V8_COMPRESS_POINTERS_DONT_USE_GLOBAL_BASE)
+-  Address cage_base = base();
++  V8_ASSUME((base_ & kPtrComprCageBaseMask) == base_);
++  byte* cage_base = reinterpret_cast<byte*>(V8_ASSUME_ALIGNED(
++      reinterpret_cast<void*>(base_), kPtrComprCageBaseAlignment));
++  // For V8_ASSUME_ALIGNED to be considered for optimizations the following
++  // addition has to happen on a pointer type.
++  Address result = reinterpret_cast<Address>(cage_base + raw_value);
+ #else
+   Address cage_base = GetPtrComprCageBaseAddress(on_heap_addr);
+-#endif
+   Address result = cage_base + static_cast<Address>(raw_value);
++#endif
++  // Allows to remove compress(decompress(...))
+   V8_ASSUME(static_cast<uint32_t>(result) == raw_value);
++  // Allows to remove SMI checks when the result is compared against a constant.
++  V8_ASSUME(HAS_SMI_TAG(result) == HAS_SMI_TAG(raw_value));
+   return result;
+ }
+ 
+@@ -212,13 +204,10 @@ Address V8HeapCompressionScheme::GetPtrComprCageBaseAddress(
+ }
+ 
+ // static
+-Tagged_t V8HeapCompressionScheme::CompressObject(Address tagged) {
++Tagged_t V8HeapCompressionScheme::CompressTagged(Address tagged) {
+   UNREACHABLE();
+ }
+ 
+-// static
+-Tagged_t V8HeapCompressionScheme::CompressAny(Address tagged) { UNREACHABLE(); }
+-
+ // static
+ Address V8HeapCompressionScheme::DecompressTaggedSigned(Tagged_t raw_value) {
+   UNREACHABLE();
+diff --git a/src/common/ptr-compr.h b/src/common/ptr-compr.h
+index bfe99cea9ea..94839948850 100644
+--- a/src/common/ptr-compr.h
++++ b/src/common/ptr-compr.h
+@@ -24,12 +24,7 @@ class V8HeapCompressionScheme {
+ 
+   // Compresses full-pointer representation of a tagged value to on-heap
+   // representation.
+-  // Must only be used for compressing object pointers since this function
+-  // assumes that we deal with a valid address inside the pointer compression
+-  // cage.
+-  V8_INLINE static Tagged_t CompressObject(Address tagged);
+-  // Compress a potentially invalid pointer.
+-  V8_INLINE static Tagged_t CompressAny(Address tagged);
++  V8_INLINE static Tagged_t CompressTagged(Address tagged);
+ 
+   // Decompresses smi value.
+   V8_INLINE static Address DecompressTaggedSigned(Tagged_t raw_value);
+@@ -77,12 +72,7 @@ class ExternalCodeCompressionScheme {
+ 
+   // Compresses full-pointer representation of a tagged value to on-heap
+   // representation.
+-  // Must only be used for compressing object pointers (incl. SMI) since this
+-  // function assumes pointers to be inside the pointer compression cage.
+-  V8_INLINE static Tagged_t CompressObject(Address tagged);
+-  // Compress anything that does not follow the above requirements (e.g. a maybe
+-  // object, or a marker bit pattern).
+-  V8_INLINE static Tagged_t CompressAny(Address tagged);
++  V8_INLINE static Tagged_t CompressTagged(Address tagged);
+ 
+   // Decompresses smi value.
+   V8_INLINE static Address DecompressTaggedSigned(Tagged_t raw_value);
+diff --git a/src/execution/frames.cc b/src/execution/frames.cc
+index 334ccb0535f..bc056ddcdce 100644
+--- a/src/execution/frames.cc
++++ b/src/execution/frames.cc
+@@ -1188,7 +1188,7 @@ void VisitSpillSlot(Isolate* isolate, RootVisitor* v,
+     // Restore compression. Generated code should be able to trust that
+     // compressed spill slots remain compressed.
+     *spill_slot.location() =
+-        V8HeapCompressionScheme::CompressObject(*spill_slot.location());
++        V8HeapCompressionScheme::CompressTagged(*spill_slot.location());
+   }
+ #endif
+ }
+diff --git a/src/execution/isolate.cc b/src/execution/isolate.cc
+index d41cc02099a..a1300fa1683 100644
+--- a/src/execution/isolate.cc
++++ b/src/execution/isolate.cc
+@@ -4075,7 +4075,7 @@ void Isolate::VerifyStaticRoots() {
+   idx = RootIndex::kFirstReadOnlyRoot;
+ #define CHECK_NAME(_1, _2, CamelName)                                     \
+   CHECK_WITH_MSG(StaticReadOnlyRoot::k##CamelName ==                      \
+-                     V8HeapCompressionScheme::CompressObject(roots[idx]), \
++                     V8HeapCompressionScheme::CompressTagged(roots[idx]), \
+                  STATIC_ROOTS_FAILED_MSG);                                \
+   ++idx;
+   STRONG_READ_ONLY_ROOT_LIST(CHECK_NAME)
+@@ -4331,9 +4331,9 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
+     Address last = base + code_cage->size() - 1;
+     PtrComprCageBase code_cage_base{code_cage_base_};
+     CHECK_EQ(base, ComprScheme::DecompressTagged(
+-                       code_cage_base, ComprScheme::CompressObject(base)));
++                       code_cage_base, ComprScheme::CompressTagged(base)));
+     CHECK_EQ(last, ComprScheme::DecompressTagged(
+-                       code_cage_base, ComprScheme::CompressObject(last)));
++                       code_cage_base, ComprScheme::CompressTagged(last)));
+   }
+ #endif  // V8_EXTERNAL_CODE_SPACE
+ 
+diff --git a/src/heap/heap-inl.h b/src/heap/heap-inl.h
+index d976ea2fd04..7721a3ea1d1 100644
+--- a/src/heap/heap-inl.h
++++ b/src/heap/heap-inl.h
+@@ -139,7 +139,7 @@ FixedArray Heap::single_character_string_table() {
+ #define DCHECK_STATIC_ROOT(obj, name)                                        \
+   if constexpr (RootsTable::IsReadOnly(RootIndex::k##name) &&                \
+                 RootIndex::k##name != RootIndex::kException) {               \
+-    DCHECK_WITH_MSG(V8HeapCompressionScheme::CompressObject(obj.ptr()) ==    \
++    DCHECK_WITH_MSG(V8HeapCompressionScheme::CompressTagged(obj.ptr()) ==    \
+                         StaticReadOnlyRootsPointerTable[static_cast<size_t>( \
+                             RootIndex::k##name)],                            \
+                     STATIC_ROOTS_FAILED_MSG);                                \
+diff --git a/src/heap/read-only-spaces.cc b/src/heap/read-only-spaces.cc
+index 2bc9e80cd27..26db3d2f534 100644
+--- a/src/heap/read-only-spaces.cc
++++ b/src/heap/read-only-spaces.cc
+@@ -190,7 +190,7 @@ ReadOnlyHeap* PointerCompressedReadOnlyArtifacts::GetReadOnlyHeapForIsolate(
+     Address original_address = original_object.ptr();
+     Address new_address =
+         isolate_root +
+-        V8HeapCompressionScheme::CompressObject(original_address);
++        V8HeapCompressionScheme::CompressTagged(original_address);
+     Object new_object = Object(new_address);
+     cache.push_back(new_object);
+   }
+@@ -241,7 +241,7 @@ void PointerCompressedReadOnlyArtifacts::Initialize(
+     shared_memory_.push_back(std::move(shared_memory));
+     // This is just CompressTagged but inlined so it will always compile.
+     Tagged_t compressed_address =
+-        V8HeapCompressionScheme::CompressAny(page->address());
++        V8HeapCompressionScheme::CompressTagged(page->address());
+     page_offsets_.push_back(compressed_address);
+ 
+     // 3. Update the accounting stats so the allocated bytes are for the new
+diff --git a/src/heap/remembered-set-inl.h b/src/heap/remembered-set-inl.h
+index 2de82cc6af8..6af093d25ef 100644
+--- a/src/heap/remembered-set-inl.h
++++ b/src/heap/remembered-set-inl.h
+@@ -45,7 +45,7 @@ SlotCallbackResult UpdateTypedSlotHelper::UpdateTypedSlot(Heap* heap,
+       DCHECK(!HasWeakHeapObjectTag(new_target));
+       if (new_target != old_target) {
+         base::Memory<Tagged_t>(addr) =
+-            V8HeapCompressionScheme::CompressObject(new_target.ptr());
++            V8HeapCompressionScheme::CompressTagged(new_target.ptr());
+       }
+       return result;
+     }
+diff --git a/src/heap/setup-heap-internal.cc b/src/heap/setup-heap-internal.cc
+index 385b1de07e5..943c28d42fd 100644
+--- a/src/heap/setup-heap-internal.cc
++++ b/src/heap/setup-heap-internal.cc
+@@ -178,7 +178,7 @@ bool Heap::CreateReadOnlyHeapObjects() {
+   // The read only heap is sorted such that often used objects are allocated
+   // early for their compressed address to fit into 12bit arm immediates.
+   ReadOnlySpace* ro_space = isolate()->heap()->read_only_space();
+-  DCHECK_LT(V8HeapCompressionScheme::CompressAny(ro_space->top()), 0xfff);
++  DCHECK_LT(V8HeapCompressionScheme::CompressTagged(ro_space->top()), 0xfff);
+   USE(ro_space);
+ #endif
+ 
+diff --git a/src/objects/compressed-slots-inl.h b/src/objects/compressed-slots-inl.h
+index 4a4e9c8a2da..670c86cc97b 100644
+--- a/src/objects/compressed-slots-inl.h
++++ b/src/objects/compressed-slots-inl.h
+@@ -44,7 +44,7 @@ Object CompressedObjectSlot::load(PtrComprCageBase cage_base) const {
+ }
+ 
+ void CompressedObjectSlot::store(Object value) const {
+-  *location() = TCompressionScheme::CompressObject(value.ptr());
++  *location() = TCompressionScheme::CompressTagged(value.ptr());
+ }
+ 
+ void CompressedObjectSlot::store_map(Map map) const {
+@@ -77,19 +77,19 @@ Object CompressedObjectSlot::Relaxed_Load(PtrComprCageBase cage_base) const {
+ }
+ 
+ void CompressedObjectSlot::Relaxed_Store(Object value) const {
+-  Tagged_t ptr = TCompressionScheme::CompressObject(value.ptr());
++  Tagged_t ptr = TCompressionScheme::CompressTagged(value.ptr());
+   AsAtomicTagged::Relaxed_Store(location(), ptr);
+ }
+ 
+ void CompressedObjectSlot::Release_Store(Object value) const {
+-  Tagged_t ptr = TCompressionScheme::CompressObject(value.ptr());
++  Tagged_t ptr = TCompressionScheme::CompressTagged(value.ptr());
+   AsAtomicTagged::Release_Store(location(), ptr);
+ }
+ 
+ Object CompressedObjectSlot::Release_CompareAndSwap(Object old,
+                                                     Object target) const {
+-  Tagged_t old_ptr = TCompressionScheme::CompressObject(old.ptr());
+-  Tagged_t target_ptr = TCompressionScheme::CompressObject(target.ptr());
++  Tagged_t old_ptr = TCompressionScheme::CompressTagged(old.ptr());
++  Tagged_t target_ptr = TCompressionScheme::CompressTagged(target.ptr());
+   Tagged_t result =
+       AsAtomicTagged::Release_CompareAndSwap(location(), old_ptr, target_ptr);
+   return Object(TCompressionScheme::DecompressTagged(address(), result));
+@@ -110,7 +110,7 @@ MaybeObject CompressedMaybeObjectSlot::load(PtrComprCageBase cage_base) const {
+ }
+ 
+ void CompressedMaybeObjectSlot::store(MaybeObject value) const {
+-  *location() = TCompressionScheme::CompressAny(value.ptr());
++  *location() = TCompressionScheme::CompressTagged(value.ptr());
+ }
+ 
+ MaybeObject CompressedMaybeObjectSlot::Relaxed_Load() const {
+@@ -125,14 +125,14 @@ MaybeObject CompressedMaybeObjectSlot::Relaxed_Load(
+ }
+ 
+ void CompressedMaybeObjectSlot::Relaxed_Store(MaybeObject value) const {
+-  Tagged_t ptr = TCompressionScheme::CompressAny(value.ptr());
++  Tagged_t ptr = TCompressionScheme::CompressTagged(value.ptr());
+   AsAtomicTagged::Relaxed_Store(location(), ptr);
+ }
+ 
+ void CompressedMaybeObjectSlot::Release_CompareAndSwap(
+     MaybeObject old, MaybeObject target) const {
+-  Tagged_t old_ptr = TCompressionScheme::CompressAny(old.ptr());
+-  Tagged_t target_ptr = TCompressionScheme::CompressAny(target.ptr());
++  Tagged_t old_ptr = TCompressionScheme::CompressTagged(old.ptr());
++  Tagged_t target_ptr = TCompressionScheme::CompressTagged(target.ptr());
+   AsAtomicTagged::Release_CompareAndSwap(location(), old_ptr, target_ptr);
+ }
+ 
+@@ -154,7 +154,7 @@ HeapObjectReference CompressedHeapObjectSlot::load(
+ }
+ 
+ void CompressedHeapObjectSlot::store(HeapObjectReference value) const {
+-  *location() = TCompressionScheme::CompressObject(value.ptr());
++  *location() = TCompressionScheme::CompressTagged(value.ptr());
+ }
+ 
+ HeapObject CompressedHeapObjectSlot::ToHeapObject() const {
+@@ -165,7 +165,7 @@ HeapObject CompressedHeapObjectSlot::ToHeapObject() const {
+ }
+ 
+ void CompressedHeapObjectSlot::StoreHeapObject(HeapObject value) const {
+-  *location() = TCompressionScheme::CompressObject(value.ptr());
++  *location() = TCompressionScheme::CompressTagged(value.ptr());
+ }
+ 
+ //
+@@ -181,7 +181,7 @@ Object OffHeapCompressedObjectSlot<CompressionScheme>::load(
+ 
+ template <typename CompressionScheme>
+ void OffHeapCompressedObjectSlot<CompressionScheme>::store(Object value) const {
+-  *TSlotBase::location() = CompressionScheme::CompressObject(value.ptr());
++  *TSlotBase::location() = CompressionScheme::CompressTagged(value.ptr());
+ }
+ 
+ template <typename CompressionScheme>
+@@ -201,22 +201,22 @@ Object OffHeapCompressedObjectSlot<CompressionScheme>::Acquire_Load(
+ template <typename CompressionScheme>
+ void OffHeapCompressedObjectSlot<CompressionScheme>::Relaxed_Store(
+     Object value) const {
+-  Tagged_t ptr = CompressionScheme::CompressObject(value.ptr());
++  Tagged_t ptr = CompressionScheme::CompressTagged(value.ptr());
+   AsAtomicTagged::Relaxed_Store(TSlotBase::location(), ptr);
+ }
+ 
+ template <typename CompressionScheme>
+ void OffHeapCompressedObjectSlot<CompressionScheme>::Release_Store(
+     Object value) const {
+-  Tagged_t ptr = CompressionScheme::CompressObject(value.ptr());
++  Tagged_t ptr = CompressionScheme::CompressTagged(value.ptr());
+   AsAtomicTagged::Release_Store(TSlotBase::location(), ptr);
+ }
+ 
+ template <typename CompressionScheme>
+ void OffHeapCompressedObjectSlot<CompressionScheme>::Release_CompareAndSwap(
+     Object old, Object target) const {
+-  Tagged_t old_ptr = CompressionScheme::CompressObject(old.ptr());
+-  Tagged_t target_ptr = CompressionScheme::CompressObject(target.ptr());
++  Tagged_t old_ptr = CompressionScheme::CompressTagged(old.ptr());
++  Tagged_t target_ptr = CompressionScheme::CompressTagged(target.ptr());
+   AsAtomicTagged::Release_CompareAndSwap(TSlotBase::location(), old_ptr,
+                                          target_ptr);
+ }
+diff --git a/src/objects/instance-type-inl.h b/src/objects/instance-type-inl.h
+index 6ea8f3b42d9..3c2788b367a 100644
+--- a/src/objects/instance-type-inl.h
++++ b/src/objects/instance-type-inl.h
+@@ -120,12 +120,12 @@ inline bool MayHaveMapCheckFastCase(InstanceType type) {
+ }
+ 
+ inline bool CheckInstanceMap(RootIndex expected, Map map) {
+-  return V8HeapCompressionScheme::CompressObject(map.ptr()) ==
++  return V8HeapCompressionScheme::CompressTagged(map.ptr()) ==
+          StaticReadOnlyRootsPointerTable[static_cast<size_t>(expected)];
+ }
+ 
+ inline bool CheckInstanceMapRange(RootIndexRange expected, Map map) {
+-  Tagged_t ptr = V8HeapCompressionScheme::CompressObject(map.ptr());
++  Tagged_t ptr = V8HeapCompressionScheme::CompressTagged(map.ptr());
+   Tagged_t first =
+       StaticReadOnlyRootsPointerTable[static_cast<size_t>(expected.first)];
+   Tagged_t last =
+diff --git a/src/objects/objects-inl.h b/src/objects/objects-inl.h
+index 3229a8e85ff..51db916fab8 100644
+--- a/src/objects/objects-inl.h
++++ b/src/objects/objects-inl.h
+@@ -128,7 +128,7 @@ ODDBALL_LIST(IS_TYPE_FUNCTION_DEF)
+ #define IS_TYPE_FUNCTION_DEF(Type, Value, CamelName)                       \
+   bool Object::Is##Type(ReadOnlyRoots roots) const {                       \
+     SLOW_DCHECK(CheckObjectComparisonAllowed(ptr(), roots.Value().ptr())); \
+-    return V8HeapCompressionScheme::CompressObject(ptr()) ==               \
++    return V8HeapCompressionScheme::CompressTagged(ptr()) ==               \
+            StaticReadOnlyRoot::k##CamelName;                               \
+   }
+ #else
+diff --git a/src/objects/slots-inl.h b/src/objects/slots-inl.h
+index 1759c7927cb..f1f2e038f0f 100644
+--- a/src/objects/slots-inl.h
++++ b/src/objects/slots-inl.h
+@@ -265,8 +265,7 @@ inline void CopyTagged(Address dst, const Address src, size_t num_tagged) {
+ // Sets |counter| number of kTaggedSize-sized values starting at |start| slot.
+ inline void MemsetTagged(Tagged_t* start, Object value, size_t counter) {
+ #ifdef V8_COMPRESS_POINTERS
+-  // CompressAny since many callers pass values which are not valid objects.
+-  Tagged_t raw_value = V8HeapCompressionScheme::CompressAny(value.ptr());
++  Tagged_t raw_value = V8HeapCompressionScheme::CompressTagged(value.ptr());
+   MemsetUint32(start, raw_value, counter);
+ #else
+   Address raw_value = value.ptr();
+diff --git a/src/objects/tagged-field-inl.h b/src/objects/tagged-field-inl.h
+index 7f2af6d89a6..0d2de548e57 100644
+--- a/src/objects/tagged-field-inl.h
++++ b/src/objects/tagged-field-inl.h
+@@ -5,9 +5,10 @@
+ #ifndef V8_OBJECTS_TAGGED_FIELD_INL_H_
+ #define V8_OBJECTS_TAGGED_FIELD_INL_H_
+ 
+-#include "src/common/ptr-compr-inl.h"
+ #include "src/objects/tagged-field.h"
+ 
++#include "src/common/ptr-compr-inl.h"
++
+ namespace v8 {
+ namespace internal {
+ 
+@@ -48,10 +49,7 @@ template <typename T, int kFieldOffset, typename CompressionScheme>
+ Tagged_t TaggedField<T, kFieldOffset, CompressionScheme>::full_to_tagged(
+     Address value) {
+ #ifdef V8_COMPRESS_POINTERS
+-  if (std::is_base_of<MaybeObject, T>::value) {
+-    return CompressionScheme::CompressAny(value);
+-  }
+-  return CompressionScheme::CompressObject(value);
++  return CompressionScheme::CompressTagged(value);
+ #else
+   return value;
+ #endif
+diff --git a/src/objects/tagged-value-inl.h b/src/objects/tagged-value-inl.h
+index 7cdebdf700b..84f4c93ec22 100644
+--- a/src/objects/tagged-value-inl.h
++++ b/src/objects/tagged-value-inl.h
+@@ -21,7 +21,7 @@ namespace internal {
+ inline StrongTaggedValue::StrongTaggedValue(Object o)
+     :
+ #ifdef V8_COMPRESS_POINTERS
+-      TaggedImpl(CompressionScheme::CompressObject(o.ptr()))
++      TaggedImpl(CompressionScheme::CompressTagged(o.ptr()))
+ #else
+       TaggedImpl(o.ptr())
+ #endif
+@@ -39,7 +39,7 @@ Object StrongTaggedValue::ToObject(Isolate* isolate, StrongTaggedValue object) {
+ inline TaggedValue::TaggedValue(MaybeObject o)
+     :
+ #ifdef V8_COMPRESS_POINTERS
+-      TaggedImpl(CompressionScheme::CompressAny(o.ptr()))
++      TaggedImpl(CompressionScheme::CompressTagged(o.ptr()))
+ #else
+       TaggedImpl(o.ptr())
+ #endif
+diff --git a/src/snapshot/read-only-serializer.cc b/src/snapshot/read-only-serializer.cc
+index 05b75c945f4..55d928e1f11 100644
+--- a/src/snapshot/read-only-serializer.cc
++++ b/src/snapshot/read-only-serializer.cc
+@@ -91,7 +91,7 @@ void ReadOnlySerializer::FinalizeSerialization() {
+     auto space = isolate()->read_only_heap()->read_only_space();
+     size_t num_pages = space->pages().size();
+     sink_.PutInt(num_pages, "num pages");
+-    Tagged_t pos = V8HeapCompressionScheme::CompressAny(
++    Tagged_t pos = V8HeapCompressionScheme::CompressTagged(
+         reinterpret_cast<Address>(space->pages()[0]));
+     sink_.PutInt(pos, "first page offset");
+     for (auto p : space->pages()) {
+diff --git a/src/snapshot/static-roots-gen.cc b/src/snapshot/static-roots-gen.cc
+index 33614c6401b..45f3a6b8e29 100644
+--- a/src/snapshot/static-roots-gen.cc
++++ b/src/snapshot/static-roots-gen.cc
+@@ -28,7 +28,7 @@ class StaticRootsTableGenImpl {
+       RootIndex pos = RootIndex::kFirstReadOnlyRoot;
+ #define ADD_ROOT(_, value, CamelName)                       \
+   {                                                         \
+-    Tagged_t ptr = V8HeapCompressionScheme::CompressObject( \
++    Tagged_t ptr = V8HeapCompressionScheme::CompressTagged( \
+         ro_roots.unchecked_##value().ptr());                \
+     sorted_roots_[ptr].push_back(pos);                      \
+     camel_names_[RootIndex::k##CamelName] = #CamelName;     \
+diff --git a/src/wasm/wasm-engine.cc b/src/wasm/wasm-engine.cc
+index c59540b1470..2911e071814 100644
+--- a/src/wasm/wasm-engine.cc
++++ b/src/wasm/wasm-engine.cc
+@@ -1034,7 +1034,7 @@ void WasmEngine::AddIsolate(Isolate* isolate) {
+ #if defined(V8_COMPRESS_POINTERS)
+   // The null value is not accessible on mksnapshot runs.
+   if (isolate->snapshot_available()) {
+-    wasm_null_tagged_compressed_ = V8HeapCompressionScheme::CompressObject(
++    wasm_null_tagged_compressed_ = V8HeapCompressionScheme::CompressTagged(
+         isolate->factory()->wasm_null()->ptr());
+   }
+ #endif
+diff --git a/test/cctest/test-mementos.cc b/test/cctest/test-mementos.cc
+index 1fd892815a2..ccaa1c733f6 100644
+--- a/test/cctest/test-mementos.cc
++++ b/test/cctest/test-mementos.cc
+@@ -53,11 +53,9 @@ static void SetUpNewSpaceWithPoisonedMementoAtTop() {
+       Object(new_space->top() + kHeapObjectTag));
+   memento.set_map_after_allocation(ReadOnlyRoots(heap).allocation_memento_map(),
+                                    SKIP_WRITE_BARRIER);
+-
+-  // Using this accessor because set_memento expects an Object and not a
+-  // MaybeObject.
+-  TaggedField<MaybeObject, AllocationMemento::kAllocationSiteOffset>::store(
+-      memento, MaybeObject(kHeapObjectTag));
++  memento.set_allocation_site(
++      AllocationSite::unchecked_cast(Object(kHeapObjectTag)),
++      SKIP_WRITE_BARRIER);
+ }
+ 
+ 
+diff --git a/test/mkgrokdump/mkgrokdump.cc b/test/mkgrokdump/mkgrokdump.cc
+index 91404e318fb..7ddd1c0893b 100644
+--- a/test/mkgrokdump/mkgrokdump.cc
++++ b/test/mkgrokdump/mkgrokdump.cc
+@@ -103,7 +103,7 @@ static void DumpSpaceFirstPageAddress(FILE* out, i::BaseSpace* space,
+                                       i::Address first_page) {
+   const char* name = space->name();
+   i::Tagged_t compressed =
+-      i::V8HeapCompressionScheme::CompressObject(first_page);
++      i::V8HeapCompressionScheme::CompressTagged(first_page);
+   uintptr_t unsigned_compressed = static_cast<uint32_t>(compressed);
+   i::PrintF(out, "  0x%08" V8PRIxPTR ": \"%s\",\n", unsigned_compressed, name);
+ }
+-- 
+2.35.1
+

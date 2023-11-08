@@ -1,0 +1,198 @@
+From 8f0b451fc245fec95dcb6657fdca541a36ad1e85 Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Wed, 22 Dec 2021 10:26:57 +0800
+Subject: [PATCH] [riscv64] Optimize simd Load Lane
+
+Change-Id: I7e61221775a616943886cdb369eb9bbe5e110a32
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3347499
+Reviewed-by: ji qiu <qiuji@iscas.ac.cn>
+Commit-Queue: ji qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#78436}
+---
+ src/codegen/riscv64/assembler-riscv64.cc      |  2 +-
+ .../backend/riscv64/code-generator-riscv64.cc | 10 +++----
+ src/diagnostics/riscv64/disasm-riscv64.cc     |  3 ++
+ src/execution/riscv64/simulator-riscv64.cc    | 28 +++++++++++++++++++
+ .../riscv64/liftoff-assembler-riscv64.h       | 18 ++++--------
+ test/cctest/test-assembler-riscv64.cc         | 22 ++++++++++++---
+ 6 files changed, 60 insertions(+), 23 deletions(-)
+
+diff --git a/src/codegen/riscv64/assembler-riscv64.cc b/src/codegen/riscv64/assembler-riscv64.cc
+index c2ce6c81814..c55d646cd04 100644
+--- a/src/codegen/riscv64/assembler-riscv64.cc
++++ b/src/codegen/riscv64/assembler-riscv64.cc
+@@ -59,7 +59,7 @@ static unsigned CpuFeaturesImpliedByCompiler() {
+ 
+ #if (defined CAN_USE_RVV_INSTRUCTIONS) || (defined USE_SIMULATOR)
+   answer |= 1u << RISCV_SIMD;
+-#endif  // def CAN_USE_RVV_INSTRUCTIONS && USE_SIMULATOR
++#endif  // def CAN_USE_RVV_INSTRUCTIONS || USE_SIMULATOR
+   return answer;
+ }
+ 
+diff --git a/src/compiler/backend/riscv64/code-generator-riscv64.cc b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+index 9ad821fecce..e834c830ae6 100644
+--- a/src/compiler/backend/riscv64/code-generator-riscv64.cc
++++ b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+@@ -2751,13 +2751,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       int64_t imm1 = make_uint64(i.InputInt32(3), i.InputInt32(2));
+       int64_t imm2 = make_uint64(i.InputInt32(5), i.InputInt32(4));
+       __ VU.set(kScratchReg, VSew::E64, Vlmul::m1);
+-      __ li(kScratchReg, 1);
+-      __ vmv_vx(v0, kScratchReg);
+-      __ li(kScratchReg, imm1);
+-      __ vmerge_vx(kSimd128ScratchReg, kScratchReg, kSimd128ScratchReg);
+       __ li(kScratchReg, imm2);
+-      __ vsll_vi(v0, v0, 1);
+-      __ vmerge_vx(kSimd128ScratchReg, kScratchReg, kSimd128ScratchReg);
++      __ vmv_sx(kSimd128ScratchReg2, kScratchReg);
++      __ vslideup_vi(kSimd128ScratchReg, kSimd128ScratchReg2, 1);
++      __ li(kScratchReg, imm1);
++      __ vmv_sx(kSimd128ScratchReg, kScratchReg);
+ 
+       __ VU.set(kScratchReg, E8, m1);
+       if (dst == src0) {
+diff --git a/src/diagnostics/riscv64/disasm-riscv64.cc b/src/diagnostics/riscv64/disasm-riscv64.cc
+index 02d3bbd9cd6..b40e6d2b671 100644
+--- a/src/diagnostics/riscv64/disasm-riscv64.cc
++++ b/src/diagnostics/riscv64/disasm-riscv64.cc
+@@ -2068,6 +2068,9 @@ void Decoder::DecodeRvvIVI(Instruction* instr) {
+     case RO_V_VSLIDEDOWN_VI:
+       Format(instr, "vslidedown.vi 'vd, 'vs2, 'uimm5'vm");
+       break;
++    case RO_V_VSLIDEUP_VI:
++      Format(instr, "vslideup.vi   'vd, 'vs2, 'uimm5'vm");
++      break;
+     case RO_V_VSRL_VI:
+       Format(instr, "vsrl.vi   'vd, 'vs2, 'uimm5'vm");
+       break;
+diff --git a/src/execution/riscv64/simulator-riscv64.cc b/src/execution/riscv64/simulator-riscv64.cc
+index 6f323016bc4..82c721ddd5e 100644
+--- a/src/execution/riscv64/simulator-riscv64.cc
++++ b/src/execution/riscv64/simulator-riscv64.cc
+@@ -5216,6 +5216,34 @@ void Simulator::DecodeRvvIVI() {
+       RVV_VI_LOOP_END
+       rvv_trace_vd();
+     } break;
++    case RO_V_VSLIDEUP_VI: {
++      RVV_VI_CHECK_SLIDE(true);
++
++      const uint8_t offset = instr_.RvvUimm5();
++      RVV_VI_GENERAL_LOOP_BASE
++      if (rvv_vstart() < offset && i < offset) continue;
++
++      switch (rvv_vsew()) {
++        case E8: {
++          VI_XI_SLIDEUP_PARAMS(8, offset);
++          vd = vs2;
++        } break;
++        case E16: {
++          VI_XI_SLIDEUP_PARAMS(16, offset);
++          vd = vs2;
++        } break;
++        case E32: {
++          VI_XI_SLIDEUP_PARAMS(32, offset);
++          vd = vs2;
++        } break;
++        default: {
++          VI_XI_SLIDEUP_PARAMS(64, offset);
++          vd = vs2;
++        } break;
++      }
++      RVV_VI_LOOP_END
++      rvv_trace_vd();
++    } break;
+     case RO_V_VSRL_VI:
+       RVV_VI_VI_ULOOP({ vd = vs2 >> uimm5; })
+       break;
+diff --git a/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h b/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
+index 83aea992184..1ba0d4148a5 100644
+--- a/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
++++ b/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
+@@ -1734,16 +1734,12 @@ void LiftoffAssembler::LoadTransform(LiftoffRegister dst, Register src_addr,
+     if (memtype == MachineType::Int32()) {
+       VU.set(kScratchReg, E32, m1);
+       Lwu(scratch, src_op);
+-      li(kScratchReg, 0x1 << 0);
+-      vmv_sx(v0, kScratchReg);
+-      vmerge_vx(dst_v, scratch, dst_v);
++      vmv_sx(dst_v, scratch);
+     } else {
+       DCHECK_EQ(MachineType::Int64(), memtype);
+       VU.set(kScratchReg, E64, m1);
+       Ld(scratch, src_op);
+-      li(kScratchReg, 0x1 << 0);
+-      vmv_sx(v0, kScratchReg);
+-      vmerge_vx(dst_v, scratch, dst_v);
++      vmv_sx(dst_v, scratch);
+     }
+   } else {
+     DCHECK_EQ(LoadTransformationKind::kSplat, transform);
+@@ -1849,13 +1845,11 @@ void LiftoffAssembler::emit_i8x16_shuffle(LiftoffRegister dst,
+   uint64_t imm1 = *(reinterpret_cast<const uint64_t*>(shuffle));
+   uint64_t imm2 = *((reinterpret_cast<const uint64_t*>(shuffle)) + 1);
+   VU.set(kScratchReg, VSew::E64, Vlmul::m1);
+-  li(kScratchReg, 1);
+-  vmv_vx(v0, kScratchReg);
+-  li(kScratchReg, imm1);
+-  vmerge_vx(kSimd128ScratchReg, kScratchReg, kSimd128ScratchReg);
+   li(kScratchReg, imm2);
+-  vsll_vi(v0, v0, 1);
+-  vmerge_vx(kSimd128ScratchReg, kScratchReg, kSimd128ScratchReg);
++  vmv_sx(kSimd128ScratchReg2, kScratchReg);
++  vslideup_vi(kSimd128ScratchReg, kSimd128ScratchReg2, 1);
++  li(kScratchReg, imm1);
++  vmv_sx(kSimd128ScratchReg, kScratchReg);
+ 
+   VU.set(kScratchReg, E8, m1);
+   VRegister temp =
+diff --git a/test/cctest/test-assembler-riscv64.cc b/test/cctest/test-assembler-riscv64.cc
+index 6b18d40078d..885b6ae7182 100644
+--- a/test/cctest/test-assembler-riscv64.cc
++++ b/test/cctest/test-assembler-riscv64.cc
+@@ -2435,8 +2435,7 @@ UTEST_RVV_VNCLIP_E32M2_E16M1(vnclip_vi, )
+                                        array, expect_res)                   \
+   TEST(RISCV_UTEST_##instr_name##_##width##_##frac_width) {                 \
+     if (!CpuFeatures::IsSupported(RISCV_SIMD)) return;                      \
+-    constexpr uint32_t vlen = 128;                                          \
+-    constexpr uint32_t n = vlen / width;                                    \
++    constexpr uint32_t n = kRvvVLEN / width;                                \
+     CcTest::InitializeVM();                                                 \
+     for (int##frac_width##_t x : array) {                                   \
+       int##frac_width##_t src[n] = {0};                                     \
+@@ -2491,8 +2490,7 @@ UTEST_RVV_VI_VIE_FORM_WITH_RES(vsext_vf2, int16_t, 16, 8, ARRAY(int8_t),
+                                          expect_res)                     \
+   TEST(RISCV_UTEST_##instr_name##_##type) {                              \
+     if (!CpuFeatures::IsSupported(RISCV_SIMD)) return;                   \
+-    constexpr uint32_t vlen = 128;                                       \
+-    constexpr uint32_t n = vlen / width;                                 \
++    constexpr uint32_t n = kRvvVLEN / width;                             \
+     CcTest::InitializeVM();                                              \
+     for (type x : array) {                                               \
+       for (uint32_t offset = 0; offset < n; offset++) {                  \
+@@ -2529,6 +2527,22 @@ UTEST_RVV_VP_VS_VI_FORM_WITH_RES(vslidedown_vi, uint16_t, 16, ARRAY(uint16_t),
+ UTEST_RVV_VP_VS_VI_FORM_WITH_RES(vslidedown_vi, uint8_t, 8, ARRAY(uint8_t),
+                                  (i + offset) < n ? src[i + offset] : 0)
+ 
++UTEST_RVV_VP_VS_VI_FORM_WITH_RES(vslideup_vi, int64_t, 64, ARRAY(int64_t),
++                                 i < offset ? dst[i] : src[i - offset])
++UTEST_RVV_VP_VS_VI_FORM_WITH_RES(vslideup_vi, int32_t, 32, ARRAY(int32_t),
++                                 i < offset ? dst[i] : src[i - offset])
++UTEST_RVV_VP_VS_VI_FORM_WITH_RES(vslideup_vi, int16_t, 16, ARRAY(int16_t),
++                                 i < offset ? dst[i] : src[i - offset])
++UTEST_RVV_VP_VS_VI_FORM_WITH_RES(vslideup_vi, int8_t, 8, ARRAY(int8_t),
++                                 i < offset ? dst[i] : src[i - offset])
++
++UTEST_RVV_VP_VS_VI_FORM_WITH_RES(vslideup_vi, uint32_t, 32, ARRAY(uint32_t),
++                                 i < offset ? dst[i] : src[i - offset])
++UTEST_RVV_VP_VS_VI_FORM_WITH_RES(vslideup_vi, uint16_t, 16, ARRAY(uint16_t),
++                                 i < offset ? dst[i] : src[i - offset])
++UTEST_RVV_VP_VS_VI_FORM_WITH_RES(vslideup_vi, uint8_t, 8, ARRAY(uint8_t),
++                                 i < offset ? dst[i] : src[i - offset])
++
+ #undef UTEST_RVV_VP_VS_VI_FORM_WITH_RES
+ #undef ARRAY
+ #undef __
+-- 
+2.35.1
+

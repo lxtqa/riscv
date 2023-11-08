@@ -1,0 +1,732 @@
+From dd9bbfd41636e2b2a44b678e9ffca6922704af54 Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Mon, 14 Aug 2023 20:21:05 +0800
+Subject: [PATCH] [riscv] Reduce the number of vector arch codes (Part 4)
+
+This CL simplifies riscv v-extension arch code.
+
+Change-Id: I243f2b55adf461d830e6f42a6cd6f9258f0a4872
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4778439
+Reviewed-by: Ji Qiu <qiuji@iscas.ac.cn>
+Auto-Submit: Yahan Lu <yahan@iscas.ac.cn>
+Commit-Queue: Yahan Lu <yahan@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#89516}
+---
+ .../backend/riscv/code-generator-riscv.cc     | 187 ++++++------------
+ .../backend/riscv/instruction-codes-riscv.h   |  24 +--
+ .../riscv/instruction-scheduler-riscv.cc      |  22 +--
+ .../riscv/instruction-selector-riscv.h        | 183 +++++++++++++++--
+ .../riscv/instruction-selector-riscv32.cc     |  30 +++
+ .../riscv/instruction-selector-riscv64.cc     |  25 +++
+ 6 files changed, 295 insertions(+), 176 deletions(-)
+
+diff --git a/src/compiler/backend/riscv/code-generator-riscv.cc b/src/compiler/backend/riscv/code-generator-riscv.cc
+index ffca066c227..3142c95e696 100644
+--- a/src/compiler/backend/riscv/code-generator-riscv.cc
++++ b/src/compiler/backend/riscv/code-generator-riscv.cc
+@@ -2381,36 +2381,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+                 kSimd128ScratchReg2);
+       break;
+     }
+-    case kRiscvS128And: {
+-      (__ VU).set(kScratchReg, VSew::E8, Vlmul::m1);
+-      __ vand_vv(i.OutputSimd128Register(), i.InputSimd128Register(0),
+-                 i.InputSimd128Register(1));
+-      break;
+-    }
+-    case kRiscvS128Or: {
+-      (__ VU).set(kScratchReg, VSew::E8, Vlmul::m1);
+-      __ vor_vv(i.OutputSimd128Register(), i.InputSimd128Register(0),
+-                i.InputSimd128Register(1));
+-      break;
+-    }
+-    case kRiscvS128Xor: {
+-      (__ VU).set(kScratchReg, VSew::E8, Vlmul::m1);
+-      __ vxor_vv(i.OutputSimd128Register(), i.InputSimd128Register(0),
+-                 i.InputSimd128Register(1));
+-      break;
+-    }
+     case kRiscvS128Not: {
+       (__ VU).set(kScratchReg, VSew::E8, Vlmul::m1);
+       __ vnot_vv(i.OutputSimd128Register(), i.InputSimd128Register(0));
+       break;
+     }
+-    case kRiscvS128AndNot: {
+-      (__ VU).set(kScratchReg, VSew::E8, Vlmul::m1);
+-      __ vnot_vv(kSimd128ScratchReg, i.InputSimd128Register(1));
+-      __ vand_vv(i.OutputSimd128Register(), i.InputSimd128Register(0),
+-                 kSimd128ScratchReg);
+-      break;
+-    }
+     case kRiscvS128Const: {
+       Simd128Register dst = i.OutputSimd128Register();
+       uint8_t imm[16];
+@@ -3028,20 +3003,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+                  kScratchReg, kSimd128ScratchReg);
+       break;
+     }
+-    case kRiscvF64x2Ne: {
+-      __ VU.set(kScratchReg, E64, m1);
+-      __ vmfne_vv(v0, i.InputSimd128Register(1), i.InputSimd128Register(0));
+-      __ vmv_vx(i.OutputSimd128Register(), zero_reg);
+-      __ vmerge_vi(i.OutputSimd128Register(), -1, i.OutputSimd128Register());
+-      break;
+-    }
+-    case kRiscvF64x2Eq: {
+-      __ VU.set(kScratchReg, E64, m1);
+-      __ vmfeq_vv(v0, i.InputSimd128Register(1), i.InputSimd128Register(0));
+-      __ vmv_vx(i.OutputSimd128Register(), zero_reg);
+-      __ vmerge_vi(i.OutputSimd128Register(), -1, i.OutputSimd128Register());
+-      break;
+-    }
+     case kRiscvF64x2ReplaceLane: {
+       __ VU.set(kScratchReg, E64, m1);
+       __ li(kScratchReg, 0x1 << i.InputInt8(1));
+@@ -3050,20 +3011,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+                     i.InputSimd128Register(0));
+       break;
+     }
+-    case kRiscvF64x2Lt: {
+-      __ VU.set(kScratchReg, E64, m1);
+-      __ vmflt_vv(v0, i.InputSimd128Register(0), i.InputSimd128Register(1));
+-      __ vmv_vx(i.OutputSimd128Register(), zero_reg);
+-      __ vmerge_vi(i.OutputSimd128Register(), -1, i.OutputSimd128Register());
+-      break;
+-    }
+-    case kRiscvF64x2Le: {
+-      __ VU.set(kScratchReg, E64, m1);
+-      __ vmfle_vv(v0, i.InputSimd128Register(0), i.InputSimd128Register(1));
+-      __ vmv_vx(i.OutputSimd128Register(), zero_reg);
+-      __ vmerge_vi(i.OutputSimd128Register(), -1, i.OutputSimd128Register());
+-      break;
+-    }
+     case kRiscvF64x2Pmax: {
+       __ VU.set(kScratchReg, E64, m1);
+       __ vmflt_vv(v0, i.InputSimd128Register(0), i.InputSimd128Register(1));
+@@ -3078,39 +3025,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+                    i.InputSimd128Register(0));
+       break;
+     }
+-#if V8_TARGET_ARCH_RISCV64
+-    case kRiscvF64x2Max: {
+-      __ VU.set(kScratchReg, E64, m1);
+-      const int64_t kNaN = 0x7ff8000000000000L;
+-      __ vmfeq_vv(v0, i.InputSimd128Register(0), i.InputSimd128Register(0));
+-      __ vmfeq_vv(kSimd128ScratchReg, i.InputSimd128Register(1),
+-                  i.InputSimd128Register(1));
+-      __ vand_vv(v0, v0, kSimd128ScratchReg);
+-      __ li(kScratchReg, kNaN);
+-      __ vmv_vx(kSimd128ScratchReg, kScratchReg);
+-      __ vfmax_vv(kSimd128ScratchReg, i.InputSimd128Register(1),
+-                  i.InputSimd128Register(0), Mask);
+-      __ vmv_vv(i.OutputSimd128Register(), kSimd128ScratchReg);
+-      break;
+-    }
+-#elif V8_TARGET_ARCH_RISCV32
+-    case kRiscvF64x2Max: {
+-      __ VU.set(kScratchReg, E64, m1);
+-      const int32_t kNaN = 0x7ff80000L, kNaNShift = 32;
+-      __ vmfeq_vv(v0, i.InputSimd128Register(0), i.InputSimd128Register(0));
+-      __ vmfeq_vv(kSimd128ScratchReg, i.InputSimd128Register(1),
+-                  i.InputSimd128Register(1));
+-      __ vand_vv(v0, v0, kSimd128ScratchReg);
+-      __ li(kScratchReg, kNaN);
+-      __ li(kScratchReg2, kNaNShift);
+-      __ vmv_vx(kSimd128ScratchReg, kScratchReg);
+-      __ vsll_vx(kSimd128ScratchReg, kSimd128ScratchReg, kScratchReg2);
+-      __ vfmax_vv(kSimd128ScratchReg, i.InputSimd128Register(1),
+-                  i.InputSimd128Register(0), Mask);
+-      __ vmv_vv(i.OutputSimd128Register(), kSimd128ScratchReg);
+-      break;
+-    }
+-#endif
+     case kRiscvF64x2ExtractLane: {
+       __ VU.set(kScratchReg, E64, m1);
+       if (is_uint5(i.InputInt8(1))) {
+@@ -3224,20 +3138,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       __ vfcvt_f_x_v(i.OutputSimd128Register(), i.InputSimd128Register(0));
+       break;
+     }
+-    case kRiscvF32x4Eq: {
+-      __ VU.set(kScratchReg, E32, m1);
+-      __ vmfeq_vv(v0, i.InputSimd128Register(1), i.InputSimd128Register(0));
+-      __ vmv_vx(i.OutputSimd128Register(), zero_reg);
+-      __ vmerge_vi(i.OutputSimd128Register(), -1, i.OutputSimd128Register());
+-      break;
+-    }
+-    case kRiscvF32x4Ne: {
+-      __ VU.set(kScratchReg, E32, m1);
+-      __ vmfne_vv(v0, i.InputSimd128Register(1), i.InputSimd128Register(0));
+-      __ vmv_vx(i.OutputSimd128Register(), zero_reg);
+-      __ vmerge_vi(i.OutputSimd128Register(), -1, i.OutputSimd128Register());
+-      break;
+-    }
+     case kRiscvF32x4ReplaceLane: {
+       __ VU.set(kScratchReg, E32, m1);
+       __ li(kScratchReg, 0x1 << i.InputInt8(1));
+@@ -3247,20 +3147,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+                    i.InputSimd128Register(0));
+       break;
+     }
+-    case kRiscvF32x4Lt: {
+-      __ VU.set(kScratchReg, E32, m1);
+-      __ vmflt_vv(v0, i.InputSimd128Register(0), i.InputSimd128Register(1));
+-      __ vmv_vx(i.OutputSimd128Register(), zero_reg);
+-      __ vmerge_vi(i.OutputSimd128Register(), -1, i.OutputSimd128Register());
+-      break;
+-    }
+-    case kRiscvF32x4Le: {
+-      __ VU.set(kScratchReg, E32, m1);
+-      __ vmfle_vv(v0, i.InputSimd128Register(0), i.InputSimd128Register(1));
+-      __ vmv_vx(i.OutputSimd128Register(), zero_reg);
+-      __ vmerge_vi(i.OutputSimd128Register(), -1, i.OutputSimd128Register());
+-      break;
+-    }
+     case kRiscvF32x4Pmax: {
+       __ VU.set(kScratchReg, E32, m1);
+       __ vmflt_vv(v0, i.InputSimd128Register(0), i.InputSimd128Register(1));
+@@ -3280,20 +3166,6 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       __ vfsqrt_v(i.OutputSimd128Register(), i.InputSimd128Register(0));
+       break;
+     }
+-    case kRiscvF32x4Max: {
+-      __ VU.set(kScratchReg, E32, m1);
+-      const int32_t kNaN = 0x7FC00000;
+-      __ vmfeq_vv(v0, i.InputSimd128Register(0), i.InputSimd128Register(0));
+-      __ vmfeq_vv(kSimd128ScratchReg, i.InputSimd128Register(1),
+-                  i.InputSimd128Register(1));
+-      __ vand_vv(v0, v0, kSimd128ScratchReg);
+-      __ li(kScratchReg, kNaN);
+-      __ vmv_vx(kSimd128ScratchReg, kScratchReg);
+-      __ vfmax_vv(kSimd128ScratchReg, i.InputSimd128Register(1),
+-                  i.InputSimd128Register(0), Mask);
+-      __ vmv_vv(i.OutputSimd128Register(), kSimd128ScratchReg);
+-      break;
+-    }
+     case kRiscvF32x4Qfma: {
+       __ VU.set(kScratchReg, E32, m1);
+       __ vfmadd_vv(i.InputSimd128Register(0), i.InputSimd128Register(1),
+@@ -3548,7 +3420,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+     }
+     case kRiscvVmvVx: {
+       __ VU.set(kScratchReg, i.InputInt8(1), i.InputInt8(2));
+-      __ vmv_vx(i.OutputSimd128Register(), i.InputRegister(0));
++      if (instr->InputAt(0)->IsRegister()) {
++        __ vmv_vx(i.OutputSimd128Register(), i.InputRegister(0));
++      } else {
++        __ vmv_vi(i.OutputSimd128Register(), i.InputInt8(0));
++      }
+       break;
+     }
+     case kRiscvVmvVv: {
+@@ -3702,18 +3578,71 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+                   i.InputSimd128Register(1));
+       break;
+     }
++    case kRiscvVmfneVv: {
++      __ VU.set(kScratchReg, i.InputInt8(2), i.InputInt8(3));
++      __ vmfne_vv(i.OutputSimd128Register(), i.InputSimd128Register(0),
++                  i.InputSimd128Register(1));
++      break;
++    }
++    case kRiscvVmfltVv: {
++      __ VU.set(kScratchReg, i.InputInt8(2), i.InputInt8(3));
++      __ vmflt_vv(i.OutputSimd128Register(), i.InputSimd128Register(0),
++                  i.InputSimd128Register(1));
++      break;
++    }
++    case kRiscvVmfleVv: {
++      __ VU.set(kScratchReg, i.InputInt8(2), i.InputInt8(3));
++      __ vmfle_vv(i.OutputSimd128Register(), i.InputSimd128Register(0),
++                  i.InputSimd128Register(1));
++      break;
++    }
+     case kRiscvVfminVv: {
+       __ VU.set(kScratchReg, i.InputInt8(2), i.InputInt8(3));
+       __ vfmin_vv(i.OutputSimd128Register(), i.InputSimd128Register(0),
+                   i.InputSimd128Register(1), MaskType(i.InputInt8(4)));
+       break;
+     }
++    case kRiscvVfmaxVv: {
++      __ VU.set(kScratchReg, i.InputInt8(2), i.InputInt8(3));
++      __ vfmax_vv(i.OutputSimd128Register(), i.InputSimd128Register(0),
++                  i.InputSimd128Register(1), MaskType(i.InputInt8(4)));
++      break;
++    }
+     case kRiscvVandVv: {
+       __ VU.set(kScratchReg, i.InputInt8(2), i.InputInt8(3));
+       __ vand_vv(i.OutputSimd128Register(), i.InputSimd128Register(0),
+                  i.InputSimd128Register(1));
+       break;
+     }
++    case kRiscvVorVv: {
++      __ VU.set(kScratchReg, i.InputInt8(2), i.InputInt8(3));
++      __ vor_vv(i.OutputSimd128Register(), i.InputSimd128Register(0),
++                i.InputSimd128Register(1));
++      break;
++    }
++    case kRiscvVxorVv: {
++      (__ VU).set(kScratchReg, i.InputInt8(2), i.InputInt8(3));
++      __ vxor_vv(i.OutputSimd128Register(), i.InputSimd128Register(0),
++                 i.InputSimd128Register(1));
++      break;
++    }
++    case kRiscvVnotVv: {
++      (__ VU).set(kScratchReg, i.InputInt8(1), i.InputInt8(2));
++      __ vnot_vv(i.OutputSimd128Register(), i.InputSimd128Register(0));
++      break;
++    }
++    case kRiscvVmergeVx: {
++      __ VU.set(kScratchReg, i.InputInt8(2), i.InputInt8(3));
++      if (instr->InputAt(0)->IsRegister()) {
++        __ vmerge_vx(i.OutputSimd128Register(), i.InputRegister(0),
++                     i.InputSimd128Register(1));
++      } else {
++        DCHECK(is_int5(i.InputInt32(0)));
++        __ vmerge_vi(i.OutputSimd128Register(), i.InputInt8(0),
++                     i.InputSimd128Register(1));
++      }
++      break;
++    }
+     default:
+ #ifdef DEBUG
+       switch (arch_opcode) {
+diff --git a/src/compiler/backend/riscv/instruction-codes-riscv.h b/src/compiler/backend/riscv/instruction-codes-riscv.h
+index 7ef1f41c309..42873bf627e 100644
+--- a/src/compiler/backend/riscv/instruction-codes-riscv.h
++++ b/src/compiler/backend/riscv/instruction-codes-riscv.h
+@@ -229,14 +229,9 @@ namespace compiler {
+   V(RiscvI32x4ShrS)                       \
+   V(RiscvI32x4ShrU)                       \
+   V(RiscvF64x2Sqrt)                       \
+-  V(RiscvF64x2Max)                        \
+   V(RiscvF64x2ConvertLowI32x4S)           \
+   V(RiscvF64x2ConvertLowI32x4U)           \
+   V(RiscvF64x2PromoteLowF32x4)            \
+-  V(RiscvF64x2Eq)                         \
+-  V(RiscvF64x2Ne)                         \
+-  V(RiscvF64x2Lt)                         \
+-  V(RiscvF64x2Le)                         \
+   V(RiscvF64x2ExtractLane)                \
+   V(RiscvF64x2ReplaceLane)                \
+   V(RiscvF64x2Pmin)                       \
+@@ -260,11 +255,6 @@ namespace compiler {
+   V(RiscvF32x4Qfms)                       \
+   V(RiscvF64x2Qfma)                       \
+   V(RiscvF64x2Qfms)                       \
+-  V(RiscvF32x4Max)                        \
+-  V(RiscvF32x4Eq)                         \
+-  V(RiscvF32x4Ne)                         \
+-  V(RiscvF32x4Lt)                         \
+-  V(RiscvF32x4Le)                         \
+   V(RiscvF32x4Pmin)                       \
+   V(RiscvF32x4Pmax)                       \
+   V(RiscvF32x4DemoteF64x2Zero)            \
+@@ -298,12 +288,8 @@ namespace compiler {
+   V(RiscvI8x16Abs)                        \
+   V(RiscvI8x16BitMask)                    \
+   V(RiscvI8x16Popcnt)                     \
+-  V(RiscvS128And)                         \
+-  V(RiscvS128Or)                          \
+-  V(RiscvS128Xor)                         \
+   V(RiscvS128Not)                         \
+   V(RiscvS128Select)                      \
+-  V(RiscvS128AndNot)                      \
+   V(RiscvS128Load64Zero)                  \
+   V(RiscvS128Load32Zero)                  \
+   V(RiscvI32x4AllTrue)                    \
+@@ -358,6 +344,9 @@ namespace compiler {
+   V(RiscvI8x16UConvertI16x8)              \
+   V(RiscvVmvVv)                           \
+   V(RiscvVandVv)                          \
++  V(RiscvVnotVv)                          \
++  V(RiscvVorVv)                           \
++  V(RiscvVxorVv)                          \
+   V(RiscvVmvVx)                           \
+   V(RiscvVmvVi)                           \
+   V(RiscvVwmul)                           \
+@@ -391,11 +380,16 @@ namespace compiler {
+   V(RiscvVsubSatSVv)                      \
+   V(RiscvVsubSatUVv)                      \
+   V(RiscvVmfeqVv)                         \
++  V(RiscvVmfneVv)                         \
++  V(RiscvVmfleVv)                         \
++  V(RiscvVmfltVv)                         \
+   V(RiscvVfaddVv)                         \
+   V(RiscvVfsubVv)                         \
+   V(RiscvVfmulVv)                         \
+   V(RiscvVfdivVv)                         \
+-  V(RiscvVfminVv)
++  V(RiscvVfminVv)                         \
++  V(RiscvVfmaxVv)                         \
++  V(RiscvVmergeVx)
+ 
+ #define TARGET_ARCH_OPCODE_LIST(V)  \
+   TARGET_ARCH_OPCODE_LIST_COMMON(V) \
+diff --git a/src/compiler/backend/riscv/instruction-scheduler-riscv.cc b/src/compiler/backend/riscv/instruction-scheduler-riscv.cc
+index 0ea657e8461..fb68dc7ea79 100644
+--- a/src/compiler/backend/riscv/instruction-scheduler-riscv.cc
++++ b/src/compiler/backend/riscv/instruction-scheduler-riscv.cc
+@@ -102,11 +102,6 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kRiscvDivU32:
+     case kRiscvF64x2Abs:
+     case kRiscvF64x2Sqrt:
+-    case kRiscvF64x2Max:
+-    case kRiscvF64x2Eq:
+-    case kRiscvF64x2Ne:
+-    case kRiscvF64x2Lt:
+-    case kRiscvF64x2Le:
+     case kRiscvF64x2Pmin:
+     case kRiscvF64x2Pmax:
+     case kRiscvF64x2ConvertLowI32x4S:
+@@ -126,12 +121,7 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kRiscvI64x2ShrU:
+     case kRiscvI64x2BitMask:
+     case kRiscvF32x4Abs:
+-    case kRiscvF32x4Eq:
+     case kRiscvF32x4ExtractLane:
+-    case kRiscvF32x4Lt:
+-    case kRiscvF32x4Le:
+-    case kRiscvF32x4Max:
+-    case kRiscvF32x4Ne:
+     case kRiscvF32x4Sqrt:
+     case kRiscvF64x2Qfma:
+     case kRiscvF64x2Qfms:
+@@ -233,12 +223,8 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kRiscvRor32:
+     case kRiscvRoundWD:
+     case kRiscvRoundWS:
+-    case kRiscvS128And:
+-    case kRiscvS128Or:
+     case kRiscvS128Not:
+     case kRiscvS128Select:
+-    case kRiscvS128AndNot:
+-    case kRiscvS128Xor:
+     case kRiscvS128Const:
+     case kRiscvS128Zero:
+     case kRiscvS128Load32Zero:
+@@ -281,6 +267,9 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kRiscvVmvVx:
+     case kRiscvVmvVi:
+     case kRiscvVandVv:
++    case kRiscvVorVv:
++    case kRiscvVnotVv:
++    case kRiscvVxorVv:
+     case kRiscvVmvSx:
+     case kRiscvVfmvVf:
+     case kRiscvVcompress:
+@@ -314,7 +303,12 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kRiscvVfmulVv:
+     case kRiscvVfdivVv:
+     case kRiscvVfminVv:
++    case kRiscvVfmaxVv:
+     case kRiscvVmfeqVv:
++    case kRiscvVmfneVv:
++    case kRiscvVmfltVv:
++    case kRiscvVmfleVv:
++    case kRiscvVmergeVx:
+     case kRiscvSar32:
+     case kRiscvSignExtendByte:
+     case kRiscvSignExtendShort:
+diff --git a/src/compiler/backend/riscv/instruction-selector-riscv.h b/src/compiler/backend/riscv/instruction-selector-riscv.h
+index d656ed3339a..d4d6866ed91 100644
+--- a/src/compiler/backend/riscv/instruction-selector-riscv.h
++++ b/src/compiler/backend/riscv/instruction-selector-riscv.h
+@@ -1196,7 +1196,10 @@ void InstructionSelectorT<Adapter>::VisitI16x8ExtAddPairwiseI8x16U(Node* node) {
+   V(F64x2Mul, kRiscvVfmulVv, E64, m1)        \
+   V(F32x4Mul, kRiscvVfmulVv, E32, m1)        \
+   V(F64x2Div, kRiscvVfdivVv, E64, m1)        \
+-  V(F32x4Div, kRiscvVfdivVv, E32, m1)
++  V(F32x4Div, kRiscvVfdivVv, E32, m1)        \
++  V(S128And, kRiscvVandVv, E8, m1)           \
++  V(S128Or, kRiscvVorVv, E8, m1)             \
++  V(S128Xor, kRiscvVxorVv, E8, m1)
+ 
+ #define SIMD_UNOP_INT_LIST(V) \
+   V(Neg, kRiscvVnegVv)        \
+@@ -1207,18 +1210,6 @@ void InstructionSelectorT<Adapter>::VisitI16x8ExtAddPairwiseI8x16U(Node* node) {
+   V(Splat, kRiscvVfmvVf)
+ 
+ #define SIMD_BINOP_LIST(V)                              \
+-  V(F64x2Max, kRiscvF64x2Max)                           \
+-  V(F64x2Eq, kRiscvF64x2Eq)                             \
+-  V(F64x2Ne, kRiscvF64x2Ne)                             \
+-  V(F64x2Lt, kRiscvF64x2Lt)                             \
+-  V(F64x2Le, kRiscvF64x2Le)                             \
+-  V(F32x4Max, kRiscvF32x4Max)                           \
+-  V(F32x4Eq, kRiscvF32x4Eq)                             \
+-  V(F32x4Ne, kRiscvF32x4Ne)                             \
+-  V(F32x4Lt, kRiscvF32x4Lt)                             \
+-  V(F32x4Le, kRiscvF32x4Le)                             \
+-  V(F32x4RelaxedMax, kRiscvF32x4Max)                    \
+-  V(F64x2RelaxedMax, kRiscvF64x2Max)                    \
+   V(I16x8RoundingAverageU, kRiscvI16x8RoundingAverageU) \
+   V(I16x8Q15MulRSatS, kRiscvI16x8Q15MulRSatS)           \
+   V(I16x8RelaxedQ15MulRS, kRiscvI16x8Q15MulRSatS)       \
+@@ -1226,11 +1217,18 @@ void InstructionSelectorT<Adapter>::VisitI16x8ExtAddPairwiseI8x16U(Node* node) {
+   V(I16x8UConvertI32x4, kRiscvI16x8UConvertI32x4)       \
+   V(I8x16RoundingAverageU, kRiscvI8x16RoundingAverageU) \
+   V(I8x16SConvertI16x8, kRiscvI8x16SConvertI16x8)       \
+-  V(I8x16UConvertI16x8, kRiscvI8x16UConvertI16x8)       \
+-  V(S128And, kRiscvS128And)                             \
+-  V(S128Or, kRiscvS128Or)                               \
+-  V(S128Xor, kRiscvS128Xor)                             \
+-  V(S128AndNot, kRiscvS128AndNot)
++  V(I8x16UConvertI16x8, kRiscvI8x16UConvertI16x8)
++
++template <typename Adapter>
++void InstructionSelectorT<Adapter>::VisitS128AndNot(Node* node) {
++  RiscvOperandGeneratorT<Adapter> g(this);
++  InstructionOperand temp1 = g.TempFpRegister(v0);
++  this->Emit(kRiscvVnotVv, temp1, g.UseRegister(node->InputAt(1)),
++             g.UseImmediate(E8), g.UseImmediate(m1));
++  this->Emit(kRiscvVandVv, g.DefineAsRegister(node),
++             g.UseRegister(node->InputAt(0)), temp1, g.UseImmediate(E8),
++             g.UseImmediate(m1));
++}
+ 
+ template <typename Adapter>
+ void InstructionSelectorT<Adapter>::VisitS128Const(Node* node) {
+@@ -1428,6 +1426,33 @@ void InstructionSelectorT<Adapter>::VisitF32x4Min(Node* node) {
+              g.UseImmediate(m1));
+ }
+ 
++template <typename Adapter>
++void InstructionSelectorT<Adapter>::VisitF32x4Max(Node* node) {
++  RiscvOperandGeneratorT<Adapter> g(this);
++  InstructionOperand temp1 = g.TempFpRegister(v0);
++  InstructionOperand mask_reg = g.TempFpRegister(v0);
++  InstructionOperand temp2 = g.TempFpRegister(kSimd128ScratchReg);
++
++  this->Emit(kRiscvVmfeqVv, temp1, g.UseRegister(node->InputAt(0)),
++             g.UseRegister(node->InputAt(0)), g.UseImmediate(E32),
++             g.UseImmediate(m1));
++  this->Emit(kRiscvVmfeqVv, temp2, g.UseRegister(node->InputAt(1)),
++             g.UseRegister(node->InputAt(1)), g.UseImmediate(E32),
++             g.UseImmediate(m1));
++  this->Emit(kRiscvVandVv, mask_reg, temp2, temp1, g.UseImmediate(E32),
++             g.UseImmediate(m1));
++
++  InstructionOperand NaN = g.TempFpRegister(kSimd128ScratchReg);
++  InstructionOperand result = g.TempFpRegister(kSimd128ScratchReg);
++  this->Emit(kRiscvVmvVi, NaN, g.UseImmediate(0x7FC00000), g.UseImmediate(E32),
++             g.UseImmediate(m1));
++  this->Emit(kRiscvVfmaxVv, result, g.UseRegister(node->InputAt(1)),
++             g.UseRegister(node->InputAt(0)), g.UseImmediate(E32),
++             g.UseImmediate(m1), g.UseImmediate(MaskType::Mask));
++  this->Emit(kRiscvVmvVv, g.DefineAsRegister(node), result, g.UseImmediate(E32),
++             g.UseImmediate(m1));
++}
++
+ template <typename Adapter>
+ void InstructionSelectorT<Adapter>::VisitF32x4RelaxedMin(Node* node) {
+   VisitF32x4Min(node);
+@@ -1438,6 +1463,128 @@ void InstructionSelectorT<Adapter>::VisitF64x2RelaxedMin(Node* node) {
+   VisitF64x2Min(node);
+ }
+ 
++template <typename Adapter>
++void InstructionSelectorT<Adapter>::VisitF64x2RelaxedMax(Node* node) {
++  VisitF64x2Max(node);
++}
++
++template <typename Adapter>
++void InstructionSelectorT<Adapter>::VisitF32x4RelaxedMax(Node* node) {
++  VisitF32x4Max(node);
++}
++
++template <typename Adapter>
++void InstructionSelectorT<Adapter>::VisitF64x2Eq(Node* node) {
++  RiscvOperandGeneratorT<Adapter> g(this);
++  InstructionOperand temp1 = g.TempFpRegister(v0);
++  this->Emit(kRiscvVmfeqVv, temp1, g.UseRegister(node->InputAt(1)),
++             g.UseRegister(node->InputAt(0)), g.UseImmediate(E64),
++             g.UseImmediate(m1));
++  InstructionOperand temp2 = g.TempFpRegister(kSimd128ScratchReg);
++  this->Emit(kRiscvVmvVx, temp2, g.UseImmediate(0), g.UseImmediate(E64),
++             g.UseImmediate(m1));
++  this->Emit(kRiscvVmergeVx, g.DefineAsRegister(node), g.UseImmediate(-1),
++             temp2, g.UseImmediate(E64), g.UseImmediate(m1));
++}
++
++template <typename Adapter>
++void InstructionSelectorT<Adapter>::VisitF64x2Ne(Node* node) {
++  RiscvOperandGeneratorT<Adapter> g(this);
++  InstructionOperand temp1 = g.TempFpRegister(v0);
++  this->Emit(kRiscvVmfneVv, temp1, g.UseRegister(node->InputAt(1)),
++             g.UseRegister(node->InputAt(0)), g.UseImmediate(E64),
++             g.UseImmediate(m1));
++  InstructionOperand temp2 = g.TempFpRegister(kSimd128ScratchReg);
++  this->Emit(kRiscvVmvVx, temp2, g.UseImmediate(0), g.UseImmediate(E64),
++             g.UseImmediate(m1));
++  this->Emit(kRiscvVmergeVx, g.DefineAsRegister(node), g.UseImmediate(-1),
++             temp2, g.UseImmediate(E64), g.UseImmediate(m1));
++}
++
++template <typename Adapter>
++void InstructionSelectorT<Adapter>::VisitF64x2Lt(Node* node) {
++  RiscvOperandGeneratorT<Adapter> g(this);
++  InstructionOperand temp1 = g.TempFpRegister(v0);
++  this->Emit(kRiscvVmfltVv, temp1, g.UseRegister(node->InputAt(0)),
++             g.UseRegister(node->InputAt(1)), g.UseImmediate(E64),
++             g.UseImmediate(m1));
++  InstructionOperand temp2 = g.TempFpRegister(kSimd128ScratchReg);
++  this->Emit(kRiscvVmvVx, temp2, g.UseImmediate(0), g.UseImmediate(E64),
++             g.UseImmediate(m1));
++  this->Emit(kRiscvVmergeVx, g.DefineAsRegister(node), g.UseImmediate(-1),
++             temp2, g.UseImmediate(E64), g.UseImmediate(m1));
++}
++
++template <typename Adapter>
++void InstructionSelectorT<Adapter>::VisitF64x2Le(Node* node) {
++  RiscvOperandGeneratorT<Adapter> g(this);
++  InstructionOperand temp1 = g.TempFpRegister(v0);
++  this->Emit(kRiscvVmfleVv, temp1, g.UseRegister(node->InputAt(0)),
++             g.UseRegister(node->InputAt(1)), g.UseImmediate(E64),
++             g.UseImmediate(m1));
++  InstructionOperand temp2 = g.TempFpRegister(kSimd128ScratchReg);
++  this->Emit(kRiscvVmvVx, temp2, g.UseImmediate(0), g.UseImmediate(E64),
++             g.UseImmediate(m1));
++  this->Emit(kRiscvVmergeVx, g.DefineAsRegister(node), g.UseImmediate(-1),
++             temp2, g.UseImmediate(E64), g.UseImmediate(m1));
++}
++
++template <typename Adapter>
++void InstructionSelectorT<Adapter>::VisitF32x4Eq(Node* node) {
++  RiscvOperandGeneratorT<Adapter> g(this);
++  InstructionOperand temp1 = g.TempFpRegister(v0);
++  this->Emit(kRiscvVmfeqVv, temp1, g.UseRegister(node->InputAt(1)),
++             g.UseRegister(node->InputAt(0)), g.UseImmediate(E32),
++             g.UseImmediate(m1));
++  InstructionOperand temp2 = g.TempFpRegister(kSimd128ScratchReg);
++  this->Emit(kRiscvVmvVx, temp2, g.UseImmediate(0), g.UseImmediate(E32),
++             g.UseImmediate(m1));
++  this->Emit(kRiscvVmergeVx, g.DefineAsRegister(node), g.UseImmediate(-1),
++             temp2, g.UseImmediate(E32), g.UseImmediate(m1));
++}
++
++template <typename Adapter>
++void InstructionSelectorT<Adapter>::VisitF32x4Ne(Node* node) {
++  RiscvOperandGeneratorT<Adapter> g(this);
++  InstructionOperand temp1 = g.TempFpRegister(v0);
++  this->Emit(kRiscvVmfneVv, temp1, g.UseRegister(node->InputAt(1)),
++             g.UseRegister(node->InputAt(0)), g.UseImmediate(E32),
++             g.UseImmediate(m1));
++  InstructionOperand temp2 = g.TempFpRegister(kSimd128ScratchReg);
++  this->Emit(kRiscvVmvVx, temp2, g.UseImmediate(0), g.UseImmediate(E32),
++             g.UseImmediate(m1));
++  this->Emit(kRiscvVmergeVx, g.DefineAsRegister(node), g.UseImmediate(-1),
++             temp2, g.UseImmediate(E32), g.UseImmediate(m1));
++}
++
++template <typename Adapter>
++void InstructionSelectorT<Adapter>::VisitF32x4Lt(Node* node) {
++  RiscvOperandGeneratorT<Adapter> g(this);
++  InstructionOperand temp1 = g.TempFpRegister(v0);
++  this->Emit(kRiscvVmfltVv, temp1, g.UseRegister(node->InputAt(0)),
++             g.UseRegister(node->InputAt(1)), g.UseImmediate(E32),
++             g.UseImmediate(m1));
++  InstructionOperand temp2 = g.TempFpRegister(kSimd128ScratchReg);
++  this->Emit(kRiscvVmvVx, temp2, g.UseImmediate(0), g.UseImmediate(E32),
++             g.UseImmediate(m1));
++  this->Emit(kRiscvVmergeVx, g.DefineAsRegister(node), g.UseImmediate(-1),
++             temp2, g.UseImmediate(E32), g.UseImmediate(m1));
++}
++
++template <typename Adapter>
++void InstructionSelectorT<Adapter>::VisitF32x4Le(Node* node) {
++  RiscvOperandGeneratorT<Adapter> g(this);
++  InstructionOperand temp1 = g.TempFpRegister(v0);
++  this->Emit(kRiscvVmfleVv, temp1, g.UseRegister(node->InputAt(0)),
++             g.UseRegister(node->InputAt(1)), g.UseImmediate(E32),
++             g.UseImmediate(m1));
++  InstructionOperand temp2 = g.TempFpRegister(kSimd128ScratchReg);
++  this->Emit(kRiscvVmvVx, temp2, g.UseImmediate(0), g.UseImmediate(E32),
++             g.UseImmediate(m1));
++  this->Emit(kRiscvVmergeVx, g.DefineAsRegister(node), g.UseImmediate(-1),
++             temp2, g.UseImmediate(E32), g.UseImmediate(m1));
++}
++
+ template <typename Adapter>
+ void InstructionSelectorT<Adapter>::VisitI32x4DotI16x8S(Node* node) {
+   constexpr int32_t FIRST_INDEX = 0b01010101;
+diff --git a/src/compiler/backend/riscv/instruction-selector-riscv32.cc b/src/compiler/backend/riscv/instruction-selector-riscv32.cc
+index a54c8159fd2..299892138a0 100644
+--- a/src/compiler/backend/riscv/instruction-selector-riscv32.cc
++++ b/src/compiler/backend/riscv/instruction-selector-riscv32.cc
+@@ -1694,6 +1694,36 @@ void InstructionSelectorT<Adapter>::VisitF64x2Min(Node* node) {
+   this->Emit(kRiscvVmvVv, g.DefineAsRegister(node), temp5, g.UseImmediate(E64),
+              g.UseImmediate(m1));
+ }
++
++template <typename Adapter>
++void InstructionSelectorT<Adapter>::VisitF64x2Max(Node* node) {
++  RiscvOperandGeneratorT<Adapter> g(this);
++  InstructionOperand temp1 = g.TempFpRegister(v0);
++  InstructionOperand mask_reg = g.TempFpRegister(v0);
++  InstructionOperand temp2 = g.TempFpRegister(kSimd128ScratchReg);
++  const int32_t kNaN = 0x7ff80000L, kNaNShift = 32;
++  this->Emit(kRiscvVmfeqVv, temp1, g.UseRegister(node->InputAt(0)),
++             g.UseRegister(node->InputAt(0)), g.UseImmediate(E64),
++             g.UseImmediate(m1));
++  this->Emit(kRiscvVmfeqVv, temp2, g.UseRegister(node->InputAt(1)),
++             g.UseRegister(node->InputAt(1)), g.UseImmediate(E64),
++             g.UseImmediate(m1));
++  this->Emit(kRiscvVandVv, mask_reg, temp2, temp1, g.UseImmediate(E64),
++             g.UseImmediate(m1));
++
++  InstructionOperand temp3 = g.TempFpRegister(kSimd128ScratchReg);
++  InstructionOperand temp4 = g.TempFpRegister(kSimd128ScratchReg);
++  InstructionOperand temp5 = g.TempFpRegister(kSimd128ScratchReg);
++  this->Emit(kRiscvVmvVi, temp3, g.UseImmediate(kNaN), g.UseImmediate(E64),
++             g.UseImmediate(m1));
++  this->Emit(kRiscvVsllVx, temp4, temp3, g.UseImmediate(kNaNShift),
++             g.UseImmediate(E64), g.UseImmediate(m1));
++  this->Emit(kRiscvVfmaxVv, temp5, g.UseRegister(node->InputAt(1)),
++             g.UseRegister(node->InputAt(0)), g.UseImmediate(E64),
++             g.UseImmediate(m1), g.UseImmediate(Mask));
++  this->Emit(kRiscvVmvVv, g.DefineAsRegister(node), temp5, g.UseImmediate(E64),
++             g.UseImmediate(m1));
++}
+ // static
+ MachineOperatorBuilder::Flags
+ InstructionSelector::SupportedMachineOperatorFlags() {
+diff --git a/src/compiler/backend/riscv/instruction-selector-riscv64.cc b/src/compiler/backend/riscv/instruction-selector-riscv64.cc
+index 432906f78c2..8e67d2d983f 100644
+--- a/src/compiler/backend/riscv/instruction-selector-riscv64.cc
++++ b/src/compiler/backend/riscv/instruction-selector-riscv64.cc
+@@ -2863,6 +2863,31 @@ void InstructionSelectorT<Adapter>::VisitF64x2Min(Node* node) {
+              g.UseImmediate(m1));
+ }
+ 
++template <typename Adapter>
++void InstructionSelectorT<Adapter>::VisitF64x2Max(Node* node) {
++  RiscvOperandGeneratorT<Adapter> g(this);
++  InstructionOperand temp1 = g.TempFpRegister(v0);
++  InstructionOperand temp2 = g.TempFpRegister(kSimd128ScratchReg);
++  InstructionOperand mask_reg = g.TempFpRegister(v0);
++  this->Emit(kRiscvVmfeqVv, temp1, g.UseRegister(node->InputAt(0)),
++             g.UseRegister(node->InputAt(0)), g.UseImmediate(E64),
++             g.UseImmediate(m1));
++  this->Emit(kRiscvVmfeqVv, temp2, g.UseRegister(node->InputAt(1)),
++             g.UseRegister(node->InputAt(1)), g.UseImmediate(E64),
++             g.UseImmediate(m1));
++  this->Emit(kRiscvVandVv, mask_reg, temp2, temp1, g.UseImmediate(E64),
++             g.UseImmediate(m1));
++
++  InstructionOperand NaN = g.TempFpRegister(kSimd128ScratchReg);
++  InstructionOperand result = g.TempFpRegister(kSimd128ScratchReg);
++  this->Emit(kRiscvVmvVi, NaN, g.UseImmediate64(0x7ff8000000000000L),
++             g.UseImmediate(E64), g.UseImmediate(m1));
++  this->Emit(kRiscvVfmaxVv, result, g.UseRegister(node->InputAt(1)),
++             g.UseRegister(node->InputAt(0)), g.UseImmediate(E64),
++             g.UseImmediate(m1), g.UseImmediate(MaskType::Mask));
++  this->Emit(kRiscvVmvVv, g.DefineAsRegister(node), result, g.UseImmediate(E64),
++             g.UseImmediate(m1));
++}
+ // static
+ MachineOperatorBuilder::Flags
+ InstructionSelector::SupportedMachineOperatorFlags() {
+-- 
+2.35.1
+

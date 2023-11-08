@@ -1,0 +1,3435 @@
+From c4977018143e1fe7e98e11abde44db45b87fe0dd Mon Sep 17 00:00:00 2001
+From: Clemens Backes <clemensb@chromium.org>
+Date: Mon, 29 Aug 2022 12:33:33 +0200
+Subject: [PATCH] [wasm] Use v8_flags for accessing flag values
+
+Avoid the deprecated FLAG_* syntax, access flag values via the
+{v8_flags} struct instead.
+
+R=jkummerow@chromium.org
+
+Bug: v8:12887
+Change-Id: Ieccf35730f69bcefa3740227f15e05686080d122
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3843517
+Auto-Submit: Clemens Backes <clemensb@chromium.org>
+Reviewed-by: Jakob Kummerow <jkummerow@chromium.org>
+Commit-Queue: Jakob Kummerow <jkummerow@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#82774}
+---
+ src/compiler/wasm-compiler.cc                 |  55 +++++-----
+ src/compiler/wasm-gc-lowering.cc              |   4 +-
+ src/compiler/wasm-inlining.cc                 |   4 +-
+ src/compiler/wasm-inlining.h                  |   2 +-
+ src/compiler/wasm-typer.cc                    |   2 +-
+ src/runtime/runtime-wasm.cc                   |   8 +-
+ src/wasm/baseline/arm/liftoff-assembler-arm.h |   6 +-
+ .../baseline/arm64/liftoff-assembler-arm64.h  |   6 +-
+ .../baseline/ia32/liftoff-assembler-ia32.h    |   4 +-
+ src/wasm/baseline/liftoff-compiler.cc         |  79 +++++++-------
+ .../loong64/liftoff-assembler-loong64.h       |   8 +-
+ .../baseline/mips/liftoff-assembler-mips.h    |   8 +-
+ .../mips64/liftoff-assembler-mips64.h         |   8 +-
+ src/wasm/baseline/ppc/liftoff-assembler-ppc.h |  16 +--
+ .../baseline/riscv/liftoff-assembler-riscv.h  |   6 +-
+ .../riscv/liftoff-assembler-riscv32.h         |   2 +-
+ .../riscv/liftoff-assembler-riscv64.h         |   2 +-
+ .../baseline/s390/liftoff-assembler-s390.h    |   6 +-
+ src/wasm/baseline/x64/liftoff-assembler-x64.h |   4 +-
+ src/wasm/code-space-access.cc                 |   8 +-
+ src/wasm/decoder.h                            |  12 +--
+ src/wasm/function-body-decoder-impl.h         |  18 ++--
+ src/wasm/function-compiler.cc                 |  17 +--
+ src/wasm/graph-builder-interface.cc           |  26 ++---
+ src/wasm/module-compiler.cc                   | 101 +++++++++---------
+ src/wasm/module-decoder-impl.h                |  22 ++--
+ src/wasm/module-instantiate.cc                |  36 +++----
+ src/wasm/stacks.h                             |   6 +-
+ src/wasm/streaming-decoder.cc                 |   6 +-
+ src/wasm/wasm-code-manager.cc                 |  60 ++++++-----
+ src/wasm/wasm-engine.cc                       |  36 +++----
+ src/wasm/wasm-features.cc                     |   2 +-
+ src/wasm/wasm-js.cc                           |   6 +-
+ src/wasm/wasm-limits.h                        |   3 +-
+ src/wasm/wasm-module-builder.cc               |   2 +-
+ src/wasm/wasm-objects.cc                      |  34 +++---
+ src/wasm/wasm-serialization.cc                |  12 +--
+ src/wasm/wasm-subtyping.cc                    |   6 +-
+ test/cctest/test-js-to-wasm.cc                |   8 +-
+ test/cctest/wasm/test-compilation-cache.cc    |   6 +-
+ test/cctest/wasm/test-gc.cc                   |  24 +++--
+ test/cctest/wasm/test-run-wasm-exceptions.cc  |   4 +-
+ test/cctest/wasm/test-run-wasm-interpreter.cc |   2 +-
+ test/cctest/wasm/test-run-wasm-module.cc      |  22 ++--
+ test/cctest/wasm/test-run-wasm-wrappers.cc    |  12 ++-
+ test/cctest/wasm/test-run-wasm.cc             |  10 +-
+ .../cctest/wasm/test-streaming-compilation.cc |  40 +++----
+ test/cctest/wasm/test-wasm-metrics.cc         |  47 ++++----
+ test/cctest/wasm/test-wasm-serialization.cc   |   4 +-
+ test/cctest/wasm/wasm-run-utils.cc            |  10 +-
+ test/cctest/wasm/wasm-run-utils.h             |   2 +-
+ test/common/wasm/wasm-interpreter.cc          |  18 ++--
+ test/fuzzer/wasm-async.cc                     |   6 +-
+ test/fuzzer/wasm-fuzzer-common.cc             |  19 ++--
+ test/fuzzer/wasm-streaming.cc                 |   2 +-
+ test/fuzzer/wasm.cc                           |   6 +-
+ test/unittests/api/api-wasm-unittest.cc       |  16 +--
+ .../wasm/memory-protection-unittest.cc        |   6 +-
+ 58 files changed, 466 insertions(+), 441 deletions(-)
+
+diff --git a/src/compiler/wasm-compiler.cc b/src/compiler/wasm-compiler.cc
+index 8b761234e03..4a17d343884 100644
+--- a/src/compiler/wasm-compiler.cc
++++ b/src/compiler/wasm-compiler.cc
+@@ -276,7 +276,7 @@ Node* WasmGraphBuilder::EffectPhi(unsigned count, Node** effects_and_control) {
+ }
+ 
+ Node* WasmGraphBuilder::RefNull() {
+-  return (FLAG_experimental_wasm_gc && parameter_mode_ == kInstanceMode)
++  return (v8_flags.experimental_wasm_gc && parameter_mode_ == kInstanceMode)
+              ? gasm_->Null()
+              : LOAD_ROOT(NullValue, null_value);
+ }
+@@ -338,7 +338,7 @@ void WasmGraphBuilder::StackCheck(
+     WasmInstanceCacheNodes* shared_memory_instance_cache,
+     wasm::WasmCodePosition position) {
+   DCHECK_NOT_NULL(env_);  // Wrappers don't get stack checks.
+-  if (!FLAG_wasm_stack_checks || !env_->runtime_exception_support) {
++  if (!v8_flags.wasm_stack_checks || !env_->runtime_exception_support) {
+     return;
+   }
+ 
+@@ -1124,7 +1124,7 @@ void WasmGraphBuilder::TrapIfFalse(wasm::TrapReason reason, Node* cond,
+ 
+ Node* WasmGraphBuilder::AssertNotNull(Node* object,
+                                       wasm::WasmCodePosition position) {
+-  if (FLAG_experimental_wasm_skip_null_checks) return object;
++  if (v8_flags.experimental_wasm_skip_null_checks) return object;
+   Node* result = gasm_->AssertNotNull(object);
+   SetSourcePosition(result, position);
+   return result;
+@@ -2586,7 +2586,7 @@ Node* WasmGraphBuilder::BuildDiv64Call(Node* left, Node* right,
+ }
+ 
+ Node* WasmGraphBuilder::IsNull(Node* object) {
+-  return (FLAG_experimental_wasm_gc && parameter_mode_ == kInstanceMode)
++  return (v8_flags.experimental_wasm_gc && parameter_mode_ == kInstanceMode)
+              ? gasm_->IsNull(object)
+              : gasm_->TaggedEqual(object, RefNull());
+ }
+@@ -2843,7 +2843,7 @@ Node* WasmGraphBuilder::BuildIndirectCall(uint32_t table_index,
+   // need one comparison.
+   // TODO(9495): Change this if we should do full function subtyping instead.
+   Node* expected_sig_id;
+-  if (FLAG_wasm_type_canonicalization) {
++  if (v8_flags.wasm_type_canonicalization) {
+     Node* isorecursive_canonical_types =
+         LOAD_INSTANCE_FIELD(IsorecursiveCanonicalTypes, MachineType::Pointer());
+     expected_sig_id = gasm_->LoadImmutable(
+@@ -3634,7 +3634,7 @@ Node* WasmGraphBuilder::LoadLane(wasm::ValueType type, MachineType memtype,
+   if (load_kind == MemoryAccessKind::kProtected) {
+     SetSourcePosition(load, position);
+   }
+-  if (FLAG_trace_wasm_memory) {
++  if (v8_flags.trace_wasm_memory) {
+     TraceMemoryOperation(false, memtype.representation(), index, capped_offset,
+                          position);
+   }
+@@ -3676,7 +3676,7 @@ Node* WasmGraphBuilder::LoadTransform(wasm::ValueType type, MachineType memtype,
+     SetSourcePosition(load, position);
+   }
+ 
+-  if (FLAG_trace_wasm_memory) {
++  if (v8_flags.trace_wasm_memory) {
+     TraceMemoryOperation(false, memtype.representation(), index, capped_offset,
+                          position);
+   }
+@@ -3728,7 +3728,7 @@ Node* WasmGraphBuilder::LoadMem(wasm::ValueType type, MachineType memtype,
+                : gasm_->ChangeUint32ToUint64(load);  // zero extend
+   }
+ 
+-  if (FLAG_trace_wasm_memory) {
++  if (v8_flags.trace_wasm_memory) {
+     TraceMemoryOperation(false, memtype.representation(), index, capped_offset,
+                          position);
+   }
+@@ -3759,7 +3759,7 @@ void WasmGraphBuilder::StoreLane(MachineRepresentation mem_rep, Node* index,
+   if (load_kind == MemoryAccessKind::kProtected) {
+     SetSourcePosition(store, position);
+   }
+-  if (FLAG_trace_wasm_memory) {
++  if (v8_flags.trace_wasm_memory) {
+     TraceMemoryOperation(true, mem_rep, index, capped_offset, position);
+   }
+ }
+@@ -3800,7 +3800,7 @@ void WasmGraphBuilder::StoreMem(MachineRepresentation mem_rep, Node* index,
+       break;
+   }
+ 
+-  if (FLAG_trace_wasm_memory) {
++  if (v8_flags.trace_wasm_memory) {
+     TraceMemoryOperation(true, mem_rep, index, capped_offset, position);
+   }
+ }
+@@ -5640,7 +5640,7 @@ void WasmGraphBuilder::StructSet(Node* struct_object,
+ 
+ void WasmGraphBuilder::BoundsCheckArray(Node* array, Node* index,
+                                         wasm::WasmCodePosition position) {
+-  if (V8_UNLIKELY(FLAG_experimental_wasm_skip_bounds_checks)) return;
++  if (V8_UNLIKELY(v8_flags.experimental_wasm_skip_bounds_checks)) return;
+   Node* length = gasm_->LoadWasmArrayLength(array);
+   TrapIfFalse(wasm::kTrapArrayOutOfBounds, gasm_->Uint32LessThan(index, length),
+               position);
+@@ -5649,7 +5649,7 @@ void WasmGraphBuilder::BoundsCheckArray(Node* array, Node* index,
+ void WasmGraphBuilder::BoundsCheckArrayCopy(Node* array, Node* index,
+                                             Node* length,
+                                             wasm::WasmCodePosition position) {
+-  if (V8_UNLIKELY(FLAG_experimental_wasm_skip_bounds_checks)) return;
++  if (V8_UNLIKELY(v8_flags.experimental_wasm_skip_bounds_checks)) return;
+   Node* array_length = gasm_->LoadWasmArrayLength(array);
+   Node* range_end = gasm_->Int32Add(index, length);
+   Node* range_valid = gasm_->Word32And(
+@@ -6361,7 +6361,7 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
+   // through JavaScript, where they show up as opaque boxes. This will disappear
+   // once we have a proper WasmGC <-> JS interaction story.
+   Node* BuildAllocateObjectWrapper(Node* input, Node* context) {
+-    if (FLAG_wasm_gc_js_interop) return input;
++    if (v8_flags.wasm_gc_js_interop) return input;
+     return gasm_->CallBuiltin(Builtin::kWasmAllocateObjectWrapper,
+                               Operator::kEliminatable, input, context);
+   }
+@@ -6395,7 +6395,7 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
+ 
+       gasm_->Bind(&not_a_function);
+     }
+-    if (!FLAG_wasm_gc_js_interop) {
++    if (!v8_flags.wasm_gc_js_interop) {
+       Node* obj = gasm_->CallBuiltin(
+           Builtin::kWasmGetOwnProperty, Operator::kEliminatable, input,
+           LOAD_ROOT(wasm_wrapped_object_symbol, wasm_wrapped_object_symbol),
+@@ -6627,7 +6627,7 @@ class WasmWrapperGraphBuilder : public WasmGraphBuilder {
+ 
+   void BuildModifyThreadInWasmFlagHelper(Node* thread_in_wasm_flag_address,
+                                          bool new_value) {
+-    if (FLAG_debug_code) {
++    if (v8_flags.debug_code) {
+       Node* flag_value = gasm_->LoadFromObject(MachineType::Pointer(),
+                                                thread_in_wasm_flag_address, 0);
+       Node* check =
+@@ -7695,7 +7695,7 @@ static bool IsSupportedWasmFastApiFunction(
+   }
+ 
+   const auto log_imported_function_mismatch = [&shared](const char* reason) {
+-    if (FLAG_trace_opt) {
++    if (v8_flags.trace_opt) {
+       CodeTracer::Scope scope(shared->GetIsolate()->GetCodeTracer());
+       PrintF(scope.file(), "[disabled optimization for ");
+       shared->ShortPrint(scope.file());
+@@ -7825,7 +7825,7 @@ WasmImportData ResolveWasmImportCall(
+     return {WasmImportCallKind::kRuntimeTypeError, callable, wasm::kNoSuspend};
+   }
+   // Check if this can be a JS fast API call.
+-  if (FLAG_turbo_fast_api_calls &&
++  if (v8_flags.turbo_fast_api_calls &&
+       ResolveBoundJSFastApiFunction(expected_sig, callable)) {
+     return {WasmImportCallKind::kWasmToJSFastApi, callable, wasm::kNoSuspend};
+   }
+@@ -7856,7 +7856,7 @@ WasmImportData ResolveWasmImportCall(
+     COMPARE_SIG_FOR_BUILTIN(F32##name);       \
+     break;
+ 
+-    if (FLAG_wasm_math_intrinsics && shared->HasBuiltinId()) {
++    if (v8_flags.wasm_math_intrinsics && shared->HasBuiltinId()) {
+       switch (shared->builtin_id()) {
+         COMPARE_SIG_FOR_BUILTIN_F64(Acos);
+         COMPARE_SIG_FOR_BUILTIN_F64(Asin);
+@@ -8020,7 +8020,7 @@ wasm::WasmCompilationResult CompileWasmImportCallWrapper(
+   DCHECK_NE(WasmImportCallKind::kWasmToJSFastApi, kind);
+ 
+   // Check for math intrinsics first.
+-  if (FLAG_wasm_math_intrinsics &&
++  if (v8_flags.wasm_math_intrinsics &&
+       kind >= WasmImportCallKind::kFirstMathIntrinsic &&
+       kind <= WasmImportCallKind::kLastMathIntrinsic) {
+     return CompileWasmMathIntrinsic(kind, sig);
+@@ -8029,7 +8029,7 @@ wasm::WasmCompilationResult CompileWasmImportCallWrapper(
+   TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
+                "wasm.CompileWasmImportCallWrapper");
+   base::TimeTicks start_time;
+-  if (V8_UNLIKELY(FLAG_trace_wasm_compilation_times)) {
++  if (V8_UNLIKELY(v8_flags.trace_wasm_compilation_times)) {
+     start_time = base::TimeTicks::Now();
+   }
+ 
+@@ -8072,7 +8072,7 @@ wasm::WasmCompilationResult CompileWasmImportCallWrapper(
+       incoming, mcgraph, CodeKind::WASM_TO_JS_FUNCTION, func_name,
+       WasmStubAssemblerOptions(), source_position_table);
+ 
+-  if (V8_UNLIKELY(FLAG_trace_wasm_compilation_times)) {
++  if (V8_UNLIKELY(v8_flags.trace_wasm_compilation_times)) {
+     base::TimeDelta time = base::TimeTicks::Now() - start_time;
+     int codesize = result.code_desc.body_size();
+     StdoutStream{} << "Compiled WasmToJS wrapper " << func_name << ", took "
+@@ -8355,7 +8355,7 @@ bool BuildGraphForWasmFunction(wasm::CompilationEnv* env,
+       allocator, env->enabled_features, env->module, &builder, detected,
+       func_body, loop_infos, node_origins, func_index, wasm::kRegularFunction);
+   if (graph_construction_result.failed()) {
+-    if (FLAG_trace_wasm_compiler) {
++    if (v8_flags.trace_wasm_compiler) {
+       StdoutStream{} << "Compilation failed: "
+                      << graph_construction_result.error().message()
+                      << std::endl;
+@@ -8377,8 +8377,8 @@ base::Vector<const char> GetDebugName(Zone* zone,
+   base::Optional<wasm::ModuleWireBytes> module_bytes =
+       wire_bytes->GetModuleBytes();
+   if (module_bytes.has_value() &&
+-      (FLAG_trace_turbo || FLAG_trace_turbo_scheduled ||
+-       FLAG_trace_turbo_graph || FLAG_print_wasm_code)) {
++      (v8_flags.trace_turbo || v8_flags.trace_turbo_scheduled ||
++       v8_flags.trace_turbo_graph || v8_flags.print_wasm_code)) {
+     wasm::WireBytesRef name = module->lazily_generated_names.LookupFunctionName(
+         module_bytes.value(), index);
+     if (!name.is_empty()) {
+@@ -8408,7 +8408,7 @@ wasm::WasmCompilationResult ExecuteTurbofanWasmCompilation(
+     wasm::AssemblerBufferCache* buffer_cache, wasm::WasmFeatures* detected) {
+   // Check that we do not accidentally compile a Wasm function to TurboFan if
+   // --liftoff-only is set.
+-  DCHECK(!FLAG_liftoff_only);
++  DCHECK(!v8_flags.liftoff_only);
+ 
+   TRACE_EVENT2(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
+                "wasm.CompileTopTier", "func_index", func_index, "body_size",
+@@ -8428,7 +8428,7 @@ wasm::WasmCompilationResult ExecuteTurbofanWasmCompilation(
+     info.set_wasm_runtime_exception_support();
+   }
+ 
+-  if (FLAG_experimental_wasm_gc) info.set_allocation_folding();
++  if (v8_flags.experimental_wasm_gc) info.set_allocation_folding();
+ 
+   if (info.trace_turbo_json()) {
+     TurboCfgFile tcf;
+@@ -8481,7 +8481,8 @@ wasm::WasmCompilationResult ExecuteTurbofanWasmCompilation(
+   }
+   // If we tiered up only one function for debugging, dump statistics
+   // immediately.
+-  if (V8_UNLIKELY(FLAG_turbo_stats_wasm && FLAG_wasm_tier_up_filter >= 0)) {
++  if (V8_UNLIKELY(v8_flags.turbo_stats_wasm &&
++                  v8_flags.wasm_tier_up_filter >= 0)) {
+     wasm::GetWasmEngine()->DumpTurboStatistics();
+   }
+   auto result = info.ReleaseWasmCompilationResult();
+diff --git a/src/compiler/wasm-gc-lowering.cc b/src/compiler/wasm-gc-lowering.cc
+index 0133f97832d..6d83142b0e8 100644
+--- a/src/compiler/wasm-gc-lowering.cc
++++ b/src/compiler/wasm-gc-lowering.cc
+@@ -249,7 +249,7 @@ Reduction WasmGCLowering::ReduceWasmExternInternalize(Node* node) {
+   gasm_.InitializeEffectControl(effect, control);
+   auto end = gasm_.MakeLabel(MachineRepresentation::kTaggedPointer);
+ 
+-  if (!FLAG_wasm_gc_js_interop) {
++  if (!v8_flags.wasm_gc_js_interop) {
+     Node* context = gasm_.LoadImmutable(
+         MachineType::TaggedPointer(), instance_node_,
+         WasmInstanceObject::kNativeContextOffset - kHeapObjectTag);
+@@ -280,7 +280,7 @@ Reduction WasmGCLowering::ReduceWasmExternExternalize(Node* node) {
+   gasm_.InitializeEffectControl(effect, control);
+ 
+   auto end = gasm_.MakeLabel(MachineRepresentation::kTaggedPointer);
+-  if (!FLAG_wasm_gc_js_interop) {
++  if (!v8_flags.wasm_gc_js_interop) {
+     auto wrap = gasm_.MakeLabel();
+     gasm_.GotoIf(gasm_.IsI31(object), &end, object);
+     gasm_.GotoIf(gasm_.IsDataRefMap(gasm_.LoadMap(object)), &wrap);
+diff --git a/src/compiler/wasm-inlining.cc b/src/compiler/wasm-inlining.cc
+index ae2badb2f72..2b502cd9b59 100644
+--- a/src/compiler/wasm-inlining.cc
++++ b/src/compiler/wasm-inlining.cc
+@@ -29,7 +29,7 @@ Reduction WasmInliner::Reduce(Node* node) {
+ }
+ 
+ #define TRACE(...) \
+-  if (FLAG_trace_wasm_inlining) PrintF(__VA_ARGS__)
++  if (v8_flags.trace_wasm_inlining) PrintF(__VA_ARGS__)
+ 
+ void WasmInliner::Trace(Node* call, int inlinee, const char* decision) {
+   TRACE("[function %d: considering node %d, call to %d: %s]\n", function_index_,
+@@ -37,7 +37,7 @@ void WasmInliner::Trace(Node* call, int inlinee, const char* decision) {
+ }
+ 
+ int WasmInliner::GetCallCount(Node* call) {
+-  if (!FLAG_wasm_speculative_inlining) return 0;
++  if (!v8_flags.wasm_speculative_inlining) return 0;
+   return mcgraph()->GetCallCount(call->id());
+ }
+ 
+diff --git a/src/compiler/wasm-inlining.h b/src/compiler/wasm-inlining.h
+index 01d7f2bca16..9b2fb043dbd 100644
+--- a/src/compiler/wasm-inlining.h
++++ b/src/compiler/wasm-inlining.h
+@@ -59,7 +59,7 @@ class WasmInliner final : public AdvancedReducer {
+   void Finalize() final;
+ 
+   static bool graph_size_allows_inlining(size_t graph_size) {
+-    return graph_size < FLAG_wasm_inlining_budget;
++    return graph_size < v8_flags.wasm_inlining_budget;
+   }
+ 
+  private:
+diff --git a/src/compiler/wasm-typer.cc b/src/compiler/wasm-typer.cc
+index 89c22e5021c..7678a2a74e5 100644
+--- a/src/compiler/wasm-typer.cc
++++ b/src/compiler/wasm-typer.cc
+@@ -19,7 +19,7 @@ namespace internal {
+ namespace compiler {
+ 
+ #define TRACE(...) \
+-  if (FLAG_trace_wasm_typer) PrintF(__VA_ARGS__);
++  if (v8_flags.trace_wasm_typer) PrintF(__VA_ARGS__);
+ 
+ WasmTyper::WasmTyper(Editor* editor, MachineGraph* mcgraph,
+                      uint32_t function_index)
+diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
+index 8c3470b998d..8c3ff64fa2d 100644
+--- a/src/runtime/runtime-wasm.cc
++++ b/src/runtime/runtime-wasm.cc
+@@ -785,7 +785,7 @@ void SyncStackLimit(Isolate* isolate) {
+   auto continuation = WasmContinuationObject::cast(
+       isolate->root(RootIndex::kActiveContinuation));
+   auto stack = Managed<wasm::StackMemory>::cast(continuation.stack()).get();
+-  if (FLAG_trace_wasm_stack_switching) {
++  if (v8_flags.trace_wasm_stack_switching) {
+     PrintF("Switch to stack #%d\n", stack->id());
+   }
+   uintptr_t limit = reinterpret_cast<uintptr_t>(stack->jmpbuf()->stack_limit);
+@@ -796,7 +796,7 @@ void SyncStackLimit(Isolate* isolate) {
+ // Allocate a new suspender, and prepare for stack switching by updating the
+ // active continuation, active suspender and stack limit.
+ RUNTIME_FUNCTION(Runtime_WasmAllocateSuspender) {
+-  CHECK(FLAG_experimental_wasm_stack_switching);
++  CHECK(v8_flags.experimental_wasm_stack_switching);
+   HandleScope scope(isolate);
+   Handle<WasmSuspenderObject> suspender = WasmSuspenderObject::New(isolate);
+ 
+@@ -825,7 +825,7 @@ RUNTIME_FUNCTION(Runtime_WasmAllocateSuspender) {
+ 
+ // Update the stack limit after a stack switch, and preserve pending interrupts.
+ RUNTIME_FUNCTION(Runtime_WasmSyncStackLimit) {
+-  CHECK(FLAG_experimental_wasm_stack_switching);
++  CHECK(v8_flags.experimental_wasm_stack_switching);
+   SyncStackLimit(isolate);
+   return ReadOnlyRoots(isolate).undefined_value();
+ }
+@@ -833,7 +833,7 @@ RUNTIME_FUNCTION(Runtime_WasmSyncStackLimit) {
+ // Takes a promise and a suspender, and returns
+ // promise.then(suspender.resume(), suspender.reject());
+ RUNTIME_FUNCTION(Runtime_WasmCreateResumePromise) {
+-  CHECK(FLAG_experimental_wasm_stack_switching);
++  CHECK(v8_flags.experimental_wasm_stack_switching);
+   HandleScope scope(isolate);
+   Handle<Object> promise(args[0], isolate);
+   WasmSuspenderObject suspender = WasmSuspenderObject::cast(args[1]);
+diff --git a/src/wasm/baseline/arm/liftoff-assembler-arm.h b/src/wasm/baseline/arm/liftoff-assembler-arm.h
+index 31afd35f764..1f0ba4e9bd4 100644
+--- a/src/wasm/baseline/arm/liftoff-assembler-arm.h
++++ b/src/wasm/baseline/arm/liftoff-assembler-arm.h
+@@ -525,7 +525,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
+   // check in the condition code.
+   RecordComment("OOL: stack check for large frame");
+   Label continuation;
+-  if (frame_size < FLAG_stack_size * 1024) {
++  if (frame_size < v8_flags.stack_size * 1024) {
+     UseScratchRegisterScope temps(this);
+     Register stack_limit = temps.Acquire();
+     ldr(stack_limit,
+@@ -540,7 +540,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
+   Call(wasm::WasmCode::kWasmStackOverflow, RelocInfo::WASM_STUB_CALL);
+   // The call will not return; just define an empty safepoint.
+   safepoint_table_builder->DefineSafepoint(this);
+-  if (FLAG_debug_code) stop();
++  if (v8_flags.debug_code) stop();
+ 
+   bind(&continuation);
+ 
+@@ -770,7 +770,7 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+                           : MemOperand(dst_addr, actual_offset_reg);
+   str(src.gp(), dst_op);
+ 
+-  if (skip_write_barrier || FLAG_disable_write_barriers) return;
++  if (skip_write_barrier || v8_flags.disable_write_barriers) return;
+ 
+   // The write barrier.
+   Label write_barrier;
+diff --git a/src/wasm/baseline/arm64/liftoff-assembler-arm64.h b/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
+index 7372a599b2f..c9cb47eb60f 100644
+--- a/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
++++ b/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
+@@ -351,7 +351,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
+   // check in the condition code.
+   RecordComment("OOL: stack check for large frame");
+   Label continuation;
+-  if (frame_size < FLAG_stack_size * 1024) {
++  if (frame_size < v8_flags.stack_size * 1024) {
+     UseScratchRegisterScope temps(this);
+     Register stack_limit = temps.AcquireX();
+     Ldr(stack_limit,
+@@ -366,7 +366,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
+   Call(wasm::WasmCode::kWasmStackOverflow, RelocInfo::WASM_STUB_CALL);
+   // The call will not return; just define an empty safepoint.
+   safepoint_table_builder->DefineSafepoint(this);
+-  if (FLAG_debug_code) Brk(0);
++  if (v8_flags.debug_code) Brk(0);
+ 
+   bind(&continuation);
+ 
+@@ -504,7 +504,7 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+   }
+   StoreTaggedField(src.gp(), MemOperand(dst_addr.X(), offset_op));
+ 
+-  if (skip_write_barrier || FLAG_disable_write_barriers) return;
++  if (skip_write_barrier || v8_flags.disable_write_barriers) return;
+ 
+   // The write barrier.
+   Label write_barrier;
+diff --git a/src/wasm/baseline/ia32/liftoff-assembler-ia32.h b/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
+index 084f4f6f6be..23f740d8165 100644
+--- a/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
++++ b/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
+@@ -276,7 +276,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
+   // check in the condition code.
+   RecordComment("OOL: stack check for large frame");
+   Label continuation;
+-  if (frame_size < FLAG_stack_size * 1024) {
++  if (frame_size < v8_flags.stack_size * 1024) {
+     // We do not have a scratch register, so pick any and push it first.
+     Register stack_limit = eax;
+     push(stack_limit);
+@@ -411,7 +411,7 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+                        : Operand(dst_addr, offset_reg, times_1, offset_imm);
+   mov(dst_op, src.gp());
+ 
+-  if (skip_write_barrier || FLAG_disable_write_barriers) return;
++  if (skip_write_barrier || v8_flags.disable_write_barriers) return;
+ 
+   Register scratch = pinned.set(GetUnusedRegister(kGpReg, pinned)).gp();
+   Label write_barrier;
+diff --git a/src/wasm/baseline/liftoff-compiler.cc b/src/wasm/baseline/liftoff-compiler.cc
+index 53f46e0f121..f82c3a026df 100644
+--- a/src/wasm/baseline/liftoff-compiler.cc
++++ b/src/wasm/baseline/liftoff-compiler.cc
+@@ -56,9 +56,9 @@ namespace {
+ // jumping to a trap, the live range of the witness isn't important.
+ #define FREEZE_STATE(witness_name) FreezeCacheState witness_name(asm_)
+ 
+-#define TRACE(...)                                            \
+-  do {                                                        \
+-    if (FLAG_trace_liftoff) PrintF("[liftoff] " __VA_ARGS__); \
++#define TRACE(...)                                                \
++  do {                                                            \
++    if (v8_flags.trace_liftoff) PrintF("[liftoff] " __VA_ARGS__); \
+   } while (false)
+ 
+ #define WASM_INSTANCE_OBJECT_FIELD_OFFSET(name) \
+@@ -306,7 +306,7 @@ void CheckBailoutAllowed(LiftoffBailoutReason reason, const char* detail,
+   // --liftoff-only ensures that tests actually exercise the Liftoff path
+   // without bailing out. We also fail for missing CPU support, to avoid
+   // running any TurboFan code under --liftoff-only.
+-  if (FLAG_liftoff_only) {
++  if (v8_flags.liftoff_only) {
+     FATAL("--liftoff-only: treating bailout as fatal error. Cause: %s", detail);
+   }
+ 
+@@ -315,7 +315,7 @@ void CheckBailoutAllowed(LiftoffBailoutReason reason, const char* detail,
+ 
+   // If --enable-testing-opcode-in-wasm is set, we are expected to bailout with
+   // "testing opcode".
+-  if (FLAG_enable_testing_opcode_in_wasm &&
++  if (v8_flags.enable_testing_opcode_in_wasm &&
+       strcmp(detail, "testing opcode") == 0) {
+     return;
+   }
+@@ -637,7 +637,7 @@ class LiftoffCompiler {
+   }
+ 
+   void StartFunction(FullDecoder* decoder) {
+-    if (FLAG_trace_liftoff && !FLAG_trace_wasm_decoder) {
++    if (v8_flags.trace_liftoff && !v8_flags.trace_wasm_decoder) {
+       StdoutStream{} << "hint: add --trace-wasm-decoder to also see the wasm "
+                         "instructions being decoded\n";
+     }
+@@ -741,7 +741,7 @@ class LiftoffCompiler {
+ 
+   void StackCheck(FullDecoder* decoder, WasmCodePosition position) {
+     CODE_COMMENT("stack check");
+-    if (!FLAG_wasm_stack_checks || !env_->runtime_exception_support) return;
++    if (!v8_flags.wasm_stack_checks || !env_->runtime_exception_support) return;
+ 
+     // Loading the limit address can change the stack state, hence do this
+     // before storing information about registers.
+@@ -793,7 +793,7 @@ class LiftoffCompiler {
+     if (for_debugging_ != kNoDebugging) return;
+     CODE_COMMENT("tierup check");
+     // We never want to blow the entire budget at once.
+-    const int kMax = FLAG_wasm_tiering_budget / 4;
++    const int kMax = v8_flags.wasm_tiering_budget / 4;
+     if (budget_used > kMax) budget_used = kMax;
+ 
+     LiftoffRegister budget_reg(tmp2);
+@@ -873,8 +873,8 @@ class LiftoffCompiler {
+ 
+   bool dynamic_tiering() {
+     return env_->dynamic_tiering && for_debugging_ == kNoDebugging &&
+-           (FLAG_wasm_tier_up_filter == -1 ||
+-            FLAG_wasm_tier_up_filter == func_index_);
++           (v8_flags.wasm_tier_up_filter == -1 ||
++            v8_flags.wasm_tier_up_filter == func_index_);
+   }
+ 
+   void StartFunctionBody(FullDecoder* decoder, Control* block) {
+@@ -910,7 +910,7 @@ class LiftoffCompiler {
+     __ cache_state()->SetInstanceCacheRegister(kWasmInstanceRegister);
+     // Load the feedback vector and cache it in a stack slot.
+     constexpr LiftoffRegList kGpParamRegisters = GetGpParamRegisters();
+-    if (FLAG_wasm_speculative_inlining) {
++    if (v8_flags.wasm_speculative_inlining) {
+       CODE_COMMENT("load feedback vector");
+       int declared_func_index =
+           func_index_ - env_->module->num_imported_functions;
+@@ -980,7 +980,7 @@ class LiftoffCompiler {
+     // is never a position of any instruction in the function.
+     StackCheck(decoder, 0);
+ 
+-    if (FLAG_trace_wasm) TraceFunctionEntry(decoder);
++    if (v8_flags.trace_wasm) TraceFunctionEntry(decoder);
+   }
+ 
+   void GenerateOutOfLineCode(OutOfLineCode* ool) {
+@@ -1102,7 +1102,7 @@ class LiftoffCompiler {
+     DidAssemblerBailout(decoder);
+     DCHECK_EQ(num_exceptions_, 0);
+ 
+-    if (FLAG_wasm_speculative_inlining &&
++    if (v8_flags.wasm_speculative_inlining &&
+         !encountered_call_instructions_.empty()) {
+       // Update the call targets stored in the WasmModule.
+       TypeFeedbackStorage& type_feedback = env_->module->type_feedback;
+@@ -1855,7 +1855,7 @@ class LiftoffCompiler {
+         return;
+       }
+       case kExprExternInternalize:
+-        if (!FLAG_wasm_gc_js_interop) {
++        if (!v8_flags.wasm_gc_js_interop) {
+           LiftoffRegList pinned;
+           LiftoffRegister context_reg =
+               pinned.set(__ GetUnusedRegister(kGpReg, pinned));
+@@ -1875,7 +1875,7 @@ class LiftoffCompiler {
+         }
+         return;
+       case kExprExternExternalize:
+-        if (!FLAG_wasm_gc_js_interop) {
++        if (!v8_flags.wasm_gc_js_interop) {
+           LiftoffRegList pinned;
+           LiftoffRegister context_reg =
+               pinned.set(__ GetUnusedRegister(kGpReg, pinned));
+@@ -2402,7 +2402,7 @@ class LiftoffCompiler {
+   }
+ 
+   void ReturnImpl(FullDecoder* decoder, Register tmp1, Register tmp2) {
+-    if (FLAG_trace_wasm) TraceFunctionExit(decoder);
++    if (v8_flags.trace_wasm) TraceFunctionExit(decoder);
+     if (dynamic_tiering()) {
+       TierupCheck(decoder, decoder->position(), __ pc_offset(), tmp1, tmp2);
+     }
+@@ -2964,7 +2964,7 @@ class LiftoffCompiler {
+                           uint32_t pc = 0) {
+     // Only memory OOB traps need a {pc}.
+     DCHECK_IMPLIES(stub != WasmCode::kThrowWasmTrapMemOutOfBounds, pc == 0);
+-    DCHECK(FLAG_wasm_bounds_checks);
++    DCHECK(v8_flags.wasm_bounds_checks);
+     OutOfLineSafepointInfo* safepoint_info = nullptr;
+     if (V8_UNLIKELY(for_debugging_)) {
+       // Execution does not return after a trap. Therefore we don't have to
+@@ -3241,7 +3241,7 @@ class LiftoffCompiler {
+       __ PushRegister(kind, value);
+     }
+ 
+-    if (V8_UNLIKELY(FLAG_trace_wasm_memory)) {
++    if (V8_UNLIKELY(v8_flags.trace_wasm_memory)) {
+       TraceMemoryOperation(false, type.mem_type().representation(), index,
+                            offset, decoder->position());
+     }
+@@ -3282,7 +3282,7 @@ class LiftoffCompiler {
+     }
+     __ PushRegister(kS128, value);
+ 
+-    if (V8_UNLIKELY(FLAG_trace_wasm_memory)) {
++    if (V8_UNLIKELY(v8_flags.trace_wasm_memory)) {
+       // Again load extend is different.
+       MachineRepresentation mem_rep =
+           transform == LoadTransformationKind::kExtend
+@@ -3322,7 +3322,7 @@ class LiftoffCompiler {
+ 
+     __ PushRegister(kS128, result);
+ 
+-    if (V8_UNLIKELY(FLAG_trace_wasm_memory)) {
++    if (V8_UNLIKELY(v8_flags.trace_wasm_memory)) {
+       TraceMemoryOperation(false, type.mem_type().representation(), index,
+                            offset, decoder->position());
+     }
+@@ -3364,7 +3364,7 @@ class LiftoffCompiler {
+       // (important on ia32).
+       Register mem = pinned.set(GetMemoryStart(pinned));
+       LiftoffRegList outer_pinned;
+-      if (V8_UNLIKELY(FLAG_trace_wasm_memory)) outer_pinned.set(index);
++      if (V8_UNLIKELY(v8_flags.trace_wasm_memory)) outer_pinned.set(index);
+       __ Store(mem, index, offset, value, type, outer_pinned,
+                &protected_store_pc, true, i64_offset);
+       if (env_->bounds_checks == kTrapHandler) {
+@@ -3373,7 +3373,7 @@ class LiftoffCompiler {
+       }
+     }
+ 
+-    if (V8_UNLIKELY(FLAG_trace_wasm_memory)) {
++    if (V8_UNLIKELY(v8_flags.trace_wasm_memory)) {
+       TraceMemoryOperation(true, type.mem_rep(), index, offset,
+                            decoder->position());
+     }
+@@ -3400,7 +3400,7 @@ class LiftoffCompiler {
+       AddOutOfLineTrap(decoder, WasmCode::kThrowWasmTrapMemOutOfBounds,
+                        protected_store_pc);
+     }
+-    if (V8_UNLIKELY(FLAG_trace_wasm_memory)) {
++    if (V8_UNLIKELY(v8_flags.trace_wasm_memory)) {
+       TraceMemoryOperation(true, type.mem_rep(), index, offset,
+                            decoder->position());
+     }
+@@ -4797,9 +4797,9 @@ class LiftoffCompiler {
+     CODE_COMMENT("atomic store to memory");
+     Register addr = pinned.set(GetMemoryStart(pinned));
+     LiftoffRegList outer_pinned;
+-    if (V8_UNLIKELY(FLAG_trace_wasm_memory)) outer_pinned.set(index);
++    if (V8_UNLIKELY(v8_flags.trace_wasm_memory)) outer_pinned.set(index);
+     __ AtomicStore(addr, index, offset, value, type, outer_pinned);
+-    if (V8_UNLIKELY(FLAG_trace_wasm_memory)) {
++    if (V8_UNLIKELY(v8_flags.trace_wasm_memory)) {
+       TraceMemoryOperation(true, type.mem_rep(), index, offset,
+                            decoder->position());
+     }
+@@ -4823,7 +4823,7 @@ class LiftoffCompiler {
+     __ AtomicLoad(value, addr, index, offset, type, pinned);
+     __ PushRegister(kind, value);
+ 
+-    if (V8_UNLIKELY(FLAG_trace_wasm_memory)) {
++    if (V8_UNLIKELY(v8_flags.trace_wasm_memory)) {
+       TraceMemoryOperation(false, type.mem_type().representation(), index,
+                            offset, decoder->position());
+     }
+@@ -5758,7 +5758,7 @@ class LiftoffCompiler {
+                  const Value& length) {
+     // TODO(7748): Unify implementation with TF: Implement this with
+     // GenerateCCall. Remove runtime function and builtin in wasm.tq.
+-    CallRuntimeStub(FLAG_experimental_wasm_skip_bounds_checks
++    CallRuntimeStub(v8_flags.experimental_wasm_skip_bounds_checks
+                         ? WasmCode::kWasmArrayCopy
+                         : WasmCode::kWasmArrayCopyWithChecks,
+                     MakeSig::Params(kI32, kI32, kI32, kRefNull, kRefNull),
+@@ -5993,7 +5993,7 @@ class LiftoffCompiler {
+ 
+   void RefCast(FullDecoder* decoder, const Value& obj, const Value& rtt,
+                Value* result) {
+-    if (FLAG_experimental_wasm_assume_ref_cast_succeeds) {
++    if (v8_flags.experimental_wasm_assume_ref_cast_succeeds) {
+       // Just drop the rtt.
+       __ DropValues(1);
+       return;
+@@ -7054,7 +7054,7 @@ class LiftoffCompiler {
+     // One slot would be enough for call_direct, but would make index
+     // computations much more complicated.
+     size_t vector_slot = encountered_call_instructions_.size() * 2;
+-    if (FLAG_wasm_speculative_inlining) {
++    if (v8_flags.wasm_speculative_inlining) {
+       encountered_call_instructions_.push_back(imm.index);
+     }
+ 
+@@ -7097,7 +7097,7 @@ class LiftoffCompiler {
+     } else {
+       // Inlining direct calls isn't speculative, but existence of the
+       // feedback vector currently depends on this flag.
+-      if (FLAG_wasm_speculative_inlining) {
++      if (v8_flags.wasm_speculative_inlining) {
+         LiftoffRegister vector = __ GetUnusedRegister(kGpReg, {});
+         __ Fill(vector, liftoff::kFeedbackVectorOffset, kPointerKind);
+         __ IncrementSmi(vector,
+@@ -7192,7 +7192,7 @@ class LiftoffCompiler {
+     __ Load(LiftoffRegister(scratch), table, index, 0, LoadType::kI32Load);
+ 
+     // Compare against expected signature.
+-    if (FLAG_wasm_type_canonicalization) {
++    if (v8_flags.wasm_type_canonicalization) {
+       LOAD_INSTANCE_FIELD(tmp_const, IsorecursiveCanonicalTypes,
+                           kSystemPointerSize, pinned);
+       __ Load(LiftoffRegister(tmp_const), tmp_const, no_reg,
+@@ -7289,7 +7289,7 @@ class LiftoffCompiler {
+ 
+     Register target_reg = no_reg, instance_reg = no_reg;
+ 
+-    if (FLAG_wasm_speculative_inlining) {
++    if (v8_flags.wasm_speculative_inlining) {
+       ValueKind kIntPtrKind = kPointerKind;
+ 
+       LiftoffRegList pinned;
+@@ -7317,7 +7317,7 @@ class LiftoffCompiler {
+       target_reg = LiftoffRegister(kReturnRegister0).gp();
+       instance_reg = LiftoffRegister(kReturnRegister1).gp();
+ 
+-    } else {  // FLAG_wasm_speculative_inlining
++    } else {  // v8_flags.wasm_speculative_inlining
+       // Non-feedback-collecting version.
+       // Executing a write barrier needs temp registers; doing this on a
+       // conditional branch confuses the LiftoffAssembler's register management.
+@@ -7378,7 +7378,7 @@ class LiftoffCompiler {
+       // is in {instance}.
+       target_reg = target.gp();
+       instance_reg = instance.gp();
+-    }  // FLAG_wasm_speculative_inlining
++    }  // v8_flags.wasm_speculative_inlining
+ 
+     __ PrepareCall(&sig, call_descriptor, &target_reg, &instance_reg);
+     if (tail_call) {
+@@ -7411,7 +7411,8 @@ class LiftoffCompiler {
+ 
+   void MaybeEmitNullCheck(FullDecoder* decoder, Register object,
+                           LiftoffRegList pinned, ValueType type) {
+-    if (FLAG_experimental_wasm_skip_null_checks || !type.is_nullable()) return;
++    if (v8_flags.experimental_wasm_skip_null_checks || !type.is_nullable())
++      return;
+     Label* trap_label =
+         AddOutOfLineTrap(decoder, WasmCode::kThrowWasmTrapNullDereference);
+     LiftoffRegister null = __ GetUnusedRegister(kGpReg, pinned);
+@@ -7423,7 +7424,7 @@ class LiftoffCompiler {
+ 
+   void BoundsCheckArray(FullDecoder* decoder, LiftoffRegister array,
+                         LiftoffRegister index, LiftoffRegList pinned) {
+-    if (V8_UNLIKELY(FLAG_experimental_wasm_skip_bounds_checks)) return;
++    if (V8_UNLIKELY(v8_flags.experimental_wasm_skip_bounds_checks)) return;
+     Label* trap_label =
+         AddOutOfLineTrap(decoder, WasmCode::kThrowWasmTrapArrayOutOfBounds);
+     LiftoffRegister length = __ GetUnusedRegister(kGpReg, pinned);
+@@ -7542,7 +7543,7 @@ class LiftoffCompiler {
+   }
+ 
+   void TraceCacheState(FullDecoder* decoder) const {
+-    if (!FLAG_trace_liftoff) return;
++    if (!v8_flags.trace_liftoff) return;
+     StdoutStream os;
+     for (int control_depth = decoder->control_depth() - 1; control_depth >= -1;
+          --control_depth) {
+@@ -7675,7 +7676,7 @@ WasmCompilationResult ExecuteLiftoffCompilation(
+     const LiftoffOptions& compiler_options) {
+   DCHECK(compiler_options.is_initialized());
+   base::TimeTicks start_time;
+-  if (V8_UNLIKELY(FLAG_trace_wasm_compilation_times)) {
++  if (V8_UNLIKELY(v8_flags.trace_wasm_compilation_times)) {
+     start_time = base::TimeTicks::Now();
+   }
+   int func_body_size = static_cast<int>(func_body.end - func_body.start);
+@@ -7736,7 +7737,7 @@ WasmCompilationResult ExecuteLiftoffCompilation(
+   }
+   result.feedback_vector_slots = compiler->GetFeedbackVectorSlots();
+ 
+-  if (V8_UNLIKELY(FLAG_trace_wasm_compilation_times)) {
++  if (V8_UNLIKELY(v8_flags.trace_wasm_compilation_times)) {
+     base::TimeDelta time = base::TimeTicks::Now() - start_time;
+     int codesize = result.code_desc.body_size();
+     StdoutStream{} << "Compiled function "
+diff --git a/src/wasm/baseline/loong64/liftoff-assembler-loong64.h b/src/wasm/baseline/loong64/liftoff-assembler-loong64.h
+index 312c7f03fed..c9665be67f4 100644
+--- a/src/wasm/baseline/loong64/liftoff-assembler-loong64.h
++++ b/src/wasm/baseline/loong64/liftoff-assembler-loong64.h
+@@ -261,7 +261,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
+   // check in the condition code.
+   RecordComment("OOL: stack check for large frame");
+   Label continuation;
+-  if (frame_size < FLAG_stack_size * 1024) {
++  if (frame_size < v8_flags.stack_size * 1024) {
+     Register stack_limit = kScratchReg;
+     Ld_d(stack_limit,
+          FieldMemOperand(kWasmInstanceRegister,
+@@ -274,7 +274,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
+   Call(wasm::WasmCode::kWasmStackOverflow, RelocInfo::WASM_STUB_CALL);
+   // The call will not return; just define an empty safepoint.
+   safepoint_table_builder->DefineSafepoint(this);
+-  if (FLAG_debug_code) stop();
++  if (v8_flags.debug_code) stop();
+ 
+   bind(&continuation);
+ 
+@@ -405,7 +405,7 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+     St_d(src.gp(), MemOperand(dst_addr, offset_imm));
+   }
+ 
+-  if (skip_write_barrier || FLAG_disable_write_barriers) return;
++  if (skip_write_barrier || v8_flags.disable_write_barriers) return;
+ 
+   Label write_barrier;
+   Label exit;
+@@ -3006,7 +3006,7 @@ void LiftoffAssembler::CallTrapCallbackForTesting() {
+ }
+ 
+ void LiftoffAssembler::AssertUnreachable(AbortReason reason) {
+-  if (FLAG_debug_code) Abort(reason);
++  if (v8_flags.debug_code) Abort(reason);
+ }
+ 
+ void LiftoffAssembler::PushRegisters(LiftoffRegList regs) {
+diff --git a/src/wasm/baseline/mips/liftoff-assembler-mips.h b/src/wasm/baseline/mips/liftoff-assembler-mips.h
+index 6b67e1ca094..dbb18f5c6fc 100644
+--- a/src/wasm/baseline/mips/liftoff-assembler-mips.h
++++ b/src/wasm/baseline/mips/liftoff-assembler-mips.h
+@@ -386,7 +386,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
+   // check in the condition code.
+   RecordComment("OOL: stack check for large frame");
+   Label continuation;
+-  if (frame_size < FLAG_stack_size * 1024) {
++  if (frame_size < v8_flags.stack_size * 1024) {
+     Register stack_limit = kScratchReg;
+     Lw(stack_limit,
+        FieldMemOperand(kWasmInstanceRegister,
+@@ -399,7 +399,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
+   Call(wasm::WasmCode::kWasmStackOverflow, RelocInfo::WASM_STUB_CALL);
+   // The call will not return; just define an empty safepoint.
+   safepoint_table_builder->DefineSafepoint(this);
+-  if (FLAG_debug_code) stop();
++  if (v8_flags.debug_code) stop();
+ 
+   bind(&continuation);
+ 
+@@ -525,7 +525,7 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+                                              : MemOperand(dst_addr, offset_imm);
+   Sw(src.gp(), dst_op);
+ 
+-  if (skip_write_barrier || FLAG_disable_write_barriers) return;
++  if (skip_write_barrier || v8_flags.disable_write_barriers) return;
+ 
+   // The write barrier.
+   Label write_barrier;
+@@ -2992,7 +2992,7 @@ void LiftoffAssembler::CallTrapCallbackForTesting() {
+ }
+ 
+ void LiftoffAssembler::AssertUnreachable(AbortReason reason) {
+-  if (FLAG_debug_code) Abort(reason);
++  if (v8_flags.debug_code) Abort(reason);
+ }
+ 
+ void LiftoffAssembler::PushRegisters(LiftoffRegList regs) {
+diff --git a/src/wasm/baseline/mips64/liftoff-assembler-mips64.h b/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
+index f1b70b629ec..ca0310fdaf7 100644
+--- a/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
++++ b/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
+@@ -378,7 +378,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
+   // check in the condition code.
+   RecordComment("OOL: stack check for large frame");
+   Label continuation;
+-  if (frame_size < FLAG_stack_size * 1024) {
++  if (frame_size < v8_flags.stack_size * 1024) {
+     Register stack_limit = kScratchReg;
+     Ld(stack_limit,
+        FieldMemOperand(kWasmInstanceRegister,
+@@ -391,7 +391,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
+   Call(wasm::WasmCode::kWasmStackOverflow, RelocInfo::WASM_STUB_CALL);
+   // The call will not return; just define an empty safepoint.
+   safepoint_table_builder->DefineSafepoint(this);
+-  if (FLAG_debug_code) stop();
++  if (v8_flags.debug_code) stop();
+ 
+   bind(&continuation);
+ 
+@@ -509,7 +509,7 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+   MemOperand dst_op = liftoff::GetMemOp(this, dst_addr, offset_reg, offset_imm);
+   Sd(src.gp(), dst_op);
+ 
+-  if (skip_write_barrier || FLAG_disable_write_barriers) return;
++  if (skip_write_barrier || v8_flags.disable_write_barriers) return;
+ 
+   Label write_barrier;
+   Label exit;
+@@ -3564,7 +3564,7 @@ void LiftoffAssembler::CallTrapCallbackForTesting() {
+ }
+ 
+ void LiftoffAssembler::AssertUnreachable(AbortReason reason) {
+-  if (FLAG_debug_code) Abort(reason);
++  if (v8_flags.debug_code) Abort(reason);
+ }
+ 
+ void LiftoffAssembler::PushRegisters(LiftoffRegList regs) {
+diff --git a/src/wasm/baseline/ppc/liftoff-assembler-ppc.h b/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
+index 2d51e2c3361..810b224f76e 100644
+--- a/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
++++ b/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
+@@ -47,9 +47,11 @@ namespace liftoff {
+ //
+ 
+ constexpr int32_t kInstanceOffset =
+-    (FLAG_enable_embedded_constant_pool.value() ? 3 : 2) * kSystemPointerSize;
++    (v8_flags.enable_embedded_constant_pool.value() ? 3 : 2) *
++    kSystemPointerSize;
+ constexpr int kFeedbackVectorOffset =
+-    (FLAG_enable_embedded_constant_pool.value() ? 4 : 3) * kSystemPointerSize;
++    (v8_flags.enable_embedded_constant_pool.value() ? 4 : 3) *
++    kSystemPointerSize;
+ 
+ inline MemOperand GetHalfStackSlot(int offset, RegPairHalf half) {
+   int32_t half_offset =
+@@ -142,7 +144,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
+     int offset, SafepointTableBuilder* safepoint_table_builder) {
+   int frame_size =
+       GetTotalFrameSize() -
+-      (FLAG_enable_embedded_constant_pool ? 3 : 2) * kSystemPointerSize;
++      (v8_flags.enable_embedded_constant_pool ? 3 : 2) * kSystemPointerSize;
+ 
+   Assembler patching_assembler(
+       AssemblerOptions{},
+@@ -181,7 +183,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
+   // check in the condition code.
+   RecordComment("OOL: stack check for large frame");
+   Label continuation;
+-  if (frame_size < FLAG_stack_size * 1024) {
++  if (frame_size < v8_flags.stack_size * 1024) {
+     Register stack_limit = ip;
+     LoadU64(stack_limit,
+             FieldMemOperand(kWasmInstanceRegister,
+@@ -196,7 +198,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
+   Call(wasm::WasmCode::kWasmStackOverflow, RelocInfo::WASM_STUB_CALL);
+   // The call will not return; just define an empty safepoint.
+   safepoint_table_builder->DefineSafepoint(this);
+-  if (FLAG_debug_code) stop();
++  if (v8_flags.debug_code) stop();
+ 
+   bind(&continuation);
+ 
+@@ -319,7 +321,7 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+   MemOperand dst_op = MemOperand(dst_addr, offset_reg, offset_imm);
+   StoreTaggedField(src.gp(), dst_op, r0);
+ 
+-  if (skip_write_barrier || FLAG_disable_write_barriers) return;
++  if (skip_write_barrier || v8_flags.disable_write_barriers) return;
+ 
+   Label write_barrier;
+   Label exit;
+@@ -3025,7 +3027,7 @@ void LiftoffAssembler::CallTrapCallbackForTesting() {
+ }
+ 
+ void LiftoffAssembler::AssertUnreachable(AbortReason reason) {
+-  if (FLAG_debug_code) Abort(reason);
++  if (v8_flags.debug_code) Abort(reason);
+ }
+ 
+ void LiftoffAssembler::PushRegisters(LiftoffRegList regs) {
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv.h
+index 14627023cef..bfb90abb5e9 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv.h
+@@ -129,7 +129,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
+   // check in the condition code.
+   RecordComment("OOL: stack check for large frame");
+   Label continuation;
+-  if (frame_size < FLAG_stack_size * 1024) {
++  if (frame_size < v8_flags.stack_size * 1024) {
+     Register stack_limit = kScratchReg;
+     LoadWord(stack_limit,
+              FieldMemOperand(kWasmInstanceRegister,
+@@ -142,7 +142,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
+   Call(wasm::WasmCode::kWasmStackOverflow, RelocInfo::WASM_STUB_CALL);
+   // The call will not return; just define an empty safepoint.
+   safepoint_table_builder->DefineSafepoint(this);
+-  if (FLAG_debug_code) stop();
++  if (v8_flags.debug_code) stop();
+ 
+   bind(&continuation);
+ 
+@@ -2089,7 +2089,7 @@ void LiftoffAssembler::CallTrapCallbackForTesting() {
+ }
+ 
+ void LiftoffAssembler::AssertUnreachable(AbortReason reason) {
+-  if (FLAG_debug_code) Abort(reason);
++  if (v8_flags.debug_code) Abort(reason);
+ }
+ 
+ void LiftoffAssembler::PushRegisters(LiftoffRegList regs) {
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h
+index b307d714a25..0ec1fffb254 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h
+@@ -217,7 +217,7 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+       liftoff::GetMemOp(this, dst_addr, offset_reg, offset_imm, scratch);
+   StoreTaggedField(src.gp(), dst_op);
+ 
+-  if (skip_write_barrier || FLAG_disable_write_barriers) return;
++  if (skip_write_barrier || v8_flags.disable_write_barriers) return;
+ 
+   Label write_barrier;
+   Label exit;
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
+index 5482f03587b..befce17c8b7 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
+@@ -187,7 +187,7 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+   MemOperand dst_op = liftoff::GetMemOp(this, dst_addr, offset_reg, offset_imm);
+   StoreTaggedField(src.gp(), dst_op);
+ 
+-  if (skip_write_barrier || FLAG_disable_write_barriers) return;
++  if (skip_write_barrier || v8_flags.disable_write_barriers) return;
+ 
+   Label write_barrier;
+   Label exit;
+diff --git a/src/wasm/baseline/s390/liftoff-assembler-s390.h b/src/wasm/baseline/s390/liftoff-assembler-s390.h
+index f03adb5dd8f..6e2403ceea2 100644
+--- a/src/wasm/baseline/s390/liftoff-assembler-s390.h
++++ b/src/wasm/baseline/s390/liftoff-assembler-s390.h
+@@ -164,7 +164,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
+   // check in the condition code.
+   RecordComment("OOL: stack check for large frame");
+   Label continuation;
+-  if (frame_size < FLAG_stack_size * 1024) {
++  if (frame_size < v8_flags.stack_size * 1024) {
+     Register stack_limit = ip;
+     LoadU64(stack_limit,
+             FieldMemOperand(kWasmInstanceRegister,
+@@ -179,7 +179,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
+   Call(wasm::WasmCode::kWasmStackOverflow, RelocInfo::WASM_STUB_CALL);
+   // The call will not return; just define an empty safepoint.
+   safepoint_table_builder->DefineSafepoint(this);
+-  if (FLAG_debug_code) stop();
++  if (v8_flags.debug_code) stop();
+ 
+   bind(&continuation);
+ 
+@@ -302,7 +302,7 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+       MemOperand(dst_addr, offset_reg == no_reg ? r0 : offset_reg, offset_imm);
+   StoreTaggedField(src.gp(), dst_op);
+ 
+-  if (skip_write_barrier || FLAG_disable_write_barriers) return;
++  if (skip_write_barrier || v8_flags.disable_write_barriers) return;
+ 
+   Label write_barrier;
+   Label exit;
+diff --git a/src/wasm/baseline/x64/liftoff-assembler-x64.h b/src/wasm/baseline/x64/liftoff-assembler-x64.h
+index 05897b213fc..f617876e6d6 100644
+--- a/src/wasm/baseline/x64/liftoff-assembler-x64.h
++++ b/src/wasm/baseline/x64/liftoff-assembler-x64.h
+@@ -260,7 +260,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
+   // check in the condition code.
+   RecordComment("OOL: stack check for large frame");
+   Label continuation;
+-  if (frame_size < FLAG_stack_size * 1024) {
++  if (frame_size < v8_flags.stack_size * 1024) {
+     movq(kScratchRegister,
+          FieldOperand(kWasmInstanceRegister,
+                       WasmInstanceObject::kRealStackLimitAddressOffset));
+@@ -407,7 +407,7 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+                                      static_cast<uint32_t>(offset_imm));
+   StoreTaggedField(dst_op, src.gp());
+ 
+-  if (skip_write_barrier || FLAG_disable_write_barriers) return;
++  if (skip_write_barrier || v8_flags.disable_write_barriers) return;
+ 
+   Register scratch = pinned.set(GetUnusedRegister(kGpReg, pinned)).gp();
+   Label write_barrier;
+diff --git a/src/wasm/code-space-access.cc b/src/wasm/code-space-access.cc
+index 4a1a67a0b3a..a9e76e2f1f5 100644
+--- a/src/wasm/code-space-access.cc
++++ b/src/wasm/code-space-access.cc
+@@ -73,7 +73,7 @@ bool CodeSpaceWriteScope::SwitchingPerNativeModule() { return false; }
+ void CodeSpaceWriteScope::SetWritable() {
+   if (WasmCodeManager::MemoryProtectionKeysEnabled()) {
+     RwxMemoryWriteScope::SetWritable();
+-  } else if (FLAG_wasm_write_protect_code_memory) {
++  } else if (v8_flags.wasm_write_protect_code_memory) {
+     current_native_module_->AddWriter();
+   }
+ }
+@@ -81,9 +81,9 @@ void CodeSpaceWriteScope::SetWritable() {
+ // static
+ void CodeSpaceWriteScope::SetExecutable() {
+   if (WasmCodeManager::MemoryProtectionKeysEnabled()) {
+-    DCHECK(FLAG_wasm_memory_protection_keys);
++    DCHECK(v8_flags.wasm_memory_protection_keys);
+     RwxMemoryWriteScope::SetExecutable();
+-  } else if (FLAG_wasm_write_protect_code_memory) {
++  } else if (v8_flags.wasm_write_protect_code_memory) {
+     current_native_module_->RemoveWriter();
+   }
+ }
+@@ -91,7 +91,7 @@ void CodeSpaceWriteScope::SetExecutable() {
+ // static
+ bool CodeSpaceWriteScope::SwitchingPerNativeModule() {
+   return !WasmCodeManager::MemoryProtectionKeysEnabled() &&
+-         FLAG_wasm_write_protect_code_memory;
++         v8_flags.wasm_write_protect_code_memory;
+ }
+ 
+ #endif  // !V8_HAS_PTHREAD_JIT_WRITE_PROTECT
+diff --git a/src/wasm/decoder.h b/src/wasm/decoder.h
+index 87228e263a2..2f6ffeb6afc 100644
+--- a/src/wasm/decoder.h
++++ b/src/wasm/decoder.h
+@@ -26,13 +26,13 @@ namespace v8 {
+ namespace internal {
+ namespace wasm {
+ 
+-#define TRACE(...)                                    \
+-  do {                                                \
+-    if (FLAG_trace_wasm_decoder) PrintF(__VA_ARGS__); \
++#define TRACE(...)                                        \
++  do {                                                    \
++    if (v8_flags.trace_wasm_decoder) PrintF(__VA_ARGS__); \
+   } while (false)
+-#define TRACE_IF(cond, ...)                                     \
+-  do {                                                          \
+-    if (FLAG_trace_wasm_decoder && (cond)) PrintF(__VA_ARGS__); \
++#define TRACE_IF(cond, ...)                                         \
++  do {                                                              \
++    if (v8_flags.trace_wasm_decoder && (cond)) PrintF(__VA_ARGS__); \
+   } while (false)
+ 
+ // A {DecodeResult} only stores the failure / success status, but no data.
+diff --git a/src/wasm/function-body-decoder-impl.h b/src/wasm/function-body-decoder-impl.h
+index f2443072c01..2768ef7f9bd 100644
+--- a/src/wasm/function-body-decoder-impl.h
++++ b/src/wasm/function-body-decoder-impl.h
+@@ -34,9 +34,9 @@ namespace wasm {
+ struct WasmGlobal;
+ struct WasmTag;
+ 
+-#define TRACE(...)                                    \
+-  do {                                                \
+-    if (FLAG_trace_wasm_decoder) PrintF(__VA_ARGS__); \
++#define TRACE(...)                                        \
++  do {                                                    \
++    if (v8_flags.trace_wasm_decoder) PrintF(__VA_ARGS__); \
+   } while (false)
+ 
+ #define TRACE_INST_FORMAT "  @%-8d #%-30s|"
+@@ -2697,7 +2697,7 @@ class WasmFullDecoder : public WasmDecoder<validate, decoding_mode> {
+   }
+ 
+   bool CheckSimdFeatureFlagOpcode(WasmOpcode opcode) {
+-    if (!FLAG_experimental_wasm_relaxed_simd &&
++    if (!v8_flags.experimental_wasm_relaxed_simd &&
+         WasmOpcodes::IsRelaxedSimdOpcode(opcode)) {
+       this->DecodeError(
+           "simd opcode not available, enable with --experimental-relaxed-simd");
+@@ -2728,7 +2728,7 @@ class WasmFullDecoder : public WasmDecoder<validate, decoding_mode> {
+     }
+ 
+     ~TraceLine() {
+-      if (!FLAG_trace_wasm_decoder) return;
++      if (!v8_flags.trace_wasm_decoder) return;
+       AppendStackState();
+       PrintF("%.*s\n", len_, buffer_);
+     }
+@@ -2736,7 +2736,7 @@ class WasmFullDecoder : public WasmDecoder<validate, decoding_mode> {
+     // Appends a formatted string.
+     PRINTF_FORMAT(2, 3)
+     void Append(const char* format, ...) {
+-      if (!FLAG_trace_wasm_decoder) return;
++      if (!v8_flags.trace_wasm_decoder) return;
+       va_list va_args;
+       va_start(va_args, format);
+       size_t remaining_len = kMaxLen - len_;
+@@ -2748,7 +2748,7 @@ class WasmFullDecoder : public WasmDecoder<validate, decoding_mode> {
+ 
+    private:
+     void AppendStackState() {
+-      DCHECK(FLAG_trace_wasm_decoder);
++      DCHECK(v8_flags.trace_wasm_decoder);
+       Append(" ");
+       for (Control& c : decoder_->control_) {
+         switch (c.kind) {
+@@ -2813,7 +2813,7 @@ class WasmFullDecoder : public WasmDecoder<validate, decoding_mode> {
+   DECODE(Nop) { return 1; }
+ 
+   DECODE(NopForTestingUnsupportedInLiftoff) {
+-    if (!VALIDATE(FLAG_enable_testing_opcode_in_wasm)) {
++    if (!VALIDATE(v8_flags.enable_testing_opcode_in_wasm)) {
+       this->DecodeError("Invalid opcode 0x%x", opcode);
+       return 0;
+     }
+@@ -3638,7 +3638,7 @@ class WasmFullDecoder : public WasmDecoder<validate, decoding_mode> {
+   DECODE(Simd) {
+     CHECK_PROTOTYPE_OPCODE(simd);
+     if (!CheckHardwareSupportsSimd()) {
+-      if (FLAG_correctness_fuzzer_suppressions) {
++      if (v8_flags.correctness_fuzzer_suppressions) {
+         FATAL("Aborting on missing Wasm SIMD support");
+       }
+       this->DecodeError("Wasm SIMD unsupported");
+diff --git a/src/wasm/function-compiler.cc b/src/wasm/function-compiler.cc
+index 93816dc9da4..a37774743f6 100644
+--- a/src/wasm/function-compiler.cc
++++ b/src/wasm/function-compiler.cc
+@@ -80,7 +80,7 @@ WasmCompilationResult WasmCompilationUnit::ExecuteFunctionCompilation(
+     wasm_compile_function_time_scope.emplace(timed_histogram);
+   }
+ 
+-  if (FLAG_trace_wasm_compiler) {
++  if (v8_flags.trace_wasm_compiler) {
+     PrintF("Compiling wasm function %d with %s\n", func_index_,
+            ExecutionTierToString(tier_));
+   }
+@@ -95,16 +95,17 @@ WasmCompilationResult WasmCompilationUnit::ExecuteFunctionCompilation(
+       // The --wasm-tier-mask-for-testing flag can force functions to be
+       // compiled with TurboFan, and the --wasm-debug-mask-for-testing can force
+       // them to be compiled for debugging, see documentation.
+-      if (V8_LIKELY(FLAG_wasm_tier_mask_for_testing == 0) ||
++      if (V8_LIKELY(v8_flags.wasm_tier_mask_for_testing == 0) ||
+           func_index_ >= 32 ||
+-          ((FLAG_wasm_tier_mask_for_testing & (1 << func_index_)) == 0) ||
+-          FLAG_liftoff_only) {
++          ((v8_flags.wasm_tier_mask_for_testing & (1 << func_index_)) == 0) ||
++          v8_flags.liftoff_only) {
+         // We do not use the debug side table, we only (optionally) pass it to
+         // cover different code paths in Liftoff for testing.
+         std::unique_ptr<DebugSideTable> unused_debug_sidetable;
+         std::unique_ptr<DebugSideTable>* debug_sidetable_ptr = nullptr;
+-        if (V8_UNLIKELY(func_index_ < 32 && (FLAG_wasm_debug_mask_for_testing &
+-                                             (1 << func_index_)) != 0)) {
++        if (V8_UNLIKELY(func_index_ < 32 &&
++                        (v8_flags.wasm_debug_mask_for_testing &
++                         (1 << func_index_)) != 0)) {
+           debug_sidetable_ptr = &unused_debug_sidetable;
+         }
+         result = ExecuteLiftoffCompilation(
+@@ -121,7 +122,7 @@ WasmCompilationResult WasmCompilationUnit::ExecuteFunctionCompilation(
+ 
+       // If --liftoff-only, do not fall back to turbofan, even if compilation
+       // failed.
+-      if (FLAG_liftoff_only) break;
++      if (v8_flags.liftoff_only) break;
+ 
+       // If Liftoff failed, fall back to TurboFan.
+       // TODO(wasm): We could actually stop or remove the tiering unit for this
+@@ -190,7 +191,7 @@ bool UseGenericWrapper(const FunctionSig* sig) {
+       return false;
+     }
+   }
+-  return FLAG_wasm_generic_wrapper;
++  return v8_flags.wasm_generic_wrapper;
+ #else
+   return false;
+ #endif
+diff --git a/src/wasm/graph-builder-interface.cc b/src/wasm/graph-builder-interface.cc
+index cd7dd4d5277..a695a585aa7 100644
+--- a/src/wasm/graph-builder-interface.cc
++++ b/src/wasm/graph-builder-interface.cc
+@@ -175,7 +175,7 @@ class WasmGraphBuildingInterface {
+     }
+     LoadContextIntoSsa(ssa_env, decoder);
+ 
+-    if (FLAG_trace_wasm && inlined_status_ == kRegularFunction) {
++    if (v8_flags.trace_wasm && inlined_status_ == kRegularFunction) {
+       builder_->TraceFunctionEntry(decoder->position());
+     }
+   }
+@@ -419,7 +419,7 @@ class WasmGraphBuildingInterface {
+ 
+   void RefAsNonNull(FullDecoder* decoder, const Value& arg, Value* result) {
+     TFNode* cast_node =
+-        FLAG_experimental_wasm_skip_null_checks
++        v8_flags.experimental_wasm_skip_null_checks
+             ? builder_->TypeGuard(arg.node, result->type)
+             : builder_->RefAsNonNull(arg.node, decoder->position());
+     SetAndTypeNode(result, cast_node);
+@@ -510,7 +510,7 @@ class WasmGraphBuildingInterface {
+                               : decoder->stack_value(ret_count + drop_values);
+       GetNodes(values.begin(), stack_base, ret_count);
+     }
+-    if (FLAG_trace_wasm && inlined_status_ == kRegularFunction) {
++    if (v8_flags.trace_wasm && inlined_status_ == kRegularFunction) {
+       builder_->TraceFunctionExit(base::VectorOf(values), decoder->position());
+     }
+     builder_->Return(base::VectorOf(values));
+@@ -655,7 +655,7 @@ class WasmGraphBuildingInterface {
+                   const CallFunctionImmediate<validate>& imm,
+                   const Value args[], Value returns[]) {
+     int maybe_call_count = -1;
+-    if (FLAG_wasm_speculative_inlining && type_feedback_.size() > 0) {
++    if (v8_flags.wasm_speculative_inlining && type_feedback_.size() > 0) {
+       const CallSiteFeedback& feedback = next_call_feedback();
+       DCHECK_EQ(feedback.num_cases(), 1);
+       maybe_call_count = feedback.call_count(0);
+@@ -668,7 +668,7 @@ class WasmGraphBuildingInterface {
+                   const CallFunctionImmediate<validate>& imm,
+                   const Value args[]) {
+     int maybe_call_count = -1;
+-    if (FLAG_wasm_speculative_inlining && type_feedback_.size() > 0) {
++    if (v8_flags.wasm_speculative_inlining && type_feedback_.size() > 0) {
+       const CallSiteFeedback& feedback = next_call_feedback();
+       DCHECK_EQ(feedback.num_cases(), 1);
+       maybe_call_count = feedback.call_count(0);
+@@ -699,7 +699,7 @@ class WasmGraphBuildingInterface {
+                const FunctionSig* sig, uint32_t sig_index, const Value args[],
+                Value returns[]) {
+     const CallSiteFeedback* feedback = nullptr;
+-    if (FLAG_wasm_speculative_inlining && type_feedback_.size() > 0) {
++    if (v8_flags.wasm_speculative_inlining && type_feedback_.size() > 0) {
+       feedback = &next_call_feedback();
+     }
+     if (feedback == nullptr || feedback->num_cases() == 0) {
+@@ -720,7 +720,7 @@ class WasmGraphBuildingInterface {
+     for (int i = 0; i < num_cases; i++) {
+       const uint32_t expected_function_index = feedback->function_index(i);
+ 
+-      if (FLAG_trace_wasm_speculative_inlining) {
++      if (v8_flags.trace_wasm_speculative_inlining) {
+         PrintF("[Function #%d call #%d: graph support for inlining #%d]\n",
+                func_index_, feedback_instruction_index_ - 1,
+                expected_function_index);
+@@ -796,7 +796,7 @@ class WasmGraphBuildingInterface {
+                      const FunctionSig* sig, uint32_t sig_index,
+                      const Value args[]) {
+     const CallSiteFeedback* feedback = nullptr;
+-    if (FLAG_wasm_speculative_inlining && type_feedback_.size() > 0) {
++    if (v8_flags.wasm_speculative_inlining && type_feedback_.size() > 0) {
+       feedback = &next_call_feedback();
+     }
+     if (feedback == nullptr || feedback->num_cases() == 0) {
+@@ -812,7 +812,7 @@ class WasmGraphBuildingInterface {
+     for (int i = 0; i < num_cases; i++) {
+       const uint32_t expected_function_index = feedback->function_index(i);
+ 
+-      if (FLAG_trace_wasm_speculative_inlining) {
++      if (v8_flags.trace_wasm_speculative_inlining) {
+         PrintF("[Function #%d call #%d: graph support for inlining #%d]\n",
+                func_index_, feedback_instruction_index_ - 1,
+                expected_function_index);
+@@ -1246,7 +1246,7 @@ class WasmGraphBuildingInterface {
+                Value* result) {
+     WasmTypeCheckConfig config =
+         ComputeWasmTypeCheckConfig(object.type, rtt.type, decoder->module_);
+-    TFNode* cast_node = FLAG_experimental_wasm_assume_ref_cast_succeeds
++    TFNode* cast_node = v8_flags.experimental_wasm_assume_ref_cast_succeeds
+                             ? builder_->TypeGuard(object.node, result->type)
+                             : builder_->RefCast(object.node, rtt.node, config,
+                                                 decoder->position());
+@@ -1612,7 +1612,7 @@ class WasmGraphBuildingInterface {
+   // - After IfFailure nodes.
+   // - When exiting a loop through Delegate.
+   bool emit_loop_exits() {
+-    return FLAG_wasm_loop_unrolling || FLAG_wasm_loop_peeling;
++    return v8_flags.wasm_loop_unrolling || v8_flags.wasm_loop_peeling;
+   }
+ 
+   void GetNodes(TFNode** nodes, Value* values, size_t count) {
+@@ -1626,7 +1626,7 @@ class WasmGraphBuildingInterface {
+   }
+ 
+   void SetEnv(SsaEnv* env) {
+-    if (FLAG_trace_wasm_decoder) {
++    if (v8_flags.trace_wasm_decoder) {
+       char state = 'X';
+       if (env) {
+         switch (env->state) {
+@@ -2071,7 +2071,7 @@ class WasmGraphBuildingInterface {
+ 
+   CheckForNull NullCheckFor(ValueType type) {
+     DCHECK(type.is_object_reference());
+-    return (!FLAG_experimental_wasm_skip_null_checks && type.is_nullable())
++    return (!v8_flags.experimental_wasm_skip_null_checks && type.is_nullable())
+                ? CheckForNull::kWithNullCheck
+                : CheckForNull::kWithoutNullCheck;
+   }
+diff --git a/src/wasm/module-compiler.cc b/src/wasm/module-compiler.cc
+index 5752264d57a..0bae61d0197 100644
+--- a/src/wasm/module-compiler.cc
++++ b/src/wasm/module-compiler.cc
+@@ -33,19 +33,19 @@
+ #include "src/wasm/wasm-result.h"
+ #include "src/wasm/wasm-serialization.h"
+ 
+-#define TRACE_COMPILE(...)                             \
+-  do {                                                 \
+-    if (FLAG_trace_wasm_compiler) PrintF(__VA_ARGS__); \
++#define TRACE_COMPILE(...)                                 \
++  do {                                                     \
++    if (v8_flags.trace_wasm_compiler) PrintF(__VA_ARGS__); \
+   } while (false)
+ 
+-#define TRACE_STREAMING(...)                            \
+-  do {                                                  \
+-    if (FLAG_trace_wasm_streaming) PrintF(__VA_ARGS__); \
++#define TRACE_STREAMING(...)                                \
++  do {                                                      \
++    if (v8_flags.trace_wasm_streaming) PrintF(__VA_ARGS__); \
+   } while (false)
+ 
+-#define TRACE_LAZY(...)                                        \
+-  do {                                                         \
+-    if (FLAG_trace_wasm_lazy_compilation) PrintF(__VA_ARGS__); \
++#define TRACE_LAZY(...)                                            \
++  do {                                                             \
++    if (v8_flags.trace_wasm_lazy_compilation) PrintF(__VA_ARGS__); \
+   } while (false)
+ 
+ namespace v8 {
+@@ -955,8 +955,8 @@ ExecutionTierPair GetDefaultTiersPerModule(NativeModule* native_module,
+     return {ExecutionTier::kNone, ExecutionTier::kNone};
+   }
+   ExecutionTier baseline_tier =
+-      FLAG_liftoff ? ExecutionTier::kLiftoff : ExecutionTier::kTurbofan;
+-  bool eager_tier_up = !dynamic_tiering && FLAG_wasm_tier_up;
++      v8_flags.liftoff ? ExecutionTier::kLiftoff : ExecutionTier::kTurbofan;
++  bool eager_tier_up = !dynamic_tiering && v8_flags.wasm_tier_up;
+   ExecutionTier top_tier =
+       eager_tier_up ? ExecutionTier::kTurbofan : baseline_tier;
+   return {baseline_tier, top_tier};
+@@ -981,9 +981,9 @@ ExecutionTierPair GetLazyCompilationTiers(NativeModule* native_module,
+     }
+   }
+ 
+-  if (V8_UNLIKELY(FLAG_wasm_tier_up_filter >= 0 &&
++  if (V8_UNLIKELY(v8_flags.wasm_tier_up_filter >= 0 &&
+                   func_index !=
+-                      static_cast<uint32_t>(FLAG_wasm_tier_up_filter))) {
++                      static_cast<uint32_t>(v8_flags.wasm_tier_up_filter))) {
+     tiers.top_tier = tiers.baseline_tier;
+   }
+ 
+@@ -1138,8 +1138,8 @@ void ValidateSequentially(
+ }
+ 
+ bool IsLazyModule(const WasmModule* module) {
+-  return FLAG_wasm_lazy_compilation ||
+-         (FLAG_asm_wasm_lazy_compilation && is_asmjs_module(module));
++  return v8_flags.wasm_lazy_compilation ||
++         (v8_flags.asm_wasm_lazy_compilation && is_asmjs_module(module));
+ }
+ 
+ class CompileLazyTimingScope {
+@@ -1210,7 +1210,7 @@ bool CompileLazy(Isolate* isolate, Handle<WasmInstanceObject> instance,
+   // During lazy compilation, we can only get compilation errors when
+   // {--wasm-lazy-validation} is enabled. Otherwise, the module was fully
+   // verified before starting its execution.
+-  CHECK_IMPLIES(result.failed(), FLAG_wasm_lazy_validation);
++  CHECK_IMPLIES(result.failed(), v8_flags.wasm_lazy_validation);
+   if (result.failed()) {
+     return false;
+   }
+@@ -1246,7 +1246,7 @@ bool CompileLazy(Isolate* isolate, Handle<WasmInstanceObject> instance,
+ 
+   // Allocate feedback vector if needed.
+   if (result.feedback_vector_slots > 0) {
+-    DCHECK(FLAG_wasm_speculative_inlining);
++    DCHECK(v8_flags.wasm_speculative_inlining);
+     // We have to save the native_module on the stack, in case the allocation
+     // triggers a GC and we need the module to scan WasmCompileLazy stack frame.
+     *out_native_module = native_module;
+@@ -1369,13 +1369,13 @@ class FeedbackMaker {
+     if (cache_usage_ == 0) {
+       result_.emplace_back();
+     } else if (cache_usage_ == 1) {
+-      if (FLAG_trace_wasm_speculative_inlining) {
++      if (v8_flags.trace_wasm_speculative_inlining) {
+         PrintF("[Function #%d call_ref #%zu inlineable (monomorphic)]\n",
+                func_index_, result_.size());
+       }
+       result_.emplace_back(targets_cache_[0], counts_cache_[0]);
+     } else {
+-      if (FLAG_trace_wasm_speculative_inlining) {
++      if (v8_flags.trace_wasm_speculative_inlining) {
+         PrintF("[Function #%d call_ref #%zu inlineable (polymorphic %d)]\n",
+                func_index_, result_.size(), cache_usage_);
+       }
+@@ -1433,10 +1433,10 @@ void TransitiveTypeFeedbackProcessor::Process(int func_index) {
+       if (target != FunctionTypeFeedback::kNonDirectCall) {
+         int count = Smi::cast(value).value();
+         fm.AddCall(static_cast<int>(target), count);
+-      } else if (FLAG_trace_wasm_speculative_inlining) {
++      } else if (v8_flags.trace_wasm_speculative_inlining) {
+         PrintF("[Function #%d call #%d: uninitialized]\n", func_index, i / 2);
+       }
+-    } else if (FLAG_trace_wasm_speculative_inlining) {
++    } else if (v8_flags.trace_wasm_speculative_inlining) {
+       if (value == ReadOnlyRoots(instance_.GetIsolate()).megamorphic_symbol()) {
+         PrintF("[Function #%d call #%d: megamorphic]\n", func_index, i / 2);
+       }
+@@ -1461,7 +1461,7 @@ void TriggerTierUp(WasmInstanceObject instance, int func_index) {
+     base::MutexGuard mutex_guard(&module->type_feedback.mutex);
+     int array_index =
+         wasm::declared_function_index(instance.module(), func_index);
+-    instance.tiering_budget_array()[array_index] = FLAG_wasm_tiering_budget;
++    instance.tiering_budget_array()[array_index] = v8_flags.wasm_tiering_budget;
+     int& stored_priority =
+         module->type_feedback.feedback_for_function[func_index].tierup_priority;
+     if (stored_priority < kMaxInt) ++stored_priority;
+@@ -1475,7 +1475,7 @@ void TriggerTierUp(WasmInstanceObject instance, int func_index) {
+ 
+   // Before adding the tier-up unit or increasing priority, do process type
+   // feedback for best code generation.
+-  if (FLAG_wasm_speculative_inlining) {
++  if (v8_flags.wasm_speculative_inlining) {
+     // TODO(jkummerow): we could have collisions here if different instances
+     // of the same module have collected different feedback. If that ever
+     // becomes a problem, figure out a solution.
+@@ -1487,7 +1487,7 @@ void TriggerTierUp(WasmInstanceObject instance, int func_index) {
+ 
+ void TierUpNowForTesting(Isolate* isolate, WasmInstanceObject instance,
+                          int func_index) {
+-  if (FLAG_wasm_speculative_inlining) {
++  if (v8_flags.wasm_speculative_inlining) {
+     TransitiveTypeFeedbackProcessor process(instance, func_index);
+   }
+   auto* native_module = instance.module_object().native_module();
+@@ -1839,7 +1839,7 @@ class CompilationTimeCallback : public CompilationEventCallback {
+           (compile_mode_ == kStreaming),           // streamed
+           false,                                   // cached
+           false,                                   // deserialized
+-          FLAG_wasm_lazy_compilation,              // lazy
++          v8_flags.wasm_lazy_compilation,          // lazy
+           true,                                    // success
+           native_module->liftoff_code_size(),      // code_size_in_bytes
+           native_module->liftoff_bailout_count(),  // liftoff_bailout_count
+@@ -1854,7 +1854,7 @@ class CompilationTimeCallback : public CompilationEventCallback {
+           (compile_mode_ == kStreaming),           // streamed
+           false,                                   // cached
+           false,                                   // deserialized
+-          FLAG_wasm_lazy_compilation,              // lazy
++          v8_flags.wasm_lazy_compilation,          // lazy
+           false,                                   // success
+           native_module->liftoff_code_size(),      // code_size_in_bytes
+           native_module->liftoff_bailout_count(),  // liftoff_bailout_count
+@@ -1879,10 +1879,10 @@ void CompileNativeModule(Isolate* isolate,
+                          ErrorThrower* thrower, const WasmModule* wasm_module,
+                          std::shared_ptr<NativeModule> native_module,
+                          Handle<FixedArray>* export_wrappers_out) {
+-  CHECK(!FLAG_jitless);
++  CHECK(!v8_flags.jitless);
+   ModuleWireBytes wire_bytes(native_module->wire_bytes());
+   const bool lazy_module = IsLazyModule(wasm_module);
+-  if (!FLAG_wasm_lazy_validation && wasm_module->origin == kWasmOrigin &&
++  if (!v8_flags.wasm_lazy_validation && wasm_module->origin == kWasmOrigin &&
+       MayCompriseLazyFunctions(wasm_module, native_module->enabled_features(),
+                                lazy_module)) {
+     // Validate wasm modules for lazy compilation if requested. Never validate
+@@ -1914,7 +1914,7 @@ void CompileNativeModule(Isolate* isolate,
+       CompilationEvent::kFinishedExportWrappers);
+ 
+   if (compilation_state->failed()) {
+-    DCHECK_IMPLIES(lazy_module, !FLAG_wasm_lazy_validation);
++    DCHECK_IMPLIES(lazy_module, !v8_flags.wasm_lazy_validation);
+     ValidateSequentially(wasm_module, native_module.get(), isolate->counters(),
+                          isolate->allocator(), thrower, lazy_module);
+     CHECK(thrower->error());
+@@ -1930,7 +1930,7 @@ void CompileNativeModule(Isolate* isolate,
+   compilation_state->PublishDetectedFeatures(isolate);
+ 
+   if (compilation_state->failed()) {
+-    DCHECK_IMPLIES(lazy_module, !FLAG_wasm_lazy_validation);
++    DCHECK_IMPLIES(lazy_module, !v8_flags.wasm_lazy_validation);
+     ValidateSequentially(wasm_module, native_module.get(), isolate->counters(),
+                          isolate->allocator(), thrower, lazy_module);
+     CHECK(thrower->error());
+@@ -1958,7 +1958,7 @@ class BackgroundCompileJob final : public JobTask {
+     // NumOutstandingCompilations() does not reflect the units that running
+     // workers are processing, thus add the current worker count to that number.
+     return std::min(
+-        static_cast<size_t>(FLAG_wasm_num_compilation_tasks),
++        static_cast<size_t>(v8_flags.wasm_num_compilation_tasks),
+         worker_count +
+             compile_scope.compilation_state()->NumOutstandingCompilations());
+   }
+@@ -2001,11 +2001,12 @@ std::shared_ptr<NativeModule> CompileToNativeModule(
+   }
+ 
+   // Create a new {NativeModule} first.
+-  const bool include_liftoff = module->origin == kWasmOrigin && FLAG_liftoff;
++  const bool include_liftoff =
++      module->origin == kWasmOrigin && v8_flags.liftoff;
+   size_t code_size_estimate =
+       wasm::WasmCodeManager::EstimateNativeModuleCodeSize(
+           module.get(), include_liftoff,
+-          DynamicTiering{FLAG_wasm_dynamic_tiering.value()});
++          DynamicTiering{v8_flags.wasm_dynamic_tiering.value()});
+   native_module =
+       engine->NewNativeModule(isolate, enabled, module, code_size_estimate);
+   native_module->SetWireBytes(std::move(wire_bytes_copy));
+@@ -2076,8 +2077,8 @@ AsyncCompileJob::AsyncCompileJob(
+     : isolate_(isolate),
+       api_method_name_(api_method_name),
+       enabled_features_(enabled),
+-      dynamic_tiering_(DynamicTiering{FLAG_wasm_dynamic_tiering.value()}),
+-      wasm_lazy_compilation_(FLAG_wasm_lazy_compilation),
++      dynamic_tiering_(DynamicTiering{v8_flags.wasm_dynamic_tiering.value()}),
++      wasm_lazy_compilation_(v8_flags.wasm_lazy_compilation),
+       start_time_(base::TimeTicks::Now()),
+       bytes_copy_(std::move(bytes_copy)),
+       wire_bytes_(bytes_copy_.get(), bytes_copy_.get() + length),
+@@ -2085,8 +2086,8 @@ AsyncCompileJob::AsyncCompileJob(
+       compilation_id_(compilation_id) {
+   TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
+                "wasm.AsyncCompileJob");
+-  CHECK(FLAG_wasm_async_compilation);
+-  CHECK(!FLAG_jitless);
++  CHECK(v8_flags.wasm_async_compilation);
++  CHECK(!v8_flags.jitless);
+   v8::Isolate* v8_isolate = reinterpret_cast<v8::Isolate*>(isolate);
+   v8::Platform* platform = V8::GetCurrentPlatform();
+   foreground_task_runner_ = platform->GetForegroundTaskRunner(v8_isolate);
+@@ -2509,7 +2510,7 @@ void AsyncCompileJob::StartBackgroundTask() {
+ 
+   // If --wasm-num-compilation-tasks=0 is passed, do only spawn foreground
+   // tasks. This is used to make timing deterministic.
+-  if (FLAG_wasm_num_compilation_tasks > 0) {
++  if (v8_flags.wasm_num_compilation_tasks > 0) {
+     V8::GetCurrentPlatform()->CallOnWorkerThread(std::move(task));
+   } else {
+     foreground_task_runner_->PostTask(std::move(task));
+@@ -2567,7 +2568,7 @@ class AsyncCompileJob::DecodeModule : public AsyncCompileJob::CompileStep {
+           DecodingMethod::kAsync, GetWasmEngine()->allocator());
+ 
+       // Validate lazy functions here if requested.
+-      if (!FLAG_wasm_lazy_validation && result.ok()) {
++      if (!v8_flags.wasm_lazy_validation && result.ok()) {
+         const WasmModule* module = result.value().get();
+         DCHECK_EQ(module->origin, kWasmOrigin);
+         const bool lazy_module = job->wasm_lazy_compilation_;
+@@ -2607,7 +2608,7 @@ class AsyncCompileJob::DecodeModule : public AsyncCompileJob::CompileStep {
+     } else {
+       // Decode passed.
+       std::shared_ptr<WasmModule> module = std::move(result).value();
+-      const bool include_liftoff = FLAG_liftoff;
++      const bool include_liftoff = v8_flags.liftoff;
+       size_t code_size_estimate =
+           wasm::WasmCodeManager::EstimateNativeModuleCodeSize(
+               module.get(), include_liftoff, job->dynamic_tiering_);
+@@ -2687,7 +2688,7 @@ class AsyncCompileJob::PrepareAndStartCompile : public CompileStep {
+       // We are in single-threaded mode, so there are no worker tasks that will
+       // do the compilation. We call {WaitForCompilationEvent} here so that the
+       // main thread paticipates and finishes the compilation.
+-      if (FLAG_wasm_num_compilation_tasks == 0) {
++      if (v8_flags.wasm_num_compilation_tasks == 0) {
+         compilation_state->WaitForCompilationEvent(
+             CompilationEvent::kFinishedBaselineCompilation);
+       }
+@@ -2887,7 +2888,7 @@ bool AsyncStreamingProcessor::ProcessCodeSectionHeader(
+   int num_imported_functions =
+       static_cast<int>(decoder_.module()->num_imported_functions);
+   DCHECK_EQ(kWasmOrigin, decoder_.module()->origin);
+-  const bool include_liftoff = FLAG_liftoff;
++  const bool include_liftoff = v8_flags.liftoff;
+   size_t code_size_estimate =
+       wasm::WasmCodeManager::EstimateNativeModuleCodeSize(
+           num_functions, num_imported_functions, code_section_length,
+@@ -2939,7 +2940,7 @@ void AsyncStreamingProcessor::ProcessFunctionBody(
+   CompileStrategy strategy =
+       GetCompileStrategy(module, enabled_features, func_index, lazy_module);
+   bool validate_lazily_compiled_function =
+-      !FLAG_wasm_lazy_validation &&
++      !v8_flags.wasm_lazy_validation &&
+       (strategy == CompileStrategy::kLazy ||
+        strategy == CompileStrategy::kLazyBaselineEagerTopTier);
+   if (validate_lazily_compiled_function) {
+@@ -2996,7 +2997,7 @@ void AsyncStreamingProcessor::OnFinishedStream(
+   if (prefix_cache_hit_) {
+     // Restart as an asynchronous, non-streaming compilation. Most likely
+     // {PrepareAndStartCompile} will get the native module from the cache.
+-    const bool include_liftoff = FLAG_liftoff;
++    const bool include_liftoff = v8_flags.liftoff;
+     size_t code_size_estimate =
+         wasm::WasmCodeManager::EstimateNativeModuleCodeSize(
+             result.value().get(), include_liftoff, job_->dynamic_tiering_);
+@@ -3217,7 +3218,7 @@ uint8_t CompilationStateImpl::AddCompilationUnitInternal(
+   ExecutionTier reached_tier =
+       CompilationStateImpl::ReachedTierField::decode(function_progress);
+ 
+-  if (FLAG_experimental_wasm_gc && !FLAG_wasm_lazy_compilation) {
++  if (v8_flags.experimental_wasm_gc && !v8_flags.wasm_lazy_compilation) {
+     // The Turbofan optimizations we enable for WasmGC code can (for now)
+     // take a very long time, so skip Turbofan compilation for super-large
+     // functions.
+@@ -3663,8 +3664,8 @@ void CompilationStateImpl::TriggerCallbacks(
+   }
+ 
+   // For dynamic tiering, trigger "compilation chunk finished" after a new chunk
+-  // of size {FLAG_wasm_caching_threshold}.
+-  if (dynamic_tiering_ && static_cast<size_t>(FLAG_wasm_caching_threshold) <
++  // of size {v8_flags.wasm_caching_threshold}.
++  if (dynamic_tiering_ && static_cast<size_t>(v8_flags.wasm_caching_threshold) <
+                               bytes_since_last_chunk_) {
+     triggered_events.Add(CompilationEvent::kFinishedCompilationChunk);
+     bytes_since_last_chunk_ = 0;
+@@ -3902,11 +3903,11 @@ class CompileJSToWasmWrapperJob final : public JobTask {
+   }
+ 
+   size_t GetMaxConcurrency(size_t /* worker_count */) const override {
+-    DCHECK_GE(FLAG_wasm_num_compilation_tasks, 1);
++    DCHECK_GE(v8_flags.wasm_num_compilation_tasks, 1);
+     // {outstanding_units_} includes the units that other workers are currently
+     // working on, so we can safely ignore the {worker_count} and just return
+     // the current number of outstanding units.
+-    return std::min(static_cast<size_t>(FLAG_wasm_num_compilation_tasks),
++    return std::min(static_cast<size_t>(v8_flags.wasm_num_compilation_tasks),
+                     outstanding_units_.load(std::memory_order_relaxed));
+   }
+ 
+@@ -3947,7 +3948,7 @@ void CompileJsToWasmWrappers(Isolate* isolate, const WasmModule* module,
+                  compilation_units.size());
+     auto job =
+         std::make_unique<CompileJSToWasmWrapperJob>(&queue, &compilation_units);
+-    if (FLAG_wasm_num_compilation_tasks > 0) {
++    if (v8_flags.wasm_num_compilation_tasks > 0) {
+       auto job_handle = V8::GetCurrentPlatform()->CreateJob(
+           TaskPriority::kUserVisible, std::move(job));
+ 
+diff --git a/src/wasm/module-decoder-impl.h b/src/wasm/module-decoder-impl.h
+index 91948637b74..774e98e2a0d 100644
+--- a/src/wasm/module-decoder-impl.h
++++ b/src/wasm/module-decoder-impl.h
+@@ -23,9 +23,9 @@ namespace v8 {
+ namespace internal {
+ namespace wasm {
+ 
+-#define TRACE(...)                                    \
+-  do {                                                \
+-    if (FLAG_trace_wasm_decoder) PrintF(__VA_ARGS__); \
++#define TRACE(...)                                        \
++  do {                                                    \
++    if (v8_flags.trace_wasm_decoder) PrintF(__VA_ARGS__); \
+   } while (false)
+ 
+ class NoTracer {
+@@ -334,8 +334,8 @@ class ModuleDecoderTemplate : public Decoder {
+ 
+   void DumpModule(const base::Vector<const byte> module_bytes) {
+     std::string path;
+-    if (FLAG_dump_wasm_module_path) {
+-      path = FLAG_dump_wasm_module_path;
++    if (v8_flags.dump_wasm_module_path) {
++      path = v8_flags.dump_wasm_module_path;
+       if (path.size() &&
+           !base::OS::isDirectorySeparator(path[path.size() - 1])) {
+         path += base::OS::DirectorySeparator();
+@@ -683,7 +683,7 @@ class ModuleDecoderTemplate : public Decoder {
+             const FunctionSig* sig = consume_sig(module_->signature_zone.get());
+             if (!ok()) break;
+             module_->add_signature(sig, kNoSuperType);
+-            if (FLAG_wasm_type_canonicalization) {
++            if (v8_flags.wasm_type_canonicalization) {
+               type_canon->AddRecursiveGroup(module_.get(), 1);
+             }
+             break;
+@@ -726,7 +726,7 @@ class ModuleDecoderTemplate : public Decoder {
+           TypeDefinition type = consume_subtype_definition();
+           if (ok()) module_->add_type(type);
+         }
+-        if (ok() && FLAG_wasm_type_canonicalization) {
++        if (ok() && v8_flags.wasm_type_canonicalization) {
+           type_canon->AddRecursiveGroup(module_.get(), group_size);
+         }
+       } else {
+@@ -734,7 +734,7 @@ class ModuleDecoderTemplate : public Decoder {
+         TypeDefinition type = consume_subtype_definition();
+         if (ok()) {
+           module_->add_type(type);
+-          if (FLAG_wasm_type_canonicalization) {
++          if (v8_flags.wasm_type_canonicalization) {
+             type_canon->AddRecursiveGroup(module_.get(), 1);
+           }
+         }
+@@ -1103,7 +1103,7 @@ class ModuleDecoderTemplate : public Decoder {
+ 
+   void DecodeElementSection() {
+     uint32_t segment_count =
+-        consume_count("segment count", FLAG_wasm_max_table_size);
++        consume_count("segment count", v8_flags.wasm_max_table_size);
+ 
+     for (uint32_t i = 0; i < segment_count; ++i) {
+       tracer_.ElementOffset(pc_offset());
+@@ -1683,7 +1683,7 @@ class ModuleDecoderTemplate : public Decoder {
+       section_iter.advance(true);
+     }
+ 
+-    if (FLAG_dump_wasm_module) DumpModule(orig_bytes);
++    if (v8_flags.dump_wasm_module) DumpModule(orig_bytes);
+ 
+     if (decoder.failed()) {
+       return decoder.toResult<std::shared_ptr<WasmModule>>(nullptr);
+@@ -1828,7 +1828,7 @@ class ModuleDecoderTemplate : public Decoder {
+   void VerifyFunctionBody(AccountingAllocator* allocator, uint32_t func_num,
+                           const ModuleWireBytes& wire_bytes,
+                           const WasmModule* module, WasmFunction* function) {
+-    if (FLAG_trace_wasm_decoder) {
++    if (v8_flags.trace_wasm_decoder) {
+       WasmFunctionName func_name(function,
+                                  wire_bytes.GetNameOrNull(function, module));
+       StdoutStream{} << "Verifying wasm function " << func_name << std::endl;
+diff --git a/src/wasm/module-instantiate.cc b/src/wasm/module-instantiate.cc
+index 233bc14aec4..d68445e2362 100644
+--- a/src/wasm/module-instantiate.cc
++++ b/src/wasm/module-instantiate.cc
+@@ -27,9 +27,9 @@
+ #include "src/wasm/wasm-subtyping.h"
+ #include "src/wasm/wasm-value.h"
+ 
+-#define TRACE(...)                                      \
+-  do {                                                  \
+-    if (FLAG_trace_wasm_instances) PrintF(__VA_ARGS__); \
++#define TRACE(...)                                          \
++  do {                                                      \
++    if (v8_flags.trace_wasm_instances) PrintF(__VA_ARGS__); \
+   } while (false)
+ 
+ namespace v8 {
+@@ -58,7 +58,7 @@ class CompileImportWrapperJob final : public JobTask {
+ 
+   size_t GetMaxConcurrency(size_t worker_count) const override {
+     size_t flag_limit = static_cast<size_t>(
+-        std::max(1, FLAG_wasm_num_compilation_tasks.value()));
++        std::max(1, v8_flags.wasm_num_compilation_tasks.value()));
+     // Add {worker_count} to the queue size because workers might still be
+     // processing units that have already been popped from the queue.
+     return std::min(flag_limit, worker_count + queue_->size());
+@@ -184,7 +184,7 @@ void CreateMapForType(Isolate* isolate, const WasmModule* module,
+   uint32_t canonical_type_index =
+       module->isorecursive_canonical_type_ids[type_index];
+ 
+-  if (FLAG_wasm_type_canonicalization) {
++  if (v8_flags.wasm_type_canonicalization) {
+     // Try to find the canonical map for this type in the isolate store.
+     canonical_rtts = handle(isolate->heap()->wasm_canonical_rtts(), isolate);
+     DCHECK_GT(static_cast<uint32_t>(canonical_rtts->length()),
+@@ -220,7 +220,7 @@ void CreateMapForType(Isolate* isolate, const WasmModule* module,
+       map = CreateFuncRefMap(isolate, module, rtt_parent, instance);
+       break;
+   }
+-  if (FLAG_wasm_type_canonicalization) {
++  if (v8_flags.wasm_type_canonicalization) {
+     canonical_rtts->Set(canonical_type_index, HeapObjectReference::Weak(*map));
+   }
+   maps->set(type_index, *map);
+@@ -453,7 +453,7 @@ MaybeHandle<WasmInstanceObject> InstantiateToInstanceObject(
+   auto instance = builder.Build();
+   if (!instance.is_null()) {
+     // Post tasks for lazy compilation metrics before we call the start function
+-    if (FLAG_wasm_lazy_compilation &&
++    if (v8_flags.wasm_lazy_compilation &&
+         module_object->native_module()
+             ->ShouldLazyCompilationMetricsBeReported()) {
+       V8::GetCurrentPlatform()->CallDelayedOnWorkerThread(
+@@ -656,7 +656,7 @@ MaybeHandle<WasmInstanceObject> InstanceBuilder::Build() {
+   //--------------------------------------------------------------------------
+   // Set up table storage space.
+   //--------------------------------------------------------------------------
+-  if (FLAG_wasm_type_canonicalization) {
++  if (v8_flags.wasm_type_canonicalization) {
+     instance->set_isorecursive_canonical_types(
+         module_->isorecursive_canonical_type_ids.data());
+   }
+@@ -664,11 +664,11 @@ MaybeHandle<WasmInstanceObject> InstanceBuilder::Build() {
+   {
+     for (int i = 0; i < table_count; i++) {
+       const WasmTable& table = module_->tables[i];
+-      if (table.initial_size > FLAG_wasm_max_table_size) {
++      if (table.initial_size > v8_flags.wasm_max_table_size) {
+         thrower_->RangeError(
+             "initial table size (%u elements) is larger than implementation "
+             "limit (%u elements)",
+-            table.initial_size, FLAG_wasm_max_table_size.value());
++            table.initial_size, v8_flags.wasm_max_table_size.value());
+         return {};
+       }
+     }
+@@ -718,7 +718,7 @@ MaybeHandle<WasmInstanceObject> InstanceBuilder::Build() {
+   // list.
+   //--------------------------------------------------------------------------
+   if (enabled_.has_gc()) {
+-    if (FLAG_wasm_type_canonicalization &&
++    if (v8_flags.wasm_type_canonicalization &&
+         module_->isorecursive_canonical_type_ids.size() > 0) {
+       uint32_t maximum_canonical_type_index =
+           *std::max_element(module_->isorecursive_canonical_type_ids.begin(),
+@@ -739,7 +739,7 @@ MaybeHandle<WasmInstanceObject> InstanceBuilder::Build() {
+   //--------------------------------------------------------------------------
+   // Allocate type feedback vectors for functions.
+   //--------------------------------------------------------------------------
+-  if (FLAG_wasm_speculative_inlining) {
++  if (v8_flags.wasm_speculative_inlining) {
+     int num_functions = static_cast<int>(module_->num_declared_functions);
+     Handle<FixedArray> vectors =
+         isolate_->factory()->NewFixedArray(num_functions, AllocationType::kOld);
+@@ -749,7 +749,7 @@ MaybeHandle<WasmInstanceObject> InstanceBuilder::Build() {
+       int slots =
+           base::Relaxed_Load(&module_->functions[func_index].feedback_slots);
+       if (slots == 0) continue;
+-      if (FLAG_trace_wasm_speculative_inlining) {
++      if (v8_flags.trace_wasm_speculative_inlining) {
+         PrintF("[Function %d (declared %d): allocating %d feedback slots]\n",
+                func_index, i, slots);
+       }
+@@ -788,7 +788,7 @@ MaybeHandle<WasmInstanceObject> InstanceBuilder::Build() {
+   //--------------------------------------------------------------------------
+   // Initialize non-defaultable tables.
+   //--------------------------------------------------------------------------
+-  if (FLAG_experimental_wasm_typed_funcref) {
++  if (v8_flags.experimental_wasm_typed_funcref) {
+     SetTableInitialValues(instance);
+   }
+ 
+@@ -1258,12 +1258,12 @@ bool InstanceBuilder::InitializeImportedIndirectFunctionTable(
+     const WasmFunction& function = target_module->functions[function_index];
+ 
+     // Look up the signature's canonical id. In the case of
+-    // !FLAG_wasm_type_canonicalization, if there is no canonical id, then the
+-    // signature does not appear at all in this module, so putting {-1} in the
+-    // table will cause checks to always fail.
++    // !v8_flags.wasm_type_canonicalization, if there is no canonical id, then
++    // the signature does not appear at all in this module, so putting {-1} in
++    // the table will cause checks to always fail.
+     FunctionTargetAndRef entry(target_instance, function_index);
+     uint32_t canonicalized_sig_index =
+-        FLAG_wasm_type_canonicalization
++        v8_flags.wasm_type_canonicalization
+             ? target_module->isorecursive_canonical_type_ids[function.sig_index]
+             : module_->signature_map.Find(*function.sig);
+     instance->GetIndirectFunctionTable(isolate_, table_index)
+diff --git a/src/wasm/stacks.h b/src/wasm/stacks.h
+index b5626066a33..c451ccec962 100644
+--- a/src/wasm/stacks.h
++++ b/src/wasm/stacks.h
+@@ -42,7 +42,7 @@ class StackMemory {
+   }
+ 
+   ~StackMemory() {
+-    if (FLAG_trace_wasm_stack_switching) {
++    if (v8_flags.trace_wasm_stack_switching) {
+       PrintF("Delete stack #%d\n", id_);
+     }
+     PageAllocator* allocator = GetPlatformPageAllocator();
+@@ -95,7 +95,7 @@ class StackMemory {
+     limit_ = static_cast<byte*>(
+         allocator->AllocatePages(nullptr, size_, allocator->AllocatePageSize(),
+                                  PageAllocator::kReadWrite));
+-    if (FLAG_trace_wasm_stack_switching) {
++    if (v8_flags.trace_wasm_stack_switching) {
+       PrintF("Allocate stack #%d\n", id_);
+     }
+   }
+@@ -104,7 +104,7 @@ class StackMemory {
+   StackMemory(Isolate* isolate, byte* limit)
+       : isolate_(isolate),
+         limit_(limit),
+-        size_(FLAG_stack_size * KB),
++        size_(v8_flags.stack_size * KB),
+         owned_(false) {
+     id_ = 0;
+   }
+diff --git a/src/wasm/streaming-decoder.cc b/src/wasm/streaming-decoder.cc
+index dc1a2e5b2ce..5d7f25fdda3 100644
+--- a/src/wasm/streaming-decoder.cc
++++ b/src/wasm/streaming-decoder.cc
+@@ -13,9 +13,9 @@
+ #include "src/wasm/wasm-objects.h"
+ #include "src/wasm/wasm-result.h"
+ 
+-#define TRACE_STREAMING(...)                            \
+-  do {                                                  \
+-    if (FLAG_trace_wasm_streaming) PrintF(__VA_ARGS__); \
++#define TRACE_STREAMING(...)                                \
++  do {                                                      \
++    if (v8_flags.trace_wasm_streaming) PrintF(__VA_ARGS__); \
+   } while (false)
+ 
+ namespace v8 {
+diff --git a/src/wasm/wasm-code-manager.cc b/src/wasm/wasm-code-manager.cc
+index 549a0c6690a..41a63d41f7d 100644
+--- a/src/wasm/wasm-code-manager.cc
++++ b/src/wasm/wasm-code-manager.cc
+@@ -46,9 +46,9 @@
+ #include "src/diagnostics/unwinding-info-win64.h"
+ #endif  // V8_OS_WIN64
+ 
+-#define TRACE_HEAP(...)                                   \
+-  do {                                                    \
+-    if (FLAG_trace_wasm_native_heap) PrintF(__VA_ARGS__); \
++#define TRACE_HEAP(...)                                       \
++  do {                                                        \
++    if (v8_flags.trace_wasm_native_heap) PrintF(__VA_ARGS__); \
+   } while (false)
+ 
+ namespace v8 {
+@@ -151,7 +151,7 @@ base::AddressRegion DisjointAllocationPool::AllocateInRegion(
+ }
+ 
+ Address WasmCode::constant_pool() const {
+-  if (FLAG_enable_embedded_constant_pool) {
++  if (v8_flags.enable_embedded_constant_pool) {
+     if (constant_pool_offset_ < code_comments_offset_) {
+       return instruction_start() + constant_pool_offset_;
+     }
+@@ -352,10 +352,11 @@ void WasmCode::MaybePrint() const {
+   // Determines whether flags want this code to be printed.
+   bool function_index_matches =
+       (!IsAnonymous() &&
+-       FLAG_print_wasm_code_function_index == static_cast<int>(index()));
+-  if (FLAG_print_code || (kind() == kWasmFunction
+-                              ? (FLAG_print_wasm_code || function_index_matches)
+-                              : FLAG_print_wasm_stub_code.value())) {
++       v8_flags.print_wasm_code_function_index == static_cast<int>(index()));
++  if (v8_flags.print_code ||
++      (kind() == kWasmFunction
++           ? (v8_flags.print_wasm_code || function_index_matches)
++           : v8_flags.print_wasm_stub_code.value())) {
+     std::string name = DebugName();
+     Print(name.c_str());
+   }
+@@ -518,7 +519,7 @@ constexpr size_t WasmCodeAllocator::kMaxCodeSpaceSize;
+ 
+ WasmCodeAllocator::WasmCodeAllocator(std::shared_ptr<Counters> async_counters)
+     : protect_code_memory_(!V8_HAS_PTHREAD_JIT_WRITE_PROTECT &&
+-                           FLAG_wasm_write_protect_code_memory &&
++                           v8_flags.wasm_write_protect_code_memory &&
+                            !WasmCodeManager::MemoryProtectionKeysEnabled()),
+       async_counters_(std::move(async_counters)) {
+   owned_code_space_.reserve(4);
+@@ -775,7 +776,7 @@ base::Vector<byte> WasmCodeAllocator::AllocateForCodeInRegion(
+     }
+     committed_code_space_.fetch_add(commit_end - commit_start);
+     // Committed code cannot grow bigger than maximum code space size.
+-    DCHECK_LE(committed_code_space_.load(), FLAG_wasm_max_code_space * MB);
++    DCHECK_LE(committed_code_space_.load(), v8_flags.wasm_max_code_space * MB);
+     if (protect_code_memory_) {
+       DCHECK_LT(0, writers_count_);
+       InsertIntoWritableRegions({commit_start, commit_end - commit_start},
+@@ -961,8 +962,8 @@ void WasmCodeAllocator::InsertIntoWritableRegions(base::AddressRegion region,
+ 
+ namespace {
+ BoundsCheckStrategy GetBoundsChecks(const WasmModule* module) {
+-  if (!FLAG_wasm_bounds_checks) return kNoBoundsChecks;
+-  if (FLAG_wasm_enforce_bounds_checks) return kExplicitBoundsChecks;
++  if (!v8_flags.wasm_bounds_checks) return kNoBoundsChecks;
++  if (v8_flags.wasm_enforce_bounds_checks) return kExplicitBoundsChecks;
+   // We do not have trap handler support for memory64 yet.
+   if (module->is_memory64) return kExplicitBoundsChecks;
+   if (trap_handler::IsTrapHandlerEnabled()) return kTrapHandler;
+@@ -1001,7 +1002,7 @@ NativeModule::NativeModule(const WasmFeatures& enabled,
+         std::make_unique<uint32_t[]>(module_->num_declared_functions);
+ 
+     std::fill_n(tiering_budgets_.get(), module_->num_declared_functions,
+-                FLAG_wasm_tiering_budget);
++                v8_flags.wasm_tiering_budget);
+   }
+   // Even though there cannot be another thread using this object (since we are
+   // just constructing it), we need to hold the mutex to fulfill the
+@@ -1886,7 +1887,7 @@ NativeModule::~NativeModule() {
+ }
+ 
+ WasmCodeManager::WasmCodeManager()
+-    : max_committed_code_space_(FLAG_wasm_max_code_space * MB),
++    : max_committed_code_space_(v8_flags.wasm_max_code_space * MB),
+       critical_committed_code_space_(max_committed_code_space_ / 2) {}
+ 
+ WasmCodeManager::~WasmCodeManager() {
+@@ -1898,13 +1899,13 @@ WasmCodeManager::~WasmCodeManager() {
+ // static
+ bool WasmCodeManager::CanRegisterUnwindInfoForNonABICompliantCodeRange() {
+   return win64_unwindinfo::CanRegisterUnwindInfoForNonABICompliantCodeRange() &&
+-         FLAG_win64_unwinding_info;
++         v8_flags.win64_unwinding_info;
+ }
+ #endif  // V8_OS_WIN64
+ 
+ void WasmCodeManager::Commit(base::AddressRegion region) {
+   // TODO(v8:8462): Remove eager commit once perf supports remapping.
+-  if (FLAG_perf_prof) return;
++  if (v8_flags.perf_prof) return;
+   DCHECK(IsAligned(region.begin(), CommitPageSize()));
+   DCHECK(IsAligned(region.size(), CommitPageSize()));
+   // Reserve the size. Use CAS loop to avoid overflow on
+@@ -1926,10 +1927,10 @@ void WasmCodeManager::Commit(base::AddressRegion region) {
+       break;
+     }
+   }
+-  // Even when we employ W^X with FLAG_wasm_write_protect_code_memory == true,
+-  // code pages need to be initially allocated with RWX permission because of
+-  // concurrent compilation/execution. For this reason there is no distinction
+-  // here based on FLAG_wasm_write_protect_code_memory.
++  // Even when we employ W^X with v8_flags.wasm_write_protect_code_memory ==
++  // true, code pages need to be initially allocated with RWX permission because
++  // of concurrent compilation/execution. For this reason there is no
++  // distinction here based on v8_flags.wasm_write_protect_code_memory.
+   // TODO(dlehmann): This allocates initially as writable and executable, and
+   // as such is not safe-by-default. In particular, if
+   // {WasmCodeAllocator::SetWritable(false)} is never called afterwards (e.g.,
+@@ -1972,7 +1973,7 @@ void WasmCodeManager::Commit(base::AddressRegion region) {
+ 
+ void WasmCodeManager::Decommit(base::AddressRegion region) {
+   // TODO(v8:8462): Remove this once perf supports remapping.
+-  if (FLAG_perf_prof) return;
++  if (v8_flags.perf_prof) return;
+   PageAllocator* allocator = GetPlatformPageAllocator();
+   DCHECK(IsAligned(region.begin(), allocator->CommitPageSize()));
+   DCHECK(IsAligned(region.size(), allocator->CommitPageSize()));
+@@ -2001,7 +2002,7 @@ VirtualMemory WasmCodeManager::TryAllocate(size_t size, void* hint) {
+ 
+   // When we start exposing Wasm in jitless mode, then the jitless flag
+   // will have to determine whether we set kMapAsJittable or not.
+-  DCHECK(!FLAG_jitless);
++  DCHECK(!v8_flags.jitless);
+   VirtualMemory mem(page_allocator, size, hint, allocate_page_size,
+                     JitPermission::kMapAsJittable);
+   if (!mem.IsReserved()) return {};
+@@ -2009,7 +2010,7 @@ VirtualMemory WasmCodeManager::TryAllocate(size_t size, void* hint) {
+              mem.end(), mem.size());
+ 
+   // TODO(v8:8462): Remove eager commit once perf supports remapping.
+-  if (FLAG_perf_prof) {
++  if (v8_flags.perf_prof) {
+     SetPermissions(GetPlatformPageAllocator(), mem.address(), mem.size(),
+                    PageAllocator::kReadWriteExecute);
+   }
+@@ -2164,7 +2165,8 @@ bool WasmCodeManager::HasMemoryProtectionKeySupport() {
+ 
+ // static
+ bool WasmCodeManager::MemoryProtectionKeysEnabled() {
+-  return HasMemoryProtectionKeySupport() && FLAG_wasm_memory_protection_keys;
++  return HasMemoryProtectionKeySupport() &&
++         v8_flags.wasm_memory_protection_keys;
+ }
+ 
+ // static
+@@ -2246,9 +2248,10 @@ std::shared_ptr<NativeModule> WasmCodeManager::NewNativeModule(
+ 
+   // The '--wasm-max-initial-code-space-reservation' testing flag can be used to
+   // reduce the maximum size of the initial code space reservation (in MB).
+-  if (FLAG_wasm_max_initial_code_space_reservation > 0) {
++  if (v8_flags.wasm_max_initial_code_space_reservation > 0) {
+     size_t flag_max_bytes =
+-        static_cast<size_t>(FLAG_wasm_max_initial_code_space_reservation) * MB;
++        static_cast<size_t>(v8_flags.wasm_max_initial_code_space_reservation) *
++        MB;
+     if (flag_max_bytes < code_vmem_size) code_vmem_size = flag_max_bytes;
+   }
+ 
+@@ -2277,7 +2280,8 @@ std::shared_ptr<NativeModule> WasmCodeManager::NewNativeModule(
+   size_t size = code_space.size();
+   Address end = code_space.end();
+   std::shared_ptr<NativeModule> ret;
+-  new NativeModule(enabled, DynamicTiering{FLAG_wasm_dynamic_tiering.value()},
++  new NativeModule(enabled,
++                   DynamicTiering{v8_flags.wasm_dynamic_tiering.value()},
+                    std::move(code_space), std::move(module),
+                    isolate->async_counters(), &ret);
+   // The constructor initialized the shared_ptr.
+@@ -2532,7 +2536,7 @@ void WasmCodeManager::FreeNativeModule(
+ 
+   DCHECK(IsAligned(committed_size, CommitPageSize()));
+   // TODO(v8:8462): Remove this once perf supports remapping.
+-  if (!FLAG_perf_prof) {
++  if (!v8_flags.perf_prof) {
+     size_t old_committed =
+         total_committed_code_space_.fetch_sub(committed_size);
+     DCHECK_LE(committed_size, old_committed);
+diff --git a/src/wasm/wasm-engine.cc b/src/wasm/wasm-engine.cc
+index 66d4eab1349..68e99bad6d5 100644
+--- a/src/wasm/wasm-engine.cc
++++ b/src/wasm/wasm-engine.cc
+@@ -38,9 +38,9 @@ namespace v8 {
+ namespace internal {
+ namespace wasm {
+ 
+-#define TRACE_CODE_GC(...)                                         \
+-  do {                                                             \
+-    if (FLAG_trace_wasm_code_gc) PrintF("[wasm-gc] " __VA_ARGS__); \
++#define TRACE_CODE_GC(...)                                             \
++  do {                                                                 \
++    if (v8_flags.trace_wasm_code_gc) PrintF("[wasm-gc] " __VA_ARGS__); \
+   } while (false)
+ 
+ namespace {
+@@ -182,7 +182,7 @@ class WeakScriptHandle {
+ 
+ std::shared_ptr<NativeModule> NativeModuleCache::MaybeGetNativeModule(
+     ModuleOrigin origin, base::Vector<const uint8_t> wire_bytes) {
+-  if (!FLAG_wasm_native_module_cache_enabled) return nullptr;
++  if (!v8_flags.wasm_native_module_cache_enabled) return nullptr;
+   if (origin != kWasmOrigin) return nullptr;
+   base::MutexGuard lock(&mutex_);
+   size_t prefix_hash = PrefixHash(wire_bytes);
+@@ -241,7 +241,7 @@ void NativeModuleCache::StreamingCompilationFailed(size_t prefix_hash) {
+ std::shared_ptr<NativeModule> NativeModuleCache::Update(
+     std::shared_ptr<NativeModule> native_module, bool error) {
+   DCHECK_NOT_NULL(native_module);
+-  if (!FLAG_wasm_native_module_cache_enabled) return native_module;
++  if (!v8_flags.wasm_native_module_cache_enabled) return native_module;
+   if (native_module->module()->origin != kWasmOrigin) return native_module;
+   base::Vector<const uint8_t> wire_bytes = native_module->wire_bytes();
+   DCHECK(!wire_bytes.empty());
+@@ -274,7 +274,7 @@ std::shared_ptr<NativeModule> NativeModuleCache::Update(
+ }
+ 
+ void NativeModuleCache::Erase(NativeModule* native_module) {
+-  if (!FLAG_wasm_native_module_cache_enabled) return;
++  if (!v8_flags.wasm_native_module_cache_enabled) return;
+   if (native_module->module()->origin != kWasmOrigin) return;
+   // Happens in some tests where bytes are set directly.
+   if (native_module->wire_bytes().empty()) return;
+@@ -627,7 +627,7 @@ void WasmEngine::AsyncCompile(
+     const char* api_method_name_for_errors) {
+   int compilation_id = next_compilation_id_.fetch_add(1);
+   TRACE_EVENT1("v8.wasm", "wasm.AsyncCompile", "id", compilation_id);
+-  if (!FLAG_wasm_async_compilation) {
++  if (!v8_flags.wasm_async_compilation) {
+     // Asynchronous compilation disabled; fall back on synchronous compilation.
+     ErrorThrower thrower(isolate, api_method_name_for_errors);
+     MaybeHandle<WasmModuleObject> module_object;
+@@ -650,7 +650,7 @@ void WasmEngine::AsyncCompile(
+     return;
+   }
+ 
+-  if (FLAG_wasm_test_streaming) {
++  if (v8_flags.wasm_test_streaming) {
+     std::shared_ptr<StreamingDecoder> streaming_decoder =
+         StartStreamingCompilation(
+             isolate, enabled, handle(isolate->context(), isolate),
+@@ -678,7 +678,7 @@ std::shared_ptr<StreamingDecoder> WasmEngine::StartStreamingCompilation(
+   int compilation_id = next_compilation_id_.fetch_add(1);
+   TRACE_EVENT1("v8.wasm", "wasm.StartStreamingCompilation", "id",
+                compilation_id);
+-  if (FLAG_wasm_async_compilation) {
++  if (v8_flags.wasm_async_compilation) {
+     AsyncCompileJob* job = CreateAsyncCompileJob(
+         isolate, enabled, std::unique_ptr<byte[]>(nullptr), 0, context,
+         api_method_name, std::move(resolver), compilation_id);
+@@ -1146,7 +1146,7 @@ std::shared_ptr<NativeModule> WasmEngine::NewNativeModule(
+     Isolate* isolate, const WasmFeatures& enabled,
+     std::shared_ptr<const WasmModule> module, size_t code_size_estimate) {
+ #ifdef V8_ENABLE_WASM_GDB_REMOTE_DEBUGGING
+-  if (FLAG_wasm_gdb_remote && !gdb_server_) {
++  if (v8_flags.wasm_gdb_remote && !gdb_server_) {
+     gdb_server_ = gdb_server::GdbServer::Create();
+     gdb_server_->AddIsolate(isolate);
+   }
+@@ -1342,7 +1342,7 @@ void ReportLiveCodeFromFrameForGC(
+ void WasmEngine::ReportLiveCodeFromStackForGC(Isolate* isolate) {
+   wasm::WasmCodeRefScope code_ref_scope;
+   std::unordered_set<wasm::WasmCode*> live_wasm_code;
+-  if (FLAG_experimental_wasm_stack_switching) {
++  if (v8_flags.experimental_wasm_stack_switching) {
+     wasm::StackMemory* current = isolate->wasm_stacks();
+     DCHECK_NOT_NULL(current);
+     do {
+@@ -1379,10 +1379,10 @@ bool WasmEngine::AddPotentiallyDeadCode(WasmCode* code) {
+   auto added = info->potentially_dead_code.insert(code);
+   if (!added.second) return false;  // An entry already existed.
+   new_potentially_dead_code_size_ += code->instructions().size();
+-  if (FLAG_wasm_code_gc) {
++  if (v8_flags.wasm_code_gc) {
+     // Trigger a GC if 64kB plus 10% of committed code are potentially dead.
+     size_t dead_code_limit =
+-        FLAG_stress_wasm_code_gc
++        v8_flags.stress_wasm_code_gc
+             ? 0
+             : 64 * KB + GetWasmCodeManager()->committed_code_space() / 10;
+     if (new_potentially_dead_code_size_ > dead_code_limit) {
+@@ -1515,7 +1515,7 @@ void WasmEngine::SampleCatchEvent(Isolate* isolate) {
+ void WasmEngine::TriggerGC(int8_t gc_sequence_index) {
+   DCHECK(!mutex_.TryLock());
+   DCHECK_NULL(current_gc_info_);
+-  DCHECK(FLAG_wasm_code_gc);
++  DCHECK(v8_flags.wasm_code_gc);
+   new_potentially_dead_code_size_ = 0;
+   current_gc_info_.reset(new CurrentGCInfo(gc_sequence_index));
+   // Add all potentially dead code to this GC, and trigger a GC task in each
+@@ -1639,7 +1639,7 @@ uint32_t max_mem32_pages() {
+       "Wasm memories must not be bigger than JSArrayBuffers");
+   static_assert(kV8MaxWasmMemory32Pages <= kMaxUInt32);
+   return std::min(uint32_t{kV8MaxWasmMemory32Pages},
+-                  FLAG_wasm_max_mem_pages.value());
++                  v8_flags.wasm_max_mem_pages.value());
+ }
+ 
+ uint32_t max_mem64_pages() {
+@@ -1648,13 +1648,13 @@ uint32_t max_mem64_pages() {
+       "Wasm memories must not be bigger than JSArrayBuffers");
+   static_assert(kV8MaxWasmMemory64Pages <= kMaxUInt32);
+   return std::min(uint32_t{kV8MaxWasmMemory64Pages},
+-                  FLAG_wasm_max_mem_pages.value());
++                  v8_flags.wasm_max_mem_pages.value());
+ }
+ 
+ // {max_table_init_entries} is declared in wasm-limits.h.
+ uint32_t max_table_init_entries() {
+   return std::min(uint32_t{kV8MaxWasmTableInitEntries},
+-                  FLAG_wasm_max_table_size.value());
++                  v8_flags.wasm_max_table_size.value());
+ }
+ 
+ // {max_module_size} is declared in wasm-limits.h.
+@@ -1663,7 +1663,7 @@ size_t max_module_size() {
+   constexpr size_t kMin = 16;
+   constexpr size_t kMax = RoundDown<kSystemPointerSize>(size_t{kMaxInt});
+   static_assert(kMin <= kV8MaxWasmModuleSize && kV8MaxWasmModuleSize <= kMax);
+-  return std::clamp(FLAG_wasm_max_module_size.value(), kMin, kMax);
++  return std::clamp(v8_flags.wasm_max_module_size.value(), kMin, kMax);
+ }
+ 
+ #undef TRACE_CODE_GC
+diff --git a/src/wasm/wasm-features.cc b/src/wasm/wasm-features.cc
+index bedafd1d250..e24c6b910de 100644
+--- a/src/wasm/wasm-features.cc
++++ b/src/wasm/wasm-features.cc
+@@ -15,7 +15,7 @@ namespace wasm {
+ WasmFeatures WasmFeatures::FromFlags() {
+   WasmFeatures features = WasmFeatures::None();
+ #define FLAG_REF(feat, ...) \
+-  if (FLAG_experimental_wasm_##feat) features.Add(kFeature_##feat);
++  if (v8_flags.experimental_wasm_##feat) features.Add(kFeature_##feat);
+   FOREACH_WASM_FEATURE_FLAG(FLAG_REF)
+ #undef FLAG_REF
+ #define NON_FLAG_REF(feat, ...) features.Add(kFeature_##feat);
+diff --git a/src/wasm/wasm-js.cc b/src/wasm/wasm-js.cc
+index b58b3da3830..0695b16607d 100644
+--- a/src/wasm/wasm-js.cc
++++ b/src/wasm/wasm-js.cc
+@@ -2037,7 +2037,7 @@ void WebAssemblyFunction(const v8::FunctionCallbackInfo<v8::Value>& args) {
+ 
+   i::wasm::Suspend suspend = i::wasm::kNoSuspend;
+   i::wasm::Promise promise = i::wasm::kNoPromise;
+-  if (i::FLAG_experimental_wasm_stack_switching) {
++  if (i::v8_flags.experimental_wasm_stack_switching) {
+     // Optional third argument for JS Promise Integration.
+     if (!args[2]->IsNullOrUndefined() && !args[2]->IsObject()) {
+       thrower.TypeError(
+@@ -2992,7 +2992,7 @@ void WasmJs::Install(Isolate* isolate, bool exposed_on_global_object) {
+ 
+   // TODO(tebbi): Put this behind its own flag once --wasm-gc-js-interop gets
+   // closer to shipping.
+-  if (FLAG_wasm_gc_js_interop) {
++  if (v8_flags.wasm_gc_js_interop) {
+     SimpleInstallFunction(
+         isolate, webassembly, "experimentalConvertArrayToString",
+         Builtin::kExperimentalWasmConvertArrayToString, 0, true);
+@@ -3001,7 +3001,7 @@ void WasmJs::Install(Isolate* isolate, bool exposed_on_global_object) {
+         Builtin::kExperimentalWasmConvertStringToArray, 0, true);
+   }
+ 
+-  if (FLAG_wasm_test_streaming) {
++  if (v8_flags.wasm_test_streaming) {
+     isolate->set_wasm_streaming_callback(WasmStreamingCallbackForTesting);
+   }
+ 
+diff --git a/src/wasm/wasm-limits.h b/src/wasm/wasm-limits.h
+index 09e81623ad6..a083d606e00 100644
+--- a/src/wasm/wasm-limits.h
++++ b/src/wasm/wasm-limits.h
+@@ -54,7 +54,8 @@ constexpr size_t kV8MaxWasmFunctionLocals = 50000;
+ constexpr size_t kV8MaxWasmFunctionParams = 1000;
+ constexpr size_t kV8MaxWasmFunctionReturns = 1000;
+ constexpr size_t kV8MaxWasmFunctionBrTableSize = 65520;
+-// Don't use this limit directly, but use the value of FLAG_wasm_max_table_size.
++// Don't use this limit directly, but use the value of
++// v8_flags.wasm_max_table_size.
+ constexpr size_t kV8MaxWasmTableSize = 10000000;
+ constexpr size_t kV8MaxWasmTableInitEntries = 10000000;
+ constexpr size_t kV8MaxWasmTables = 100000;
+diff --git a/src/wasm/wasm-module-builder.cc b/src/wasm/wasm-module-builder.cc
+index 6e59a916506..0e485bd09b1 100644
+--- a/src/wasm/wasm-module-builder.cc
++++ b/src/wasm/wasm-module-builder.cc
+@@ -344,7 +344,7 @@ uint32_t WasmModuleBuilder::IncreaseTableMinSize(uint32_t table_index,
+                                                  uint32_t count) {
+   DCHECK_LT(table_index, tables_.size());
+   uint32_t old_min_size = tables_[table_index].min_size;
+-  if (count > FLAG_wasm_max_table_size - old_min_size) {
++  if (count > v8_flags.wasm_max_table_size - old_min_size) {
+     return std::numeric_limits<uint32_t>::max();
+   }
+   tables_[table_index].min_size = old_min_size + count;
+diff --git a/src/wasm/wasm-objects.cc b/src/wasm/wasm-objects.cc
+index 8ae41cd0c1b..53f06f96bd0 100644
+--- a/src/wasm/wasm-objects.cc
++++ b/src/wasm/wasm-objects.cc
+@@ -220,9 +220,9 @@ int WasmTableObject::Grow(Isolate* isolate, Handle<WasmTableObject> table,
+   // Check if growing by {count} is valid.
+   uint32_t max_size;
+   if (!table->maximum_length().ToUint32(&max_size)) {
+-    max_size = FLAG_wasm_max_table_size;
++    max_size = v8_flags.wasm_max_table_size;
+   }
+-  max_size = std::min(max_size, FLAG_wasm_max_table_size.value());
++  max_size = std::min(max_size, v8_flags.wasm_max_table_size.value());
+   DCHECK_LE(old_size, max_size);
+   if (max_size - old_size < count) return -1;
+ 
+@@ -284,8 +284,8 @@ int WasmTableObject::Grow(Isolate* isolate, Handle<WasmTableObject> table,
+       case wasm::HeapType::kArray:
+       case wasm::HeapType::kAny:
+       case wasm::HeapType::kI31:
+-        if (!i::FLAG_wasm_gc_js_interop && entry_repr == ValueRepr::kJS) {
+-          i::wasm::TryUnpackObjectWrapper(isolate, init_value);
++        if (!v8_flags.wasm_gc_js_interop && entry_repr == ValueRepr::kJS) {
++          wasm::TryUnpackObjectWrapper(isolate, init_value);
+         }
+         break;
+       case wasm::HeapType::kBottom:
+@@ -392,8 +392,8 @@ void WasmTableObject::Set(Isolate* isolate, Handle<WasmTableObject> table,
+     case wasm::HeapType::kArray:
+     case wasm::HeapType::kAny:
+     case wasm::HeapType::kI31:
+-      if (!i::FLAG_wasm_gc_js_interop && entry_repr == ValueRepr::kJS) {
+-        i::wasm::TryUnpackObjectWrapper(isolate, entry);
++      if (!v8_flags.wasm_gc_js_interop && entry_repr == ValueRepr::kJS) {
++        wasm::TryUnpackObjectWrapper(isolate, entry);
+       }
+       entries->set(entry_index, *entry);
+       return;
+@@ -441,7 +441,7 @@ Handle<Object> WasmTableObject::Get(Isolate* isolate,
+     case wasm::HeapType::kData:
+     case wasm::HeapType::kArray:
+     case wasm::HeapType::kAny:
+-      if (as_repr == ValueRepr::kJS && !FLAG_wasm_gc_js_interop &&
++      if (as_repr == ValueRepr::kJS && !v8_flags.wasm_gc_js_interop &&
+           entry->IsWasmObject()) {
+         // Transform wasm object into JS-compliant representation.
+         Handle<JSObject> wrapper =
+@@ -540,7 +540,7 @@ void WasmTableObject::UpdateDispatchTables(Isolate* isolate,
+         dispatch_tables.get(i + kDispatchTableInstanceOffset));
+     const WasmModule* module = instance.module();
+     int sig_id;
+-    if (FLAG_wasm_type_canonicalization) {
++    if (v8_flags.wasm_type_canonicalization) {
+       sig_id = target_instance.module()
+                    ->isorecursive_canonical_type_ids[original_sig_id];
+     } else {
+@@ -641,8 +641,8 @@ void WasmTableObject::UpdateDispatchTables(
+     }
+     // Note that {SignatureMap::Find} may return {-1} if the signature is
+     // not found; it will simply never match any check.
+-    // It is safe to use this even when FLAG_wasm_type_canonicalization, as the
+-    // C API cannot refer to user-defined types.
++    // It is safe to use this even when v8_flags.wasm_type_canonicalization, as
++    // the C API cannot refer to user-defined types.
+     auto sig_id = instance->module()->signature_map.Find(sig);
+     instance->GetIndirectFunctionTable(isolate, table_index)
+         ->Set(entry_index, sig_id, wasm_code->instruction_start(),
+@@ -833,7 +833,7 @@ void SetInstanceMemory(Handle<WasmInstanceObject> instance,
+   instance->SetRawMemory(reinterpret_cast<byte*>(buffer->backing_store()),
+                          buffer->byte_length());
+ #if DEBUG
+-  if (!FLAG_mock_arraybuffer_allocator) {
++  if (!v8_flags.mock_arraybuffer_allocator) {
+     // To flush out bugs earlier, in DEBUG mode, check that all pages of the
+     // memory are accessible by reading and writing one byte on each page.
+     // Don't do this if the mock ArrayBuffer allocator is enabled.
+@@ -994,7 +994,7 @@ int32_t WasmMemoryObject::Grow(Isolate* isolate,
+     if (!result_inplace.has_value()) {
+       // There are different limits per platform, thus crash if the correctness
+       // fuzzer is running.
+-      if (FLAG_correctness_fuzzer_suppressions) {
++      if (v8_flags.correctness_fuzzer_suppressions) {
+         FATAL("could not grow wasm memory");
+       }
+       return -1;
+@@ -1054,7 +1054,7 @@ int32_t WasmMemoryObject::Grow(Isolate* isolate,
+                                         : WasmMemoryFlag::kWasmMemory32);
+   if (!new_backing_store) {
+     // Crash on out-of-memory if the correctness fuzzer is running.
+-    if (FLAG_correctness_fuzzer_suppressions) {
++    if (v8_flags.correctness_fuzzer_suppressions) {
+       FATAL("could not grow wasm memory");
+     }
+     return -1;
+@@ -1513,8 +1513,8 @@ void WasmInstanceObject::ImportWasmJSFunctionIntoTable(
+   Zone zone(isolate->allocator(), ZONE_NAME);
+   const wasm::FunctionSig* sig = js_function->GetSignature(&zone);
+   // It is safe to look up the signature this way even if
+-  // FLAG_wasm_type_canonicalization: Signatures created in the JS API cannot
+-  // contain user-defined (module-dependent) types.
++  // v8_flags.wasm_type_canonicalization: Signatures created in the JS API
++  // cannot contain user-defined (module-dependent) types.
+   auto sig_id = instance->module()->signature_map.Find(*sig);
+ 
+   // Compile a wrapper for the target callable.
+@@ -1564,7 +1564,7 @@ void WasmInstanceObject::ImportWasmJSFunctionIntoTable(
+   Handle<WasmApiFunctionRef> ref =
+       isolate->factory()->NewWasmApiFunctionRef(callable, suspend, instance);
+   uint32_t canonicalized_sig_id =
+-      FLAG_wasm_type_canonicalization && sig_id >= 0
++      v8_flags.wasm_type_canonicalization && sig_id >= 0
+           ? instance->module()->isorecursive_canonical_type_ids[sig_id]
+           : sig_id;
+ 
+@@ -2370,7 +2370,7 @@ bool TypecheckJSObject(Isolate* isolate, const WasmModule* module,
+         case HeapType::kI31: {
+           // TODO(7748): Change this when we have a decision on the JS API for
+           // structs/arrays.
+-          if (!FLAG_wasm_gc_js_interop) {
++          if (!v8_flags.wasm_gc_js_interop) {
+             // The value can be a struct / array as this function is also used
+             // for checking objects not coming from JS (like data segments).
+             if (!value->IsSmi() && !value->IsWasmStruct() &&
+diff --git a/src/wasm/wasm-serialization.cc b/src/wasm/wasm-serialization.cc
+index 5a06794b077..c30e70f90e9 100644
+--- a/src/wasm/wasm-serialization.cc
++++ b/src/wasm/wasm-serialization.cc
+@@ -50,7 +50,7 @@ class Writer {
+     DCHECK_GE(current_size(), sizeof(T));
+     WriteUnalignedValue(reinterpret_cast<Address>(current_location()), value);
+     pos_ += sizeof(T);
+-    if (FLAG_trace_wasm_serialization) {
++    if (v8_flags.trace_wasm_serialization) {
+       StdoutStream{} << "wrote: " << static_cast<size_t>(value)
+                      << " sized: " << sizeof(T) << std::endl;
+     }
+@@ -62,7 +62,7 @@ class Writer {
+       memcpy(current_location(), v.begin(), v.size());
+       pos_ += v.size();
+     }
+-    if (FLAG_trace_wasm_serialization) {
++    if (v8_flags.trace_wasm_serialization) {
+       StdoutStream{} << "wrote vector of " << v.size() << " elements"
+                      << std::endl;
+     }
+@@ -94,7 +94,7 @@ class Reader {
+     T value =
+         ReadUnalignedValue<T>(reinterpret_cast<Address>(current_location()));
+     pos_ += sizeof(T);
+-    if (FLAG_trace_wasm_serialization) {
++    if (v8_flags.trace_wasm_serialization) {
+       StdoutStream{} << "read: " << static_cast<size_t>(value)
+                      << " sized: " << sizeof(T) << std::endl;
+     }
+@@ -106,7 +106,7 @@ class Reader {
+     DCHECK_GE(current_size(), size);
+     base::Vector<const byte> bytes{pos_, size * sizeof(T)};
+     pos_ += size * sizeof(T);
+-    if (FLAG_trace_wasm_serialization) {
++    if (v8_flags.trace_wasm_serialization) {
+       StdoutStream{} << "read vector of " << size << " elements of size "
+                      << sizeof(T) << " (total size " << size * sizeof(T) << ")"
+                      << std::endl;
+@@ -348,7 +348,7 @@ void NativeModuleSerializer::WriteCode(const WasmCode* code, Writer* writer) {
+     uint32_t budget =
+         native_module->tiering_budget_array()[declared_function_index(
+             native_module->module(), code->index())];
+-    writer->Write(budget == static_cast<uint32_t>(FLAG_wasm_tiering_budget)
++    writer->Write(budget == static_cast<uint32_t>(v8_flags.wasm_tiering_budget)
+                       ? kLazyFunction
+                       : kEagerFunction);
+     return;
+@@ -872,7 +872,7 @@ MaybeHandle<WasmModuleObject> DeserializeNativeModule(
+   auto shared_native_module = wasm_engine->MaybeGetNativeModule(
+       module->origin, owned_wire_bytes.as_vector(), isolate);
+   if (shared_native_module == nullptr) {
+-    const bool dynamic_tiering = FLAG_wasm_dynamic_tiering;
++    const bool dynamic_tiering = v8_flags.wasm_dynamic_tiering;
+     const bool include_liftoff = !dynamic_tiering;
+     size_t code_size_estimate =
+         wasm::WasmCodeManager::EstimateNativeModuleCodeSize(
+diff --git a/src/wasm/wasm-subtyping.cc b/src/wasm/wasm-subtyping.cc
+index 40760c2096e..6c74c35578e 100644
+--- a/src/wasm/wasm-subtyping.cc
++++ b/src/wasm/wasm-subtyping.cc
+@@ -17,7 +17,7 @@ V8_INLINE bool EquivalentIndices(uint32_t index1, uint32_t index2,
+                                  const WasmModule* module1,
+                                  const WasmModule* module2) {
+   DCHECK(index1 != index2 || module1 != module2);
+-  if (!FLAG_wasm_type_canonicalization) return false;
++  if (!v8_flags.wasm_type_canonicalization) return false;
+   return module1->isorecursive_canonical_type_ids[index1] ==
+          module2->isorecursive_canonical_type_ids[index2];
+ }
+@@ -224,7 +224,7 @@ V8_NOINLINE V8_EXPORT_PRIVATE bool IsHeapSubtypeOfImpl(
+     case HeapType::kStringViewIter:
+       // stringref is a subtype of anyref (aka externref) under wasm-gc.
+       return sub_heap == super_heap ||
+-             (FLAG_experimental_wasm_gc && super_heap == HeapType::kAny);
++             (v8_flags.experimental_wasm_gc && super_heap == HeapType::kAny);
+     case HeapType::kBottom:
+       UNREACHABLE();
+     case HeapType::kNone:
+@@ -289,7 +289,7 @@ V8_NOINLINE V8_EXPORT_PRIVATE bool IsHeapSubtypeOfImpl(
+   // equality; here we catch (ref $x) being a subtype of (ref null $x).
+   if (sub_module == super_module && sub_index == super_index) return true;
+ 
+-  if (FLAG_wasm_type_canonicalization) {
++  if (v8_flags.wasm_type_canonicalization) {
+     return GetTypeCanonicalizer()->IsCanonicalSubtype(sub_index, super_index,
+                                                       sub_module, super_module);
+   } else {
+diff --git a/test/cctest/test-js-to-wasm.cc b/test/cctest/test-js-to-wasm.cc
+index 71d2e207451..fe32b8d7863 100644
+--- a/test/cctest/test-js-to-wasm.cc
++++ b/test/cctest/test-js-to-wasm.cc
+@@ -266,10 +266,10 @@ class FastJSWasmCallTester {
+       : allocator_(),
+         zone_(&allocator_, ZONE_NAME),
+         builder_(zone_.New<WasmModuleBuilder>(&zone_)) {
+-    i::FLAG_allow_natives_syntax = true;
+-    i::FLAG_turbo_inline_js_wasm_calls = true;
+-    i::FLAG_stress_background_compile = false;
+-    i::FLAG_concurrent_osr = false;  // Seems to mess with %ObserveNode.
++    i::v8_flags.allow_natives_syntax = true;
++    i::v8_flags.turbo_inline_js_wasm_calls = true;
++    i::v8_flags.stress_background_compile = false;
++    i::v8_flags.concurrent_osr = false;  // Seems to mess with %ObserveNode.
+   }
+ 
+   void DeclareCallback(const char* name, FunctionSig* signature,
+diff --git a/test/cctest/wasm/test-compilation-cache.cc b/test/cctest/wasm/test-compilation-cache.cc
+index ecfb16ae4f1..20436fc53de 100644
+--- a/test/cctest/wasm/test-compilation-cache.cc
++++ b/test/cctest/wasm/test-compilation-cache.cc
+@@ -299,13 +299,13 @@ void TestModuleSharingBetweenIsolates() {
+ }
+ 
+ UNINITIALIZED_TEST(TwoIsolatesShareNativeModule) {
+-  FLAG_wasm_lazy_compilation = false;
++  v8_flags.wasm_lazy_compilation = false;
+   TestModuleSharingBetweenIsolates();
+ }
+ 
+ UNINITIALIZED_TEST(TwoIsolatesShareNativeModuleWithPku) {
+-  FLAG_wasm_lazy_compilation = false;
+-  FLAG_wasm_memory_protection_keys = true;
++  v8_flags.wasm_lazy_compilation = false;
++  v8_flags.wasm_memory_protection_keys = true;
+   TestModuleSharingBetweenIsolates();
+ }
+ 
+diff --git a/test/cctest/wasm/test-gc.cc b/test/cctest/wasm/test-gc.cc
+index 4406a0c291a..b530b2a716e 100644
+--- a/test/cctest/wasm/test-gc.cc
++++ b/test/cctest/wasm/test-gc.cc
+@@ -31,19 +31,20 @@ class WasmGCTester {
+  public:
+   explicit WasmGCTester(
+       TestExecutionTier execution_tier = TestExecutionTier::kTurbofan)
+-      : flag_gc(&v8::internal::FLAG_experimental_wasm_gc, true),
+-        flag_typedfuns(&v8::internal::FLAG_experimental_wasm_typed_funcref,
++      : flag_gc(&v8::internal::v8_flags.experimental_wasm_gc, true),
++        flag_typedfuns(&v8::internal::v8_flags.experimental_wasm_typed_funcref,
+                        true),
+-        flag_liftoff(&v8::internal::FLAG_liftoff,
++        flag_liftoff(&v8::internal::v8_flags.liftoff,
+                      execution_tier == TestExecutionTier::kLiftoff),
+-        flag_liftoff_only(&v8::internal::FLAG_liftoff_only,
++        flag_liftoff_only(&v8::internal::v8_flags.liftoff_only,
+                           execution_tier == TestExecutionTier::kLiftoff),
+-        flag_wasm_dynamic_tiering(&v8::internal::FLAG_wasm_dynamic_tiering,
+-                                  v8::internal::FLAG_liftoff_only != true),
++        flag_wasm_dynamic_tiering(&v8::internal::v8_flags.wasm_dynamic_tiering,
++                                  v8::internal::v8_flags.liftoff_only != true),
+         // Test both setups with canonicalization and without.
+-        flag_canonicalization(&v8::internal::FLAG_wasm_type_canonicalization,
+-                              execution_tier == TestExecutionTier::kTurbofan),
+-        flag_tierup(&v8::internal::FLAG_wasm_tier_up, false),
++        flag_canonicalization(
++            &v8::internal::v8_flags.wasm_type_canonicalization,
++            execution_tier == TestExecutionTier::kTurbofan),
++        flag_tierup(&v8::internal::v8_flags.wasm_tier_up, false),
+         zone_(&allocator, ZONE_NAME),
+         builder_(&zone_),
+         isolate_(CcTest::InitIsolateOnce()),
+@@ -370,7 +371,7 @@ WASM_COMPILED_EXEC_TEST(WasmRefAsNonNull) {
+ }
+ 
+ WASM_COMPILED_EXEC_TEST(WasmRefAsNonNullSkipCheck) {
+-  FlagScope<bool> no_check(&FLAG_experimental_wasm_skip_null_checks, true);
++  FlagScope<bool> no_check(&v8_flags.experimental_wasm_skip_null_checks, true);
+   WasmGCTester tester(execution_tier);
+   const byte type_index =
+       tester.DefineStruct({F(kWasmI32, true), F(kWasmI32, true)});
+@@ -540,7 +541,8 @@ WASM_COMPILED_EXEC_TEST(RefCastStatic) {
+ }
+ 
+ WASM_COMPILED_EXEC_TEST(RefCastStaticNoChecks) {
+-  FlagScope<bool> scope(&FLAG_experimental_wasm_assume_ref_cast_succeeds, true);
++  FlagScope<bool> scope(&v8_flags.experimental_wasm_assume_ref_cast_succeeds,
++                        true);
+   WasmGCTester tester(execution_tier);
+ 
+   const byte supertype_index = tester.DefineStruct({F(kWasmI32, true)});
+diff --git a/test/cctest/wasm/test-run-wasm-exceptions.cc b/test/cctest/wasm/test-run-wasm-exceptions.cc
+index 54e56399656..282d5832398 100644
+--- a/test/cctest/wasm/test-run-wasm-exceptions.cc
++++ b/test/cctest/wasm/test-run-wasm-exceptions.cc
+@@ -597,8 +597,8 @@ class IsolateScope {
+ UNINITIALIZED_WASM_EXEC_TEST(TestStackOverflowNotCaught) {
+   TestSignatures sigs;
+   EXPERIMENTAL_FLAG_SCOPE(eh);
+-  // FLAG_stack_size must be set before isolate initialization.
+-  FlagScope<int32_t> stack_size(&v8::internal::FLAG_stack_size, 8);
++  // v8_flags.stack_size must be set before isolate initialization.
++  FlagScope<int32_t> stack_size(&v8::internal::v8_flags.stack_size, 8);
+ 
+   IsolateScope isolate_scope;
+   LocalContext context(isolate_scope.isolate());
+diff --git a/test/cctest/wasm/test-run-wasm-interpreter.cc b/test/cctest/wasm/test-run-wasm-interpreter.cc
+index 4b6d5cd16fc..4023f94b072 100644
+--- a/test/cctest/wasm/test-run-wasm-interpreter.cc
++++ b/test/cctest/wasm/test-run-wasm-interpreter.cc
+@@ -157,7 +157,7 @@ static T factorial(T v) {
+ TEST(Run_Wasm_returnCallFactorial) {
+   EXPERIMENTAL_FLAG_SCOPE(return_call);
+   // Run in bounded amount of stack - 8kb.
+-  FlagScope<int32_t> stack_size(&v8::internal::FLAG_stack_size, 8);
++  FlagScope<int32_t> stack_size(&v8::internal::v8_flags.stack_size, 8);
+ 
+   WasmRunner<uint32_t, int32_t> r(TestExecutionTier::kInterpreter);
+ 
+diff --git a/test/cctest/wasm/test-run-wasm-module.cc b/test/cctest/wasm/test-run-wasm-module.cc
+index f0dff96ca18..8de6b4224d5 100644
+--- a/test/cctest/wasm/test-run-wasm-module.cc
++++ b/test/cctest/wasm/test-run-wasm-module.cc
+@@ -96,7 +96,7 @@ TEST(Run_WasmModule_Return114) {
+ }
+ 
+ TEST(Run_WasmModule_CompilationHintsLazy) {
+-  if (!FLAG_wasm_tier_up || !FLAG_liftoff) return;
++  if (!v8_flags.wasm_tier_up || !v8_flags.liftoff) return;
+   {
+     EXPERIMENTAL_FLAG_SCOPE(compilation_hints);
+ 
+@@ -155,8 +155,8 @@ TEST(Run_WasmModule_CompilationHintsLazy) {
+ }
+ 
+ TEST(Run_WasmModule_CompilationHintsNoTiering) {
+-  FlagScope<bool> no_lazy_compilation(&FLAG_wasm_lazy_compilation, false);
+-  if (!FLAG_wasm_tier_up || !FLAG_liftoff) return;
++  FlagScope<bool> no_lazy_compilation(&v8_flags.wasm_lazy_compilation, false);
++  if (!v8_flags.wasm_tier_up || !v8_flags.liftoff) return;
+   {
+     EXPERIMENTAL_FLAG_SCOPE(compilation_hints);
+ 
+@@ -201,9 +201,10 @@ TEST(Run_WasmModule_CompilationHintsNoTiering) {
+ }
+ 
+ TEST(Run_WasmModule_CompilationHintsTierUp) {
+-  FlagScope<bool> no_wasm_dynamic_tiering(&FLAG_wasm_dynamic_tiering, false);
+-  FlagScope<bool> no_lazy_compilation(&FLAG_wasm_lazy_compilation, false);
+-  if (!FLAG_wasm_tier_up || !FLAG_liftoff) return;
++  FlagScope<bool> no_wasm_dynamic_tiering(&v8_flags.wasm_dynamic_tiering,
++                                          false);
++  FlagScope<bool> no_lazy_compilation(&v8_flags.wasm_lazy_compilation, false);
++  if (!v8_flags.wasm_tier_up || !v8_flags.liftoff) return;
+   {
+     EXPERIMENTAL_FLAG_SCOPE(compilation_hints);
+ 
+@@ -262,9 +263,10 @@ TEST(Run_WasmModule_CompilationHintsTierUp) {
+ }
+ 
+ TEST(Run_WasmModule_CompilationHintsLazyBaselineEagerTopTier) {
+-  FlagScope<bool> no_wasm_dynamic_tiering(&FLAG_wasm_dynamic_tiering, false);
+-  FlagScope<bool> no_lazy_compilation(&FLAG_wasm_lazy_compilation, false);
+-  if (!FLAG_wasm_tier_up || !FLAG_liftoff) return;
++  FlagScope<bool> no_wasm_dynamic_tiering(&v8_flags.wasm_dynamic_tiering,
++                                          false);
++  FlagScope<bool> no_lazy_compilation(&v8_flags.wasm_lazy_compilation, false);
++  if (!v8_flags.wasm_tier_up || !v8_flags.liftoff) return;
+   {
+     EXPERIMENTAL_FLAG_SCOPE(compilation_hints);
+ 
+@@ -526,7 +528,7 @@ class InterruptThread : public v8::base::Thread {
+ TEST(TestInterruptLoop) {
+   {
+     // Do not dump the module of this test because it contains an infinite loop.
+-    if (FLAG_dump_wasm_module) return;
++    if (v8_flags.dump_wasm_module) return;
+ 
+     // This test tests that WebAssembly loops can be interrupted, i.e. that if
+     // an
+diff --git a/test/cctest/wasm/test-run-wasm-wrappers.cc b/test/cctest/wasm/test-run-wasm-wrappers.cc
+index 71f58c414c5..2c8d37c20f2 100644
+--- a/test/cctest/wasm/test-run-wasm-wrappers.cc
++++ b/test/cctest/wasm/test-run-wasm-wrappers.cc
+@@ -67,7 +67,8 @@ void Cleanup() {
+ TEST(WrapperBudget) {
+   {
+     // This test assumes use of the generic wrapper.
+-    FlagScope<bool> use_wasm_generic_wrapper(&FLAG_wasm_generic_wrapper, true);
++    FlagScope<bool> use_wasm_generic_wrapper(&v8_flags.wasm_generic_wrapper,
++                                             true);
+ 
+     // Initialize the environment and create a module builder.
+     AccountingAllocator allocator;
+@@ -113,7 +114,8 @@ TEST(WrapperBudget) {
+ TEST(WrapperReplacement) {
+   {
+     // This test assumes use of the generic wrapper.
+-    FlagScope<bool> use_wasm_generic_wrapper(&FLAG_wasm_generic_wrapper, true);
++    FlagScope<bool> use_wasm_generic_wrapper(&v8_flags.wasm_generic_wrapper,
++                                             true);
+ 
+     // Initialize the environment and create a module builder.
+     AccountingAllocator allocator;
+@@ -181,7 +183,8 @@ TEST(WrapperReplacement) {
+ TEST(EagerWrapperReplacement) {
+   {
+     // This test assumes use of the generic wrapper.
+-    FlagScope<bool> use_wasm_generic_wrapper(&FLAG_wasm_generic_wrapper, true);
++    FlagScope<bool> use_wasm_generic_wrapper(&v8_flags.wasm_generic_wrapper,
++                                             true);
+ 
+     // Initialize the environment and create a module builder.
+     AccountingAllocator allocator;
+@@ -285,7 +288,8 @@ TEST(EagerWrapperReplacement) {
+ TEST(WrapperReplacement_IndirectExport) {
+   {
+     // This test assumes use of the generic wrapper.
+-    FlagScope<bool> use_wasm_generic_wrapper(&FLAG_wasm_generic_wrapper, true);
++    FlagScope<bool> use_wasm_generic_wrapper(&v8_flags.wasm_generic_wrapper,
++                                             true);
+ 
+     // Initialize the environment and create a module builder.
+     AccountingAllocator allocator;
+diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.cc
+index 1d913a9ed5a..4173532584b 100644
+--- a/test/cctest/wasm/test-run-wasm.cc
++++ b/test/cctest/wasm/test-run-wasm.cc
+@@ -2514,7 +2514,7 @@ class IsolateScope {
+ UNINITIALIZED_WASM_EXEC_TEST(ReturnCall_Factorial) {
+   EXPERIMENTAL_FLAG_SCOPE(return_call);
+   // Run in bounded amount of stack - 8kb.
+-  FlagScope<int32_t> stack_size(&v8::internal::FLAG_stack_size, 8);
++  FlagScope<int32_t> stack_size(&v8::internal::v8_flags.stack_size, 8);
+ 
+   IsolateScope isolate_scope;
+   LocalContext current(isolate_scope.isolate());
+@@ -2552,7 +2552,7 @@ UNINITIALIZED_WASM_EXEC_TEST(ReturnCall_Factorial) {
+ UNINITIALIZED_WASM_EXEC_TEST(ReturnCall_MutualFactorial) {
+   EXPERIMENTAL_FLAG_SCOPE(return_call);
+   // Run in bounded amount of stack - 8kb.
+-  FlagScope<int32_t> stack_size(&v8::internal::FLAG_stack_size, 8);
++  FlagScope<int32_t> stack_size(&v8::internal::v8_flags.stack_size, 8);
+ 
+   IsolateScope isolate_scope;
+   LocalContext current(isolate_scope.isolate());
+@@ -2599,7 +2599,7 @@ UNINITIALIZED_WASM_EXEC_TEST(ReturnCall_MutualFactorial) {
+ UNINITIALIZED_WASM_EXEC_TEST(ReturnCall_IndirectFactorial) {
+   EXPERIMENTAL_FLAG_SCOPE(return_call);
+   // Run in bounded amount of stack - 8kb.
+-  FlagScope<int32_t> stack_size(&v8::internal::FLAG_stack_size, 8);
++  FlagScope<int32_t> stack_size(&v8::internal::v8_flags.stack_size, 8);
+ 
+   IsolateScope isolate_scope;
+   LocalContext current(isolate_scope.isolate());
+@@ -2648,7 +2648,7 @@ UNINITIALIZED_WASM_EXEC_TEST(ReturnCall_IndirectFactorial) {
+ UNINITIALIZED_WASM_EXEC_TEST(ReturnCall_Sum) {
+   EXPERIMENTAL_FLAG_SCOPE(return_call);
+   // Run in bounded amount of stack - 8kb.
+-  FlagScope<int32_t> stack_size(&v8::internal::FLAG_stack_size, 8);
++  FlagScope<int32_t> stack_size(&v8::internal::v8_flags.stack_size, 8);
+ 
+   IsolateScope isolate_scope;
+   LocalContext current(isolate_scope.isolate());
+@@ -2690,7 +2690,7 @@ UNINITIALIZED_WASM_EXEC_TEST(ReturnCall_Sum) {
+ UNINITIALIZED_WASM_EXEC_TEST(ReturnCall_Bounce_Sum) {
+   EXPERIMENTAL_FLAG_SCOPE(return_call);
+   // Run in bounded amount of stack - 8kb.
+-  FlagScope<int32_t> stack_size(&v8::internal::FLAG_stack_size, 8);
++  FlagScope<int32_t> stack_size(&v8::internal::v8_flags.stack_size, 8);
+ 
+   IsolateScope isolate_scope;
+   LocalContext current(isolate_scope.isolate());
+diff --git a/test/cctest/wasm/test-streaming-compilation.cc b/test/cctest/wasm/test-streaming-compilation.cc
+index e9d914fd594..32566c7fca5 100644
+--- a/test/cctest/wasm/test-streaming-compilation.cc
++++ b/test/cctest/wasm/test-streaming-compilation.cc
+@@ -253,23 +253,25 @@ class StreamTester {
+ };
+ }  // namespace
+ 
+-#define RUN_STREAM(name)                                                      \
+-  v8::Isolate* isolate = CcTest::isolate();                                   \
+-  v8::HandleScope handle_scope(isolate);                                      \
+-  v8::Local<v8::Context> context = v8::Context::New(isolate);                 \
+-  v8::Context::Scope context_scope(context);                                  \
+-  /* Reduce tiering budget so we do not need to execute too long. */          \
+-  i::FlagScope<int> reduced_tiering_budget(&i::FLAG_wasm_tiering_budget, 10); \
++#define RUN_STREAM(name)                                                     \
++  v8::Isolate* isolate = CcTest::isolate();                                  \
++  v8::HandleScope handle_scope(isolate);                                     \
++  v8::Local<v8::Context> context = v8::Context::New(isolate);                \
++  v8::Context::Scope context_scope(context);                                 \
++  /* Reduce tiering budget so we do not need to execute too long. */         \
++  i::FlagScope<int> reduced_tiering_budget(&i::v8_flags.wasm_tiering_budget, \
++                                           10);                              \
+   RunStream_##name(&platform, isolate);
+ 
+-#define STREAM_TEST(name)                                                     \
+-  void RunStream_##name(MockPlatform*, v8::Isolate*);                         \
+-  TEST_WITH_PLATFORM(Async##name, MockPlatform) { RUN_STREAM(name); }         \
+-                                                                              \
+-  TEST_WITH_PLATFORM(SingleThreaded##name, MockPlatform) {                    \
+-    i::FlagScope<bool> single_threaded_scope(&i::FLAG_single_threaded, true); \
+-    RUN_STREAM(name);                                                         \
+-  }                                                                           \
++#define STREAM_TEST(name)                                                  \
++  void RunStream_##name(MockPlatform*, v8::Isolate*);                      \
++  TEST_WITH_PLATFORM(Async##name, MockPlatform) { RUN_STREAM(name); }      \
++                                                                           \
++  TEST_WITH_PLATFORM(SingleThreaded##name, MockPlatform) {                 \
++    i::FlagScope<bool> single_threaded_scope(&i::v8_flags.single_threaded, \
++                                             true);                        \
++    RUN_STREAM(name);                                                      \
++  }                                                                        \
+   void RunStream_##name(MockPlatform* platform, v8::Isolate* isolate)
+ 
+ constexpr const char* kExportNames[] = {"a", "b", "c"};
+@@ -1205,7 +1207,7 @@ STREAM_TEST(TestModuleWithImportedFunction) {
+ STREAM_TEST(TestIncrementalCaching) {
+   FLAG_VALUE_SCOPE(wasm_tier_up, false);
+   constexpr int threshold = 10;
+-  FlagScope<int> caching_treshold(&FLAG_wasm_caching_threshold, threshold);
++  FlagScope<int> caching_treshold(&v8_flags.wasm_caching_threshold, threshold);
+   StreamTester tester(isolate);
+   int call_cache_counter = 0;
+   tester.stream()->SetMoreFunctionsCanBeSerializedCallback(
+@@ -1389,11 +1391,11 @@ STREAM_TEST(TestMoreFunctionsCanBeSerializedCallback) {
+   // The "module compiled" callback (to be renamed to "top tier chunk finished"
+   // or similar) will only be triggered with dynamic tiering, so skip this test
+   // if dynamic tiering is disabled.
+-  if (!FLAG_wasm_dynamic_tiering) return;
++  if (!v8_flags.wasm_dynamic_tiering) return;
+ 
+   // Reduce the caching threshold so that our three small functions trigger
+   // caching.
+-  FlagScope<int> caching_treshold(&FLAG_wasm_caching_threshold, 10);
++  FlagScope<int> caching_treshold(&v8_flags.wasm_caching_threshold, 10);
+   StreamTester tester(isolate);
+   bool callback_called = false;
+   tester.stream()->SetMoreFunctionsCanBeSerializedCallback(
+@@ -1448,7 +1450,7 @@ STREAM_TEST(TestMoreFunctionsCanBeSerializedCallback) {
+ 
+   // If Liftoff is enabled, then the callback should only be called after
+   // tiering up.
+-  CHECK_IMPLIES(FLAG_liftoff, !callback_called);
++  CHECK_IMPLIES(v8_flags.liftoff, !callback_called);
+   while (!callback_called) {
+     for (Handle<WasmExportedFunction> exported_function : exported_functions) {
+       Execution::Call(i_isolate, exported_function,
+diff --git a/test/cctest/wasm/test-wasm-metrics.cc b/test/cctest/wasm/test-wasm-metrics.cc
+index b36ca67e2dd..e686668d2cf 100644
+--- a/test/cctest/wasm/test-wasm-metrics.cc
++++ b/test/cctest/wasm/test-wasm-metrics.cc
+@@ -222,19 +222,20 @@ class TestCompileResolver : public CompilationResultResolver {
+   testing::SetupIsolateForWasmModule(i_isolate);                        \
+   RunCompile_##name(&platform, i_isolate);
+ 
+-#define COMPILE_TEST(name)                                                  \
+-  void RunCompile_##name(MockPlatform*, i::Isolate*);                       \
+-  TEST_WITH_PLATFORM(Sync##name, MockPlatform) {                            \
+-    i::FlagScope<bool> sync_scope(&i::FLAG_wasm_async_compilation, false);  \
+-    RUN_COMPILE(name);                                                      \
+-  }                                                                         \
+-                                                                            \
+-  TEST_WITH_PLATFORM(Async##name, MockPlatform) { RUN_COMPILE(name); }      \
+-                                                                            \
+-  TEST_WITH_PLATFORM(Streaming##name, MockPlatform) {                       \
+-    i::FlagScope<bool> streaming_scope(&i::FLAG_wasm_test_streaming, true); \
+-    RUN_COMPILE(name);                                                      \
+-  }                                                                         \
++#define COMPILE_TEST(name)                                                     \
++  void RunCompile_##name(MockPlatform*, i::Isolate*);                          \
++  TEST_WITH_PLATFORM(Sync##name, MockPlatform) {                               \
++    i::FlagScope<bool> sync_scope(&i::v8_flags.wasm_async_compilation, false); \
++    RUN_COMPILE(name);                                                         \
++  }                                                                            \
++                                                                               \
++  TEST_WITH_PLATFORM(Async##name, MockPlatform) { RUN_COMPILE(name); }         \
++                                                                               \
++  TEST_WITH_PLATFORM(Streaming##name, MockPlatform) {                          \
++    i::FlagScope<bool> streaming_scope(&i::v8_flags.wasm_test_streaming,       \
++                                       true);                                  \
++    RUN_COMPILE(name);                                                         \
++  }                                                                            \
+   void RunCompile_##name(MockPlatform* platform, i::Isolate* isolate)
+ 
+ class MetricsRecorder : public v8::metrics::Recorder {
+@@ -261,7 +262,8 @@ class MetricsRecorder : public v8::metrics::Recorder {
+ };
+ 
+ COMPILE_TEST(TestEventMetrics) {
+-  FlagScope<bool> no_wasm_dynamic_tiering(&FLAG_wasm_dynamic_tiering, false);
++  FlagScope<bool> no_wasm_dynamic_tiering(&v8_flags.wasm_dynamic_tiering,
++                                          false);
+   std::shared_ptr<MetricsRecorder> recorder =
+       std::make_shared<MetricsRecorder>();
+   reinterpret_cast<v8::Isolate*>(isolate)->SetMetricsRecorder(recorder);
+@@ -302,27 +304,28 @@ COMPILE_TEST(TestEventMetrics) {
+ 
+   CHECK_EQ(1, recorder->module_decoded_.size());
+   CHECK(recorder->module_decoded_.back().success);
+-  CHECK_EQ(i::FLAG_wasm_async_compilation,
++  CHECK_EQ(i::v8_flags.wasm_async_compilation,
+            recorder->module_decoded_.back().async);
+-  CHECK_EQ(i::FLAG_wasm_test_streaming,
++  CHECK_EQ(i::v8_flags.wasm_test_streaming,
+            recorder->module_decoded_.back().streamed);
+   CHECK_EQ(buffer.size(),
+            recorder->module_decoded_.back().module_size_in_bytes);
+   CHECK_EQ(1, recorder->module_decoded_.back().function_count);
+   CHECK_LE(0, recorder->module_decoded_.back().wall_clock_duration_in_us);
+   CHECK_IMPLIES(
+-      v8::base::ThreadTicks::IsSupported() && !i::FLAG_wasm_test_streaming,
++      v8::base::ThreadTicks::IsSupported() && !i::v8_flags.wasm_test_streaming,
+       recorder->module_decoded_.back().cpu_duration_in_us > 0);
+ 
+   CHECK_EQ(1, recorder->module_compiled_.size());
+   CHECK(recorder->module_compiled_.back().success);
+-  CHECK_EQ(i::FLAG_wasm_async_compilation,
++  CHECK_EQ(i::v8_flags.wasm_async_compilation,
+            recorder->module_compiled_.back().async);
+-  CHECK_EQ(i::FLAG_wasm_test_streaming,
++  CHECK_EQ(i::v8_flags.wasm_test_streaming,
+            recorder->module_compiled_.back().streamed);
+   CHECK(!recorder->module_compiled_.back().cached);
+   CHECK(!recorder->module_compiled_.back().deserialized);
+-  CHECK_EQ(FLAG_wasm_lazy_compilation, recorder->module_compiled_.back().lazy);
++  CHECK_EQ(v8_flags.wasm_lazy_compilation,
++           recorder->module_compiled_.back().lazy);
+   CHECK_LT(0, recorder->module_compiled_.back().code_size_in_bytes);
+   // We currently cannot ensure that no code is attributed to Liftoff after the
+   // WasmModuleCompiled event has been emitted. We therefore only assume the
+@@ -335,8 +338,8 @@ COMPILE_TEST(TestEventMetrics) {
+   CHECK_EQ(native_module->baseline_compilation_cpu_duration(),
+            recorder->module_compiled_.back().cpu_duration_in_us);
+   CHECK_IMPLIES(v8::base::ThreadTicks::IsSupported() &&
+-                    !i::FLAG_wasm_test_streaming &&
+-                    !i::FLAG_wasm_lazy_compilation,
++                    !i::v8_flags.wasm_test_streaming &&
++                    !i::v8_flags.wasm_lazy_compilation,
+                 recorder->module_compiled_.back().cpu_duration_in_us > 0);
+ 
+   CHECK_EQ(1, recorder->module_instantiated_.size());
+diff --git a/test/cctest/wasm/test-wasm-serialization.cc b/test/cctest/wasm/test-wasm-serialization.cc
+index ab5d05264ad..86d3b3a7b40 100644
+--- a/test/cctest/wasm/test-wasm-serialization.cc
++++ b/test/cctest/wasm/test-wasm-serialization.cc
+@@ -336,8 +336,8 @@ TEST(TierDownAfterDeserialization) {
+ 
+ TEST(SerializeLiftoffModuleFails) {
+   // Make sure that no function is tiered up to TurboFan.
+-  if (!FLAG_liftoff) return;
+-  FlagScope<bool> no_tier_up(&FLAG_wasm_tier_up, false);
++  if (!v8_flags.liftoff) return;
++  FlagScope<bool> no_tier_up(&v8_flags.wasm_tier_up, false);
+   v8::internal::AccountingAllocator allocator;
+   Zone zone(&allocator, "test_zone");
+ 
+diff --git a/test/cctest/wasm/wasm-run-utils.cc b/test/cctest/wasm/wasm-run-utils.cc
+index ca6d38bd0a8..d7e05141b1f 100644
+--- a/test/cctest/wasm/wasm-run-utils.cc
++++ b/test/cctest/wasm/wasm-run-utils.cc
+@@ -241,7 +241,7 @@ void TestingModuleBuilder::AddIndirectFunctionTable(
+     for (uint32_t i = 0; i < table_size; ++i) {
+       WasmFunction& function = test_module_->functions[function_indexes[i]];
+       int sig_id =
+-          FLAG_wasm_type_canonicalization
++          v8_flags.wasm_type_canonicalization
+               ? test_module_
+                     ->isorecursive_canonical_type_ids[function.sig_index]
+               : test_module_->signature_map.Find(*function.sig);
+@@ -387,7 +387,7 @@ Handle<WasmInstanceObject> TestingModuleBuilder::InitInstanceObject() {
+   size_t code_size_estimate =
+       wasm::WasmCodeManager::EstimateNativeModuleCodeSize(
+           test_module_.get(), kUsesLiftoff,
+-          DynamicTiering{FLAG_wasm_dynamic_tiering.value()});
++          DynamicTiering{v8_flags.wasm_dynamic_tiering.value()});
+   auto native_module = GetWasmEngine()->NewNativeModule(
+       isolate_, enabled_features_, test_module_, code_size_estimate);
+   native_module->SetWireBytes(base::OwnedVector<const uint8_t>());
+@@ -421,9 +421,9 @@ void TestBuildingGraphWithBuilder(compiler::WasmGraphBuilder* builder,
+       &unused_detected_features, body, &loops, nullptr, 0, kRegularFunction);
+   if (result.failed()) {
+ #ifdef DEBUG
+-    if (!FLAG_trace_wasm_decoder) {
++    if (!v8_flags.trace_wasm_decoder) {
+       // Retry the compilation with the tracing flag on, to help in debugging.
+-      FLAG_trace_wasm_decoder = true;
++      v8_flags.trace_wasm_decoder = true;
+       result = BuildTFGraph(zone->allocator(), WasmFeatures::All(), nullptr,
+                             builder, &unused_detected_features, body, &loops,
+                             nullptr, 0, kRegularFunction);
+@@ -552,7 +552,7 @@ Handle<Code> WasmFunctionWrapper::GetWrapperCode(Isolate* isolate) {
+         AssemblerOptions::Default(isolate));
+     code = code_.ToHandleChecked();
+ #ifdef ENABLE_DISASSEMBLER
+-    if (FLAG_print_opt_code) {
++    if (v8_flags.print_opt_code) {
+       CodeTracer::Scope tracing_scope(isolate->GetCodeTracer());
+       OFStream os(tracing_scope.file());
+ 
+diff --git a/test/cctest/wasm/wasm-run-utils.h b/test/cctest/wasm/wasm-run-utils.h
+index d4b9c74efeb..0ce398339c6 100644
+--- a/test/cctest/wasm/wasm-run-utils.h
++++ b/test/cctest/wasm/wasm-run-utils.h
+@@ -138,7 +138,7 @@ class TestingModuleBuilder {
+     DCHECK_EQ(test_module_->types.size(),
+               test_module_->per_module_canonical_type_ids.size());
+     test_module_->add_signature(sig, kNoSuperType);
+-    if (FLAG_wasm_type_canonicalization) {
++    if (v8_flags.wasm_type_canonicalization) {
+       GetTypeCanonicalizer()->AddRecursiveGroup(test_module_.get(), 1);
+       instance_object_->set_isorecursive_canonical_types(
+           test_module_->isorecursive_canonical_type_ids.data());
+diff --git a/test/common/wasm/wasm-interpreter.cc b/test/common/wasm/wasm-interpreter.cc
+index f98eaab3d51..ec0a29c4422 100644
+--- a/test/common/wasm/wasm-interpreter.cc
++++ b/test/common/wasm/wasm-interpreter.cc
+@@ -42,9 +42,9 @@ using base::ReadUnalignedValue;
+ using base::WriteLittleEndianValue;
+ using base::WriteUnalignedValue;
+ 
+-#define TRACE(...)                                        \
+-  do {                                                    \
+-    if (FLAG_trace_wasm_interpreter) PrintF(__VA_ARGS__); \
++#define TRACE(...)                                            \
++  do {                                                        \
++    if (v8_flags.trace_wasm_interpreter) PrintF(__VA_ARGS__); \
+   } while (false)
+ 
+ #if V8_TARGET_BIG_ENDIAN
+@@ -1703,7 +1703,7 @@ class WasmInterpreterInternals {
+     Push(result);
+     *len += imm.length;
+ 
+-    if (FLAG_trace_wasm_memory) {
++    if (v8_flags.trace_wasm_memory) {
+       MemoryTracingInfo info(imm.offset + index, false, rep);
+       TraceMemoryOperation({}, &info, code->function->func_index,
+                            static_cast<int>(pc),
+@@ -1735,7 +1735,7 @@ class WasmInterpreterInternals {
+     WriteLittleEndianValue<mtype>(addr, converter<mtype, ctype>{}(val));
+     *len += imm.length;
+ 
+-    if (FLAG_trace_wasm_memory) {
++    if (v8_flags.trace_wasm_memory) {
+       MemoryTracingInfo info(imm.offset + index, true, rep);
+       TraceMemoryOperation({}, &info, code->function->func_index,
+                            static_cast<int>(pc),
+@@ -3131,9 +3131,9 @@ class WasmInterpreterInternals {
+                     pc_t* limit) V8_WARN_UNUSED_RESULT {
+     // The goal of this stack check is not to prevent actual stack overflows,
+     // but to simulate stack overflows during the execution of compiled code.
+-    // That is why this function uses FLAG_stack_size, even though the value
++    // That is why this function uses v8_flags.stack_size, even though the value
+     // stack actually lies in zone memory.
+-    const size_t stack_size_limit = FLAG_stack_size * KB;
++    const size_t stack_size_limit = v8_flags.stack_size * KB;
+     // Sum up the value stack size and the control stack size.
+     const size_t current_stack_size = (sp_ - stack_.get()) * sizeof(*sp_) +
+                                       frames_.size() * sizeof(frames_[0]);
+@@ -4041,7 +4041,7 @@ class WasmInterpreterInternals {
+ 
+   void TraceValueStack() {
+ #ifdef DEBUG
+-    if (!FLAG_trace_wasm_interpreter) return;
++    if (!v8_flags.trace_wasm_interpreter) return;
+     HandleScope handle_scope(isolate_);  // Avoid leaking handles.
+     Frame* top = frames_.size() > 0 ? &frames_.back() : nullptr;
+     sp_t sp = top ? top->sp : 0;
+@@ -4105,7 +4105,7 @@ class WasmInterpreterInternals {
+                                   uint32_t sig_index) {
+     HandleScope handle_scope(isolate_);  // Avoid leaking handles.
+     uint32_t expected_sig_id;
+-    if (FLAG_wasm_type_canonicalization) {
++    if (v8_flags.wasm_type_canonicalization) {
+       expected_sig_id = module()->isorecursive_canonical_type_ids[sig_index];
+     } else {
+       expected_sig_id = module()->per_module_canonical_type_ids[sig_index];
+diff --git a/test/fuzzer/wasm-async.cc b/test/fuzzer/wasm-async.cc
+index d59cb36d03d..a18914e2a1a 100644
+--- a/test/fuzzer/wasm-async.cc
++++ b/test/fuzzer/wasm-async.cc
+@@ -48,9 +48,9 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
+   v8::Isolate* isolate = support->GetIsolate();
+ 
+   // Set some more flags.
+-  FLAG_wasm_async_compilation = true;
+-  FLAG_wasm_max_mem_pages = 32;
+-  FLAG_wasm_max_table_size = 100;
++  v8_flags.wasm_async_compilation = true;
++  v8_flags.wasm_max_mem_pages = 32;
++  v8_flags.wasm_max_table_size = 100;
+ 
+   i::Isolate* i_isolate = reinterpret_cast<v8::internal::Isolate*>(isolate);
+ 
+diff --git a/test/fuzzer/wasm-fuzzer-common.cc b/test/fuzzer/wasm-fuzzer-common.cc
+index 0f0471abc5e..c9756947c89 100644
+--- a/test/fuzzer/wasm-fuzzer-common.cc
++++ b/test/fuzzer/wasm-fuzzer-common.cc
+@@ -727,7 +727,7 @@ void OneTimeEnableStagedWasmFeatures(v8::Isolate* isolate) {
+   struct EnableStagedWasmFeatures {
+     explicit EnableStagedWasmFeatures(v8::Isolate* isolate) {
+ #define ENABLE_STAGED_FEATURES(feat, desc, val) \
+-  FLAG_experimental_wasm_##feat = true;
++  v8_flags.experimental_wasm_##feat = true;
+       FOREACH_WASM_STAGING_FEATURE_FLAG(ENABLE_STAGED_FEATURES)
+ #undef ENABLE_STAGED_FEATURES
+       isolate->InstallConditionalFeatures(isolate->GetCurrentContext());
+@@ -797,8 +797,8 @@ void WasmExecutionFuzzer::FuzzWasmModule(base::Vector<const uint8_t> data,
+ #else
+   bool liftoff_as_reference = false;
+ #endif
+-  FlagScope<bool> turbo_mid_tier_regalloc(&FLAG_turbo_force_mid_tier_regalloc,
+-                                          configuration_byte == 0);
++  FlagScope<bool> turbo_mid_tier_regalloc(
++      &v8_flags.turbo_force_mid_tier_regalloc, configuration_byte == 0);
+ 
+   if (!GenerateModule(i_isolate, &zone, data, &buffer, liftoff_as_reference)) {
+     return;
+@@ -809,7 +809,7 @@ void WasmExecutionFuzzer::FuzzWasmModule(base::Vector<const uint8_t> data,
+   ErrorThrower interpreter_thrower(i_isolate, "Interpreter");
+   ModuleWireBytes wire_bytes(buffer.begin(), buffer.end());
+ 
+-  if (require_valid && FLAG_wasm_fuzzer_gen_test) {
++  if (require_valid && v8_flags.wasm_fuzzer_gen_test) {
+     GenerateTestCase(i_isolate, wire_bytes, true);
+   }
+ 
+@@ -818,16 +818,17 @@ void WasmExecutionFuzzer::FuzzWasmModule(base::Vector<const uint8_t> data,
+   {
+     // Explicitly enable Liftoff, disable tiering and set the tier_mask. This
+     // way, we deterministically test a combination of Liftoff and Turbofan.
+-    FlagScope<bool> liftoff(&FLAG_liftoff, true);
+-    FlagScope<bool> no_tier_up(&FLAG_wasm_tier_up, false);
+-    FlagScope<int> tier_mask_scope(&FLAG_wasm_tier_mask_for_testing, tier_mask);
+-    FlagScope<int> debug_mask_scope(&FLAG_wasm_debug_mask_for_testing,
++    FlagScope<bool> liftoff(&v8_flags.liftoff, true);
++    FlagScope<bool> no_tier_up(&v8_flags.wasm_tier_up, false);
++    FlagScope<int> tier_mask_scope(&v8_flags.wasm_tier_mask_for_testing,
++                                   tier_mask);
++    FlagScope<int> debug_mask_scope(&v8_flags.wasm_debug_mask_for_testing,
+                                     debug_mask);
+     compiled_module = GetWasmEngine()->SyncCompile(
+         i_isolate, enabled_features, &interpreter_thrower, wire_bytes);
+   }
+   bool compiles = !compiled_module.is_null();
+-  if (!require_valid && FLAG_wasm_fuzzer_gen_test) {
++  if (!require_valid && v8_flags.wasm_fuzzer_gen_test) {
+     GenerateTestCase(i_isolate, wire_bytes, compiles);
+   }
+ 
+diff --git a/test/fuzzer/wasm-streaming.cc b/test/fuzzer/wasm-streaming.cc
+index 6be59f450b2..a257add4721 100644
+--- a/test/fuzzer/wasm-streaming.cc
++++ b/test/fuzzer/wasm-streaming.cc
+@@ -157,7 +157,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
+   fuzzer::OneTimeEnableStagedWasmFeatures(isolate);
+ 
+   // Limit the maximum module size to avoid OOM.
+-  FLAG_wasm_max_module_size = 256 * KB;
++  v8_flags.wasm_max_module_size = 256 * KB;
+ 
+   WasmFeatures enabled_features = i::wasm::WasmFeatures::FromIsolate(i_isolate);
+ 
+diff --git a/test/fuzzer/wasm.cc b/test/fuzzer/wasm.cc
+index b26f662b095..b4d14f271f0 100644
+--- a/test/fuzzer/wasm.cc
++++ b/test/fuzzer/wasm.cc
+@@ -27,8 +27,8 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
+ 
+   // We reduce the maximum memory size and table size of WebAssembly instances
+   // to avoid OOMs in the fuzzer.
+-  i::FLAG_wasm_max_mem_pages = 32;
+-  i::FLAG_wasm_max_table_size = 100;
++  i::v8_flags.wasm_max_mem_pages = 32;
++  i::v8_flags.wasm_max_table_size = 100;
+ 
+   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
+ 
+@@ -59,7 +59,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
+           ->SyncCompile(i_isolate, enabled_features, &thrower, wire_bytes)
+           .ToHandle(&module_object);
+ 
+-  if (i::FLAG_wasm_fuzzer_gen_test) {
++  if (i::v8_flags.wasm_fuzzer_gen_test) {
+     i::wasm::fuzzer::GenerateTestCase(i_isolate, wire_bytes, compiles);
+   }
+ 
+diff --git a/test/unittests/api/api-wasm-unittest.cc b/test/unittests/api/api-wasm-unittest.cc
+index 269bfab640e..6a3d363b62f 100644
+--- a/test/unittests/api/api-wasm-unittest.cc
++++ b/test/unittests/api/api-wasm-unittest.cc
+@@ -165,14 +165,14 @@ TEST_F(ApiWasmTest, TestSetWasmSimdEnabledCallback) {
+ 
+   // {Isolate::IsWasmSimdEnabled} calls the callback set by the embedder if
+   // such a callback exists. Otherwise it returns
+-  // {FLAG_experimental_wasm_simd}. First we test that the flag is returned
++  // {v8_flags.experimental_wasm_simd}. First we test that the flag is returned
+   // correctly if no callback is set. Then we test that the flag is ignored if
+   // the callback is set.
+ 
+-  i::FLAG_experimental_wasm_simd = false;
++  i::v8_flags.experimental_wasm_simd = false;
+   CHECK(!i_isolate()->IsWasmSimdEnabled(i_context));
+ 
+-  i::FLAG_experimental_wasm_simd = true;
++  i::v8_flags.experimental_wasm_simd = true;
+   CHECK(i_isolate()->IsWasmSimdEnabled(i_context));
+ 
+   isolate()->SetWasmSimdEnabledCallback(MockWasmSimdEnabledCallback);
+@@ -180,7 +180,7 @@ TEST_F(ApiWasmTest, TestSetWasmSimdEnabledCallback) {
+   CHECK(!i_isolate()->IsWasmSimdEnabled(i_context));
+ 
+   wasm_simd_enabled_value = true;
+-  i::FLAG_experimental_wasm_simd = false;
++  i::v8_flags.experimental_wasm_simd = false;
+   CHECK(i_isolate()->IsWasmSimdEnabled(i_context));
+ }
+ 
+@@ -190,14 +190,14 @@ TEST_F(ApiWasmTest, TestSetWasmExceptionsEnabledCallback) {
+ 
+   // {Isolate::AreWasmExceptionsEnabled} calls the callback set by the embedder
+   // if such a callback exists. Otherwise it returns
+-  // {FLAG_experimental_wasm_eh}. First we test that the flag is returned
++  // {v8_flags.experimental_wasm_eh}. First we test that the flag is returned
+   // correctly if no callback is set. Then we test that the flag is ignored if
+   // the callback is set.
+ 
+-  i::FLAG_experimental_wasm_eh = false;
++  i::v8_flags.experimental_wasm_eh = false;
+   CHECK(!i_isolate()->AreWasmExceptionsEnabled(i_context));
+ 
+-  i::FLAG_experimental_wasm_eh = true;
++  i::v8_flags.experimental_wasm_eh = true;
+   CHECK(i_isolate()->AreWasmExceptionsEnabled(i_context));
+ 
+   isolate()->SetWasmExceptionsEnabledCallback(
+@@ -206,7 +206,7 @@ TEST_F(ApiWasmTest, TestSetWasmExceptionsEnabledCallback) {
+   CHECK(!i_isolate()->AreWasmExceptionsEnabled(i_context));
+ 
+   wasm_exceptions_enabled_value = true;
+-  i::FLAG_experimental_wasm_eh = false;
++  i::v8_flags.experimental_wasm_eh = false;
+   CHECK(i_isolate()->AreWasmExceptionsEnabled(i_context));
+ }
+ 
+diff --git a/test/unittests/wasm/memory-protection-unittest.cc b/test/unittests/wasm/memory-protection-unittest.cc
+index 4423529c3f2..a6b2feaa6c6 100644
+--- a/test/unittests/wasm/memory-protection-unittest.cc
++++ b/test/unittests/wasm/memory-protection-unittest.cc
+@@ -48,17 +48,17 @@ const char* MemoryProtectionModeToString(MemoryProtectionMode mode) {
+ class MemoryProtectionTest : public TestWithNativeContext {
+  public:
+   void Initialize(MemoryProtectionMode mode) {
+-    i::FLAG_wasm_lazy_compilation = false;
++    v8_flags.wasm_lazy_compilation = false;
+     mode_ = mode;
+     bool enable_pku = mode == kPku || mode == kPkuWithMprotectFallback;
+-    FLAG_wasm_memory_protection_keys = enable_pku;
++    v8_flags.wasm_memory_protection_keys = enable_pku;
+     // The key is initially write-protected.
+     CHECK_IMPLIES(WasmCodeManager::HasMemoryProtectionKeySupport(),
+                   !WasmCodeManager::MemoryProtectionKeyWritable());
+ 
+     bool enable_mprotect =
+         mode == kMprotect || mode == kPkuWithMprotectFallback;
+-    FLAG_wasm_write_protect_code_memory = enable_mprotect;
++    v8_flags.wasm_write_protect_code_memory = enable_mprotect;
+   }
+ 
+   void CompileModule() {
+-- 
+2.35.1
+

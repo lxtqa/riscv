@@ -1,0 +1,999 @@
+From ba401aa9c13aefad97074d0ad229588e07119ed6 Mon Sep 17 00:00:00 2001
+From: Victor Gomes <victorgomes@chromium.org>
+Date: Wed, 11 Oct 2023 17:41:05 +0200
+Subject: [PATCH] [baseline] Add v8_enable_sparkplug GN flag
+
+Sparkplug has been ported to all V8 supported architectures.
+However it is still useful to compile V8 without it.
+
+This CL introduces a GN flag and splits source and headers files
+that do not need to be compiled.
+
+This *does not* remove Sparkplug checks in the runtime code.
+
+Bug: v8:11421
+
+Change-Id: I59a9a6e44703d6f8fa7b2d60e32fefd1af8cc96b
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4931698
+Auto-Submit: Victor Gomes <victorgomes@chromium.org>
+Commit-Queue: Victor Gomes <victorgomes@chromium.org>
+Reviewed-by: Leszek Swirski <leszeks@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#90366}
+---
+ BUILD.bazel                             |   1 +
+ BUILD.gn                                | 116 +++++++++++++++++++-----
+ src/baseline/baseline-assembler-inl.h   |   6 --
+ src/baseline/baseline-assembler.h       |   7 --
+ src/baseline/baseline-batch-compiler.cc |  43 ---------
+ src/baseline/baseline-compiler.cc       |   9 +-
+ src/baseline/baseline-compiler.h        |   7 --
+ src/baseline/baseline.cc                |   8 +-
+ src/builtins/builtins-internal-gen.cc   |  15 +--
+ src/builtins/ppc/builtins-ppc.cc        |   4 -
+ src/builtins/s390/builtins-s390.cc      |   4 -
+ src/common/globals.h                    |   2 -
+ src/execution/isolate.cc                |   4 +
+ src/execution/isolate.h                 |   4 +
+ src/execution/stack-guard.cc            |   7 +-
+ src/execution/tiering-manager.cc        |   9 +-
+ src/flags/flag-definitions.h            |  20 ++--
+ src/objects/js-function.cc              |   2 +
+ src/runtime/runtime.cc                  |   5 +-
+ src/snapshot/code-serializer.cc         |   4 +
+ src/snapshot/snapshot.cc                |   2 +
+ test/cctest/heap/test-heap.cc           |  16 ++--
+ test/cctest/test-api.cc                 |   2 +-
+ test/cctest/test-cpu-profiler.cc        |   4 +-
+ 24 files changed, 151 insertions(+), 150 deletions(-)
+
+diff --git a/BUILD.bazel b/BUILD.bazel
+index eb9ea08c5a4..1d31a7a38c7 100644
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -364,6 +364,7 @@ v8_config(
+         "GOOGLE3",
+         "V8_ADVANCED_BIGINT_ALGORITHMS",
+         "V8_CONCURRENT_MARKING",
++        "V8_ENABLE_SPARKPLUG",
+     ] + select({
+         "@v8//bazel/config:is_debug": [
+             "DEBUG",
+diff --git a/BUILD.gn b/BUILD.gn
+index 46216c7d66f..761e284f239 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -401,6 +401,10 @@ declare_args() {
+   # applications yet so disable jit.
+   v8_jitless = v8_enable_lite_mode || target_is_ios_device
+ 
++  # Enable Sparkplug
++  # Sets -DV8_ENABLE_SPARKPLUG.
++  v8_enable_sparkplug = ""
++
+   # Enable Maglev's graph printer.
+   # Sets -DV8_ENABLE_MAGLEV_GRAPH_PRINTER.
+   v8_enable_maglev_graph_printer = !build_with_chromium
+@@ -499,6 +503,9 @@ if (v8_enable_external_code_space == "") {
+       v8_enable_pointer_compression_shared_cage &&
+       (v8_current_cpu == "x64" || v8_current_cpu == "arm64")
+ }
++if (v8_enable_sparkplug == "") {
++  v8_enable_sparkplug = !v8_jitless
++}
+ if (v8_enable_maglev == "") {
+   v8_enable_maglev = v8_enable_turbofan &&
+                      (v8_current_cpu == "arm" || v8_current_cpu == "x64" ||
+@@ -507,9 +514,9 @@ if (v8_enable_maglev == "") {
+ assert(v8_enable_turbofan || !v8_enable_maglev,
+        "Maglev is not available when Turbofan is disabled.")
+ 
+-assert(!v8_jitless ||
+-           (!v8_enable_maglev && !v8_enable_turbofan && !v8_enable_webassembly),
+-       "Maglev, Turbofan and Wasm are not available in jitless mode")
++assert(!v8_jitless || (!v8_enable_sparkplug && !v8_enable_maglev &&
++                           !v8_enable_turbofan && !v8_enable_webassembly),
++       "Sparkplug, Maglev, Turbofan and Wasm are not available in jitless mode")
+ 
+ if (v8_enable_single_generation == "") {
+   v8_enable_single_generation = v8_disable_write_barriers
+@@ -1135,6 +1142,9 @@ config("features") {
+   if (v8_enable_external_code_space) {
+     defines += [ "V8_EXTERNAL_CODE_SPACE" ]
+   }
++  if (v8_enable_sparkplug) {
++    defines += [ "V8_ENABLE_SPARKPLUG" ]
++  }
+   if (v8_enable_maglev) {
+     defines += [ "V8_ENABLE_MAGLEV" ]
+   }
+@@ -3098,10 +3108,6 @@ v8_header_set("v8_internal_headers") {
+     "src/ast/scopes.h",
+     "src/ast/source-range-ast-visitor.h",
+     "src/ast/variables.h",
+-    "src/baseline/baseline-assembler-inl.h",
+-    "src/baseline/baseline-assembler.h",
+-    "src/baseline/baseline-batch-compiler.h",
+-    "src/baseline/baseline-compiler.h",
+     "src/baseline/baseline.h",
+     "src/baseline/bytecode-offset-iterator.h",
+     "src/builtins/accessors.h",
+@@ -4034,6 +4040,15 @@ v8_header_set("v8_internal_headers") {
+     sources -= [ "//base/trace_event/common/trace_event_common.h" ]
+   }
+ 
++  if (v8_enable_sparkplug) {
++    sources += [
++      "src/baseline/baseline-assembler-inl.h",
++      "src/baseline/baseline-assembler.h",
++      "src/baseline/baseline-batch-compiler.h",
++      "src/baseline/baseline-compiler.h",
++    ]
++  }
++
+   if (v8_enable_maglev) {
+     sources += [
+       "src/maglev/maglev-assembler-inl.h",
+@@ -4262,11 +4277,15 @@ v8_header_set("v8_internal_headers") {
+       "src/regexp/ia32/regexp-macro-assembler-ia32.h",
+       "src/wasm/baseline/ia32/liftoff-assembler-ia32-inl.h",
+     ]
++    if (v8_enable_sparkplug) {
++      sources += [
++        "src/baseline/ia32/baseline-assembler-ia32-inl.h",
++        "src/baseline/ia32/baseline-compiler-ia32-inl.h",
++      ]
++    }
+   } else if (v8_current_cpu == "x64") {
+     sources += [
+       ### gcmole(x64) ###
+-      "src/baseline/x64/baseline-assembler-x64-inl.h",
+-      "src/baseline/x64/baseline-compiler-x64-inl.h",
+       "src/codegen/shared-ia32-x64/macro-assembler-shared-ia32-x64.h",
+       "src/codegen/x64/assembler-x64-inl.h",
+       "src/codegen/x64/assembler-x64.h",
+@@ -4289,6 +4308,13 @@ v8_header_set("v8_internal_headers") {
+       sources += [ "src/diagnostics/unwinding-info-win64.h" ]
+     }
+ 
++    if (v8_enable_sparkplug) {
++      sources += [
++        "src/baseline/x64/baseline-assembler-x64-inl.h",
++        "src/baseline/x64/baseline-compiler-x64-inl.h",
++      ]
++    }
++
+     if (v8_enable_webassembly) {
+       # iOS Xcode simulator builds run on an x64 target. iOS and macOS are both
+       # based on Darwin and thus POSIX-compliant to a similar degree.
+@@ -4302,8 +4328,6 @@ v8_header_set("v8_internal_headers") {
+   } else if (v8_current_cpu == "arm") {
+     sources += [
+       ### gcmole(arm) ###
+-      "src/baseline/arm/baseline-assembler-arm-inl.h",
+-      "src/baseline/arm/baseline-compiler-arm-inl.h",
+       "src/codegen/arm/assembler-arm-inl.h",
+       "src/codegen/arm/assembler-arm.h",
+       "src/codegen/arm/constants-arm.h",
+@@ -4318,11 +4342,16 @@ v8_header_set("v8_internal_headers") {
+       "src/regexp/arm/regexp-macro-assembler-arm.h",
+       "src/wasm/baseline/arm/liftoff-assembler-arm-inl.h",
+     ]
++
++    if (v8_enable_sparkplug) {
++      sources += [
++        "src/baseline/arm/baseline-assembler-arm-inl.h",
++        "src/baseline/arm/baseline-compiler-arm-inl.h",
++      ]
++    }
+   } else if (v8_current_cpu == "arm64") {
+     sources += [
+       ### gcmole(arm64) ###
+-      "src/baseline/arm64/baseline-assembler-arm64-inl.h",
+-      "src/baseline/arm64/baseline-compiler-arm64-inl.h",
+       "src/codegen/arm64/assembler-arm64-inl.h",
+       "src/codegen/arm64/assembler-arm64.h",
+       "src/codegen/arm64/constants-arm64.h",
+@@ -4346,6 +4375,12 @@ v8_header_set("v8_internal_headers") {
+     if (v8_control_flow_integrity) {
+       sources += [ "src/execution/arm64/pointer-authentication-arm64.h" ]
+     }
++    if (v8_enable_sparkplug) {
++      sources += [
++        "src/baseline/arm64/baseline-assembler-arm64-inl.h",
++        "src/baseline/arm64/baseline-compiler-arm64-inl.h",
++      ]
++    }
+     if (v8_enable_webassembly) {
+       # Trap handling is enabled on arm64 Mac and Linux and in simulators on
+       # x64 on Linux and Mac.
+@@ -4365,8 +4400,6 @@ v8_header_set("v8_internal_headers") {
+   } else if (v8_current_cpu == "mips64" || v8_current_cpu == "mips64el") {
+     sources += [
+       ### gcmole(mips64el) ###
+-      "src/baseline/mips64/baseline-assembler-mips64-inl.h",
+-      "src/baseline/mips64/baseline-compiler-mips64-inl.h",
+       "src/codegen/mips64/assembler-mips64-inl.h",
+       "src/codegen/mips64/assembler-mips64.h",
+       "src/codegen/mips64/constants-mips64.h",
+@@ -4379,11 +4412,15 @@ v8_header_set("v8_internal_headers") {
+       "src/regexp/mips64/regexp-macro-assembler-mips64.h",
+       "src/wasm/baseline/mips64/liftoff-assembler-mips64-inl.h",
+     ]
++    if (v8_enable_sparkplug) {
++      sources += [
++        "src/baseline/mips64/baseline-assembler-mips64-inl.h",
++        "src/baseline/mips64/baseline-compiler-mips64-inl.h",
++      ]
++    }
+   } else if (v8_current_cpu == "loong64") {
+     sources += [
+       ### gcmole(loong64) ###
+-      "src/baseline/loong64/baseline-assembler-loong64-inl.h",
+-      "src/baseline/loong64/baseline-compiler-loong64-inl.h",
+       "src/codegen/loong64/assembler-loong64-inl.h",
+       "src/codegen/loong64/assembler-loong64.h",
+       "src/codegen/loong64/constants-loong64.h",
+@@ -4396,6 +4433,12 @@ v8_header_set("v8_internal_headers") {
+       "src/regexp/loong64/regexp-macro-assembler-loong64.h",
+       "src/wasm/baseline/loong64/liftoff-assembler-loong64-inl.h",
+     ]
++    if (v8_enable_sparkplug) {
++      sources += [
++        "src/baseline/loong64/baseline-assembler-loong64-inl.h",
++        "src/baseline/loong64/baseline-compiler-loong64-inl.h",
++      ]
++    }
+     if (v8_enable_webassembly) {
+       # Trap handling is enabled on loong64 Linux and in simulators on
+       # x64 on Linux.
+@@ -4427,8 +4470,6 @@ v8_header_set("v8_internal_headers") {
+   } else if (v8_current_cpu == "ppc64") {
+     sources += [
+       ### gcmole(ppc64) ###
+-      "src/baseline/ppc/baseline-assembler-ppc-inl.h",
+-      "src/baseline/ppc/baseline-compiler-ppc-inl.h",
+       "src/codegen/ppc/assembler-ppc-inl.h",
+       "src/codegen/ppc/assembler-ppc.h",
+       "src/codegen/ppc/constants-ppc.h",
+@@ -4443,11 +4484,15 @@ v8_header_set("v8_internal_headers") {
+       "src/regexp/ppc/regexp-macro-assembler-ppc.h",
+       "src/wasm/baseline/ppc/liftoff-assembler-ppc-inl.h",
+     ]
++    if (v8_enable_sparkplug) {
++      sources += [
++        "src/baseline/ppc/baseline-assembler-ppc-inl.h",
++        "src/baseline/ppc/baseline-compiler-ppc-inl.h",
++      ]
++    }
+   } else if (v8_current_cpu == "s390" || v8_current_cpu == "s390x") {
+     sources += [
+       ### gcmole(s390) ###
+-      "src/baseline/s390/baseline-assembler-s390-inl.h",
+-      "src/baseline/s390/baseline-compiler-s390-inl.h",
+       "src/codegen/s390/assembler-s390-inl.h",
+       "src/codegen/s390/assembler-s390.h",
+       "src/codegen/s390/constants-s390.h",
+@@ -4462,6 +4507,12 @@ v8_header_set("v8_internal_headers") {
+       "src/regexp/s390/regexp-macro-assembler-s390.h",
+       "src/wasm/baseline/s390/liftoff-assembler-s390-inl.h",
+     ]
++    if (v8_enable_sparkplug) {
++      sources += [
++        "src/baseline/s390/baseline-assembler-s390-inl.h",
++        "src/baseline/s390/baseline-compiler-s390-inl.h",
++      ]
++    }
+   } else if (v8_current_cpu == "riscv64") {
+     sources += [
+       ### gcmole(riscv64) ###
+@@ -4500,11 +4551,15 @@ v8_header_set("v8_internal_headers") {
+       "src/regexp/riscv/regexp-macro-assembler-riscv.h",
+       "src/wasm/baseline/riscv64/liftoff-assembler-riscv64-inl.h",
+     ]
++    if (v8_enable_sparkplug) {
++      sources += [
++        "src/baseline/riscv/baseline-assembler-riscv-inl.h",
++        "src/baseline/riscv/baseline-compiler-riscv-inl.h",
++      ]
++    }
+   } else if (v8_current_cpu == "riscv32") {
+     sources += [
+       ### gcmole(riscv32) ###
+-      "src/baseline/riscv/baseline-assembler-riscv-inl.h",
+-      "src/baseline/riscv/baseline-compiler-riscv-inl.h",
+       "src/codegen/riscv/assembler-riscv-inl.h",
+       "src/codegen/riscv/assembler-riscv.h",
+       "src/codegen/riscv/base-assembler-riscv.h",
+@@ -4539,6 +4594,12 @@ v8_header_set("v8_internal_headers") {
+       "src/regexp/riscv/regexp-macro-assembler-riscv.h",
+       "src/wasm/baseline/riscv32/liftoff-assembler-riscv32-inl.h",
+     ]
++    if (v8_enable_sparkplug) {
++      sources += [
++        "src/baseline/riscv/baseline-assembler-riscv-inl.h",
++        "src/baseline/riscv/baseline-compiler-riscv-inl.h",
++      ]
++    }
+   }
+ 
+   public_deps = [
+@@ -4969,8 +5030,6 @@ v8_source_set("v8_base_without_compiler") {
+     "src/ast/scopes.cc",
+     "src/ast/source-range-ast-visitor.cc",
+     "src/ast/variables.cc",
+-    "src/baseline/baseline-batch-compiler.cc",
+-    "src/baseline/baseline-compiler.cc",
+     "src/baseline/baseline.cc",
+     "src/baseline/bytecode-offset-iterator.cc",
+     "src/builtins/accessors.cc",
+@@ -5425,6 +5484,13 @@ v8_source_set("v8_base_without_compiler") {
+     sources += [ "src/snapshot/snapshot-compression.cc" ]
+   }
+ 
++  if (v8_enable_sparkplug) {
++    sources += [
++      "src/baseline/baseline-batch-compiler.cc",
++      "src/baseline/baseline-compiler.cc",
++    ]
++  }
++
+   if (v8_enable_maglev) {
+     sources += [
+       "src/maglev/maglev-assembler.cc",
+diff --git a/src/baseline/baseline-assembler-inl.h b/src/baseline/baseline-assembler-inl.h
+index 34250e0e67e..4d24a159232 100644
+--- a/src/baseline/baseline-assembler-inl.h
++++ b/src/baseline/baseline-assembler-inl.h
+@@ -7,10 +7,6 @@
+ 
+ #include "src/baseline/baseline-assembler.h"
+ 
+-// TODO(v8:11421): Remove #if once baseline compiler is ported to other
+-// architectures.
+-#if ENABLE_SPARKPLUG
+-
+ #include <type_traits>
+ #include <unordered_map>
+ 
+@@ -175,6 +171,4 @@ EnsureAccumulatorPreservedScope::~EnsureAccumulatorPreservedScope() {
+ }  // namespace internal
+ }  // namespace v8
+ 
+-#endif  // ENABLE_SPARKPLUG
+-
+ #endif  // V8_BASELINE_BASELINE_ASSEMBLER_INL_H_
+diff --git a/src/baseline/baseline-assembler.h b/src/baseline/baseline-assembler.h
+index 1437e68ef82..430cefd11e5 100644
+--- a/src/baseline/baseline-assembler.h
++++ b/src/baseline/baseline-assembler.h
+@@ -5,11 +5,6 @@
+ #ifndef V8_BASELINE_BASELINE_ASSEMBLER_H_
+ #define V8_BASELINE_BASELINE_ASSEMBLER_H_
+ 
+-// TODO(v8:11421): Remove #if once baseline compiler is ported to other
+-// architectures.
+-#include "src/flags/flags.h"
+-#if ENABLE_SPARKPLUG
+-
+ #include "src/codegen/macro-assembler.h"
+ #include "src/interpreter/bytecode-register.h"
+ #include "src/objects/tagged-index.h"
+@@ -264,6 +259,4 @@ class EnsureAccumulatorPreservedScope final {
+ }  // namespace internal
+ }  // namespace v8
+ 
+-#endif
+-
+ #endif  // V8_BASELINE_BASELINE_ASSEMBLER_H_
+diff --git a/src/baseline/baseline-batch-compiler.cc b/src/baseline/baseline-batch-compiler.cc
+index db634068dd3..ad759a88091 100644
+--- a/src/baseline/baseline-batch-compiler.cc
++++ b/src/baseline/baseline-batch-compiler.cc
+@@ -4,11 +4,6 @@
+ 
+ #include "src/baseline/baseline-batch-compiler.h"
+ 
+-// TODO(v8:11421): Remove #if once baseline compiler is ported to other
+-// architectures.
+-#include "src/flags/flags.h"
+-#if ENABLE_SPARKPLUG
+-
+ #include <algorithm>
+ 
+ #include "src/baseline/baseline-compiler.h"
+@@ -390,41 +385,3 @@ void BaselineBatchCompiler::ClearBatch() {
+ }  // namespace baseline
+ }  // namespace internal
+ }  // namespace v8
+-
+-#else
+-
+-namespace v8 {
+-namespace internal {
+-namespace baseline {
+-
+-class ConcurrentBaselineCompiler {};
+-
+-BaselineBatchCompiler::BaselineBatchCompiler(Isolate* isolate)
+-    : isolate_(isolate),
+-      compilation_queue_(Handle<WeakFixedArray>::null()),
+-      last_index_(0),
+-      estimated_instruction_size_(0),
+-      enabled_(false) {}
+-
+-BaselineBatchCompiler::~BaselineBatchCompiler() {
+-  if (!compilation_queue_.is_null()) {
+-    GlobalHandles::Destroy(compilation_queue_.location());
+-    compilation_queue_ = Handle<WeakFixedArray>::null();
+-  }
+-}
+-
+-void BaselineBatchCompiler::InstallBatch() { UNREACHABLE(); }
+-
+-void BaselineBatchCompiler::EnqueueFunction(Handle<JSFunction> function) {
+-  UNREACHABLE();
+-}
+-
+-void BaselineBatchCompiler::EnqueueSFI(SharedFunctionInfo shared) {
+-  UNREACHABLE();
+-}
+-
+-}  // namespace baseline
+-}  // namespace internal
+-}  // namespace v8
+-
+-#endif
+diff --git a/src/baseline/baseline-compiler.cc b/src/baseline/baseline-compiler.cc
+index 978c092826e..08f243a10e1 100644
+--- a/src/baseline/baseline-compiler.cc
++++ b/src/baseline/baseline-compiler.cc
+@@ -2,11 +2,6 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
+-// TODO(v8:11421): Remove #if once baseline compiler is ported to other
+-// architectures.
+-#include "src/flags/flags.h"
+-#if ENABLE_SPARKPLUG
+-
+ #include <algorithm>
+ #include <type_traits>
+ 
+@@ -1321,7 +1316,7 @@ void BaselineCompiler::VisitCallRuntimeForPair() {
+       BaselineAssembler::ScratchRegisterScope scratch_scope(&basm_);
+       Register out_reg = scratch_scope.AcquireScratch();
+       __ RegisterFrameAddress(out.first, out_reg);
+-      DCHECK(in.register_count() == 1);
++      DCHECK_EQ(in.register_count(), 1);
+       CallRuntime(Runtime::kLoadLookupSlotForCall_Baseline, in.first_register(),
+                   out_reg);
+       break;
+@@ -2402,5 +2397,3 @@ SaveAccumulatorScope::~SaveAccumulatorScope() {
+ }  // namespace baseline
+ }  // namespace internal
+ }  // namespace v8
+-
+-#endif  // ENABLE_SPARKPLUG
+diff --git a/src/baseline/baseline-compiler.h b/src/baseline/baseline-compiler.h
+index f5d2c89bf13..32838429c95 100644
+--- a/src/baseline/baseline-compiler.h
++++ b/src/baseline/baseline-compiler.h
+@@ -5,11 +5,6 @@
+ #ifndef V8_BASELINE_BASELINE_COMPILER_H_
+ #define V8_BASELINE_BASELINE_COMPILER_H_
+ 
+-// TODO(v8:11421): Remove #if once baseline compiler is ported to other
+-// architectures.
+-#include "src/flags/flags.h"
+-#if ENABLE_SPARKPLUG
+-
+ #include "src/base/logging.h"
+ #include "src/base/pointer-with-payload.h"
+ #include "src/base/threaded-list.h"
+@@ -241,6 +236,4 @@ class SaveAccumulatorScope final {
+ }  // namespace internal
+ }  // namespace v8
+ 
+-#endif  // ENABLE_SPARKPLUG
+-
+ #endif  // V8_BASELINE_BASELINE_COMPILER_H_
+diff --git a/src/baseline/baseline.cc b/src/baseline/baseline.cc
+index 23f53faf1ee..c7493328723 100644
+--- a/src/baseline/baseline.cc
++++ b/src/baseline/baseline.cc
+@@ -7,10 +7,7 @@
+ #include "src/handles/maybe-handles.h"
+ #include "src/objects/shared-function-info-inl.h"
+ 
+-// TODO(v8:11421): Remove #if once baseline compiler is ported to other
+-// architectures.
+-#include "src/flags/flags.h"
+-#if ENABLE_SPARKPLUG
++#ifdef V8_ENABLE_SPARKPLUG
+ 
+ #include "src/baseline/baseline-assembler-inl.h"
+ #include "src/baseline/baseline-compiler.h"
+@@ -82,7 +79,8 @@ void EmitReturnBaseline(MacroAssembler* masm) {
+ namespace v8 {
+ namespace internal {
+ 
+-bool CanCompileWithBaseline(Isolate* isolate, SharedFunctionInfo shared) {
++bool CanCompileWithBaseline(Isolate* isolate,
++                            Tagged<SharedFunctionInfo> shared) {
+   return false;
+ }
+ 
+diff --git a/src/builtins/builtins-internal-gen.cc b/src/builtins/builtins-internal-gen.cc
+index 4cbff5d060d..6e550a35386 100644
+--- a/src/builtins/builtins-internal-gen.cc
++++ b/src/builtins/builtins-internal-gen.cc
+@@ -1376,24 +1376,13 @@ void Builtins::Generate_MemMove(MacroAssembler* masm) {
+ }
+ #endif  // V8_TARGET_ARCH_IA32
+ 
+-// TODO(v8:11421): Remove #if once baseline compiler is ported to other
+-// architectures.
+-#if ENABLE_SPARKPLUG
+ void Builtins::Generate_BaselineLeaveFrame(MacroAssembler* masm) {
++#ifdef V8_ENABLE_SPARKPLUG
+   EmitReturnBaseline(masm);
+-}
+ #else
+-// Stub out implementations of arch-specific baseline builtins.
+-void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+-  masm->Trap();
+-}
+-void Builtins::Generate_BaselineLeaveFrame(MacroAssembler* masm) {
+-  masm->Trap();
+-}
+-void Builtins::Generate_BaselineOnStackReplacement(MacroAssembler* masm) {
+   masm->Trap();
++#endif  // V8_ENABLE_SPARKPLUG
+ }
+-#endif
+ 
+ // TODO(v8:11421): Remove #if once the Maglev compiler is ported to other
+ // architectures.
+diff --git a/src/builtins/ppc/builtins-ppc.cc b/src/builtins/ppc/builtins-ppc.cc
+index cd0a68e3f52..6a5452f1d2e 100644
+--- a/src/builtins/ppc/builtins-ppc.cc
++++ b/src/builtins/ppc/builtins-ppc.cc
+@@ -1203,7 +1203,6 @@ static void AdvanceBytecodeOffsetOrReturn(MacroAssembler* masm,
+   __ bind(&end);
+ }
+ 
+-#if ENABLE_SPARKPLUG
+ // static
+ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+   auto descriptor =
+@@ -1333,7 +1332,6 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+   __ LoadRoot(kInterpreterAccumulatorRegister, RootIndex::kUndefinedValue);
+   __ Ret();
+ }
+-#endif
+ 
+ // static
+ void Builtins::Generate_BaselineOutOfLinePrologueDeopt(MacroAssembler* masm) {
+@@ -2157,7 +2155,6 @@ void Builtins::Generate_InterpreterOnStackReplacement(MacroAssembler* masm) {
+                      D::MaybeTargetCodeRegister());
+ }
+ 
+-#if ENABLE_SPARKPLUG
+ void Builtins::Generate_BaselineOnStackReplacement(MacroAssembler* masm) {
+   using D = OnStackReplacementDescriptor;
+   static_assert(D::kParameterCount == 1);
+@@ -2167,7 +2164,6 @@ void Builtins::Generate_BaselineOnStackReplacement(MacroAssembler* masm) {
+   OnStackReplacement(masm, OsrSourceTier::kBaseline,
+                      D::MaybeTargetCodeRegister());
+ }
+-#endif
+ 
+ // static
+ void Builtins::Generate_FunctionPrototypeApply(MacroAssembler* masm) {
+diff --git a/src/builtins/s390/builtins-s390.cc b/src/builtins/s390/builtins-s390.cc
+index 38dbb900124..ebe32a5e910 100644
+--- a/src/builtins/s390/builtins-s390.cc
++++ b/src/builtins/s390/builtins-s390.cc
+@@ -1237,7 +1237,6 @@ static void AdvanceBytecodeOffsetOrReturn(MacroAssembler* masm,
+   __ bind(&end);
+ }
+ 
+-#if ENABLE_SPARKPLUG
+ // static
+ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+   // UseScratchRegisterScope temps(masm);
+@@ -1366,7 +1365,6 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+   __ LoadRoot(kInterpreterAccumulatorRegister, RootIndex::kUndefinedValue);
+   __ Ret();
+ }
+-#endif
+ 
+ // static
+ void Builtins::Generate_BaselineOutOfLinePrologueDeopt(MacroAssembler* masm) {
+@@ -3985,7 +3983,6 @@ void Builtins::Generate_InterpreterOnStackReplacement(MacroAssembler* masm) {
+                      D::MaybeTargetCodeRegister());
+ }
+ 
+-#if ENABLE_SPARKPLUG
+ void Builtins::Generate_BaselineOnStackReplacement(MacroAssembler* masm) {
+   using D = OnStackReplacementDescriptor;
+   static_assert(D::kParameterCount == 1);
+@@ -3995,7 +3992,6 @@ void Builtins::Generate_BaselineOnStackReplacement(MacroAssembler* masm) {
+   OnStackReplacement(masm, OsrSourceTier::kBaseline,
+                      D::MaybeTargetCodeRegister());
+ }
+-#endif
+ 
+ void Builtins::Generate_BaselineOrInterpreterEnterAtBytecode(
+     MacroAssembler* masm) {
+diff --git a/src/common/globals.h b/src/common/globals.h
+index 58e06731118..9fc2749a67b 100644
+--- a/src/common/globals.h
++++ b/src/common/globals.h
+@@ -154,8 +154,6 @@ namespace internal {
+ #define ENABLE_CONTROL_FLOW_INTEGRITY_BOOL false
+ #endif
+ 
+-#define ENABLE_SPARKPLUG true
+-
+ #if V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_ARM64
+ // Set stack limit lower for ARM and ARM64 than for other architectures because:
+ //  - on Arm stack allocating MacroAssembler takes 120K bytes.
+diff --git a/src/execution/isolate.cc b/src/execution/isolate.cc
+index 55715bf4baf..31dfd90adbe 100644
+--- a/src/execution/isolate.cc
++++ b/src/execution/isolate.cc
+@@ -3796,8 +3796,10 @@ void Isolate::Deinit() {
+   cancelable_task_manager()->CancelAndWait();
+ 
+   // Cancel all compiler tasks.
++#ifdef V8_ENABLE_SPARKPLUG
+   delete baseline_batch_compiler_;
+   baseline_batch_compiler_ = nullptr;
++#endif  // V8_ENABLE_SPARKPLUG
+ 
+ #ifdef V8_ENABLE_MAGLEV
+   delete maglev_concurrent_dispatcher_;
+@@ -4551,7 +4553,9 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
+     lazy_compile_dispatcher_ = std::make_unique<LazyCompileDispatcher>(
+         this, V8::GetCurrentPlatform(), v8_flags.stack_size);
+   }
++#ifdef V8_ENABLE_SPARKPLUG
+   baseline_batch_compiler_ = new baseline::BaselineBatchCompiler(this);
++#endif  // V8_ENABLE_SPARKPLUG
+ #ifdef V8_ENABLE_MAGLEV
+   maglev_concurrent_dispatcher_ = new maglev::MaglevConcurrentDispatcher(this);
+ #endif  // V8_ENABLE_MAGLEV
+diff --git a/src/execution/isolate.h b/src/execution/isolate.h
+index 72a55106e27..86349f1b26a 100644
+--- a/src/execution/isolate.h
++++ b/src/execution/isolate.h
+@@ -1585,10 +1585,12 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+   bool IsDeferredHandle(Address* location);
+ #endif  // DEBUG
+ 
++#ifdef V8_ENABLE_SPARKPLUG
+   baseline::BaselineBatchCompiler* baseline_batch_compiler() const {
+     DCHECK_NOT_NULL(baseline_batch_compiler_);
+     return baseline_batch_compiler_;
+   }
++#endif  // V8_ENABLE_SPARKPLUG
+ 
+ #ifdef V8_ENABLE_MAGLEV
+   maglev::MaglevConcurrentDispatcher* maglev_concurrent_dispatcher() {
+@@ -2414,7 +2416,9 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+   Zone* compiler_zone_ = nullptr;
+ 
+   std::unique_ptr<LazyCompileDispatcher> lazy_compile_dispatcher_;
++#ifdef V8_ENABLE_SPARKPLUG
+   baseline::BaselineBatchCompiler* baseline_batch_compiler_ = nullptr;
++#endif  // V8_ENABLE_SPARKPLUG
+ #ifdef V8_ENABLE_MAGLEV
+   maglev::MaglevConcurrentDispatcher* maglev_concurrent_dispatcher_ = nullptr;
+ #endif  // V8_ENABLE_MAGLEV
+diff --git a/src/execution/stack-guard.cc b/src/execution/stack-guard.cc
+index 563916a4e96..efcaf8cd10b 100644
+--- a/src/execution/stack-guard.cc
++++ b/src/execution/stack-guard.cc
+@@ -4,7 +4,6 @@
+ 
+ #include "src/execution/stack-guard.h"
+ 
+-#include "src/baseline/baseline-batch-compiler.h"
+ #include "src/compiler-dispatcher/optimizing-compile-dispatcher.h"
+ #include "src/execution/interrupts-scope.h"
+ #include "src/execution/isolate.h"
+@@ -16,6 +15,10 @@
+ #include "src/tracing/trace-event.h"
+ #include "src/utils/memcopy.h"
+ 
++#ifdef V8_ENABLE_SPARKPLUG
++#include "src/baseline/baseline-batch-compiler.h"
++#endif
++
+ #ifdef V8_ENABLE_MAGLEV
+ #include "src/maglev/maglev-concurrent-dispatcher.h"
+ #endif  // V8_ENABLE_MAGLEV
+@@ -346,11 +349,13 @@ Tagged<Object> StackGuard::HandleInterrupts(InterruptLevel level) {
+     isolate_->optimizing_compile_dispatcher()->InstallOptimizedFunctions();
+   }
+ 
++#ifdef V8_ENABLE_SPARKPLUG
+   if (TestAndClear(&interrupt_flags, INSTALL_BASELINE_CODE)) {
+     TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
+                  "V8.FinalizeBaselineConcurrentCompilation");
+     isolate_->baseline_batch_compiler()->InstallBatch();
+   }
++#endif  // V8_ENABLE_SPARKPLUG
+ 
+ #ifdef V8_ENABLE_MAGLEV
+   if (TestAndClear(&interrupt_flags, INSTALL_MAGLEV_CODE)) {
+diff --git a/src/execution/tiering-manager.cc b/src/execution/tiering-manager.cc
+index 387cc1f0960..faf52575bb0 100644
+--- a/src/execution/tiering-manager.cc
++++ b/src/execution/tiering-manager.cc
+@@ -5,7 +5,6 @@
+ #include "src/execution/tiering-manager.h"
+ 
+ #include "src/base/platform/platform.h"
+-#include "src/baseline/baseline-batch-compiler.h"
+ #include "src/baseline/baseline.h"
+ #include "src/codegen/assembler.h"
+ #include "src/codegen/compilation-cache.h"
+@@ -23,6 +22,10 @@
+ #include "src/objects/code.h"
+ #include "src/tracing/trace-event.h"
+ 
++#ifdef V8_ENABLE_SPARKPLUG
++#include "src/baseline/baseline-batch-compiler.h"
++#endif  // V8_ENABLE_SPARKPLUG
++
+ namespace v8 {
+ namespace internal {
+ 
+@@ -427,6 +430,7 @@ void TieringManager::OnInterruptTick(Handle<JSFunction> function,
+   // compile request and fulfillment, which doesn't work with strictly linear
+   // tiering.
+   if (compile_sparkplug) {
++#ifdef V8_ENABLE_SPARKPLUG
+     if (v8_flags.baseline_batch_compilation) {
+       isolate_->baseline_batch_compiler()->EnqueueFunction(function);
+     } else {
+@@ -435,6 +439,9 @@ void TieringManager::OnInterruptTick(Handle<JSFunction> function,
+       Compiler::CompileBaseline(isolate_, function, Compiler::CLEAR_EXCEPTION,
+                                 &is_compiled_scope);
+     }
++#else
++    UNREACHABLE();
++#endif  // V8_ENABLE_SPARKPLUG
+   }
+ 
+   // We only tier up beyond sparkplug if we already had a feedback vector.
+diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
+index fa47004c67e..5497edded67 100644
+--- a/src/flags/flag-definitions.h
++++ b/src/flags/flag-definitions.h
+@@ -119,11 +119,7 @@
+ #error DEBUG_BOOL must be defined at this point.
+ #endif  // DEBUG_BOOL
+ 
+-#ifndef ENABLE_SPARKPLUG
+-#error ENABLE_SPARKPLUG must be defined at this point.
+-#endif  // ENABLE_SPARKPLUG
+-
+-#if ENABLE_SPARKPLUG
++#if V8_ENABLE_SPARKPLUG
+ #define ENABLE_SPARKPLUG_BY_DEFAULT true
+ #else
+ #define ENABLE_SPARKPLUG_BY_DEFAULT false
+@@ -645,7 +641,7 @@ DEFINE_BOOL(maglev_stats_nvp, false,
+ DEFINE_BOOL(maglev_function_context_specialization, true,
+             "enable function context specialization in maglev")
+ 
+-#if ENABLE_SPARKPLUG
++#ifdef V8_ENABLE_SPARKPLUG
+ DEFINE_WEAK_IMPLICATION(future, flush_baseline_code)
+ #endif
+ 
+@@ -664,9 +660,9 @@ DEFINE_WEAK_VALUE_IMPLICATION(max_opt < 3, turbofan, false)
+ #ifdef V8_ENABLE_MAGLEV
+ DEFINE_WEAK_VALUE_IMPLICATION(max_opt < 2, maglev, false)
+ #endif  // V8_ENABLE_MAGLEV
+-#if ENABLE_SPARKPLUG
++#ifdef V8_ENABLE_SPARKPLUG
+ DEFINE_WEAK_VALUE_IMPLICATION(max_opt < 1, sparkplug, false)
+-#endif  // ENABLE_SPARKPLUG
++#endif  // V8_ENABLE_SPARKPLUG
+ 
+ // Flag to select wasm trace mark type
+ DEFINE_STRING(
+@@ -690,10 +686,10 @@ DEFINE_NEG_IMPLICATION(jitless, track_field_types)
+ // No code generation at runtime.
+ DEFINE_IMPLICATION(jitless, regexp_interpret_all)
+ DEFINE_NEG_IMPLICATION(jitless, turbofan)
+-#if ENABLE_SPARKPLUG
++#ifdef V8_ENABLE_SPARKPLUG
+ DEFINE_NEG_IMPLICATION(jitless, sparkplug)
+ DEFINE_NEG_IMPLICATION(jitless, always_sparkplug)
+-#endif  // ENABLE_SPARKPLUG
++#endif  // V8_ENABLE_SPARKPLUG
+ #ifdef V8_ENABLE_MAGLEV
+ DEFINE_NEG_IMPLICATION(jitless, maglev)
+ #endif  // V8_ENABLE_MAGLEV
+@@ -886,7 +882,7 @@ DEFINE_BOOL(trace_generalization, false, "trace map generalization")
+ 
+ // Flags for Sparkplug
+ #undef FLAG
+-#if ENABLE_SPARKPLUG
++#if V8_ENABLE_SPARKPLUG
+ #define FLAG FLAG_FULL
+ #else
+ #define FLAG FLAG_READONLY
+@@ -894,7 +890,7 @@ DEFINE_BOOL(trace_generalization, false, "trace map generalization")
+ DEFINE_BOOL(sparkplug, ENABLE_SPARKPLUG_BY_DEFAULT,
+             "enable Sparkplug baseline compiler")
+ DEFINE_BOOL(always_sparkplug, false, "directly tier up to Sparkplug code")
+-#if ENABLE_SPARKPLUG
++#if V8_ENABLE_SPARKPLUG
+ DEFINE_IMPLICATION(always_sparkplug, sparkplug)
+ DEFINE_BOOL(baseline_batch_compilation, true, "batch compile Sparkplug code")
+ #if defined(V8_OS_DARWIN) && defined(V8_HOST_ARCH_ARM64) && \
+diff --git a/src/objects/js-function.cc b/src/objects/js-function.cc
+index b20b6a7a257..069829e3b30 100644
+--- a/src/objects/js-function.cc
++++ b/src/objects/js-function.cc
+@@ -654,6 +654,7 @@ void JSFunction::InitializeFeedbackCell(
+     EnsureClosureFeedbackCellArray(function,
+                                    reset_budget_for_feedback_allocation);
+   }
++#ifdef V8_ENABLE_SPARKPLUG
+   // TODO(jgruber): Unduplicate these conditions from tiering-manager.cc.
+   if (function->shared()->sparkplug_compiled() &&
+       CanCompileWithBaseline(isolate, function->shared()) &&
+@@ -667,6 +668,7 @@ void JSFunction::InitializeFeedbackCell(
+                                 &is_compiled_scope);
+     }
+   }
++#endif  // V8_ENABLE_SPARKPLUG
+ }
+ 
+ namespace {
+diff --git a/src/runtime/runtime.cc b/src/runtime/runtime.cc
+index c01f1c2d357..4c4250ea47d 100644
+--- a/src/runtime/runtime.cc
++++ b/src/runtime/runtime.cc
+@@ -225,7 +225,10 @@ bool Runtime::IsAllowListedForFuzzing(FunctionId id) {
+              !v8_flags.concurrent_recompilation;
+     case Runtime::kBaselineOsr:
+     case Runtime::kCompileBaseline:
+-      return ENABLE_SPARKPLUG;
++#ifdef V8_ENABLE_SPARKPLUG
++      return true;
++#endif
++      // Fallthrough.
+     default:
+       return false;
+   }
+diff --git a/src/snapshot/code-serializer.cc b/src/snapshot/code-serializer.cc
+index 12f79c6ff35..cbed64dd68d 100644
+--- a/src/snapshot/code-serializer.cc
++++ b/src/snapshot/code-serializer.cc
+@@ -377,6 +377,7 @@ void FinalizeDeserialization(Isolate* isolate,
+   }
+ }
+ 
++#ifdef V8_ENABLE_SPARKPLUG
+ void BaselineBatchCompileIfSparkplugCompiled(Isolate* isolate,
+                                              Tagged<Script> script) {
+   // Here is main thread, we trigger early baseline compilation only in
+@@ -392,6 +393,9 @@ void BaselineBatchCompileIfSparkplugCompiled(Isolate* isolate,
+     }
+   }
+ }
++#else
++void BaselineBatchCompileIfSparkplugCompiled(Isolate*, Tagged<Script>) {}
++#endif  // V8_ENABLE_SPARKPLUG
+ 
+ const char* ToString(SerializedCodeSanityCheckResult result) {
+   switch (result) {
+diff --git a/src/snapshot/snapshot.cc b/src/snapshot/snapshot.cc
+index 8bd84e2ff0b..9023aff1844 100644
+--- a/src/snapshot/snapshot.cc
++++ b/src/snapshot/snapshot.cc
+@@ -860,7 +860,9 @@ SnapshotCreatorImpl::SnapshotCreatorImpl(
+     isolate_->InitWithoutSnapshot();
+   }
+ 
++#ifdef V8_ENABLE_SPARKPLUG
+   isolate_->baseline_batch_compiler()->set_enabled(false);
++#endif  // V8_ENABLE_SPARKPLUG
+ 
+   // Reserve a spot for the default context s.t. the call sequence of
+   // SetDefaultContext / AddContext remains independent.
+diff --git a/test/cctest/heap/test-heap.cc b/test/cctest/heap/test-heap.cc
+index 06adc1bc63d..97d5bcd2a2d 100644
+--- a/test/cctest/heap/test-heap.cc
++++ b/test/cctest/heap/test-heap.cc
+@@ -1078,9 +1078,9 @@ TEST(TestBytecodeFlushing) {
+   v8_flags.always_turbofan = false;
+   i::v8_flags.optimize_for_size = false;
+ #endif  // !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+-#if ENABLE_SPARKPLUG
++#ifdef V8_ENABLE_SPARKPLUG
+   v8_flags.always_sparkplug = false;
+-#endif  // ENABLE_SPARKPLUG
++#endif  // V8_ENABLE_SPARKPLUG
+   i::v8_flags.flush_bytecode = true;
+   i::v8_flags.allow_natives_syntax = true;
+ 
+@@ -1141,12 +1141,12 @@ static void TestMultiReferencedBytecodeFlushing(bool sparkplug_compile) {
+   v8_flags.always_turbofan = false;
+   i::v8_flags.optimize_for_size = false;
+ #endif  // !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+-#if ENABLE_SPARKPLUG
++#ifdef V8_ENABLE_SPARKPLUG
+   v8_flags.always_sparkplug = false;
+   v8_flags.flush_baseline_code = true;
+ #else
+   if (sparkplug_compile) return;
+-#endif  // ENABLE_SPARKPLUG
++#endif  // V8_ENABLE_SPARKPLUG
+   i::v8_flags.flush_bytecode = true;
+   i::v8_flags.allow_natives_syntax = true;
+ 
+@@ -1227,9 +1227,9 @@ HEAP_TEST(Regress10560) {
+   i::v8_flags.turbofan = false;
+   i::v8_flags.always_turbofan = false;
+ #endif  // !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+-#if ENABLE_SPARKPLUG
++#ifdef V8_ENABLE_SPARKPLUG
+   v8_flags.always_sparkplug = false;
+-#endif  // ENABLE_SPARKPLUG
++#endif  // V8_ENABLE_SPARKPLUG
+   i::v8_flags.lazy_feedback_allocation = true;
+ 
+   ManualGCScope manual_gc_scope;
+@@ -1395,9 +1395,9 @@ TEST(TestOptimizeAfterBytecodeFlushingCandidate) {
+   if (v8_flags.single_generation) return;
+   v8_flags.turbofan = true;
+   v8_flags.always_turbofan = false;
+-#if ENABLE_SPARKPLUG
++#ifdef V8_ENABLE_SPARKPLUG
+   v8_flags.always_sparkplug = false;
+-#endif  // ENABLE_SPARKPLUG
++#endif  // V8_ENABLE_SPARKPLUG
+   i::v8_flags.optimize_for_size = false;
+   i::v8_flags.incremental_marking = true;
+   i::v8_flags.flush_bytecode = true;
+diff --git a/test/cctest/test-api.cc b/test/cctest/test-api.cc
+index 42f466c1dfa..cc67900b019 100644
+--- a/test/cctest/test-api.cc
++++ b/test/cctest/test-api.cc
+@@ -13872,7 +13872,7 @@ UNINITIALIZED_TEST(SetJitCodeEventHandler) {
+   i::v8_flags.incremental_marking = false;
+   i::v8_flags.stress_concurrent_allocation = false;  // For SimulateFullSpace.
+   // Batch compilation can cause different owning spaces for foo and bar.
+-#if ENABLE_SPARKPLUG
++#ifdef V8_ENABLE_SPARKPLUG
+   i::v8_flags.baseline_batch_compilation = false;
+ #endif
+   if (!i::v8_flags.compact) return;
+diff --git a/test/cctest/test-cpu-profiler.cc b/test/cctest/test-cpu-profiler.cc
+index eb79aeb8839..058b22f23bc 100644
+--- a/test/cctest/test-cpu-profiler.cc
++++ b/test/cctest/test-cpu-profiler.cc
+@@ -4748,9 +4748,9 @@ TEST(BytecodeFlushEventsEagerLogging) {
+   v8_flags.always_turbofan = false;
+   v8_flags.optimize_for_size = false;
+ #endif  // !defined(V8_LITE_MODE) && defined(V8_ENABLE_TURBOFAN)
+-#if ENABLE_SPARKPLUG
++#ifdef V8_ENABLE_SPARKPLUG
+   v8_flags.always_sparkplug = false;
+-#endif  // ENABLE_SPARKPLUG
++#endif  // V8_ENABLE_SPARKPLUG
+   v8_flags.flush_bytecode = true;
+   v8_flags.allow_natives_syntax = true;
+ 
+-- 
+2.35.1
+

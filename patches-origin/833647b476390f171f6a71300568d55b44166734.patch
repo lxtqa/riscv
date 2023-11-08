@@ -1,0 +1,1101 @@
+From 833647b476390f171f6a71300568d55b44166734 Mon Sep 17 00:00:00 2001
+From: Jakob Linke <jgruber@chromium.org>
+Date: Wed, 5 Oct 2022 11:08:02 +0200
+Subject: [PATCH] [maglev] Extract the function prologue to an out of line
+ builtin
+
+Prior to this CL the function prologue took roughly the first 340
+bytes of any generated ML code object (release mode, x64). The
+prologue handles deoptimization, optimization, stack (and interrupt)
+checks, and stack frame setup including reserving and initializing
+space for stack locals.
+
+All this is now extracted to the MaglevOutOfLinePrologue builtin.
+
+Costs:
+- The extra unconditional builtin call at the start of ML code.
+- Only dynamic knowledge of # stack slots (so we can't unroll
+  initialization loops as well as with static knowledge).
+- Some extra complexity due to frame and return address juggling.
+
+Benefits:
+- 340 bytes saved per code object (memory).
+- 340 bytes saved per code object (codegen time).
+- The prologue contains 5 reloc entries, with an ool prologue we
+  don't have to iterate these at runtime.
+
+The ool prologue can be enabled/disabled with --maglev-ool-prologue
+(on by default).
+
+One option for the future is to move stack slot initialization
+back inline since it doesn't emit much code and benefits from static
+knowledge of stack layout.
+
+Bug: v8:7700
+Change-Id: I182a9591e62d205de0223036ba8cb25e9c6a6347
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3934842
+Commit-Queue: Jakob Linke <jgruber@chromium.org>
+Reviewed-by: Leszek Swirski <leszeks@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#83533}
+---
+ src/builtins/arm/builtins-arm.cc              |   4 +-
+ src/builtins/arm64/builtins-arm64.cc          |   4 +-
+ src/builtins/builtins-definitions.h           |   1 +
+ src/builtins/builtins-internal-gen.cc         |   9 +-
+ src/builtins/ia32/builtins-ia32.cc            |   5 +-
+ src/builtins/loong64/builtins-loong64.cc      |   4 +-
+ src/builtins/mips64/builtins-mips64.cc        |   4 +-
+ src/builtins/ppc/builtins-ppc.cc              |   4 +-
+ src/builtins/riscv/builtins-riscv.cc          |   4 +-
+ src/builtins/s390/builtins-s390.cc            |   4 +-
+ src/builtins/x64/builtins-x64.cc              | 215 ++++++++++++++++-
+ src/codegen/arm/macro-assembler-arm.cc        |   2 +-
+ src/codegen/arm/macro-assembler-arm.h         |   4 +-
+ src/codegen/arm64/macro-assembler-arm64.cc    |   2 +-
+ src/codegen/arm64/macro-assembler-arm64.h     |   4 +-
+ src/codegen/ia32/macro-assembler-ia32.cc      |   2 +-
+ src/codegen/ia32/macro-assembler-ia32.h       |   2 +-
+ .../loong64/macro-assembler-loong64.cc        |   2 +-
+ src/codegen/loong64/macro-assembler-loong64.h |   4 +-
+ src/codegen/mips64/macro-assembler-mips64.cc  |   2 +-
+ src/codegen/mips64/macro-assembler-mips64.h   |   4 +-
+ src/codegen/ppc/macro-assembler-ppc.cc        |   2 +-
+ src/codegen/ppc/macro-assembler-ppc.h         |   4 +-
+ src/codegen/riscv/macro-assembler-riscv.cc    |   2 +-
+ src/codegen/riscv/macro-assembler-riscv.h     |   4 +-
+ src/codegen/s390/macro-assembler-s390.cc      |   2 +-
+ src/codegen/s390/macro-assembler-s390.h       |   4 +-
+ src/codegen/x64/macro-assembler-x64.cc        |   6 +-
+ src/codegen/x64/macro-assembler-x64.h         |   2 +-
+ src/execution/frames.cc                       |  29 ++-
+ src/flags/flag-definitions.h                  |   1 +
+ src/maglev/maglev-code-generator.cc           | 223 +++++++++---------
+ 32 files changed, 401 insertions(+), 164 deletions(-)
+
+diff --git a/src/builtins/arm/builtins-arm.cc b/src/builtins/arm/builtins-arm.cc
+index 81f5c961bc4..d6a6591dfe7 100644
+--- a/src/builtins/arm/builtins-arm.cc
++++ b/src/builtins/arm/builtins-arm.cc
+@@ -1051,7 +1051,7 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+ 
+     // Drop the frame created by the baseline call.
+     __ ldm(ia_w, sp, {fp, lr});
+-    __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
++    __ OptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
+     __ Trap();
+   }
+ 
+@@ -1300,7 +1300,7 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+   __ jmp(&after_stack_check_interrupt);
+ 
+   __ bind(&flags_need_processing);
+-  __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
++  __ OptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
+ 
+   __ bind(&is_baseline);
+   {
+diff --git a/src/builtins/arm64/builtins-arm64.cc b/src/builtins/arm64/builtins-arm64.cc
+index 00368d0da6a..168270bf6fb 100644
+--- a/src/builtins/arm64/builtins-arm64.cc
++++ b/src/builtins/arm64/builtins-arm64.cc
+@@ -1205,7 +1205,7 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+     ASM_CODE_COMMENT_STRING(masm, "Optimized marker check");
+     // Drop the frame created by the baseline call.
+     __ Pop<TurboAssembler::kAuthLR>(fp, lr);
+-    __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
++    __ OptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
+     __ Trap();
+   }
+ 
+@@ -1474,7 +1474,7 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+   __ jmp(&after_stack_check_interrupt);
+ 
+   __ bind(&flags_need_processing);
+-  __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
++  __ OptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
+ 
+   __ bind(&is_baseline);
+   {
+diff --git a/src/builtins/builtins-definitions.h b/src/builtins/builtins-definitions.h
+index 99a3c35c45c..3134445805e 100644
+--- a/src/builtins/builtins-definitions.h
++++ b/src/builtins/builtins-definitions.h
+@@ -198,6 +198,7 @@ namespace internal {
+                                                                                \
+   /* Maglev Compiler */                                                        \
+   ASM(MaglevOnStackReplacement, OnStackReplacement)                            \
++  ASM(MaglevOutOfLinePrologue, NoContext)                                      \
+                                                                                \
+   /* Code life-cycle */                                                        \
+   TFC(CompileLazy, JSTrampoline)                                               \
+diff --git a/src/builtins/builtins-internal-gen.cc b/src/builtins/builtins-internal-gen.cc
+index eb7790d3fc4..f7531ca38b8 100644
+--- a/src/builtins/builtins-internal-gen.cc
++++ b/src/builtins/builtins-internal-gen.cc
+@@ -1305,10 +1305,17 @@ void Builtins::Generate_BaselineOnStackReplacement(MacroAssembler* masm) {
+ // architectures.
+ #ifndef V8_TARGET_ARCH_X64
+ void Builtins::Generate_MaglevOnStackReplacement(MacroAssembler* masm) {
+-  using D = OnStackReplacementDescriptor;
++  using D =
++      i::CallInterfaceDescriptorFor<Builtin::kMaglevOnStackReplacement>::type;
+   static_assert(D::kParameterCount == 1);
+   masm->Trap();
+ }
++void Builtins::Generate_MaglevOutOfLinePrologue(MacroAssembler* masm) {
++  using D =
++      i::CallInterfaceDescriptorFor<Builtin::kMaglevOutOfLinePrologue>::type;
++  static_assert(D::kParameterCount == 0);
++  masm->Trap();
++}
+ #endif  // V8_TARGET_ARCH_X64
+ 
+ // ES6 [[Get]] operation.
+diff --git a/src/builtins/ia32/builtins-ia32.cc b/src/builtins/ia32/builtins-ia32.cc
+index ecb1bd91362..5535c68c7ed 100644
+--- a/src/builtins/ia32/builtins-ia32.cc
++++ b/src/builtins/ia32/builtins-ia32.cc
+@@ -1111,7 +1111,7 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+   {
+     // Restore actual argument count.
+     __ movd(eax, xmm0);
+-    __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, xmm1);
++    __ OptimizeCodeOrTailCallOptimizedCodeSlot(flags, xmm1);
+   }
+ 
+   __ bind(&compile_lazy);
+@@ -1640,8 +1640,7 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+     // requires the stack to only contain valid frames.
+     __ Drop(2);
+     __ movd(arg_count, saved_arg_count);  // Restore actual argument count.
+-    __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags,
+-                                                    saved_feedback_vector);
++    __ OptimizeCodeOrTailCallOptimizedCodeSlot(flags, saved_feedback_vector);
+     __ Trap();
+   }
+ 
+diff --git a/src/builtins/loong64/builtins-loong64.cc b/src/builtins/loong64/builtins-loong64.cc
+index c147a80d1a3..be486b83966 100644
+--- a/src/builtins/loong64/builtins-loong64.cc
++++ b/src/builtins/loong64/builtins-loong64.cc
+@@ -1022,7 +1022,7 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+     // Ensure the flags is not allocated again.
+     // Drop the frame created by the baseline call.
+     __ Pop(ra, fp);
+-    __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
++    __ OptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
+     __ Trap();
+   }
+ 
+@@ -1275,7 +1275,7 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+   __ jmp(&after_stack_check_interrupt);
+ 
+   __ bind(&flags_need_processing);
+-  __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
++  __ OptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
+ 
+   __ bind(&is_baseline);
+   {
+diff --git a/src/builtins/mips64/builtins-mips64.cc b/src/builtins/mips64/builtins-mips64.cc
+index f164f1d9b05..6ba80b52e1e 100644
+--- a/src/builtins/mips64/builtins-mips64.cc
++++ b/src/builtins/mips64/builtins-mips64.cc
+@@ -1021,7 +1021,7 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+     // Ensure the flags is not allocated again.
+     // Drop the frame created by the baseline call.
+     __ Pop(ra, fp);
+-    __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
++    __ OptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
+     __ Trap();
+   }
+ 
+@@ -1270,7 +1270,7 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+   __ jmp(&after_stack_check_interrupt);
+ 
+   __ bind(&flags_need_processing);
+-  __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
++  __ OptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
+   __ bind(&is_baseline);
+   {
+     // Load the feedback vector from the closure.
+diff --git a/src/builtins/ppc/builtins-ppc.cc b/src/builtins/ppc/builtins-ppc.cc
+index be9784515a8..8decc418fce 100644
+--- a/src/builtins/ppc/builtins-ppc.cc
++++ b/src/builtins/ppc/builtins-ppc.cc
+@@ -1298,7 +1298,7 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+       __ Pop(r0, fp);
+     }
+     __ mtlr(r0);
+-    __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
++    __ OptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
+     __ Trap();
+   }
+ 
+@@ -1568,7 +1568,7 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+   __ jmp(&after_stack_check_interrupt);
+ 
+   __ bind(&flags_need_processing);
+-  __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
++  __ OptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
+ 
+   __ bind(&is_baseline);
+   {
+diff --git a/src/builtins/riscv/builtins-riscv.cc b/src/builtins/riscv/builtins-riscv.cc
+index 0571568ebb3..7cba83d4f0c 100644
+--- a/src/builtins/riscv/builtins-riscv.cc
++++ b/src/builtins/riscv/builtins-riscv.cc
+@@ -1078,7 +1078,7 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+     ASM_CODE_COMMENT_STRING(masm, "Optimized marker check");
+     // Drop the frame created by the baseline call.
+     __ Pop(ra, fp);
+-    __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
++    __ OptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
+     __ Trap();
+   }
+ 
+@@ -1319,7 +1319,7 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+   __ Branch(&after_stack_check_interrupt);
+ 
+   __ bind(&flags_need_processing);
+-  __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
++  __ OptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
+   __ bind(&is_baseline);
+   {
+     // Load the feedback vector from the closure.
+diff --git a/src/builtins/s390/builtins-s390.cc b/src/builtins/s390/builtins-s390.cc
+index e5c5e9d0437..b9bc2bab338 100644
+--- a/src/builtins/s390/builtins-s390.cc
++++ b/src/builtins/s390/builtins-s390.cc
+@@ -1335,7 +1335,7 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+ 
+     // Drop the frame created by the baseline call.
+     __ Pop(r14, fp);
+-    __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
++    __ OptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
+     __ Trap();
+   }
+ 
+@@ -1599,7 +1599,7 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+   __ jmp(&after_stack_check_interrupt);
+ 
+   __ bind(&flags_need_processing);
+-  __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
++  __ OptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
+ 
+   __ bind(&is_baseline);
+   {
+diff --git a/src/builtins/x64/builtins-x64.cc b/src/builtins/x64/builtins-x64.cc
+index 03539e1caa2..6dfdffcdb84 100644
+--- a/src/builtins/x64/builtins-x64.cc
++++ b/src/builtins/x64/builtins-x64.cc
+@@ -1197,8 +1197,7 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+   __ int3();  // Should not return.
+ 
+   __ bind(&flags_need_processing);
+-  __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector,
+-                                                  closure);
++  __ OptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector, closure);
+ 
+   __ bind(&is_baseline);
+   {
+@@ -1627,8 +1626,8 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+     // return since we may do a runtime call along the way that requires the
+     // stack to only contain valid frames.
+     __ Drop(1);
+-    __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
+-        flags, feedback_vector, closure, JumpMode::kPushAndReturn);
++    __ OptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector, closure,
++                                               JumpMode::kPushAndReturn);
+     __ Trap();
+   }
+ 
+@@ -2697,12 +2696,218 @@ void Builtins::Generate_BaselineOnStackReplacement(MacroAssembler* masm) {
+ }
+ 
+ void Builtins::Generate_MaglevOnStackReplacement(MacroAssembler* masm) {
+-  using D = OnStackReplacementDescriptor;
++  using D =
++      i::CallInterfaceDescriptorFor<Builtin::kMaglevOnStackReplacement>::type;
+   static_assert(D::kParameterCount == 1);
+   OnStackReplacement(masm, OsrSourceTier::kMaglev,
+                      D::MaybeTargetCodeRegister());
+ }
+ 
++// Called immediately at the start of Maglev-generated functions, with all
++// state (register and stack) unchanged, except:
++//
++// - the stack slot byte size and
++// - the tagged stack slot byte size
++//
++// are pushed as untagged arguments to the stack. This prologue builtin takes
++// care of a few things that each Maglev function needs on entry:
++//
++// - the deoptimization check
++// - tiering support (checking FeedbackVector flags)
++// - the stack overflow / interrupt check
++// - and finally, setting up the Maglev frame.
++//
++// If this builtin returns, the Maglev frame is fully set up and we are
++// prepared for continued execution. Otherwise, we take one of multiple
++// possible non-standard exit paths (deoptimization, tailcalling other code, or
++// throwing a stack overflow exception).
++void Builtins::Generate_MaglevOutOfLinePrologue(MacroAssembler* masm) {
++  using D =
++      i::CallInterfaceDescriptorFor<Builtin::kMaglevOutOfLinePrologue>::type;
++  static_assert(D::kParameterCount == 0);
++
++  // This builtin is called by Maglev code prior to any register mutations, and
++  // the only stack mutation is pushing the arguments for this builtin. In
++  // other words:
++  //
++  // - The register state is the same as when we entered the Maglev code object,
++  // i.e. set up for a standard JS call.
++  // - The caller has not yet set up a stack frame.
++  // - The caller has pushed the (untagged) stack parameters for this builtin.
++
++  static constexpr int kStackParameterCount = 2;
++  static constexpr int kReturnAddressCount = 1;
++  static constexpr int kReturnAddressOffset = 0 * kSystemPointerSize;
++  static constexpr int kTaggedStackSlotBytesOffset = 1 * kSystemPointerSize;
++  static constexpr int kTotalStackSlotBytesOffset = 2 * kSystemPointerSize;
++  USE(kReturnAddressOffset);
++  USE(kTaggedStackSlotBytesOffset);
++  USE(kTotalStackSlotBytesOffset);
++
++  // Scratch registers. Don't clobber regs related to the calling
++  // convention (e.g. kJavaScriptCallArgCountRegister).
++  const Register scratch0 = rcx;
++  const Register scratch1 = r9;
++  const Register scratch2 = rbx;
++
++  Label deoptimize, optimize, call_stack_guard, call_stack_guard_return;
++
++  // A modified version of BailoutIfDeoptimized that drops the builtin frame
++  // before deoptimizing.
++  {
++    static constexpr int kCodeStartToCodeDataContainerOffset =
++        Code::kCodeDataContainerOffset - Code::kHeaderSize;
++    __ LoadTaggedPointerField(scratch0,
++                              Operand(kJavaScriptCallCodeStartRegister,
++                                      kCodeStartToCodeDataContainerOffset));
++    __ testl(
++        FieldOperand(scratch0, CodeDataContainer::kKindSpecificFlagsOffset),
++        Immediate(1 << Code::kMarkedForDeoptimizationBit));
++    __ j(not_zero, &deoptimize);
++  }
++
++  // Tiering support.
++  const Register flags = scratch0;
++  const Register feedback_vector = scratch1;
++  {
++    __ LoadTaggedPointerField(
++        feedback_vector,
++        FieldOperand(kJSFunctionRegister, JSFunction::kFeedbackCellOffset));
++    __ LoadTaggedPointerField(
++        feedback_vector, FieldOperand(feedback_vector, Cell::kValueOffset));
++    __ AssertFeedbackVector(feedback_vector);
++
++    __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++        flags, feedback_vector, CodeKind::MAGLEV, &optimize);
++  }
++
++  // Good to go - set up the MAGLEV stack frame and return.
++
++  // First, tear down to the caller frame.
++  const Register tagged_stack_slot_bytes = scratch1;
++  const Register total_stack_slot_bytes = scratch0;
++  const Register return_address = scratch2;
++  __ PopReturnAddressTo(return_address);
++  __ Pop(tagged_stack_slot_bytes);
++  __ Pop(total_stack_slot_bytes);
++
++  __ EnterFrame(StackFrame::MAGLEV);
++
++  // Save arguments in frame.
++  // TODO(leszeks): Consider eliding this frame if we don't make any calls
++  // that could clobber these registers.
++  __ Push(kContextRegister);
++  __ Push(kJSFunctionRegister);              // Callee's JS function.
++  __ Push(kJavaScriptCallArgCountRegister);  // Actual argument count.
++
++  {
++    ASM_CODE_COMMENT_STRING(masm, " Stack/interrupt check");
++    // Stack check. This folds the checks for both the interrupt stack limit
++    // check and the real stack limit into one by just checking for the
++    // interrupt limit. The interrupt limit is either equal to the real stack
++    // limit or tighter. By ensuring we have space until that limit after
++    // building the frame we can quickly precheck both at once.
++    // TODO(leszeks): Include a max call argument size here.
++    __ Move(kScratchRegister, rsp);
++    __ subq(kScratchRegister, total_stack_slot_bytes);
++    __ cmpq(kScratchRegister,
++            __ StackLimitAsOperand(StackLimitKind::kInterruptStackLimit));
++    __ j(below, &call_stack_guard);
++    __ bind(&call_stack_guard_return);
++  }
++
++  // Initialize stack slots:
++  //
++  // - tagged slots are initialized with smi zero.
++  // - untagged slots are simply reserved without initialization.
++  //
++  // Tagged slots first.
++  const Register untagged_stack_slot_bytes = total_stack_slot_bytes;
++  {
++    Label next, loop_condition, loop_header;
++
++    DCHECK_EQ(total_stack_slot_bytes, untagged_stack_slot_bytes);
++    __ subq(total_stack_slot_bytes, tagged_stack_slot_bytes);
++
++    const Register smi_zero = rax;
++    DCHECK(!AreAliased(smi_zero, scratch0, scratch1, scratch2));
++    __ Move(smi_zero, Smi::zero());
++
++    __ jmp(&loop_condition, Label::kNear);
++
++    // TODO(leszeks): Consider filling with xmm + movdqa instead.
++    // TODO(v8:7700): Consider doing more than one push per loop iteration.
++    __ bind(&loop_header);
++    __ pushq(rax);
++    __ bind(&loop_condition);
++    __ subq(tagged_stack_slot_bytes, Immediate(kSystemPointerSize));
++    __ j(greater_equal, &loop_header, Label::kNear);
++
++    __ bind(&next);
++  }
++
++  // Untagged slots second.
++  __ subq(rsp, untagged_stack_slot_bytes);
++
++  // The "all-good" return location. This is the only spot where we actually
++  // return to the caller.
++  __ PushReturnAddressFrom(return_address);
++  __ ret(0);
++
++  __ bind(&deoptimize);
++  {
++    // Drop the frame and jump to CompileLazyDeoptimizedCode. This is slightly
++    // fiddly due to the CET shadow stack (otherwise we could do a conditional
++    // Jump to the builtin).
++    __ Drop(kStackParameterCount + kReturnAddressCount);
++    __ Move(scratch0,
++            BUILTIN_CODE(masm->isolate(), CompileLazyDeoptimizedCode));
++    __ LoadCodeObjectEntry(scratch0, scratch0);
++    __ PushReturnAddressFrom(scratch0);
++    __ ret(0);
++  }
++
++  __ bind(&optimize);
++  {
++    __ Drop(kStackParameterCount + kReturnAddressCount);
++    __ AssertFunction(kJSFunctionRegister);
++    __ OptimizeCodeOrTailCallOptimizedCodeSlot(
++        flags, feedback_vector, kJSFunctionRegister, JumpMode::kPushAndReturn);
++    __ Trap();
++  }
++
++  __ bind(&call_stack_guard);
++  {
++    ASM_CODE_COMMENT_STRING(masm, "Stack/interrupt call");
++
++    // Push the MAGLEV code return address now, as if it had been pushed by the
++    // call to this builtin.
++    __ PushReturnAddressFrom(return_address);
++
++    {
++      FrameScope inner_frame_scope(masm, StackFrame::INTERNAL);
++      __ SmiTag(total_stack_slot_bytes);
++      __ Push(total_stack_slot_bytes);
++      __ SmiTag(tagged_stack_slot_bytes);
++      __ Push(tagged_stack_slot_bytes);
++      // Save any registers that can be referenced by maglev::RegisterInput.
++      // TODO(leszeks): Only push those that are used by the graph.
++      __ Push(kJavaScriptCallNewTargetRegister);
++      // Push the frame size.
++      __ Push(total_stack_slot_bytes);
++      __ CallRuntime(Runtime::kStackGuardWithGap, 1);
++      __ Pop(kJavaScriptCallNewTargetRegister);
++      __ Pop(tagged_stack_slot_bytes);
++      __ SmiUntag(tagged_stack_slot_bytes);
++      __ Pop(total_stack_slot_bytes);
++      __ SmiUntag(total_stack_slot_bytes);
++    }
++
++    __ PopReturnAddressTo(return_address);
++    __ jmp(&call_stack_guard_return);
++  }
++}
++
+ #if V8_ENABLE_WEBASSEMBLY
+ void Builtins::Generate_WasmCompileLazy(MacroAssembler* masm) {
+   // The function index was pushed to the stack by the caller as int32.
+diff --git a/src/codegen/arm/macro-assembler-arm.cc b/src/codegen/arm/macro-assembler-arm.cc
+index f88c04333f4..565d0820bdd 100644
+--- a/src/codegen/arm/macro-assembler-arm.cc
++++ b/src/codegen/arm/macro-assembler-arm.cc
+@@ -2078,7 +2078,7 @@ void MacroAssembler::LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
+   b(ne, flags_need_processing);
+ }
+ 
+-void MacroAssembler::MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
++void MacroAssembler::OptimizeCodeOrTailCallOptimizedCodeSlot(
+     Register flags, Register feedback_vector) {
+   ASM_CODE_COMMENT(this);
+   DCHECK(!AreAliased(flags, feedback_vector));
+diff --git a/src/codegen/arm/macro-assembler-arm.h b/src/codegen/arm/macro-assembler-arm.h
+index 099b1551bf8..51f79075812 100644
+--- a/src/codegen/arm/macro-assembler-arm.h
++++ b/src/codegen/arm/macro-assembler-arm.h
+@@ -779,8 +779,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   void LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
+       Register flags, Register feedback_vector, CodeKind current_code_kind,
+       Label* flags_need_processing);
+-  void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(Register flags,
+-                                                    Register feedback_vector);
++  void OptimizeCodeOrTailCallOptimizedCodeSlot(Register flags,
++                                               Register feedback_vector);
+ 
+   // ---------------------------------------------------------------------------
+   // Runtime calls
+diff --git a/src/codegen/arm64/macro-assembler-arm64.cc b/src/codegen/arm64/macro-assembler-arm64.cc
+index 0112f35129c..c6d77b6013c 100644
+--- a/src/codegen/arm64/macro-assembler-arm64.cc
++++ b/src/codegen/arm64/macro-assembler-arm64.cc
+@@ -1440,7 +1440,7 @@ void MacroAssembler::LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
+   TestAndBranchIfAnySet(flags, kFlagsMask, flags_need_processing);
+ }
+ 
+-void MacroAssembler::MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
++void MacroAssembler::OptimizeCodeOrTailCallOptimizedCodeSlot(
+     Register flags, Register feedback_vector) {
+   ASM_CODE_COMMENT(this);
+   DCHECK(!AreAliased(flags, feedback_vector));
+diff --git a/src/codegen/arm64/macro-assembler-arm64.h b/src/codegen/arm64/macro-assembler-arm64.h
+index 44e173f53b0..e041690d308 100644
+--- a/src/codegen/arm64/macro-assembler-arm64.h
++++ b/src/codegen/arm64/macro-assembler-arm64.h
+@@ -1843,8 +1843,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   void LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
+       Register flags, Register feedback_vector, CodeKind current_code_kind,
+       Label* flags_need_processing);
+-  void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(Register flags,
+-                                                    Register feedback_vector);
++  void OptimizeCodeOrTailCallOptimizedCodeSlot(Register flags,
++                                               Register feedback_vector);
+ 
+   // Helpers ------------------------------------------------------------------
+ 
+diff --git a/src/codegen/ia32/macro-assembler-ia32.cc b/src/codegen/ia32/macro-assembler-ia32.cc
+index eeb33d2aedc..e5bd88e80ad 100644
+--- a/src/codegen/ia32/macro-assembler-ia32.cc
++++ b/src/codegen/ia32/macro-assembler-ia32.cc
+@@ -848,7 +848,7 @@ void MacroAssembler::LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
+   j(not_zero, flags_need_processing);
+ }
+ 
+-void MacroAssembler::MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
++void MacroAssembler::OptimizeCodeOrTailCallOptimizedCodeSlot(
+     Register flags, XMMRegister saved_feedback_vector) {
+   ASM_CODE_COMMENT(this);
+   Label maybe_has_optimized_code, maybe_needs_logging;
+diff --git a/src/codegen/ia32/macro-assembler-ia32.h b/src/codegen/ia32/macro-assembler-ia32.h
+index bc71da2dd0b..a55beb1a4e1 100644
+--- a/src/codegen/ia32/macro-assembler-ia32.h
++++ b/src/codegen/ia32/macro-assembler-ia32.h
+@@ -564,7 +564,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   void LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
+       Register flags, XMMRegister saved_feedback_vector,
+       CodeKind current_code_kind, Label* flags_need_processing);
+-  void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
++  void OptimizeCodeOrTailCallOptimizedCodeSlot(
+       Register flags, XMMRegister saved_feedback_vector);
+ 
+   // Abort execution if argument is not a smi, enabled via --debug-code.
+diff --git a/src/codegen/loong64/macro-assembler-loong64.cc b/src/codegen/loong64/macro-assembler-loong64.cc
+index 2822a0e205e..d94485fa718 100644
+--- a/src/codegen/loong64/macro-assembler-loong64.cc
++++ b/src/codegen/loong64/macro-assembler-loong64.cc
+@@ -4270,7 +4270,7 @@ void MacroAssembler::LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
+   Branch(flags_need_processing, ne, scratch, Operand(zero_reg));
+ }
+ 
+-void MacroAssembler::MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
++void MacroAssembler::OptimizeCodeOrTailCallOptimizedCodeSlot(
+     Register flags, Register feedback_vector) {
+   ASM_CODE_COMMENT(this);
+   DCHECK(!AreAliased(flags, feedback_vector));
+diff --git a/src/codegen/loong64/macro-assembler-loong64.h b/src/codegen/loong64/macro-assembler-loong64.h
+index ac0d4b36764..38555a5604b 100644
+--- a/src/codegen/loong64/macro-assembler-loong64.h
++++ b/src/codegen/loong64/macro-assembler-loong64.h
+@@ -1054,8 +1054,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   void LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
+       Register flags, Register feedback_vector, CodeKind current_code_kind,
+       Label* flags_need_processing);
+-  void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(Register flags,
+-                                                    Register feedback_vector);
++  void OptimizeCodeOrTailCallOptimizedCodeSlot(Register flags,
++                                               Register feedback_vector);
+ 
+   template <typename Field>
+   void DecodeField(Register dst, Register src) {
+diff --git a/src/codegen/mips64/macro-assembler-mips64.cc b/src/codegen/mips64/macro-assembler-mips64.cc
+index 24e6fee51ae..2cbf089b2c0 100644
+--- a/src/codegen/mips64/macro-assembler-mips64.cc
++++ b/src/codegen/mips64/macro-assembler-mips64.cc
+@@ -6315,7 +6315,7 @@ void MacroAssembler::LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
+   Branch(flags_need_processing, ne, scratch, Operand(zero_reg));
+ }
+ 
+-void MacroAssembler::MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
++void MacroAssembler::OptimizeCodeOrTailCallOptimizedCodeSlot(
+     Register flags, Register feedback_vector) {
+   ASM_CODE_COMMENT(this);
+   Label maybe_has_optimized_code, maybe_needs_logging;
+diff --git a/src/codegen/mips64/macro-assembler-mips64.h b/src/codegen/mips64/macro-assembler-mips64.h
+index b927ac112fd..9b57d14342b 100644
+--- a/src/codegen/mips64/macro-assembler-mips64.h
++++ b/src/codegen/mips64/macro-assembler-mips64.h
+@@ -1243,8 +1243,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   void LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
+       Register flags, Register feedback_vector, CodeKind current_code_kind,
+       Label* flags_need_processing);
+-  void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(Register flags,
+-                                                    Register feedback_vector);
++  void OptimizeCodeOrTailCallOptimizedCodeSlot(Register flags,
++                                               Register feedback_vector);
+ 
+   template <typename Field>
+   void DecodeField(Register dst, Register src) {
+diff --git a/src/codegen/ppc/macro-assembler-ppc.cc b/src/codegen/ppc/macro-assembler-ppc.cc
+index bfc8d0f8b53..3f5040c9ffb 100644
+--- a/src/codegen/ppc/macro-assembler-ppc.cc
++++ b/src/codegen/ppc/macro-assembler-ppc.cc
+@@ -2152,7 +2152,7 @@ void MacroAssembler::LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
+   bne(flags_need_processing, cr0);
+ }
+ 
+-void MacroAssembler::MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
++void MacroAssembler::OptimizeCodeOrTailCallOptimizedCodeSlot(
+     Register flags, Register feedback_vector) {
+   DCHECK(!AreAliased(flags, feedback_vector));
+   Label maybe_has_optimized_code, maybe_needs_logging;
+diff --git a/src/codegen/ppc/macro-assembler-ppc.h b/src/codegen/ppc/macro-assembler-ppc.h
+index 298634176e3..4cbefa69b9a 100644
+--- a/src/codegen/ppc/macro-assembler-ppc.h
++++ b/src/codegen/ppc/macro-assembler-ppc.h
+@@ -1470,8 +1470,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   void LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
+       Register flags, Register feedback_vector, CodeKind current_code_kind,
+       Label* flags_need_processing);
+-  void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(Register flags,
+-                                                    Register feedback_vector);
++  void OptimizeCodeOrTailCallOptimizedCodeSlot(Register flags,
++                                               Register feedback_vector);
+ 
+   // ---------------------------------------------------------------------------
+   // Runtime calls
+diff --git a/src/codegen/riscv/macro-assembler-riscv.cc b/src/codegen/riscv/macro-assembler-riscv.cc
+index 7d0add60968..f01d6cf72bb 100644
+--- a/src/codegen/riscv/macro-assembler-riscv.cc
++++ b/src/codegen/riscv/macro-assembler-riscv.cc
+@@ -207,7 +207,7 @@ void MacroAssembler::LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
+   Branch(flags_need_processing, ne, scratch, Operand(zero_reg));
+ }
+ 
+-void MacroAssembler::MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
++void MacroAssembler::OptimizeCodeOrTailCallOptimizedCodeSlot(
+     Register flags, Register feedback_vector) {
+   ASM_CODE_COMMENT(this);
+   DCHECK(!AreAliased(flags, feedback_vector));
+diff --git a/src/codegen/riscv/macro-assembler-riscv.h b/src/codegen/riscv/macro-assembler-riscv.h
+index c245e67606a..6f2f8eb25ef 100644
+--- a/src/codegen/riscv/macro-assembler-riscv.h
++++ b/src/codegen/riscv/macro-assembler-riscv.h
+@@ -1344,8 +1344,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   void LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
+       Register flags, Register feedback_vector, CodeKind current_code_kind,
+       Label* flags_need_processing);
+-  void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(Register flags,
+-                                                    Register feedback_vector);
++  void OptimizeCodeOrTailCallOptimizedCodeSlot(Register flags,
++                                               Register feedback_vector);
+ 
+   // -------------------------------------------------------------------------
+   // Support functions.
+diff --git a/src/codegen/s390/macro-assembler-s390.cc b/src/codegen/s390/macro-assembler-s390.cc
+index c693fbc3ac3..1763749950c 100644
+--- a/src/codegen/s390/macro-assembler-s390.cc
++++ b/src/codegen/s390/macro-assembler-s390.cc
+@@ -2146,7 +2146,7 @@ void MacroAssembler::LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
+   b(Condition(7), flags_need_processing);
+ }
+ 
+-void MacroAssembler::MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
++void MacroAssembler::OptimizeCodeOrTailCallOptimizedCodeSlot(
+     Register flags, Register feedback_vector) {
+   DCHECK(!AreAliased(flags, feedback_vector));
+   Label maybe_has_optimized_code, maybe_needs_logging;
+diff --git a/src/codegen/s390/macro-assembler-s390.h b/src/codegen/s390/macro-assembler-s390.h
+index 7d9a6ca0902..3a7f218a26b 100644
+--- a/src/codegen/s390/macro-assembler-s390.h
++++ b/src/codegen/s390/macro-assembler-s390.h
+@@ -1764,8 +1764,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   void LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
+       Register flags, Register feedback_vector, CodeKind current_code_kind,
+       Label* flags_need_processing);
+-  void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(Register flags,
+-                                                    Register feedback_vector);
++  void OptimizeCodeOrTailCallOptimizedCodeSlot(Register flags,
++                                               Register feedback_vector);
+ 
+   // ---------------------------------------------------------------------------
+   // GC Support
+diff --git a/src/codegen/x64/macro-assembler-x64.cc b/src/codegen/x64/macro-assembler-x64.cc
+index 8ef7f7be06b..43c4961b40b 100644
+--- a/src/codegen/x64/macro-assembler-x64.cc
++++ b/src/codegen/x64/macro-assembler-x64.cc
+@@ -908,7 +908,7 @@ void MacroAssembler::LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
+   j(not_zero, flags_need_processing);
+ }
+ 
+-void MacroAssembler::MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
++void MacroAssembler::OptimizeCodeOrTailCallOptimizedCodeSlot(
+     Register flags, Register feedback_vector, Register closure,
+     JumpMode jump_mode) {
+   ASM_CODE_COMMENT(this);
+@@ -918,12 +918,12 @@ void MacroAssembler::MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
+   testl(flags, Immediate(FeedbackVector::kFlagsTieringStateIsAnyRequested));
+   j(zero, &maybe_needs_logging);
+ 
+-  GenerateTailCallToReturnedCode(Runtime::kCompileOptimized);
++  GenerateTailCallToReturnedCode(Runtime::kCompileOptimized, jump_mode);
+ 
+   bind(&maybe_needs_logging);
+   testl(flags, Immediate(FeedbackVector::LogNextExecutionBit::kMask));
+   j(zero, &maybe_has_optimized_code);
+-  GenerateTailCallToReturnedCode(Runtime::kFunctionLogNextExecution);
++  GenerateTailCallToReturnedCode(Runtime::kFunctionLogNextExecution, jump_mode);
+ 
+   bind(&maybe_has_optimized_code);
+   Register optimized_code_entry = flags;
+diff --git a/src/codegen/x64/macro-assembler-x64.h b/src/codegen/x64/macro-assembler-x64.h
+index a213f9e4a8e..7f138fd9d9b 100644
+--- a/src/codegen/x64/macro-assembler-x64.h
++++ b/src/codegen/x64/macro-assembler-x64.h
+@@ -840,7 +840,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   void LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
+       Register flags, Register feedback_vector, CodeKind current_code_kind,
+       Label* flags_need_processing);
+-  void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
++  void OptimizeCodeOrTailCallOptimizedCodeSlot(
+       Register flags, Register feedback_vector, Register closure,
+       JumpMode jump_mode = JumpMode::kJump);
+ 
+diff --git a/src/execution/frames.cc b/src/execution/frames.cc
+index 985b38f13cf..e1578d69482 100644
+--- a/src/execution/frames.cc
++++ b/src/execution/frames.cc
+@@ -1470,14 +1470,27 @@ void MaglevFrame::Iterate(RootVisitor* v) const {
+     // the stack guard in the prologue of the maglev function. This means that
+     // we've set up the frame header, but not the spill slots yet.
+ 
+-    // DCHECK the frame setup under the above assumption. Include one extra slot
+-    // for the single argument into StackGuardWithGap, and another for the saved
+-    // new.target register.
+-    DCHECK_EQ(actual_frame_size, StandardFrameConstants::kFixedFrameSizeFromFp +
+-                                     2 * kSystemPointerSize);
+-    DCHECK_EQ(isolate()->c_function(),
+-              Runtime::FunctionForId(Runtime::kStackGuardWithGap)->entry);
+-    DCHECK_EQ(maglev_safepoint_entry.num_pushed_registers(), 0);
++    if (v8_flags.maglev_ool_prologue) {
++      // DCHECK the frame setup under the above assumption. The
++      // MaglevOutOfLinePrologue builtin creates an INTERNAL frame for the
++      // StackGuardWithGap call (where extra slots and args are), so the MAGLEV
++      // frame itself is exactly kFixedFrameSizeFromFp.
++      DCHECK_EQ(actual_frame_size,
++                StandardFrameConstants::kFixedFrameSizeFromFp);
++      DCHECK_EQ(isolate()->c_function(),
++                Runtime::FunctionForId(Runtime::kStackGuardWithGap)->entry);
++      DCHECK_EQ(maglev_safepoint_entry.num_pushed_registers(), 0);
++    } else {
++      // DCHECK the frame setup under the above assumption. Include one extra
++      // slot for the single argument into StackGuardWithGap, and another for
++      // the saved new.target register.
++      DCHECK_EQ(actual_frame_size,
++                StandardFrameConstants::kFixedFrameSizeFromFp +
++                    2 * kSystemPointerSize);
++      DCHECK_EQ(isolate()->c_function(),
++                Runtime::FunctionForId(Runtime::kStackGuardWithGap)->entry);
++      DCHECK_EQ(maglev_safepoint_entry.num_pushed_registers(), 0);
++    }
+     spill_slot_count = 0;
+     tagged_slot_count = 0;
+   }
+diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
+index 84c3570153c..6407ce4e9e5 100644
+--- a/src/flags/flag-definitions.h
++++ b/src/flags/flag-definitions.h
+@@ -480,6 +480,7 @@ DEFINE_BOOL(trace_maglev_regalloc, false, "trace maglev register allocation")
+ // TODO(v8:7700): Remove once stable.
+ DEFINE_BOOL(maglev_function_context_specialization, true,
+             "enable function context specialization in maglev")
++DEFINE_BOOL(maglev_ool_prologue, true, "use the Maglev out of line prologue")
+ 
+ #if ENABLE_SPARKPLUG
+ DEFINE_WEAK_IMPLICATION(future, sparkplug)
+diff --git a/src/maglev/maglev-code-generator.cc b/src/maglev/maglev-code-generator.cc
+index d41ac29dfbf..3b846aef2a4 100644
+--- a/src/maglev/maglev-code-generator.cc
++++ b/src/maglev/maglev-code-generator.cc
+@@ -646,130 +646,141 @@ class MaglevCodeGeneratingNodeProcessor {
+       : masm_(masm) {}
+ 
+   void PreProcessGraph(Graph* graph) {
++    code_gen_state()->set_untagged_slots(graph->untagged_stack_slots());
++    code_gen_state()->set_tagged_slots(graph->tagged_stack_slots());
++
+     if (v8_flags.maglev_break_on_entry) {
+       __ int3();
+     }
+ 
+-    __ BailoutIfDeoptimized(rbx);
++    if (v8_flags.maglev_ool_prologue) {
++      // Call the out-of-line prologue (with parameters passed on the stack).
++      __ Push(Immediate(code_gen_state()->stack_slots() * kSystemPointerSize));
++      __ Push(Immediate(code_gen_state()->tagged_slots() * kSystemPointerSize));
++      __ CallBuiltin(Builtin::kMaglevOutOfLinePrologue);
++    } else {
++      __ BailoutIfDeoptimized(rbx);
+ 
+-    // Tiering support.
+-    // TODO(jgruber): Extract to a builtin (the tiering prologue is ~230 bytes
+-    // per Maglev code object on x64).
+-    {
+-      // Scratch registers. Don't clobber regs related to the calling
+-      // convention (e.g. kJavaScriptCallArgCountRegister).
+-      Register flags = rcx;
+-      Register feedback_vector = r9;
+-
+-      // Load the feedback vector.
+-      __ LoadTaggedPointerField(
+-          feedback_vector,
+-          FieldOperand(kJSFunctionRegister, JSFunction::kFeedbackCellOffset));
+-      __ LoadTaggedPointerField(
+-          feedback_vector, FieldOperand(feedback_vector, Cell::kValueOffset));
+-      __ AssertFeedbackVector(feedback_vector);
+-
+-      Label flags_need_processing, next;
+-      __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
+-          flags, feedback_vector, CodeKind::MAGLEV, &flags_need_processing);
+-      __ jmp(&next);
+-
+-      __ bind(&flags_need_processing);
++      // Tiering support.
++      // TODO(jgruber): Extract to a builtin (the tiering prologue is ~230 bytes
++      // per Maglev code object on x64).
+       {
+-        ASM_CODE_COMMENT_STRING(masm(), "Optimized marker check");
+-        __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
+-            flags, feedback_vector, kJSFunctionRegister, JumpMode::kJump);
+-        __ Trap();
+-      }
+-
+-      __ bind(&next);
+-    }
++        // Scratch registers. Don't clobber regs related to the calling
++        // convention (e.g. kJavaScriptCallArgCountRegister).
++        Register flags = rcx;
++        Register feedback_vector = r9;
++
++        // Load the feedback vector.
++        __ LoadTaggedPointerField(
++            feedback_vector,
++            FieldOperand(kJSFunctionRegister, JSFunction::kFeedbackCellOffset));
++        __ LoadTaggedPointerField(
++            feedback_vector, FieldOperand(feedback_vector, Cell::kValueOffset));
++        __ AssertFeedbackVector(feedback_vector);
++
++        Label flags_need_processing, next;
++        __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++            flags, feedback_vector, CodeKind::MAGLEV, &flags_need_processing);
++        __ jmp(&next);
++
++        __ bind(&flags_need_processing);
++        {
++          ASM_CODE_COMMENT_STRING(masm(), "Optimized marker check");
++          __ OptimizeCodeOrTailCallOptimizedCodeSlot(
++              flags, feedback_vector, kJSFunctionRegister, JumpMode::kJump);
++          __ Trap();
++        }
+ 
+-    __ EnterFrame(StackFrame::MAGLEV);
++        __ bind(&next);
++      }
+ 
+-    // Save arguments in frame.
+-    // TODO(leszeks): Consider eliding this frame if we don't make any calls
+-    // that could clobber these registers.
+-    __ Push(kContextRegister);
+-    __ Push(kJSFunctionRegister);              // Callee's JS function.
+-    __ Push(kJavaScriptCallArgCountRegister);  // Actual argument count.
++      __ EnterFrame(StackFrame::MAGLEV);
+ 
+-    code_gen_state()->set_untagged_slots(graph->untagged_stack_slots());
+-    code_gen_state()->set_tagged_slots(graph->tagged_stack_slots());
+-
+-    {
+-      ASM_CODE_COMMENT_STRING(masm(), " Stack/interrupt check");
+-      // Stack check. This folds the checks for both the interrupt stack limit
+-      // check and the real stack limit into one by just checking for the
+-      // interrupt limit. The interrupt limit is either equal to the real stack
+-      // limit or tighter. By ensuring we have space until that limit after
+-      // building the frame we can quickly precheck both at once.
+-      __ Move(kScratchRegister, rsp);
+-      // TODO(leszeks): Include a max call argument size here.
+-      __ subq(kScratchRegister,
+-              Immediate(code_gen_state()->stack_slots() * kSystemPointerSize));
+-      __ cmpq(kScratchRegister,
+-              __ StackLimitAsOperand(StackLimitKind::kInterruptStackLimit));
++      // Save arguments in frame.
++      // TODO(leszeks): Consider eliding this frame if we don't make any calls
++      // that could clobber these registers.
++      __ Push(kContextRegister);
++      __ Push(kJSFunctionRegister);              // Callee's JS function.
++      __ Push(kJavaScriptCallArgCountRegister);  // Actual argument count.
+ 
+-      __ j(below, &deferred_call_stack_guard_);
+-      __ bind(&deferred_call_stack_guard_return_);
+-    }
++      {
++        ASM_CODE_COMMENT_STRING(masm(), " Stack/interrupt check");
++        // Stack check. This folds the checks for both the interrupt stack limit
++        // check and the real stack limit into one by just checking for the
++        // interrupt limit. The interrupt limit is either equal to the real
++        // stack limit or tighter. By ensuring we have space until that limit
++        // after building the frame we can quickly precheck both at once.
++        __ Move(kScratchRegister, rsp);
++        // TODO(leszeks): Include a max call argument size here.
++        __ subq(kScratchRegister, Immediate(code_gen_state()->stack_slots() *
++                                            kSystemPointerSize));
++        __ cmpq(kScratchRegister,
++                __ StackLimitAsOperand(StackLimitKind::kInterruptStackLimit));
++
++        __ j(below, &deferred_call_stack_guard_);
++        __ bind(&deferred_call_stack_guard_return_);
++      }
+ 
+-    // Initialize stack slots.
+-    if (graph->tagged_stack_slots() > 0) {
+-      ASM_CODE_COMMENT_STRING(masm(), "Initializing stack slots");
+-      // TODO(leszeks): Consider filling with xmm + movdqa instead.
+-      __ Move(rax, Immediate(0));
+-
+-      // Magic value. Experimentally, an unroll size of 8 doesn't seem any worse
+-      // than fully unrolled pushes.
+-      const int kLoopUnrollSize = 8;
+-      int tagged_slots = graph->tagged_stack_slots();
+-      if (tagged_slots < 2 * kLoopUnrollSize) {
+-        // If the frame is small enough, just unroll the frame fill completely.
+-        for (int i = 0; i < tagged_slots; ++i) {
+-          __ pushq(rax);
+-        }
+-      } else {
+-        // Extract the first few slots to round to the unroll size.
+-        int first_slots = tagged_slots % kLoopUnrollSize;
+-        for (int i = 0; i < first_slots; ++i) {
+-          __ pushq(rax);
+-        }
+-        __ Move(rbx, Immediate(tagged_slots / kLoopUnrollSize));
+-        // We enter the loop unconditionally, so make sure we need to loop at
+-        // least once.
+-        DCHECK_GT(tagged_slots / kLoopUnrollSize, 0);
+-        Label loop;
+-        __ bind(&loop);
+-        for (int i = 0; i < kLoopUnrollSize; ++i) {
+-          __ pushq(rax);
++      // Initialize stack slots.
++      if (graph->tagged_stack_slots() > 0) {
++        ASM_CODE_COMMENT_STRING(masm(), "Initializing stack slots");
++        // TODO(leszeks): Consider filling with xmm + movdqa instead.
++        __ Move(rax, Immediate(0));
++
++        // Magic value. Experimentally, an unroll size of 8 doesn't seem any
++        // worse than fully unrolled pushes.
++        const int kLoopUnrollSize = 8;
++        int tagged_slots = graph->tagged_stack_slots();
++        if (tagged_slots < 2 * kLoopUnrollSize) {
++          // If the frame is small enough, just unroll the frame fill
++          // completely.
++          for (int i = 0; i < tagged_slots; ++i) {
++            __ pushq(rax);
++          }
++        } else {
++          // Extract the first few slots to round to the unroll size.
++          int first_slots = tagged_slots % kLoopUnrollSize;
++          for (int i = 0; i < first_slots; ++i) {
++            __ pushq(rax);
++          }
++          __ Move(rbx, Immediate(tagged_slots / kLoopUnrollSize));
++          // We enter the loop unconditionally, so make sure we need to loop at
++          // least once.
++          DCHECK_GT(tagged_slots / kLoopUnrollSize, 0);
++          Label loop;
++          __ bind(&loop);
++          for (int i = 0; i < kLoopUnrollSize; ++i) {
++            __ pushq(rax);
++          }
++          __ decl(rbx);
++          __ j(greater, &loop);
+         }
+-        __ decl(rbx);
+-        __ j(greater, &loop);
+       }
+-    }
+-    if (graph->untagged_stack_slots() > 0) {
+-      // Extend rsp by the size of the remaining untagged part of the frame, no
+-      // need to initialise these.
+-      __ subq(rsp,
+-              Immediate(graph->untagged_stack_slots() * kSystemPointerSize));
++      if (graph->untagged_stack_slots() > 0) {
++        // Extend rsp by the size of the remaining untagged part of the frame,
++        // no need to initialise these.
++        __ subq(rsp,
++                Immediate(graph->untagged_stack_slots() * kSystemPointerSize));
++      }
+     }
+   }
+ 
+   void PostProcessGraph(Graph*) {
+     __ int3();
+-    __ bind(&deferred_call_stack_guard_);
+-    ASM_CODE_COMMENT_STRING(masm(), "Stack/interrupt call");
+-    // Save any registers that can be referenced by RegisterInput.
+-    // TODO(leszeks): Only push those that are used by the graph.
+-    __ PushAll(RegisterInput::kAllowedRegisters);
+-    // Push the frame size
+-    __ Push(Immediate(
+-        Smi::FromInt(code_gen_state()->stack_slots() * kSystemPointerSize)));
+-    __ CallRuntime(Runtime::kStackGuardWithGap, 1);
+-    __ PopAll(RegisterInput::kAllowedRegisters);
+-    __ jmp(&deferred_call_stack_guard_return_);
++
++    if (!v8_flags.maglev_ool_prologue) {
++      __ bind(&deferred_call_stack_guard_);
++      ASM_CODE_COMMENT_STRING(masm(), "Stack/interrupt call");
++      // Save any registers that can be referenced by RegisterInput.
++      // TODO(leszeks): Only push those that are used by the graph.
++      __ PushAll(RegisterInput::kAllowedRegisters);
++      // Push the frame size
++      __ Push(Immediate(
++          Smi::FromInt(code_gen_state()->stack_slots() * kSystemPointerSize)));
++      __ CallRuntime(Runtime::kStackGuardWithGap, 1);
++      __ PopAll(RegisterInput::kAllowedRegisters);
++      __ jmp(&deferred_call_stack_guard_return_);
++    }
+   }
+ 
+   void PreProcessBasicBlock(BasicBlock* block) {
+-- 
+2.35.1
+

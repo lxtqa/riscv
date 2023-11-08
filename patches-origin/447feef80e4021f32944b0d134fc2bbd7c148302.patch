@@ -1,0 +1,661 @@
+From 447feef80e4021f32944b0d134fc2bbd7c148302 Mon Sep 17 00:00:00 2001
+From: Igor Sheludko <ishell@chromium.org>
+Date: Wed, 31 Aug 2022 20:11:13 +0200
+Subject: [PATCH] [assembler] Introduce RelocInfo::NEAR_BUILTIN_ENTRY
+
+... for PC-relative builtin calls/jumps and explicitly use near_call /
+near_jump instructions.
+
+This is a step towards
+1) removing the RelocInfo::RUNTIME_ENTRY which was temporarily used
+   for this purpose,
+2) being able to remap embedded builtins into the code range multiple
+   times.
+
+Bug: v8:11527
+Change-Id: Ife26c8bbc524be0b07f333776716f22bd4bd36aa
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3866190
+Commit-Queue: Igor Sheludko <ishell@chromium.org>
+Reviewed-by: Jakob Linke <jgruber@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#82884}
+---
+ src/codegen/arm/assembler-arm-inl.h         |  2 ++
+ src/codegen/arm64/assembler-arm64-inl.h     | 19 ++++++++++++--
+ src/codegen/arm64/assembler-arm64.cc        |  1 +
+ src/codegen/arm64/assembler-arm64.h         |  5 ++++
+ src/codegen/arm64/macro-assembler-arm64.cc  | 28 ++++++++-------------
+ src/codegen/assembler.cc                    |  2 +-
+ src/codegen/ia32/assembler-ia32-inl.h       |  2 ++
+ src/codegen/loong64/assembler-loong64-inl.h |  2 ++
+ src/codegen/mips/assembler-mips-inl.h       |  2 ++
+ src/codegen/mips64/assembler-mips64-inl.h   |  2 ++
+ src/codegen/ppc/assembler-ppc-inl.h         |  2 ++
+ src/codegen/reloc-info.cc                   | 13 ++++++++--
+ src/codegen/reloc-info.h                    | 27 +++++++++++++++-----
+ src/codegen/riscv/assembler-riscv-inl.h     |  2 ++
+ src/codegen/s390/assembler-s390-inl.h       |  2 ++
+ src/codegen/turbo-assembler.cc              |  3 +--
+ src/codegen/x64/assembler-x64-inl.h         | 23 +++++++++++++----
+ src/codegen/x64/assembler-x64.cc            |  3 +++
+ src/codegen/x64/assembler-x64.h             |  5 ++++
+ src/codegen/x64/macro-assembler-x64.cc      |  4 +--
+ src/objects/code.cc                         |  9 +++++++
+ src/objects/visitors.h                      |  3 ++-
+ src/snapshot/deserializer.cc                |  3 +++
+ src/snapshot/serializer.cc                  |  3 +++
+ 24 files changed, 129 insertions(+), 38 deletions(-)
+
+diff --git a/src/codegen/arm/assembler-arm-inl.h b/src/codegen/arm/assembler-arm-inl.h
+index 7ad3d6ff6bf..7873a1a465a 100644
+--- a/src/codegen/arm/assembler-arm-inl.h
++++ b/src/codegen/arm/assembler-arm-inl.h
+@@ -151,6 +151,8 @@ Address RelocInfo::target_internal_reference_address() {
+   return pc_;
+ }
+ 
++Builtin RelocInfo::target_builtin_at(Assembler* origin) { UNREACHABLE(); }
++
+ Address RelocInfo::target_runtime_entry(Assembler* origin) {
+   DCHECK(IsRuntimeEntry(rmode_));
+   return target_address();
+diff --git a/src/codegen/arm64/assembler-arm64-inl.h b/src/codegen/arm64/assembler-arm64-inl.h
+index 0ce128682b7..ee15bd74f4c 100644
+--- a/src/codegen/arm64/assembler-arm64-inl.h
++++ b/src/codegen/arm64/assembler-arm64-inl.h
+@@ -528,6 +528,15 @@ Handle<HeapObject> Assembler::target_object_handle_at(Address pc) {
+       Assembler::embedded_object_index_referenced_from(pc));
+ }
+ 
++Builtin Assembler::target_builtin_at(Address pc) {
++  Instruction* instr = reinterpret_cast<Instruction*>(pc);
++  DCHECK(instr->IsBranchAndLink() || instr->IsUnconditionalBranch());
++  DCHECK_EQ(instr->ImmPCOffset() % kInstrSize, 0);
++  int builtin_id = static_cast<int>(instr->ImmPCOffset() / kInstrSize);
++  DCHECK(Builtins::IsBuiltinId(builtin_id));
++  return static_cast<Builtin>(builtin_id);
++}
++
+ Address Assembler::runtime_entry_at(Address pc) {
+   Instruction* instr = reinterpret_cast<Instruction*>(pc);
+   if (instr->IsLdrLiteralX()) {
+@@ -620,7 +629,8 @@ int RelocInfo::target_address_size() {
+ }
+ 
+ Address RelocInfo::target_address() {
+-  DCHECK(IsCodeTarget(rmode_) || IsRuntimeEntry(rmode_) || IsWasmCall(rmode_));
++  DCHECK(IsCodeTarget(rmode_) || IsNearBuiltinEntry(rmode_) ||
++         IsRuntimeEntry(rmode_) || IsWasmCall(rmode_));
+   return Assembler::target_address_at(pc_, constant_pool_);
+ }
+ 
+@@ -726,9 +736,14 @@ Address RelocInfo::target_internal_reference_address() {
+   return pc_;
+ }
+ 
++Builtin RelocInfo::target_builtin_at(Assembler* origin) {
++  DCHECK(IsNearBuiltinEntry(rmode_));
++  return Assembler::target_builtin_at(pc_);
++}
++
+ Address RelocInfo::target_runtime_entry(Assembler* origin) {
+   DCHECK(IsRuntimeEntry(rmode_));
+-  return origin->runtime_entry_at(pc_);
++  return target_address();
+ }
+ 
+ void RelocInfo::set_target_runtime_entry(Address target,
+diff --git a/src/codegen/arm64/assembler-arm64.cc b/src/codegen/arm64/assembler-arm64.cc
+index a0d25b77bfe..8e96f630f76 100644
+--- a/src/codegen/arm64/assembler-arm64.cc
++++ b/src/codegen/arm64/assembler-arm64.cc
+@@ -187,6 +187,7 @@ CPURegList CPURegList::GetCallerSavedV(int size) {
+ 
+ const int RelocInfo::kApplyMask =
+     RelocInfo::ModeMask(RelocInfo::CODE_TARGET) |
++    RelocInfo::ModeMask(RelocInfo::NEAR_BUILTIN_ENTRY) |
+     RelocInfo::ModeMask(RelocInfo::RUNTIME_ENTRY) |
+     RelocInfo::ModeMask(RelocInfo::INTERNAL_REFERENCE);
+ 
+diff --git a/src/codegen/arm64/assembler-arm64.h b/src/codegen/arm64/assembler-arm64.h
+index c1f082c1b0b..e079e87a205 100644
+--- a/src/codegen/arm64/assembler-arm64.h
++++ b/src/codegen/arm64/assembler-arm64.h
+@@ -269,6 +269,11 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // Returns the handle for the heap object referenced at 'pc'.
+   inline Handle<HeapObject> target_object_handle_at(Address pc);
+ 
++  // During code generation builtin targets in PC-relative call/jump
++  // instructions are temporarily encoded as builtin ID until the generated
++  // code is moved into the code space.
++  static inline Builtin target_builtin_at(Address pc);
++
+   // Returns the target address for a runtime function for the call encoded
+   // at 'pc'.
+   // Runtime entries can be temporarily encoded as the offset between the
+diff --git a/src/codegen/arm64/macro-assembler-arm64.cc b/src/codegen/arm64/macro-assembler-arm64.cc
+index 63582ce9b33..2790a2462e3 100644
+--- a/src/codegen/arm64/macro-assembler-arm64.cc
++++ b/src/codegen/arm64/macro-assembler-arm64.cc
+@@ -2033,8 +2033,6 @@ void TurboAssembler::JumpHelper(int64_t offset, RelocInfo::Mode rmode,
+ 
+ // The calculated offset is either:
+ // * the 'target' input unmodified if this is a Wasm call, or
+-// * the offset of the target from the code range start, if this is a call to
+-//   un-embedded builtin, or
+ // * the offset of the target from the current PC, in instructions, for any
+ //   other type of call.
+ int64_t TurboAssembler::CalculateTargetOffset(Address target,
+@@ -2045,18 +2043,7 @@ int64_t TurboAssembler::CalculateTargetOffset(Address target,
+     // address at this point, and needs to be encoded as-is.
+     return offset;
+   }
+-  if (RelocInfo::IsRuntimeEntry(rmode)) {
+-    // The runtime entry targets are used for generating short builtin calls
+-    // from JIT-compiled code (it's not used during snapshot creation).
+-    // The value is encoded as an offset from the code range (see
+-    // Assembler::runtime_entry_at()).
+-    // Note, that builtin-to-builitin calls use different OFF_HEAP_TARGET mode
+-    // and therefore are encoded differently.
+-    DCHECK_NE(options().code_range_base, 0);
+-    offset -= static_cast<int64_t>(options().code_range_base);
+-  } else {
+-    offset -= reinterpret_cast<int64_t>(pc);
+-  }
++  offset -= reinterpret_cast<int64_t>(pc);
+   DCHECK_EQ(offset % kInstrSize, 0);
+   offset = offset / static_cast<int>(kInstrSize);
+   return offset;
+@@ -2194,7 +2181,7 @@ void TurboAssembler::CallBuiltin(Builtin builtin) {
+       break;
+     }
+     case BuiltinCallJumpMode::kPCRelative:
+-      Call(BuiltinEntry(builtin), RelocInfo::RUNTIME_ENTRY);
++      near_call(static_cast<int>(builtin), RelocInfo::NEAR_BUILTIN_ENTRY);
+       break;
+     case BuiltinCallJumpMode::kIndirect: {
+       UseScratchRegisterScope temps(this);
+@@ -2220,6 +2207,7 @@ void TurboAssembler::CallBuiltin(Builtin builtin) {
+   }
+ }
+ 
++// TODO(ishell): remove cond parameter from here to simplify things.
+ void TurboAssembler::TailCallBuiltin(Builtin builtin, Condition cond) {
+   ASM_CODE_COMMENT_STRING(this,
+                           CommentForOffHeapTrampoline("tail call", builtin));
+@@ -2241,9 +2229,15 @@ void TurboAssembler::TailCallBuiltin(Builtin builtin, Condition cond) {
+       Jump(temp, cond);
+       break;
+     }
+-    case BuiltinCallJumpMode::kPCRelative:
+-      Jump(BuiltinEntry(builtin), RelocInfo::RUNTIME_ENTRY, cond);
++    case BuiltinCallJumpMode::kPCRelative: {
++      if (cond != nv) {
++        Label done;
++        if (cond != al) B(NegateCondition(cond), &done);
++        near_jump(static_cast<int>(builtin), RelocInfo::NEAR_BUILTIN_ENTRY);
++        Bind(&done);
++      }
+       break;
++    }
+     case BuiltinCallJumpMode::kIndirect: {
+       LoadEntryFromBuiltin(builtin, temp);
+       Jump(temp, cond);
+diff --git a/src/codegen/assembler.cc b/src/codegen/assembler.cc
+index c28cf445984..3efa20f2075 100644
+--- a/src/codegen/assembler.cc
++++ b/src/codegen/assembler.cc
+@@ -77,7 +77,7 @@ AssemblerOptions AssemblerOptions::Default(Isolate* isolate) {
+       isolate->is_short_builtin_calls_enabled() &&
+       !generating_embedded_builtin &&
+       (options.code_range_base != kNullAddress) &&
+-      // Serialization of RUNTIME_ENTRY reloc infos is not supported yet.
++      // Serialization of NEAR_BUILTIN_ENTRY reloc infos is not supported yet.
+       !serializer;
+   if (short_builtin_calls) {
+     options.builtin_call_jump_mode = BuiltinCallJumpMode::kPCRelative;
+diff --git a/src/codegen/ia32/assembler-ia32-inl.h b/src/codegen/ia32/assembler-ia32-inl.h
+index 8417115801b..57a835fe248 100644
+--- a/src/codegen/ia32/assembler-ia32-inl.h
++++ b/src/codegen/ia32/assembler-ia32-inl.h
+@@ -130,6 +130,8 @@ Address RelocInfo::target_internal_reference_address() {
+   return pc_;
+ }
+ 
++Builtin RelocInfo::target_builtin_at(Assembler* origin) { UNREACHABLE(); }
++
+ Address RelocInfo::target_runtime_entry(Assembler* origin) {
+   DCHECK(IsRuntimeEntry(rmode_));
+   return ReadUnalignedValue<Address>(pc_);
+diff --git a/src/codegen/loong64/assembler-loong64-inl.h b/src/codegen/loong64/assembler-loong64-inl.h
+index 525c9b8cebc..ec472275b15 100644
+--- a/src/codegen/loong64/assembler-loong64-inl.h
++++ b/src/codegen/loong64/assembler-loong64-inl.h
+@@ -159,6 +159,8 @@ Handle<Code> Assembler::relative_code_target_object_handle_at(
+   return GetCodeTarget(code_target_index);
+ }
+ 
++Builtin RelocInfo::target_builtin_at(Assembler* origin) { UNREACHABLE(); }
++
+ Address RelocInfo::target_runtime_entry(Assembler* origin) {
+   DCHECK(IsRuntimeEntry(rmode_));
+   return target_address();
+diff --git a/src/codegen/mips/assembler-mips-inl.h b/src/codegen/mips/assembler-mips-inl.h
+index fceb46b78e6..6bda8bd7437 100644
+--- a/src/codegen/mips/assembler-mips-inl.h
++++ b/src/codegen/mips/assembler-mips-inl.h
+@@ -231,6 +231,8 @@ Address RelocInfo::target_internal_reference_address() {
+   return pc_;
+ }
+ 
++Builtin RelocInfo::target_builtin_at(Assembler* origin) { UNREACHABLE(); }
++
+ Address RelocInfo::target_runtime_entry(Assembler* origin) {
+   DCHECK(IsRuntimeEntry(rmode_));
+   return target_address();
+diff --git a/src/codegen/mips64/assembler-mips64-inl.h b/src/codegen/mips64/assembler-mips64-inl.h
+index 3cf2461e5cf..2ef960d7803 100644
+--- a/src/codegen/mips64/assembler-mips64-inl.h
++++ b/src/codegen/mips64/assembler-mips64-inl.h
+@@ -203,6 +203,8 @@ Address RelocInfo::target_internal_reference_address() {
+   return pc_;
+ }
+ 
++Builtin RelocInfo::target_builtin_at(Assembler* origin) { UNREACHABLE(); }
++
+ Address RelocInfo::target_runtime_entry(Assembler* origin) {
+   DCHECK(IsRuntimeEntry(rmode_));
+   return target_address();
+diff --git a/src/codegen/ppc/assembler-ppc-inl.h b/src/codegen/ppc/assembler-ppc-inl.h
+index 5bf5ce28c9b..bde1b23ce8a 100644
+--- a/src/codegen/ppc/assembler-ppc-inl.h
++++ b/src/codegen/ppc/assembler-ppc-inl.h
+@@ -212,6 +212,8 @@ void RelocInfo::set_target_external_reference(
+                                    icache_flush_mode);
+ }
+ 
++Builtin RelocInfo::target_builtin_at(Assembler* origin) { UNREACHABLE(); }
++
+ Address RelocInfo::target_runtime_entry(Assembler* origin) {
+   DCHECK(IsRuntimeEntry(rmode_));
+   return target_address();
+diff --git a/src/codegen/reloc-info.cc b/src/codegen/reloc-info.cc
+index 10e63a4f3ef..8625a7ef928 100644
+--- a/src/codegen/reloc-info.cc
++++ b/src/codegen/reloc-info.cc
+@@ -345,8 +345,8 @@ void RelocInfo::set_wasm_stub_call_address(Address address,
+ void RelocInfo::set_target_address(Address target,
+                                    WriteBarrierMode write_barrier_mode,
+                                    ICacheFlushMode icache_flush_mode) {
+-  DCHECK(IsCodeTargetMode(rmode_) || IsRuntimeEntry(rmode_) ||
+-         IsWasmCall(rmode_));
++  DCHECK(IsCodeTargetMode(rmode_) || IsNearBuiltinEntry(rmode_) ||
++         IsRuntimeEntry(rmode_) || IsWasmCall(rmode_));
+   Assembler::set_target_address_at(pc_, constant_pool_, target,
+                                    icache_flush_mode);
+   if (!host().is_null() && IsCodeTargetMode(rmode_) &&
+@@ -416,6 +416,8 @@ const char* RelocInfo::RelocModeName(RelocInfo::Mode rmode) {
+       return "encoded internal reference";
+     case OFF_HEAP_TARGET:
+       return "off heap target";
++    case NEAR_BUILTIN_ENTRY:
++      return "near builtin entry";
+     case DEOPT_SCRIPT_OFFSET:
+       return "deopt script offset";
+     case DEOPT_INLINING_ID:
+@@ -527,6 +529,13 @@ void RelocInfo::Verify(Isolate* isolate) {
+           OffHeapInstructionStream::TryLookupCode(isolate, addr)));
+       break;
+     }
++    case NEAR_BUILTIN_ENTRY: {
++      Address addr = target_address();
++      CHECK_NE(addr, kNullAddress);
++      CHECK(Builtins::IsBuiltinId(
++          OffHeapInstructionStream::TryLookupCode(isolate, addr)));
++      break;
++    }
+     case RUNTIME_ENTRY:
+     case EXTERNAL_REFERENCE:
+     case DEOPT_SCRIPT_OFFSET:
+diff --git a/src/codegen/reloc-info.h b/src/codegen/reloc-info.h
+index 2d5b4a51046..8053d6a18e6 100644
+--- a/src/codegen/reloc-info.h
++++ b/src/codegen/reloc-info.h
+@@ -56,6 +56,7 @@ class RelocInfo {
+     NO_INFO,  // Never recorded value. Most common one, hence value 0.
+ 
+     CODE_TARGET,
++    // TODO(ishell): rename to NEAR_CODE_TARGET.
+     RELATIVE_CODE_TARGET,  // LAST_CODE_TARGET_MODE
+     COMPRESSED_EMBEDDED_OBJECT,
+     FULL_EMBEDDED_OBJECT,
+@@ -64,9 +65,7 @@ class RelocInfo {
+     WASM_CALL,  // FIRST_SHAREABLE_RELOC_MODE
+     WASM_STUB_CALL,
+ 
+-    // TODO(ishell): rename to UNEMBEDDED_BUILTIN_ENTRY.
+-    // An un-embedded off-heap instruction stream target.
+-    // See http://crbug.com/v8/11527 for details.
++    // TODO(ishell): This reloc info shouldn't be used anymore. Remove it.
+     RUNTIME_ENTRY,
+ 
+     EXTERNAL_REFERENCE,  // The address of an external C++ function.
+@@ -77,7 +76,11 @@ class RelocInfo {
+     INTERNAL_REFERENCE_ENCODED,
+ 
+     // An off-heap instruction stream target. See http://goo.gl/Z2HUiM.
+-    OFF_HEAP_TARGET,
++    // TODO(ishell): rename to BUILTIN_ENTRY.
++    OFF_HEAP_TARGET,  // FIRST_BUILTIN_ENTRY_MODE
++    // An un-embedded off-heap instruction stream target.
++    // See http://crbug.com/v8/11527 for details.
++    NEAR_BUILTIN_ENTRY,  // LAST_BUILTIN_ENTRY_MODE
+ 
+     // Marks constant and veneer pools. Only used on ARM and ARM64.
+     // They use a custom noncompact encoding.
+@@ -106,6 +109,8 @@ class RelocInfo {
+     FIRST_EMBEDDED_OBJECT_RELOC_MODE = COMPRESSED_EMBEDDED_OBJECT,
+     LAST_EMBEDDED_OBJECT_RELOC_MODE = DATA_EMBEDDED_OBJECT,
+     LAST_GCED_ENUM = LAST_EMBEDDED_OBJECT_RELOC_MODE,
++    FIRST_BUILTIN_ENTRY_MODE = OFF_HEAP_TARGET,
++    LAST_BUILTIN_ENTRY_MODE = NEAR_BUILTIN_ENTRY,
+     FIRST_SHAREABLE_RELOC_MODE = WASM_CALL,
+   };
+ 
+@@ -155,7 +160,6 @@ class RelocInfo {
+     return base::IsInRange(mode, FIRST_EMBEDDED_OBJECT_RELOC_MODE,
+                            LAST_EMBEDDED_OBJECT_RELOC_MODE);
+   }
+-  // TODO(ishell): rename to IsUnembeddedBuiltinEntry().
+   static constexpr bool IsRuntimeEntry(Mode mode) {
+     return mode == RUNTIME_ENTRY;
+   }
+@@ -191,6 +195,13 @@ class RelocInfo {
+   static constexpr bool IsOffHeapTarget(Mode mode) {
+     return mode == OFF_HEAP_TARGET;
+   }
++  static constexpr bool IsNearBuiltinEntry(Mode mode) {
++    return mode == NEAR_BUILTIN_ENTRY;
++  }
++  static constexpr bool IsBuiltinEntryMode(Mode mode) {
++    return base::IsInRange(mode, FIRST_BUILTIN_ENTRY_MODE,
++                           LAST_BUILTIN_ENTRY_MODE);
++  }
+   static constexpr bool IsNoInfo(Mode mode) { return mode == NO_INFO; }
+ 
+   static bool IsOnlyForSerializer(Mode mode) {
+@@ -265,6 +276,9 @@ class RelocInfo {
+       Heap* heap, HeapObject target,
+       WriteBarrierMode write_barrier_mode = UPDATE_WRITE_BARRIER,
+       ICacheFlushMode icache_flush_mode = FLUSH_ICACHE_IF_NEEDED);
++  // Decodes builtin ID encoded as a PC-relative offset. This encoding is used
++  // during code generation of call/jump with NEAR_BUILTIN_ENTRY.
++  V8_INLINE Builtin target_builtin_at(Assembler* origin);
+   V8_INLINE Address target_runtime_entry(Assembler* origin);
+   V8_INLINE void set_target_runtime_entry(
+       Address target,
+@@ -327,7 +341,7 @@ class RelocInfo {
+       visitor->VisitInternalReference(host(), this);
+     } else if (IsRuntimeEntry(mode)) {
+       visitor->VisitRuntimeEntry(host(), this);
+-    } else if (IsOffHeapTarget(mode)) {
++    } else if (IsBuiltinEntryMode(mode)) {
+       visitor->VisitOffHeapTarget(host(), this);
+     }
+   }
+@@ -369,6 +383,7 @@ class RelocInfo {
+            ModeMask(RelocInfo::COMPRESSED_EMBEDDED_OBJECT) |
+            ModeMask(RelocInfo::FULL_EMBEDDED_OBJECT) |
+            ModeMask(RelocInfo::DATA_EMBEDDED_OBJECT) |
++           ModeMask(RelocInfo::NEAR_BUILTIN_ENTRY) |
+            ModeMask(RelocInfo::RUNTIME_ENTRY) |
+            ModeMask(RelocInfo::RELATIVE_CODE_TARGET) | kApplyMask;
+   }
+diff --git a/src/codegen/riscv/assembler-riscv-inl.h b/src/codegen/riscv/assembler-riscv-inl.h
+index b9c12ba4bbb..a81d2566895 100644
+--- a/src/codegen/riscv/assembler-riscv-inl.h
++++ b/src/codegen/riscv/assembler-riscv-inl.h
+@@ -250,6 +250,8 @@ Handle<Code> Assembler::relative_code_target_object_handle_at(
+   return Handle<Code>::cast(GetEmbeddedObject(code_target_index));
+ }
+ 
++Builtin RelocInfo::target_builtin_at(Assembler* origin) { UNREACHABLE(); }
++
+ Address RelocInfo::target_runtime_entry(Assembler* origin) {
+   DCHECK(IsRuntimeEntry(rmode_));
+   return target_address();
+diff --git a/src/codegen/s390/assembler-s390-inl.h b/src/codegen/s390/assembler-s390-inl.h
+index 4c266476b79..bd54b6eff2f 100644
+--- a/src/codegen/s390/assembler-s390-inl.h
++++ b/src/codegen/s390/assembler-s390-inl.h
+@@ -206,6 +206,8 @@ void RelocInfo::set_target_external_reference(
+                                    icache_flush_mode);
+ }
+ 
++Builtin RelocInfo::target_builtin_at(Assembler* origin) { UNREACHABLE(); }
++
+ Address RelocInfo::target_runtime_entry(Assembler* origin) {
+   DCHECK(IsRuntimeEntry(rmode_));
+   return target_address();
+diff --git a/src/codegen/turbo-assembler.cc b/src/codegen/turbo-assembler.cc
+index e12be0d5677..da6d2a07996 100644
+--- a/src/codegen/turbo-assembler.cc
++++ b/src/codegen/turbo-assembler.cc
+@@ -29,8 +29,7 @@ TurboAssemblerBase::TurboAssemblerBase(Isolate* isolate,
+ Address TurboAssemblerBase::BuiltinEntry(Builtin builtin) {
+   DCHECK(Builtins::IsBuiltinId(builtin));
+   if (isolate_ != nullptr) {
+-    Address entry =
+-        isolate_->builtin_entry_table()[static_cast<int32_t>(builtin)];
++    Address entry = isolate_->builtin_entry_table()[Builtins::ToInt(builtin)];
+     DCHECK_EQ(entry, EmbeddedData::FromBlob(isolate_).InstructionStartOfBuiltin(
+                          builtin));
+     return entry;
+diff --git a/src/codegen/x64/assembler-x64-inl.h b/src/codegen/x64/assembler-x64-inl.h
+index fc0e1d4c53b..675698a3372 100644
+--- a/src/codegen/x64/assembler-x64-inl.h
++++ b/src/codegen/x64/assembler-x64-inl.h
+@@ -35,7 +35,6 @@ void Assembler::emitw(uint16_t x) {
+   pc_ += sizeof(uint16_t);
+ }
+ 
+-// TODO(ishell): Rename accordingly once RUNTIME_ENTRY is renamed.
+ void Assembler::emit_runtime_entry(Address entry, RelocInfo::Mode rmode) {
+   DCHECK(RelocInfo::IsRuntimeEntry(rmode));
+   DCHECK_NE(options().code_range_base, 0);
+@@ -272,6 +271,12 @@ Handle<HeapObject> Assembler::compressed_embedded_object_handle_at(Address pc) {
+   return GetEmbeddedObject(ReadUnalignedValue<uint32_t>(pc));
+ }
+ 
++Builtin Assembler::target_builtin_at(Address pc) {
++  int32_t builtin_id = ReadUnalignedValue<int32_t>(pc);
++  DCHECK(Builtins::IsBuiltinId(builtin_id));
++  return static_cast<Builtin>(builtin_id);
++}
++
+ Address Assembler::runtime_entry_at(Address pc) {
+   return ReadUnalignedValue<int32_t>(pc) + options().code_range_base;
+ }
+@@ -281,7 +286,8 @@ Address Assembler::runtime_entry_at(Address pc) {
+ 
+ // The modes possibly affected by apply must be in kApplyMask.
+ void RelocInfo::apply(intptr_t delta) {
+-  if (IsCodeTarget(rmode_) || IsRuntimeEntry(rmode_)) {
++  if (IsCodeTarget(rmode_) || IsNearBuiltinEntry(rmode_) ||
++      IsRuntimeEntry(rmode_)) {
+     WriteUnalignedValue(
+         pc_, ReadUnalignedValue<int32_t>(pc_) - static_cast<int32_t>(delta));
+   } else if (IsInternalReference(rmode_)) {
+@@ -291,7 +297,8 @@ void RelocInfo::apply(intptr_t delta) {
+ }
+ 
+ Address RelocInfo::target_address() {
+-  DCHECK(IsCodeTarget(rmode_) || IsRuntimeEntry(rmode_) || IsWasmCall(rmode_));
++  DCHECK(IsCodeTarget(rmode_) || IsNearBuiltinEntry(rmode_) ||
++         IsRuntimeEntry(rmode_) || IsWasmCall(rmode_));
+   return Assembler::target_address_at(pc_, constant_pool_);
+ }
+ 
+@@ -387,9 +394,14 @@ void RelocInfo::set_target_object(Heap* heap, HeapObject target,
+   }
+ }
+ 
++Builtin RelocInfo::target_builtin_at(Assembler* origin) {
++  DCHECK(IsNearBuiltinEntry(rmode_));
++  return Assembler::target_builtin_at(pc_);
++}
++
+ Address RelocInfo::target_runtime_entry(Assembler* origin) {
+   DCHECK(IsRuntimeEntry(rmode_));
+-  return origin->runtime_entry_at(pc_);
++  return target_address();
+ }
+ 
+ void RelocInfo::set_target_runtime_entry(Address target,
+@@ -413,7 +425,8 @@ void RelocInfo::WipeOut() {
+   } else if (IsCompressedEmbeddedObject(rmode_)) {
+     Address smi_address = Smi::FromInt(0).ptr();
+     WriteUnalignedValue(pc_, CompressTagged(smi_address));
+-  } else if (IsCodeTarget(rmode_) || IsRuntimeEntry(rmode_)) {
++  } else if (IsCodeTarget(rmode_) || IsNearBuiltinEntry(rmode_) ||
++             IsRuntimeEntry(rmode_)) {
+     // Effectively write zero into the relocation.
+     Assembler::set_target_address_at(pc_, constant_pool_,
+                                      pc_ + sizeof(int32_t));
+diff --git a/src/codegen/x64/assembler-x64.cc b/src/codegen/x64/assembler-x64.cc
+index 20242826b8e..20a9c5fdbbe 100644
+--- a/src/codegen/x64/assembler-x64.cc
++++ b/src/codegen/x64/assembler-x64.cc
+@@ -1011,6 +1011,7 @@ void Assembler::call(Handle<CodeT> target, RelocInfo::Mode rmode) {
+ 
+ void Assembler::near_call(intptr_t disp, RelocInfo::Mode rmode) {
+   EnsureSpace ensure_space(this);
++  // 1110 1000 #32-bit disp.
+   emit(0xE8);
+   DCHECK(is_int32(disp));
+   RecordRelocInfo(rmode);
+@@ -1019,6 +1020,7 @@ void Assembler::near_call(intptr_t disp, RelocInfo::Mode rmode) {
+ 
+ void Assembler::near_jmp(intptr_t disp, RelocInfo::Mode rmode) {
+   EnsureSpace ensure_space(this);
++  // 1110 1001 #32-bit disp.
+   emit(0xE9);
+   DCHECK(is_int32(disp));
+   if (!RelocInfo::IsNoInfo(rmode)) RecordRelocInfo(rmode);
+@@ -4462,6 +4464,7 @@ void Assembler::RecordRelocInfo(RelocInfo::Mode rmode, intptr_t data) {
+ 
+ const int RelocInfo::kApplyMask =
+     RelocInfo::ModeMask(RelocInfo::CODE_TARGET) |
++    RelocInfo::ModeMask(RelocInfo::NEAR_BUILTIN_ENTRY) |
+     RelocInfo::ModeMask(RelocInfo::RUNTIME_ENTRY) |
+     RelocInfo::ModeMask(RelocInfo::INTERNAL_REFERENCE) |
+     RelocInfo::ModeMask(RelocInfo::WASM_CALL);
+diff --git a/src/codegen/x64/assembler-x64.h b/src/codegen/x64/assembler-x64.h
+index da64faf0436..708012bfce8 100644
+--- a/src/codegen/x64/assembler-x64.h
++++ b/src/codegen/x64/assembler-x64.h
+@@ -455,6 +455,11 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+       ICacheFlushMode icache_flush_mode = FLUSH_ICACHE_IF_NEEDED);
+   static inline int32_t relative_target_offset(Address target, Address pc);
+ 
++  // During code generation builtin targets in PC-relative call/jump
++  // instructions are temporarily encoded as builtin ID until the generated
++  // code is moved into the code space.
++  static inline Builtin target_builtin_at(Address pc);
++
+   // This sets the branch destination (which is in the instruction on x64).
+   // This is for calls and branches within generated code.
+   inline static void deserialization_set_special_target_at(
+diff --git a/src/codegen/x64/macro-assembler-x64.cc b/src/codegen/x64/macro-assembler-x64.cc
+index ed5bee38662..62fda6336d0 100644
+--- a/src/codegen/x64/macro-assembler-x64.cc
++++ b/src/codegen/x64/macro-assembler-x64.cc
+@@ -2179,7 +2179,7 @@ void TurboAssembler::CallBuiltin(Builtin builtin) {
+       Call(BuiltinEntry(builtin), RelocInfo::OFF_HEAP_TARGET);
+       break;
+     case BuiltinCallJumpMode::kPCRelative:
+-      call(BuiltinEntry(builtin), RelocInfo::RUNTIME_ENTRY);
++      near_call(static_cast<intptr_t>(builtin), RelocInfo::NEAR_BUILTIN_ENTRY);
+       break;
+     case BuiltinCallJumpMode::kIndirect:
+       Call(EntryFromBuiltinAsOperand(builtin));
+@@ -2200,7 +2200,7 @@ void TurboAssembler::TailCallBuiltin(Builtin builtin) {
+       Jump(BuiltinEntry(builtin), RelocInfo::OFF_HEAP_TARGET);
+       break;
+     case BuiltinCallJumpMode::kPCRelative:
+-      jmp(BuiltinEntry(builtin), RelocInfo::RUNTIME_ENTRY);
++      near_jmp(static_cast<intptr_t>(builtin), RelocInfo::NEAR_BUILTIN_ENTRY);
+       break;
+     case BuiltinCallJumpMode::kIndirect:
+       Jump(EntryFromBuiltinAsOperand(builtin));
+diff --git a/src/objects/code.cc b/src/objects/code.cc
+index bf42bd0a6ae..021e7b23ac1 100644
+--- a/src/objects/code.cc
++++ b/src/objects/code.cc
+@@ -207,6 +207,14 @@ void Code::RelocateFromDesc(ByteArray reloc_info, Heap* heap,
+       Code code = FromCodeT(CodeT::cast(*p));
+       it.rinfo()->set_target_address(code.raw_instruction_start(),
+                                      UPDATE_WRITE_BARRIER, SKIP_ICACHE_FLUSH);
++    } else if (RelocInfo::IsNearBuiltinEntry(mode)) {
++      // Rewrite builtin IDs to PC-relative offset to the builtin entry point.
++      Builtin builtin = it.rinfo()->target_builtin_at(origin);
++      Address p =
++          heap->isolate()->builtin_entry_table()[Builtins::ToInt(builtin)];
++      it.rinfo()->set_target_address(p, UPDATE_WRITE_BARRIER,
++                                     SKIP_ICACHE_FLUSH);
++      DCHECK_EQ(p, it.rinfo()->target_address());
+     } else if (RelocInfo::IsRuntimeEntry(mode)) {
+       Address p = it.rinfo()->target_runtime_entry(origin);
+       it.rinfo()->set_target_runtime_entry(p, UPDATE_WRITE_BARRIER,
+@@ -365,6 +373,7 @@ bool Code::IsIsolateIndependent(Isolate* isolate) {
+                  RelocInfo::ModeMask(RelocInfo::EXTERNAL_REFERENCE) |
+                  RelocInfo::ModeMask(RelocInfo::INTERNAL_REFERENCE) |
+                  RelocInfo::ModeMask(RelocInfo::INTERNAL_REFERENCE_ENCODED) |
++                 RelocInfo::ModeMask(RelocInfo::NEAR_BUILTIN_ENTRY) |
+                  RelocInfo::ModeMask(RelocInfo::RUNTIME_ENTRY) |
+                  RelocInfo::ModeMask(RelocInfo::WASM_CALL) |
+                  RelocInfo::ModeMask(RelocInfo::WASM_STUB_CALL)));
+diff --git a/src/objects/visitors.h b/src/objects/visitors.h
+index 52c8114ff18..49ec0bfb2bb 100644
+--- a/src/objects/visitors.h
++++ b/src/objects/visitors.h
+@@ -174,7 +174,8 @@ class ObjectVisitor {
+   // Visits an (encoded) internal reference.
+   virtual void VisitInternalReference(Code host, RelocInfo* rinfo) {}
+ 
+-  // Visits an off-heap target in the instruction stream.
++  // Visits an off-heap target or near builtin entry in the instruction stream.
++  // TODO(ishell): rename to VisitBuiltinEntry.
+   virtual void VisitOffHeapTarget(Code host, RelocInfo* rinfo) {}
+ 
+   // Visits the relocation info using the given iterator.
+diff --git a/src/snapshot/deserializer.cc b/src/snapshot/deserializer.cc
+index 396a7370f6b..6cb38fdae37 100644
+--- a/src/snapshot/deserializer.cc
++++ b/src/snapshot/deserializer.cc
+@@ -801,6 +801,9 @@ void DeserializerRelocInfoVisitor::VisitInternalReference(Code host,
+ 
+ void DeserializerRelocInfoVisitor::VisitOffHeapTarget(Code host,
+                                                       RelocInfo* rinfo) {
++  // Currently we don't serialize code that contains near builtin entries.
++  DCHECK_NE(rinfo->rmode(), RelocInfo::NEAR_BUILTIN_ENTRY);
++
+   byte data = source().Get();
+   CHECK_EQ(data, Deserializer<Isolate>::kOffHeapTarget);
+ 
+diff --git a/src/snapshot/serializer.cc b/src/snapshot/serializer.cc
+index 492390d30c0..3785882f80e 100644
+--- a/src/snapshot/serializer.cc
++++ b/src/snapshot/serializer.cc
+@@ -1134,6 +1134,9 @@ void Serializer::ObjectSerializer::VisitOffHeapTarget(Code host,
+                                                       RelocInfo* rinfo) {
+   static_assert(EmbeddedData::kTableSize == Builtins::kBuiltinCount);
+ 
++  // Currently we don't serialize code that contains near builtin entries.
++  CHECK_NE(rinfo->rmode(), RelocInfo::NEAR_BUILTIN_ENTRY);
++
+   Address addr = rinfo->target_off_heap_target();
+   CHECK_NE(kNullAddress, addr);
+ 
+-- 
+2.35.1
+

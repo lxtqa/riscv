@@ -1,0 +1,915 @@
+From b667e7f67cff0c8bef8b00aad325295f1fa2499a Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Tue, 28 Feb 2023 20:26:07 +0800
+Subject: [PATCH] [riscv] Fix failed wasm-spec-tests/simd*
+
+- Fix s128_const load incorrect value
+- Add vfadd_vf test
+- Fix emit_i32x4_sconvert_f32x4 error
+- Fix popcnt error
+- Add keep_nan_same arg in RoundHelper
+- Fix extadd failed
+
+Change-Id: I5fff893f1ac1596ad0f4b2aae93875aba804e748
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4297890
+Reviewed-by: Ji Qiu <qiuji@iscas.ac.cn>
+Commit-Queue: Ji Qiu <qiuji@iscas.ac.cn>
+Reviewed-by: Jakob Kummerow <jkummerow@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#86158}
+---
+ src/codegen/riscv/assembler-riscv.h           |  2 +
+ src/codegen/riscv/base-assembler-riscv.h      |  2 +
+ src/codegen/riscv/base-constants-riscv.h      |  5 +-
+ src/codegen/riscv/base-riscv-i.cc             |  8 ++
+ src/codegen/riscv/macro-assembler-riscv.cc    | 54 ++++++-----
+ src/codegen/riscv/macro-assembler-riscv.h     |  3 +-
+ .../backend/riscv/code-generator-riscv.cc     |  5 ++
+ src/diagnostics/riscv/disasm-riscv.cc         | 59 ++++++------
+ src/execution/riscv/simulator-riscv.cc        | 47 +++++++++-
+ .../baseline/riscv/liftoff-assembler-riscv.h  | 90 ++++++++++++-------
+ .../riscv/liftoff-assembler-riscv64.h         |  9 ++
+ test/cctest/test-assembler-riscv64.cc         | 33 ++++++-
+ test/wasm-spec-tests/wasm-spec-tests.status   |  3 -
+ 13 files changed, 226 insertions(+), 94 deletions(-)
+
+diff --git a/src/codegen/riscv/assembler-riscv.h b/src/codegen/riscv/assembler-riscv.h
+index c3603f02aa5..f70aa9cd012 100644
+--- a/src/codegen/riscv/assembler-riscv.h
++++ b/src/codegen/riscv/assembler-riscv.h
+@@ -612,6 +612,8 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase,
+ 
+   VectorUnit VU;
+ 
++  void ClearVectorunit() { VU.clear(); }
++
+  protected:
+   // Readable constants for base and offset adjustment helper, these indicate if
+   // aside from offset, another value like offset + 4 should fit into int16.
+diff --git a/src/codegen/riscv/base-assembler-riscv.h b/src/codegen/riscv/base-assembler-riscv.h
+index 8bdfd4ecd1a..7c2d02b2082 100644
+--- a/src/codegen/riscv/base-assembler-riscv.h
++++ b/src/codegen/riscv/base-assembler-riscv.h
+@@ -78,6 +78,8 @@ class AssemblerRiscvBase {
+   virtual void emit(Instr x) = 0;
+   virtual void emit(ShortInstr x) = 0;
+   virtual void emit(uint64_t x) = 0;
++
++  virtual void ClearVectorunit() = 0;
+   // Instruction generation.
+ 
+   // ----- Top-level instruction formats match those in the ISA manual
+diff --git a/src/codegen/riscv/base-constants-riscv.h b/src/codegen/riscv/base-constants-riscv.h
+index 2950e9479d6..0f225c39f75 100644
+--- a/src/codegen/riscv/base-constants-riscv.h
++++ b/src/codegen/riscv/base-constants-riscv.h
+@@ -17,8 +17,9 @@
+ #define UNIMPLEMENTED_RISCV()
+ #endif
+ 
+-#define UNSUPPORTED_RISCV() \
+-  v8::internal::PrintF("Unsupported instruction %d.\n", __LINE__)
++#define UNSUPPORTED_RISCV()                                        \
++  v8::internal::PrintF("Unsupported instruction %d.\n", __LINE__); \
++  UNIMPLEMENTED();
+ 
+ enum Endianness { kLittle, kBig };
+ 
+diff --git a/src/codegen/riscv/base-riscv-i.cc b/src/codegen/riscv/base-riscv-i.cc
+index 19687c9370b..a3d70292483 100644
+--- a/src/codegen/riscv/base-riscv-i.cc
++++ b/src/codegen/riscv/base-riscv-i.cc
+@@ -18,11 +18,13 @@ void AssemblerRISCVI::auipc(Register rd, int32_t imm20) {
+ 
+ void AssemblerRISCVI::jal(Register rd, int32_t imm21) {
+   GenInstrJ(JAL, rd, imm21);
++  ClearVectorunit();
+   BlockTrampolinePoolFor(1);
+ }
+ 
+ void AssemblerRISCVI::jalr(Register rd, Register rs1, int16_t imm12) {
+   GenInstrI(0b000, JALR, rd, rs1, imm12);
++  ClearVectorunit();
+   BlockTrampolinePoolFor(1);
+ }
+ 
+@@ -30,26 +32,32 @@ void AssemblerRISCVI::jalr(Register rd, Register rs1, int16_t imm12) {
+ 
+ void AssemblerRISCVI::beq(Register rs1, Register rs2, int16_t imm13) {
+   GenInstrBranchCC_rri(0b000, rs1, rs2, imm13);
++  ClearVectorunit();
+ }
+ 
+ void AssemblerRISCVI::bne(Register rs1, Register rs2, int16_t imm13) {
+   GenInstrBranchCC_rri(0b001, rs1, rs2, imm13);
++  ClearVectorunit();
+ }
+ 
+ void AssemblerRISCVI::blt(Register rs1, Register rs2, int16_t imm13) {
+   GenInstrBranchCC_rri(0b100, rs1, rs2, imm13);
++  ClearVectorunit();
+ }
+ 
+ void AssemblerRISCVI::bge(Register rs1, Register rs2, int16_t imm13) {
+   GenInstrBranchCC_rri(0b101, rs1, rs2, imm13);
++  ClearVectorunit();
+ }
+ 
+ void AssemblerRISCVI::bltu(Register rs1, Register rs2, int16_t imm13) {
+   GenInstrBranchCC_rri(0b110, rs1, rs2, imm13);
++  ClearVectorunit();
+ }
+ 
+ void AssemblerRISCVI::bgeu(Register rs1, Register rs2, int16_t imm13) {
+   GenInstrBranchCC_rri(0b111, rs1, rs2, imm13);
++  ClearVectorunit();
+ }
+ 
+ // Loads
+diff --git a/src/codegen/riscv/macro-assembler-riscv.cc b/src/codegen/riscv/macro-assembler-riscv.cc
+index e7bbcc6831f..15fae5443c6 100644
+--- a/src/codegen/riscv/macro-assembler-riscv.cc
++++ b/src/codegen/riscv/macro-assembler-riscv.cc
+@@ -3038,7 +3038,8 @@ void MacroAssembler::RoundFloat(FPURegister dst, FPURegister src,
+ // handling is needed by NaN, +/-Infinity, +/-0
+ template <typename F>
+ void MacroAssembler::RoundHelper(VRegister dst, VRegister src, Register scratch,
+-                                 VRegister v_scratch, FPURoundingMode frm) {
++                                 VRegister v_scratch, FPURoundingMode frm,
++                                 bool keep_nan_same) {
+   VU.set(scratch, std::is_same<F, float>::value ? E32 : E64, m1);
+   // if src is NaN/+-Infinity/+-Zero or if the exponent is larger than # of bits
+   // in mantissa, the result is the same as src, so move src to dest  (to avoid
+@@ -3064,14 +3065,13 @@ void MacroAssembler::RoundHelper(VRegister dst, VRegister src, Register scratch,
+   // } else {
+   //   srli(rt, rt, 64 - size);
+   // }
+-
++  vmv_vx(v_scratch, zero_reg);
+   li(scratch, 64 - kFloatMantissaBits - kFloatExponentBits);
+   vsll_vx(v_scratch, src, scratch);
+   li(scratch, 64 - kFloatExponentBits);
+   vsrl_vx(v_scratch, v_scratch, scratch);
+   li(scratch, kFloatExponentBias + kFloatMantissaBits);
+   vmslt_vx(v0, v_scratch, scratch);
+-
+   VU.set(frm);
+   vmv_vv(dst, src);
+   if (dst == src) {
+@@ -3089,46 +3089,60 @@ void MacroAssembler::RoundHelper(VRegister dst, VRegister src, Register scratch,
+   } else {
+     vfsngj_vv(dst, dst, src);
+   }
++  if (!keep_nan_same) {
++    vmfeq_vv(v0, src, src);
++    vnot_vv(v0, v0);
++    if (std::is_same<F, float>::value) {
++      fmv_w_x(kScratchDoubleReg, zero_reg);
++    } else {
++#ifdef V8_TARGET_ARCH_RISCV64
++      fmv_d_x(kScratchDoubleReg, zero_reg);
++#else
++      UNIMPLEMENTED();
++#endif
++    }
++    vfadd_vf(dst, src, kScratchDoubleReg, MaskType::Mask);
++  }
+ }
+ 
+ void MacroAssembler::Ceil_f(VRegister vdst, VRegister vsrc, Register scratch,
+                             VRegister v_scratch) {
+-  RoundHelper<float>(vdst, vsrc, scratch, v_scratch, RUP);
++  RoundHelper<float>(vdst, vsrc, scratch, v_scratch, RUP, false);
+ }
+ 
+ void MacroAssembler::Ceil_d(VRegister vdst, VRegister vsrc, Register scratch,
+                             VRegister v_scratch) {
+-  RoundHelper<double>(vdst, vsrc, scratch, v_scratch, RUP);
++  RoundHelper<double>(vdst, vsrc, scratch, v_scratch, RUP, false);
+ }
+ 
+ void MacroAssembler::Floor_f(VRegister vdst, VRegister vsrc, Register scratch,
+                              VRegister v_scratch) {
+-  RoundHelper<float>(vdst, vsrc, scratch, v_scratch, RDN);
++  RoundHelper<float>(vdst, vsrc, scratch, v_scratch, RDN, false);
+ }
+ 
+ void MacroAssembler::Floor_d(VRegister vdst, VRegister vsrc, Register scratch,
+                              VRegister v_scratch) {
+-  RoundHelper<double>(vdst, vsrc, scratch, v_scratch, RDN);
++  RoundHelper<double>(vdst, vsrc, scratch, v_scratch, RDN, false);
+ }
+ 
+ void MacroAssembler::Trunc_d(VRegister vdst, VRegister vsrc, Register scratch,
+                              VRegister v_scratch) {
+-  RoundHelper<double>(vdst, vsrc, scratch, v_scratch, RTZ);
++  RoundHelper<double>(vdst, vsrc, scratch, v_scratch, RTZ, false);
+ }
+ 
+ void MacroAssembler::Trunc_f(VRegister vdst, VRegister vsrc, Register scratch,
+                              VRegister v_scratch) {
+-  RoundHelper<float>(vdst, vsrc, scratch, v_scratch, RTZ);
++  RoundHelper<float>(vdst, vsrc, scratch, v_scratch, RTZ, false);
+ }
+ 
+ void MacroAssembler::Round_f(VRegister vdst, VRegister vsrc, Register scratch,
+                              VRegister v_scratch) {
+-  RoundHelper<float>(vdst, vsrc, scratch, v_scratch, RNE);
++  RoundHelper<float>(vdst, vsrc, scratch, v_scratch, RNE, false);
+ }
+ 
+ void MacroAssembler::Round_d(VRegister vdst, VRegister vsrc, Register scratch,
+                              VRegister v_scratch) {
+-  RoundHelper<double>(vdst, vsrc, scratch, v_scratch, RNE);
++  RoundHelper<double>(vdst, vsrc, scratch, v_scratch, RNE, false);
+ }
+ 
+ #if V8_TARGET_ARCH_RISCV64
+@@ -5044,16 +5058,14 @@ void MacroAssembler::WasmRvvGtU(VRegister dst, VRegister lhs, VRegister rhs,
+ }
+ 
+ void MacroAssembler::WasmRvvS128const(VRegister dst, const uint8_t imms[16]) {
+-  uint64_t imm1 = *(reinterpret_cast<const uint64_t*>(imms));
+-  uint64_t imm2 = *((reinterpret_cast<const uint64_t*>(imms)) + 1);
+-  VU.set(kScratchReg, VSew::E64, Vlmul::m1);
+-  li(kScratchReg, 1);
+-  vmv_vx(v0, kScratchReg);
+-  li(kScratchReg, imm1);
+-  vmerge_vx(dst, kScratchReg, dst);
+-  li(kScratchReg, imm2);
+-  vsll_vi(v0, v0, 1);
+-  vmerge_vx(dst, kScratchReg, dst);
++  uint64_t vals[2];
++  memcpy(vals, imms, sizeof(vals));
++  VU.set(kScratchReg, E64, m1);
++  li(kScratchReg, vals[1]);
++  vmv_sx(kSimd128ScratchReg, kScratchReg);
++  vslideup_vi(dst, kSimd128ScratchReg, 1);
++  li(kScratchReg, vals[0]);
++  vmv_sx(dst, kScratchReg);
+ }
+ 
+ void MacroAssembler::LoadLane(int ts, VRegister dst, uint8_t laneidx,
+diff --git a/src/codegen/riscv/macro-assembler-riscv.h b/src/codegen/riscv/macro-assembler-riscv.h
+index 26e97ac89eb..296cb8725a9 100644
+--- a/src/codegen/riscv/macro-assembler-riscv.h
++++ b/src/codegen/riscv/macro-assembler-riscv.h
+@@ -1506,7 +1506,8 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
+ #endif
+   template <typename F>
+   void RoundHelper(VRegister dst, VRegister src, Register scratch,
+-                   VRegister v_scratch, FPURoundingMode frm);
++                   VRegister v_scratch, FPURoundingMode frm,
++                   bool keep_nan_same = true);
+ 
+   template <typename TruncFunc>
+   void RoundFloatingPointToInteger(Register rd, FPURegister fs, Register result,
+diff --git a/src/compiler/backend/riscv/code-generator-riscv.cc b/src/compiler/backend/riscv/code-generator-riscv.cc
+index 71c9330b080..b23f8a86756 100644
+--- a/src/compiler/backend/riscv/code-generator-riscv.cc
++++ b/src/compiler/backend/riscv/code-generator-riscv.cc
+@@ -2367,6 +2367,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       } else {
+         __ VU.set(kScratchReg, E64, m1);
+         __ li(kScratchReg, i.InputInt64(1));
++        __ vmv_vi(kSimd128ScratchReg3, -1);
+         __ vmv_sx(kSimd128ScratchReg3, kScratchReg);
+         index = kSimd128ScratchReg3;
+       }
+@@ -2905,6 +2906,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       Simd128Register src = i.InputSimd128Register(0);
+       __ VU.set(kScratchReg, E8, m1);
+       __ vmv_vx(kSimd128RegZero, zero_reg);
++      __ vmv_vx(kSimd128ScratchReg, zero_reg);
+       __ vmslt_vv(kSimd128ScratchReg, src, kSimd128RegZero);
+       __ VU.set(kScratchReg, E32, m1);
+       __ vmv_xs(dst, kSimd128ScratchReg);
+@@ -2915,6 +2917,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       Simd128Register src = i.InputSimd128Register(0);
+       __ VU.set(kScratchReg, E16, m1);
+       __ vmv_vx(kSimd128RegZero, zero_reg);
++      __ vmv_vx(kSimd128ScratchReg, zero_reg);
+       __ vmslt_vv(kSimd128ScratchReg, src, kSimd128RegZero);
+       __ VU.set(kScratchReg, E32, m1);
+       __ vmv_xs(dst, kSimd128ScratchReg);
+@@ -2925,6 +2928,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       Simd128Register src = i.InputSimd128Register(0);
+       __ VU.set(kScratchReg, E32, m1);
+       __ vmv_vx(kSimd128RegZero, zero_reg);
++      __ vmv_vx(kSimd128ScratchReg, zero_reg);
+       __ vmslt_vv(kSimd128ScratchReg, src, kSimd128RegZero);
+       __ vmv_xs(dst, kSimd128ScratchReg);
+       break;
+@@ -2934,6 +2938,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       Simd128Register src = i.InputSimd128Register(0);
+       __ VU.set(kScratchReg, E64, m1);
+       __ vmv_vx(kSimd128RegZero, zero_reg);
++      __ vmv_vx(kSimd128ScratchReg, zero_reg);
+       __ vmslt_vv(kSimd128ScratchReg, src, kSimd128RegZero);
+       __ VU.set(kScratchReg, E32, m1);
+       __ vmv_xs(dst, kSimd128ScratchReg);
+diff --git a/src/diagnostics/riscv/disasm-riscv.cc b/src/diagnostics/riscv/disasm-riscv.cc
+index 04484134981..57931af574b 100644
+--- a/src/diagnostics/riscv/disasm-riscv.cc
++++ b/src/diagnostics/riscv/disasm-riscv.cc
+@@ -1302,7 +1302,6 @@ void Decoder::DecodeRFPType(Instruction* instr) {
+     case (RO_FCLASS_D & kRFPTypeMask): {  // RO_FCLASS_D , 64D RO_FMV_X_D
+       if (instr->Rs2Value() != 0b00000) {
+         UNSUPPORTED_RISCV();
+-        break;
+       }
+       switch (instr->Funct3Value()) {
+         case 0b001:  // RO_FCLASS_D
+@@ -1736,23 +1735,28 @@ void Decoder::DecodeJType(Instruction* instr) {
+ void Decoder::DecodeCRType(Instruction* instr) {
+   switch (instr->RvcFunct4Value()) {
+     case 0b1000:
+-      if (instr->RvcRs1Value() != 0 && instr->RvcRs2Value() == 0)
++      if (instr->RvcRs1Value() != 0 && instr->RvcRs2Value() == 0) {
+         Format(instr, "jr        'Crs1");
+-      else if (instr->RvcRdValue() != 0 && instr->RvcRs2Value() != 0)
++        break;
++      } else if (instr->RvcRdValue() != 0 && instr->RvcRs2Value() != 0) {
+         Format(instr, "mv        'Crd, 'Crs2");
+-      else
++        break;
++      } else {
+         UNSUPPORTED_RISCV();
+-      break;
++      }
+     case 0b1001:
+-      if (instr->RvcRs1Value() == 0 && instr->RvcRs2Value() == 0)
++      if (instr->RvcRs1Value() == 0 && instr->RvcRs2Value() == 0) {
+         Format(instr, "ebreak");
+-      else if (instr->RvcRdValue() != 0 && instr->RvcRs2Value() == 0)
++        break;
++      } else if (instr->RvcRdValue() != 0 && instr->RvcRs2Value() == 0) {
+         Format(instr, "jalr      'Crs1");
+-      else if (instr->RvcRdValue() != 0 && instr->RvcRs2Value() != 0)
++        break;
++      } else if (instr->RvcRdValue() != 0 && instr->RvcRs2Value() != 0) {
+         Format(instr, "add       'Crd, 'Crd, 'Crs2");
+-      else
++        break;
++      } else {
+         UNSUPPORTED_RISCV();
+-      break;
++      }
+     default:
+       UNSUPPORTED_RISCV();
+   }
+@@ -1802,13 +1806,15 @@ void Decoder::DecodeCIType(Instruction* instr) {
+       Format(instr, "li        'Crd, 'Cimm6");
+       break;
+     case RO_C_LUI_ADD:
+-      if (instr->RvcRdValue() == 2)
++      if (instr->RvcRdValue() == 2) {
+         Format(instr, "addi      sp, sp, 'Cimm6Addi16sp");
+-      else if (instr->RvcRdValue() != 0 && instr->RvcRdValue() != 2)
++        break;
++      } else if (instr->RvcRdValue() != 0 && instr->RvcRdValue() != 2) {
+         Format(instr, "lui       'Crd, 'Cimm6U");
+-      else
++        break;
++      } else {
+         UNSUPPORTED_RISCV();
+-      break;
++      }
+     case RO_C_SLLI:
+       Format(instr, "slli      'Crd, 'Crd, 'Cshamt");
+       break;
+@@ -1928,15 +1934,18 @@ void Decoder::DecodeCBType(Instruction* instr) {
+       Format(instr, "beqz       'Crs1s, x0, 'Cimm8B");
+       break;
+     case RO_C_MISC_ALU:
+-      if (instr->RvcFunct2BValue() == 0b00)
++      if (instr->RvcFunct2BValue() == 0b00) {
+         Format(instr, "srli       'Crs1s, 'Crs1s, 'Cshamt");
+-      else if (instr->RvcFunct2BValue() == 0b01)
++        break;
++      } else if (instr->RvcFunct2BValue() == 0b01) {
+         Format(instr, "srai       'Crs1s, 'Crs1s, 'Cshamt");
+-      else if (instr->RvcFunct2BValue() == 0b10)
++        break;
++      } else if (instr->RvcFunct2BValue() == 0b10) {
+         Format(instr, "andi       'Crs1s, 'Crs1s, 'Cimm6");
+-      else
++        break;
++      } else {
+         UNSUPPORTED_RISCV();
+-      break;
++      }
+     default:
+       UNSUPPORTED_RISCV();
+   }
+@@ -2046,7 +2055,6 @@ void Decoder::DecodeRvvIVV(Instruction* instr) {
+       break;
+     default:
+       UNSUPPORTED_RISCV();
+-      break;
+   }
+ }
+ 
+@@ -2139,7 +2147,6 @@ void Decoder::DecodeRvvIVI(Instruction* instr) {
+       break;
+     default:
+       UNSUPPORTED_RISCV();
+-      break;
+   }
+ }
+ 
+@@ -2256,7 +2263,6 @@ void Decoder::DecodeRvvIVX(Instruction* instr) {
+       break;
+     default:
+       UNSUPPORTED_RISCV();
+-      break;
+   }
+ }
+ 
+@@ -2340,7 +2346,6 @@ void Decoder::DecodeRvvMVV(Instruction* instr) {
+       break;
+     default:
+       UNSUPPORTED_RISCV();
+-      break;
+   }
+ }
+ 
+@@ -2383,7 +2388,6 @@ void Decoder::DecodeRvvMVX(Instruction* instr) {
+       break;
+     default:
+       UNSUPPORTED_RISCV();
+-      break;
+   }
+ }
+ 
+@@ -2430,7 +2434,6 @@ void Decoder::DecodeRvvFVV(Instruction* instr) {
+           break;
+         default:
+           UNSUPPORTED_RISCV();
+-          break;
+       }
+       break;
+     case RO_V_VFUNARY1:
+@@ -2567,7 +2570,6 @@ void Decoder::DecodeRvvFVV(Instruction* instr) {
+       break;
+     default:
+       UNSUPPORTED_RISCV();
+-      break;
+   }
+ }
+ 
+@@ -2637,9 +2639,11 @@ void Decoder::DecodeRvvFVF(Instruction* instr) {
+     case RO_V_VFWNMSAC_VF:
+       Format(instr, "vfwnmsac.vf 'vd, 'fs1, 'vs2'vm");
+       break;
++    case RO_V_VFADD_VF:
++      Format(instr, "vfadd.vf 'vd, 'vs2, 'fs1'vm");
++      break;
+     default:
+       UNSUPPORTED_RISCV();
+-      break;
+   }
+ }
+ 
+@@ -2681,7 +2685,6 @@ void Decoder::DecodeVType(Instruction* instr) {
+       break;
+     default:
+       UNSUPPORTED_RISCV();
+-      break;
+   }
+ }
+ int Decoder::switch_nf(Instruction* instr) {
+diff --git a/src/execution/riscv/simulator-riscv.cc b/src/execution/riscv/simulator-riscv.cc
+index 0c422d238f4..9582db48963 100644
+--- a/src/execution/riscv/simulator-riscv.cc
++++ b/src/execution/riscv/simulator-riscv.cc
+@@ -6317,6 +6317,7 @@ void Simulator::DecodeRvvMVX() {
+   DCHECK_EQ(instr_.InstructionBits() & (kBaseOpcodeMask | kFunct3Mask), OP_MVX);
+   switch (instr_.InstructionBits() & kVTypeMask) {
+     case RO_V_VRXUNARY0:
++      // vmv.s.x
+       if (instr_.Vs2Value() == 0x0) {
+         if (rvv_vl() > 0 && rvv_vstart() < rvv_vl()) {
+           switch (rvv_vsew()) {
+@@ -6339,7 +6340,6 @@ void Simulator::DecodeRvvMVX() {
+             default:
+               UNREACHABLE();
+           }
+-          // set_rvv_vl(0);
+         }
+         set_rvv_vstart(0);
+         rvv_trace_vd();
+@@ -6636,7 +6636,6 @@ void Simulator::DecodeRvvFVV() {
+           break;
+         default:
+           UNSUPPORTED_RISCV();
+-          break;
+       }
+       break;
+     case RO_V_VFUNARY1:
+@@ -6987,7 +6986,6 @@ void Simulator::DecodeRvvFVV() {
+       break;
+     default:
+       UNSUPPORTED_RISCV();
+-      break;
+   }
+ }
+ 
+@@ -7021,6 +7019,48 @@ void Simulator::DecodeRvvFVF() {
+             USE(vs2);
+           })
+       break;
++    case RO_V_VFADD_VF:
++      RVV_VI_VFP_VF_LOOP(
++          { UNIMPLEMENTED(); },
++          {
++            auto fn = [this](float frs1, float frs2) {
++              if (is_invalid_fadd(frs1, frs2)) {
++                this->set_fflags(kInvalidOperation);
++                return std::numeric_limits<float>::quiet_NaN();
++              } else {
++                return frs1 + frs2;
++              }
++            };
++            auto alu_out = fn(fs1, vs2);
++            // if any input or result is NaN, the result is quiet_NaN
++            if (std::isnan(alu_out) || std::isnan(fs1) || std::isnan(vs2)) {
++              // signaling_nan sets kInvalidOperation bit
++              if (isSnan(alu_out) || isSnan(fs1) || isSnan(vs2))
++                set_fflags(kInvalidOperation);
++              alu_out = std::numeric_limits<float>::quiet_NaN();
++            }
++            vd = alu_out;
++          },
++          {
++            auto fn = [this](double frs1, double frs2) {
++              if (is_invalid_fadd(frs1, frs2)) {
++                this->set_fflags(kInvalidOperation);
++                return std::numeric_limits<double>::quiet_NaN();
++              } else {
++                return frs1 + frs2;
++              }
++            };
++            auto alu_out = fn(fs1, vs2);
++            // if any input or result is NaN, the result is quiet_NaN
++            if (std::isnan(alu_out) || std::isnan(fs1) || std::isnan(vs2)) {
++              // signaling_nan sets kInvalidOperation bit
++              if (isSnan(alu_out) || isSnan(fs1) || isSnan(vs2))
++                set_fflags(kInvalidOperation);
++              alu_out = std::numeric_limits<double>::quiet_NaN();
++            }
++            vd = alu_out;
++          })
++      break;
+     case RO_V_VFWADD_VF:
+       RVV_VI_CHECK_DSS(true);
+       RVV_VI_VFP_VF_LOOP_WIDEN(
+@@ -7116,7 +7156,6 @@ void Simulator::DecodeRvvFVF() {
+       break;
+     default:
+       UNSUPPORTED_RISCV();
+-      break;
+   }
+ }
+ void Simulator::DecodeVType() {
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv.h
+index e4017e5ca12..dda83e53b42 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv.h
+@@ -329,24 +329,41 @@ void LiftoffAssembler::emit_smi_check(Register obj, Label* target,
+   Branch(target, condition, scratch, Operand(zero_reg));
+ }
+ 
++// Implemente vector popcnt refer dense_popcnt
++//  int dense_popcnt(uint32_t n)
++//  {
++//      int count = 32;  // sizeof(uint32_t) * CHAR_BIT;
++//      n ^= 0xFF'FF'FF'FF;
++//      while(n)
++//      {
++//          --count;
++//          n &= n - 1;
++//      }
++//      return count;
++//  }
+ void LiftoffAssembler::emit_i8x16_popcnt(LiftoffRegister dst,
+                                          LiftoffRegister src) {
+   VRegister src_v = src.fp().toV();
+   VRegister dst_v = dst.fp().toV();
+-  Label t;
+-
++  Label t, done;
+   VU.set(kScratchReg, E8, m1);
+   vmv_vv(kSimd128ScratchReg, src_v);
+-  vmv_vv(dst_v, kSimd128RegZero);
+-
++  li(kScratchReg, 0xFF);
++  vxor_vx(kSimd128ScratchReg, kSimd128ScratchReg, kScratchReg);
++  vmv_vi(dst_v, 8);
++  vmv_vi(kSimd128RegZero, 0);
+   bind(&t);
+-  vmsne_vv(v0, kSimd128ScratchReg, kSimd128RegZero);
+-  vadd_vi(dst_v, dst_v, 1, Mask);
+-  vadd_vi(kSimd128ScratchReg2, kSimd128ScratchReg, -1, Mask);
+-  vand_vv(kSimd128ScratchReg, kSimd128ScratchReg, kSimd128ScratchReg2);
+-  // kScratchReg = -1 if kSimd128ScratchReg == 0 i.e. no active element
+-  vfirst_m(kScratchReg, kSimd128ScratchReg);
+-  bgez(kScratchReg, &t);
++  vmsne_vi(v0, kSimd128ScratchReg, 0);
++  VU.set(kScratchReg, E16, m1);
++  vmv_xs(kScratchReg, v0);
++  beqz(kScratchReg, &done);
++  VU.set(kScratchReg, E8, m1);
++  vadd_vi(dst_v, dst_v, -1, MaskType::Mask);
++  vadd_vi(kSimd128ScratchReg2, kSimd128ScratchReg, -1, MaskType::Mask);
++  vand_vv(kSimd128ScratchReg, kSimd128ScratchReg2, kSimd128ScratchReg,
++          MaskType::Mask);
++  Branch(&t);
++  bind(&done);
+ }
+ 
+ void LiftoffAssembler::emit_i8x16_swizzle(LiftoffRegister dst,
+@@ -595,6 +612,7 @@ void LiftoffAssembler::emit_i64x2_bitmask(LiftoffRegister dst,
+                                           LiftoffRegister src) {
+   VU.set(kScratchReg, E64, m1);
+   vmv_vx(kSimd128RegZero, zero_reg);
++  vmv_vx(kSimd128ScratchReg, zero_reg);
+   vmslt_vv(kSimd128ScratchReg, src.fp().toV(), kSimd128RegZero);
+   VU.set(kScratchReg, E32, m1);
+   vmv_xs(dst.gp(), kSimd128ScratchReg);
+@@ -950,20 +968,20 @@ void LiftoffAssembler::emit_v128_anytrue(LiftoffRegister dst,
+ void LiftoffAssembler::emit_i8x16_alltrue(LiftoffRegister dst,
+                                           LiftoffRegister src) {
+   VU.set(kScratchReg, E8, m1);
+-  Label alltrue;
+-  li(kScratchReg, -1);
+-  vmv_sx(kSimd128ScratchReg, kScratchReg);
++  Label notalltrue;
++  vmv_vi(kSimd128ScratchReg, -1);
+   vredminu_vs(kSimd128ScratchReg, src.fp().toV(), kSimd128ScratchReg);
+   vmv_xs(dst.gp(), kSimd128ScratchReg);
+-  beqz(dst.gp(), &alltrue);
++  beqz(dst.gp(), &notalltrue);
+   li(dst.gp(), 1);
+-  bind(&alltrue);
++  bind(&notalltrue);
+ }
+ 
+ void LiftoffAssembler::emit_i8x16_bitmask(LiftoffRegister dst,
+                                           LiftoffRegister src) {
+   VU.set(kScratchReg, E8, m1);
+   vmv_vx(kSimd128RegZero, zero_reg);
++  vmv_vx(kSimd128ScratchReg, zero_reg);
+   vmslt_vv(kSimd128ScratchReg, src.fp().toV(), kSimd128RegZero);
+   VU.set(kScratchReg, E32, m1);
+   vmv_xs(dst.gp(), kSimd128ScratchReg);
+@@ -1102,6 +1120,7 @@ void LiftoffAssembler::emit_i16x8_bitmask(LiftoffRegister dst,
+                                           LiftoffRegister src) {
+   VU.set(kScratchReg, E16, m1);
+   vmv_vx(kSimd128RegZero, zero_reg);
++  vmv_vx(kSimd128ScratchReg, zero_reg);
+   vmslt_vv(kSimd128ScratchReg, src.fp().toV(), kSimd128RegZero);
+   VU.set(kScratchReg, E32, m1);
+   vmv_xs(dst.gp(), kSimd128ScratchReg);
+@@ -1246,6 +1265,7 @@ void LiftoffAssembler::emit_i32x4_bitmask(LiftoffRegister dst,
+                                           LiftoffRegister src) {
+   VU.set(kScratchReg, E32, m1);
+   vmv_vx(kSimd128RegZero, zero_reg);
++  vmv_vx(kSimd128ScratchReg, zero_reg);
+   vmslt_vv(kSimd128ScratchReg, src.fp().toV(), kSimd128RegZero);
+   vmv_xs(dst.gp(), kSimd128ScratchReg);
+ }
+@@ -1746,8 +1766,9 @@ void LiftoffAssembler::emit_i32x4_sconvert_f32x4(LiftoffRegister dst,
+   VU.set(kScratchReg, E32, m1);
+   VU.set(FPURoundingMode::RTZ);
+   vmfeq_vv(v0, src.fp().toV(), src.fp().toV());
++  vmv_vv(kSimd128ScratchReg, src.fp().toV());
+   vmv_vx(dst.fp().toV(), zero_reg);
+-  vfcvt_x_f_v(dst.fp().toV(), src.fp().toV(), Mask);
++  vfcvt_x_f_v(dst.fp().toV(), kSimd128ScratchReg, Mask);
+ }
+ 
+ void LiftoffAssembler::emit_i32x4_uconvert_f32x4(LiftoffRegister dst,
+@@ -1755,8 +1776,9 @@ void LiftoffAssembler::emit_i32x4_uconvert_f32x4(LiftoffRegister dst,
+   VU.set(kScratchReg, E32, m1);
+   VU.set(FPURoundingMode::RTZ);
+   vmfeq_vv(v0, src.fp().toV(), src.fp().toV());
++  vmv_vv(kSimd128ScratchReg, src.fp().toV());
+   vmv_vx(dst.fp().toV(), zero_reg);
+-  vfcvt_xu_f_v(dst.fp().toV(), src.fp().toV(), Mask);
++  vfcvt_xu_f_v(dst.fp().toV(), kSimd128ScratchReg, Mask);
+ }
+ 
+ void LiftoffAssembler::emit_f32x4_sconvert_i32x4(LiftoffRegister dst,
+@@ -1777,48 +1799,48 @@ void LiftoffAssembler::emit_i8x16_sconvert_i16x8(LiftoffRegister dst,
+                                                  LiftoffRegister lhs,
+                                                  LiftoffRegister rhs) {
+   VU.set(kScratchReg, E16, m1);
+-  vmv_vv(v26, lhs.fp().toV());
+-  vmv_vv(v27, lhs.fp().toV());
++  vmv_vv(kSimd128ScratchReg, lhs.fp().toV());  // kSimd128ScratchReg v24
++  vmv_vv(v25, rhs.fp().toV());
+   VU.set(kScratchReg, E8, m1);
+   VU.set(FPURoundingMode::RNE);
+-  vnclip_vi(dst.fp().toV(), v26, 0);
++  vnclip_vi(dst.fp().toV(), kSimd128ScratchReg, 0);
+ }
+ 
+ void LiftoffAssembler::emit_i8x16_uconvert_i16x8(LiftoffRegister dst,
+                                                  LiftoffRegister lhs,
+                                                  LiftoffRegister rhs) {
+   VU.set(kScratchReg, E16, m1);
+-  vmv_vv(v26, lhs.fp().toV());
+-  vmv_vv(v27, lhs.fp().toV());
++  vmv_vv(kSimd128ScratchReg, lhs.fp().toV());  // kSimd128ScratchReg v24
++  vmv_vv(v25, rhs.fp().toV());
+   VU.set(kScratchReg, E16, m2);
+-  vmax_vx(v26, v26, zero_reg);
++  vmax_vx(kSimd128ScratchReg, kSimd128ScratchReg, zero_reg);
+   VU.set(kScratchReg, E8, m1);
+   VU.set(FPURoundingMode::RNE);
+-  vnclipu_vi(dst.fp().toV(), v26, 0);
++  vnclipu_vi(dst.fp().toV(), kSimd128ScratchReg, 0);
+ }
+ 
+ void LiftoffAssembler::emit_i16x8_sconvert_i32x4(LiftoffRegister dst,
+                                                  LiftoffRegister lhs,
+                                                  LiftoffRegister rhs) {
+   VU.set(kScratchReg, E32, m1);
+-  vmv_vv(v26, lhs.fp().toV());
+-  vmv_vv(v27, lhs.fp().toV());
++  vmv_vv(kSimd128ScratchReg, lhs.fp().toV());  // kSimd128ScratchReg v24
++  vmv_vv(v25, rhs.fp().toV());
+   VU.set(kScratchReg, E16, m1);
+   VU.set(FPURoundingMode::RNE);
+-  vnclip_vi(dst.fp().toV(), v26, 0);
++  vnclip_vi(dst.fp().toV(), kSimd128ScratchReg, 0);
+ }
+ 
+ void LiftoffAssembler::emit_i16x8_uconvert_i32x4(LiftoffRegister dst,
+                                                  LiftoffRegister lhs,
+                                                  LiftoffRegister rhs) {
+   VU.set(kScratchReg, E32, m1);
+-  vmv_vv(v26, lhs.fp().toV());
+-  vmv_vv(v27, lhs.fp().toV());
++  vmv_vv(kSimd128ScratchReg, lhs.fp().toV());  // kSimd128ScratchReg v24
++  vmv_vv(v25, rhs.fp().toV());
+   VU.set(kScratchReg, E32, m2);
+-  vmax_vx(v26, v26, zero_reg);
++  vmax_vx(kSimd128ScratchReg, kSimd128ScratchReg, zero_reg);
+   VU.set(kScratchReg, E16, m1);
+   VU.set(FPURoundingMode::RNE);
+-  vnclipu_vi(dst.fp().toV(), v26, 0);
++  vnclipu_vi(dst.fp().toV(), kSimd128ScratchReg, 0);
+ }
+ 
+ void LiftoffAssembler::emit_i16x8_sconvert_i8x16_low(LiftoffRegister dst,
+@@ -1913,6 +1935,7 @@ void LiftoffAssembler::emit_i8x16_abs(LiftoffRegister dst,
+   VU.set(kScratchReg, E8, m1);
+   vmv_vx(kSimd128RegZero, zero_reg);
+   vmv_vv(dst.fp().toV(), src.fp().toV());
++  vmv_vv(v0, kSimd128RegZero);
+   vmslt_vv(v0, src.fp().toV(), kSimd128RegZero);
+   vneg_vv(dst.fp().toV(), src.fp().toV(), MaskType::Mask);
+ }
+@@ -1922,6 +1945,7 @@ void LiftoffAssembler::emit_i16x8_abs(LiftoffRegister dst,
+   VU.set(kScratchReg, E16, m1);
+   vmv_vx(kSimd128RegZero, zero_reg);
+   vmv_vv(dst.fp().toV(), src.fp().toV());
++  vmv_vv(v0, kSimd128RegZero);
+   vmslt_vv(v0, src.fp().toV(), kSimd128RegZero);
+   vneg_vv(dst.fp().toV(), src.fp().toV(), MaskType::Mask);
+ }
+@@ -1931,6 +1955,7 @@ void LiftoffAssembler::emit_i64x2_abs(LiftoffRegister dst,
+   VU.set(kScratchReg, E64, m1);
+   vmv_vx(kSimd128RegZero, zero_reg);
+   vmv_vv(dst.fp().toV(), src.fp().toV());
++  vmv_vv(v0, kSimd128RegZero);
+   vmslt_vv(v0, src.fp().toV(), kSimd128RegZero);
+   vneg_vv(dst.fp().toV(), src.fp().toV(), MaskType::Mask);
+ }
+@@ -1940,6 +1965,7 @@ void LiftoffAssembler::emit_i32x4_abs(LiftoffRegister dst,
+   VU.set(kScratchReg, E32, m1);
+   vmv_vx(kSimd128RegZero, zero_reg);
+   vmv_vv(dst.fp().toV(), src.fp().toV());
++  vmv_vv(v0, kSimd128RegZero);
+   vmslt_vv(v0, src.fp().toV(), kSimd128RegZero);
+   vneg_vv(dst.fp().toV(), src.fp().toV(), MaskType::Mask);
+ }
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
+index e415d110b0c..b130c003387 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
+@@ -728,6 +728,7 @@ void LiftoffAssembler::Move(DoubleRegister dst, DoubleRegister src,
+   if (kind != kS128) {
+     MacroAssembler::Move(dst, src);
+   } else {
++    VU.set(kScratchReg, E8, m1);
+     MacroAssembler::vmv_vv(dst.toV(), src.toV());
+   }
+ }
+@@ -1574,6 +1575,8 @@ void LiftoffAssembler::emit_f64x2_max(LiftoffRegister dst, LiftoffRegister lhs,
+ void LiftoffAssembler::emit_i32x4_extadd_pairwise_i16x8_s(LiftoffRegister dst,
+                                                           LiftoffRegister src) {
+   VU.set(kScratchReg, E64, m1);
++  vmv_vi(kSimd128ScratchReg, -1);
++  vmv_vi(kSimd128ScratchReg3, -1);
+   li(kScratchReg, 0x0006000400020000);
+   vmv_sx(kSimd128ScratchReg, kScratchReg);
+   li(kScratchReg, 0x0007000500030001);
+@@ -1588,6 +1591,8 @@ void LiftoffAssembler::emit_i32x4_extadd_pairwise_i16x8_s(LiftoffRegister dst,
+ void LiftoffAssembler::emit_i32x4_extadd_pairwise_i16x8_u(LiftoffRegister dst,
+                                                           LiftoffRegister src) {
+   VU.set(kScratchReg, E64, m1);
++  vmv_vi(kSimd128ScratchReg, -1);
++  vmv_vi(kSimd128ScratchReg3, -1);
+   li(kScratchReg, 0x0006000400020000);
+   vmv_sx(kSimd128ScratchReg, kScratchReg);
+   li(kScratchReg, 0x0007000500030001);
+@@ -1602,6 +1607,8 @@ void LiftoffAssembler::emit_i32x4_extadd_pairwise_i16x8_u(LiftoffRegister dst,
+ void LiftoffAssembler::emit_i16x8_extadd_pairwise_i8x16_s(LiftoffRegister dst,
+                                                           LiftoffRegister src) {
+   VU.set(kScratchReg, E64, m1);
++  vmv_vi(kSimd128ScratchReg, -1);
++  vmv_vi(kSimd128ScratchReg3, -1);
+   li(kScratchReg, 0x0E0C0A0806040200);
+   vmv_sx(kSimd128ScratchReg, kScratchReg);
+   li(kScratchReg, 0x0F0D0B0907050301);
+@@ -1616,6 +1623,8 @@ void LiftoffAssembler::emit_i16x8_extadd_pairwise_i8x16_s(LiftoffRegister dst,
+ void LiftoffAssembler::emit_i16x8_extadd_pairwise_i8x16_u(LiftoffRegister dst,
+                                                           LiftoffRegister src) {
+   VU.set(kScratchReg, E64, m1);
++  vmv_vi(kSimd128ScratchReg, -1);
++  vmv_vi(kSimd128ScratchReg3, -1);
+   li(kScratchReg, 0x0E0C0A0806040200);
+   vmv_sx(kSimd128ScratchReg, kScratchReg);
+   li(kScratchReg, 0x0F0D0B0907050301);
+diff --git a/test/cctest/test-assembler-riscv64.cc b/test/cctest/test-assembler-riscv64.cc
+index 64ca2a5c54b..ebacbc4c493 100644
+--- a/test/cctest/test-assembler-riscv64.cc
++++ b/test/cctest/test-assembler-riscv64.cc
+@@ -2288,11 +2288,14 @@ UTEST_RVV_VI_VX_FORM_WITH_FN(vminu_vx, 32, ARRAY_INT32, std::min<uint32_t>)
+ #define UTEST_RVV_VF_VV_FORM_WITH_OP(instr_name, tested_op) \
+   UTEST_RVV_VF_VV_FORM_WITH_RES(instr_name, ((rs1_fval)tested_op(rs2_fval)))
+ 
+-#define UTEST_RVV_VF_VF_FORM_WITH_OP(instr_name, tested_op) \
+-  UTEST_RVV_VF_VF_FORM_WITH_RES(instr_name, ((rs1_fval)tested_op(rs2_fval)))
++#define UTEST_RVV_VF_VF_FORM_WITH_OP(instr_name, array, tested_op) \
++  UTEST_RVV_VF_VF_FORM_WITH_RES(instr_name, array,                 \
++                                ((rs1_fval)tested_op(rs2_fval)))
++
++#define ARRAY_FLOAT compiler::ValueHelper::GetVector<float>()
+ 
+ UTEST_RVV_VF_VV_FORM_WITH_OP(vfadd_vv, +)
+-// UTEST_RVV_VF_VF_FORM_WITH_OP(vfadd_vf, ARRAY_FLOAT, +)
++UTEST_RVV_VF_VF_FORM_WITH_OP(vfadd_vf, ARRAY_FLOAT, +)
+ UTEST_RVV_VF_VV_FORM_WITH_OP(vfsub_vv, -)
+ // UTEST_RVV_VF_VF_FORM_WITH_OP(vfsub_vf, ARRAY_FLOAT, -)
+ UTEST_RVV_VF_VV_FORM_WITH_OP(vfmul_vv, *)
+@@ -2866,6 +2869,30 @@ UTEST_VCPOP_M_WITH_WIDTH(32)
+ UTEST_VCPOP_M_WITH_WIDTH(16)
+ UTEST_VCPOP_M_WITH_WIDTH(8)
+ 
++TEST(RISCV_UTEST_WasmRvvS128const) {
++  if (!CpuFeatures::IsSupported(RISCV_SIMD)) return;
++  CcTest::InitializeVM();
++  for (uint64_t x : compiler::ValueHelper::GetVector<int64_t>()) {
++    for (uint64_t y : compiler::ValueHelper::GetVector<int64_t>()) {
++      uint64_t src[2] = {x, y};
++      uint8_t vals[16];
++      volatile uint64_t result[kRvvVLEN / 64] = {0};
++      memcpy(vals, src, sizeof(vals));
++      auto fn = [vals, &result](MacroAssembler& assm) {
++        __ Push(kScratchReg);
++        __ WasmRvvS128const(v10, vals);
++        __ li(t1, Operand(int64_t(result)));
++        __ VU.set(t0, VSew::E64, Vlmul::m1);
++        __ vs(v10, t1, 0, VSew::E64);
++        __ Pop(kScratchReg);
++      };
++      GenAndRunTest(fn);
++      CHECK_EQ(result[0], x);
++      CHECK_EQ(result[1], y);
++    }
++  }
++}
++
+ #undef UTEST_VCPOP_M_WITH_WIDTH
+ 
+ #undef __
+diff --git a/test/wasm-spec-tests/wasm-spec-tests.status b/test/wasm-spec-tests/wasm-spec-tests.status
+index 9064ae3118b..9a7e12bd333 100644
+--- a/test/wasm-spec-tests/wasm-spec-tests.status
++++ b/test/wasm-spec-tests/wasm-spec-tests.status
+@@ -95,9 +95,6 @@
+    # These tests need larger stack size on simulator.
+    'skip-stack-guard-page': '--sim-stack-size=8192',
+    'proposals/tail-call/skip-stack-guard-page': '--sim-stack-size=8192',
+-
+-   # SIMD is not fully implemented yet.
+-   'simd*': [SKIP],
+ }],  # 'arch == riscv64'
+ 
+ 
+-- 
+2.35.1
+

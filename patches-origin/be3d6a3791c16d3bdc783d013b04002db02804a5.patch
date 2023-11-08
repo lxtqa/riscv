@@ -1,0 +1,797 @@
+From be3d6a3791c16d3bdc783d013b04002db02804a5 Mon Sep 17 00:00:00 2001
+From: Stephen Roettger <sroettger@google.com>
+Date: Wed, 28 Sep 2022 11:32:07 +0200
+Subject: [PATCH] Cleanup: replace RO embedded_constant_pool flag with value
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The flag is used inside const expressions so it's impossible to change
+it at runtime. There's no reason that this is a command line flag.
+
+Change-Id: I983aeabe8ed276599b28add4ab883546edc7039e
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3925197
+Reviewed-by: Jakob Kummerow <jkummerow@chromium.org>
+Reviewed-by: Igor Sheludko <ishell@chromium.org>
+Commit-Queue: Stephen Röttger <sroettger@google.com>
+Reviewed-by: Jakob Linke <jgruber@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#83488}
+---
+ src/builtins/ppc/builtins-ppc.cc              |  8 ++++----
+ src/codegen/assembler.h                       |  4 ++--
+ src/codegen/macro-assembler.h                 | 12 ++++++------
+ src/codegen/ppc/assembler-ppc-inl.h           |  8 ++++----
+ src/codegen/ppc/assembler-ppc.cc              |  6 ++----
+ src/codegen/ppc/assembler-ppc.h               |  7 +++----
+ src/codegen/ppc/macro-assembler-ppc.cc        | 19 +++++++++----------
+ src/codegen/ppc/register-ppc.h                |  2 +-
+ src/codegen/s390/macro-assembler-s390.cc      |  4 ++--
+ src/common/globals.h                          |  4 ++--
+ src/compiler/backend/code-generator.cc        |  2 +-
+ .../backend/ppc/code-generator-ppc.cc         | 10 +++++-----
+ src/compiler/linkage.h                        |  2 +-
+ src/deoptimizer/deoptimizer.cc                | 12 ++++++------
+ src/deoptimizer/ppc/deoptimizer-ppc.cc        |  2 +-
+ src/execution/frame-constants.h               |  4 ++--
+ src/execution/frames.cc                       |  4 ++--
+ src/execution/ppc/frame-constants-ppc.cc      |  2 +-
+ src/execution/ppc/frame-constants-ppc.h       |  6 +++---
+ src/flags/flag-definitions.h                  | 10 ----------
+ src/objects/code-inl.h                        |  6 +++---
+ src/objects/code.h                            |  8 +++-----
+ src/snapshot/deserializer.h                   |  2 +-
+ src/snapshot/embedded/embedded-data-inl.h     |  8 ++++----
+ src/snapshot/embedded/embedded-data.cc        |  2 +-
+ src/snapshot/embedded/embedded-data.h         |  4 ++--
+ src/wasm/baseline/ppc/liftoff-assembler-ppc.h |  8 +++-----
+ src/wasm/wasm-code-manager.cc                 |  2 +-
+ 28 files changed, 75 insertions(+), 93 deletions(-)
+
+diff --git a/src/builtins/ppc/builtins-ppc.cc b/src/builtins/ppc/builtins-ppc.cc
+index 4993dfccde4..be9784515a8 100644
+--- a/src/builtins/ppc/builtins-ppc.cc
++++ b/src/builtins/ppc/builtins-ppc.cc
+@@ -433,7 +433,7 @@ void OnStackReplacement(MacroAssembler* masm, OsrSourceTier source,
+     ConstantPoolUnavailableScope constant_pool_unavailable(masm);
+     __ addi(r3, r3, Operand(Code::kHeaderSize - kHeapObjectTag));  // Code start
+ 
+-    if (v8_flags.enable_embedded_constant_pool) {
++    if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
+       __ LoadConstantPoolPointerRegisterFromCodeTargetAddress(r3);
+     }
+ 
+@@ -845,7 +845,7 @@ void Generate_JSEntryVariant(MacroAssembler* masm, StackFrame::Type type,
+   // r8: argv
+   __ li(r0, Operand(-1));  // Push a bad frame pointer to fail if it is used.
+   __ push(r0);
+-  if (v8_flags.enable_embedded_constant_pool) {
++  if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
+     __ li(kConstantPoolRegister, Operand::Zero());
+     __ push(kConstantPoolRegister);
+   }
+@@ -1292,7 +1292,7 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+     ASM_CODE_COMMENT_STRING(masm, "Optimized marker check");
+ 
+     // Drop the frame created by the baseline call.
+-    if (v8_flags.enable_embedded_constant_pool) {
++    if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
+       __ Pop(r0, fp, kConstantPoolRegister);
+     } else {
+       __ Pop(r0, fp);
+@@ -3055,7 +3055,7 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
+   ConstantPoolUnavailableScope constant_pool_unavailable(masm);
+   __ Move(ip, pending_handler_entrypoint_address);
+   __ LoadU64(ip, MemOperand(ip));
+-  if (v8_flags.enable_embedded_constant_pool) {
++  if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
+     __ Move(kConstantPoolRegister, pending_handler_constant_pool_address);
+     __ LoadU64(kConstantPoolRegister, MemOperand(kConstantPoolRegister));
+   }
+diff --git a/src/codegen/assembler.h b/src/codegen/assembler.h
+index 8a8164d0739..1073a9d4f63 100644
+--- a/src/codegen/assembler.h
++++ b/src/codegen/assembler.h
+@@ -245,7 +245,7 @@ class V8_EXPORT_PRIVATE AssemblerBase : public Malloced {
+   }
+ 
+   bool is_constant_pool_available() const {
+-    if (v8_flags.enable_embedded_constant_pool) {
++    if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
+       // We need to disable constant pool here for embeded builtins
+       // because the metadata section is not adjacent to instructions
+       return constant_pool_available_ && !options().isolate_independent_code;
+@@ -374,7 +374,7 @@ class V8_EXPORT_PRIVATE AssemblerBase : public Malloced {
+   byte* pc_;
+ 
+   void set_constant_pool_available(bool available) {
+-    if (v8_flags.enable_embedded_constant_pool) {
++    if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
+       constant_pool_available_ = available;
+     } else {
+       // Embedded constant pool not supported on this architecture.
+diff --git a/src/codegen/macro-assembler.h b/src/codegen/macro-assembler.h
+index aaf30dea62a..61b26a320f2 100644
+--- a/src/codegen/macro-assembler.h
++++ b/src/codegen/macro-assembler.h
+@@ -136,10 +136,10 @@ class V8_NODISCARD FrameAndConstantPoolScope {
+       : masm_(masm),
+         type_(type),
+         old_has_frame_(masm->has_frame()),
+-        old_constant_pool_available_(v8_flags.enable_embedded_constant_pool &&
++        old_constant_pool_available_(V8_EMBEDDED_CONSTANT_POOL_BOOL &&
+                                      masm->is_constant_pool_available()) {
+     masm->set_has_frame(true);
+-    if (v8_flags.enable_embedded_constant_pool) {
++    if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
+       masm->set_constant_pool_available(true);
+     }
+     if (type_ != StackFrame::MANUAL && type_ != StackFrame::NO_FRAME_TYPE) {
+@@ -150,7 +150,7 @@ class V8_NODISCARD FrameAndConstantPoolScope {
+   ~FrameAndConstantPoolScope() {
+     masm_->LeaveFrame(type_);
+     masm_->set_has_frame(old_has_frame_);
+-    if (v8_flags.enable_embedded_constant_pool) {
++    if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
+       masm_->set_constant_pool_available(old_constant_pool_available_);
+     }
+   }
+@@ -169,14 +169,14 @@ class V8_NODISCARD ConstantPoolUnavailableScope {
+  public:
+   explicit ConstantPoolUnavailableScope(Assembler* assembler)
+       : assembler_(assembler),
+-        old_constant_pool_available_(v8_flags.enable_embedded_constant_pool &&
++        old_constant_pool_available_(V8_EMBEDDED_CONSTANT_POOL_BOOL &&
+                                      assembler->is_constant_pool_available()) {
+-    if (v8_flags.enable_embedded_constant_pool) {
++    if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
+       assembler->set_constant_pool_available(false);
+     }
+   }
+   ~ConstantPoolUnavailableScope() {
+-    if (v8_flags.enable_embedded_constant_pool) {
++    if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
+       assembler_->set_constant_pool_available(old_constant_pool_available_);
+     }
+   }
+diff --git a/src/codegen/ppc/assembler-ppc-inl.h b/src/codegen/ppc/assembler-ppc-inl.h
+index e130cf5870a..898f1325209 100644
+--- a/src/codegen/ppc/assembler-ppc-inl.h
++++ b/src/codegen/ppc/assembler-ppc-inl.h
+@@ -87,7 +87,7 @@ Address RelocInfo::target_address() {
+ Address RelocInfo::target_address_address() {
+   DCHECK(HasTargetAddressAddress());
+ 
+-  if (v8_flags.enable_embedded_constant_pool &&
++  if (V8_EMBEDDED_CONSTANT_POOL_BOOL &&
+       Assembler::IsConstantPoolLoadStart(pc_)) {
+     // We return the PC for embedded constant pool since this function is used
+     // by the serializer and expects the address to reside within the code
+@@ -108,7 +108,7 @@ Address RelocInfo::target_address_address() {
+ }
+ 
+ Address RelocInfo::constant_pool_entry_address() {
+-  if (v8_flags.enable_embedded_constant_pool) {
++  if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
+     DCHECK(constant_pool_);
+     ConstantPoolEntry::Access access;
+     if (Assembler::IsConstantPoolLoadStart(pc_, &access))
+@@ -250,7 +250,7 @@ void Assembler::UntrackBranch() {
+ 
+ // Fetch the 32bit value from the FIXED_SEQUENCE lis/ori
+ Address Assembler::target_address_at(Address pc, Address constant_pool) {
+-  if (v8_flags.enable_embedded_constant_pool && constant_pool) {
++  if (V8_EMBEDDED_CONSTANT_POOL_BOOL && constant_pool) {
+     ConstantPoolEntry::Access access;
+     if (IsConstantPoolLoadStart(pc, &access))
+       return Memory<Address>(target_constant_pool_address_at(
+@@ -425,7 +425,7 @@ void Assembler::deserialization_set_target_internal_reference_at(
+ void Assembler::set_target_address_at(Address pc, Address constant_pool,
+                                       Address target,
+                                       ICacheFlushMode icache_flush_mode) {
+-  if (v8_flags.enable_embedded_constant_pool && constant_pool) {
++  if (V8_EMBEDDED_CONSTANT_POOL_BOOL && constant_pool) {
+     ConstantPoolEntry::Access access;
+     if (IsConstantPoolLoadStart(pc, &access)) {
+       Memory<Address>(target_constant_pool_address_at(
+diff --git a/src/codegen/ppc/assembler-ppc.cc b/src/codegen/ppc/assembler-ppc.cc
+index 844d27995ff..5ba168228b6 100644
+--- a/src/codegen/ppc/assembler-ppc.cc
++++ b/src/codegen/ppc/assembler-ppc.cc
+@@ -167,8 +167,7 @@ bool RelocInfo::IsCodedSpecially() {
+ }
+ 
+ bool RelocInfo::IsInConstantPool() {
+-  if (v8_flags.enable_embedded_constant_pool &&
+-      constant_pool_ != kNullAddress) {
++  if (V8_EMBEDDED_CONSTANT_POOL_BOOL && constant_pool_ != kNullAddress) {
+     return Assembler::IsConstantPoolLoadStart(pc_);
+   }
+   return false;
+@@ -1310,8 +1309,7 @@ int Assembler::instructions_required_for_mov(Register dst,
+ 
+ bool Assembler::use_constant_pool_for_mov(Register dst, const Operand& src,
+                                           bool canOptimize) const {
+-  if (!v8_flags.enable_embedded_constant_pool ||
+-      !is_constant_pool_available()) {
++  if (!V8_EMBEDDED_CONSTANT_POOL_BOOL || !is_constant_pool_available()) {
+     // If there is no constant pool available, we must use a mov
+     // immediate sequence.
+     return false;
+diff --git a/src/codegen/ppc/assembler-ppc.h b/src/codegen/ppc/assembler-ppc.h
+index 6563287d0a8..a6db48b4a82 100644
+--- a/src/codegen/ppc/assembler-ppc.h
++++ b/src/codegen/ppc/assembler-ppc.h
+@@ -309,10 +309,9 @@ class Assembler : public AssemblerBase {
+   static constexpr int kMovInstructionsNoConstantPool = 2;
+   static constexpr int kTaggedLoadInstructions = 1;
+ #endif
+-  static constexpr int kMovInstructions =
+-      v8_flags.enable_embedded_constant_pool.value()
+-          ? kMovInstructionsConstantPool
+-          : kMovInstructionsNoConstantPool;
++  static constexpr int kMovInstructions = V8_EMBEDDED_CONSTANT_POOL_BOOL
++                                              ? kMovInstructionsConstantPool
++                                              : kMovInstructionsNoConstantPool;
+ 
+   static inline int encode_crbit(const CRegister& cr, enum CRBit crbit) {
+     return ((cr.code() * CRWIDTH) + crbit);
+diff --git a/src/codegen/ppc/macro-assembler-ppc.cc b/src/codegen/ppc/macro-assembler-ppc.cc
+index 0095f451c36..bfc8d0f8b53 100644
+--- a/src/codegen/ppc/macro-assembler-ppc.cc
++++ b/src/codegen/ppc/macro-assembler-ppc.cc
+@@ -898,7 +898,7 @@ void MacroAssembler::RecordWrite(Register object, Register slot_address,
+ void TurboAssembler::PushCommonFrame(Register marker_reg) {
+   int fp_delta = 0;
+   mflr(r0);
+-  if (v8_flags.enable_embedded_constant_pool) {
++  if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
+     if (marker_reg.is_valid()) {
+       Push(r0, fp, kConstantPoolRegister, marker_reg);
+       fp_delta = 2;
+@@ -921,7 +921,7 @@ void TurboAssembler::PushCommonFrame(Register marker_reg) {
+ void TurboAssembler::PushStandardFrame(Register function_reg) {
+   int fp_delta = 0;
+   mflr(r0);
+-  if (v8_flags.enable_embedded_constant_pool) {
++  if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
+     if (function_reg.is_valid()) {
+       Push(r0, fp, kConstantPoolRegister, cp, function_reg);
+       fp_delta = 3;
+@@ -943,7 +943,7 @@ void TurboAssembler::PushStandardFrame(Register function_reg) {
+ }
+ 
+ void TurboAssembler::RestoreFrameStateForTailCall() {
+-  if (v8_flags.enable_embedded_constant_pool) {
++  if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
+     LoadU64(kConstantPoolRegister,
+             MemOperand(fp, StandardFrameConstants::kConstantPoolOffset));
+     set_constant_pool_available(false);
+@@ -1230,7 +1230,7 @@ void TurboAssembler::StubPrologue(StackFrame::Type type) {
+     mov(r11, Operand(StackFrame::TypeToMarker(type)));
+     PushCommonFrame(r11);
+   }
+-  if (v8_flags.enable_embedded_constant_pool) {
++  if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
+     LoadConstantPoolPointerRegister();
+     set_constant_pool_available(true);
+   }
+@@ -1238,7 +1238,7 @@ void TurboAssembler::StubPrologue(StackFrame::Type type) {
+ 
+ void TurboAssembler::Prologue() {
+   PushStandardFrame(r4);
+-  if (v8_flags.enable_embedded_constant_pool) {
++  if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
+     // base contains prologue address
+     LoadConstantPoolPointerRegister();
+     set_constant_pool_available(true);
+@@ -1288,8 +1288,7 @@ void TurboAssembler::DropArgumentsAndPushNewReceiver(Register argc,
+ 
+ void TurboAssembler::EnterFrame(StackFrame::Type type,
+                                 bool load_constant_pool_pointer_reg) {
+-  if (v8_flags.enable_embedded_constant_pool &&
+-      load_constant_pool_pointer_reg) {
++  if (V8_EMBEDDED_CONSTANT_POOL_BOOL && load_constant_pool_pointer_reg) {
+     // Push type explicitly so we can leverage the constant pool.
+     // This path cannot rely on ip containing code entry.
+     PushCommonFrame();
+@@ -1322,7 +1321,7 @@ int TurboAssembler::LeaveFrame(StackFrame::Type type, int stack_adjustment) {
+   int frame_ends;
+   LoadU64(r0, MemOperand(fp, StandardFrameConstants::kCallerPCOffset));
+   LoadU64(ip, MemOperand(fp, StandardFrameConstants::kCallerFPOffset));
+-  if (v8_flags.enable_embedded_constant_pool) {
++  if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
+     LoadU64(kConstantPoolRegister,
+             MemOperand(fp, StandardFrameConstants::kConstantPoolOffset));
+   }
+@@ -1373,7 +1372,7 @@ void MacroAssembler::EnterExitFrame(bool save_doubles, int stack_space,
+     li(r8, Operand::Zero());
+     StoreU64(r8, MemOperand(fp, ExitFrameConstants::kSPOffset));
+   }
+-  if (v8_flags.enable_embedded_constant_pool) {
++  if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
+     StoreU64(kConstantPoolRegister,
+              MemOperand(fp, ExitFrameConstants::kConstantPoolOffset));
+   }
+@@ -2654,7 +2653,7 @@ void TurboAssembler::LoadSmiLiteral(Register dst, Smi smi) {
+ 
+ void TurboAssembler::LoadDoubleLiteral(DoubleRegister result,
+                                        base::Double value, Register scratch) {
+-  if (v8_flags.enable_embedded_constant_pool && is_constant_pool_available() &&
++  if (V8_EMBEDDED_CONSTANT_POOL_BOOL && is_constant_pool_available() &&
+       !(scratch == r0 && ConstantPoolAccessIsInOverflow())) {
+     ConstantPoolEntry::Access access = ConstantPoolAddEntry(value);
+     if (access == ConstantPoolEntry::OVERFLOWED) {
+diff --git a/src/codegen/ppc/register-ppc.h b/src/codegen/ppc/register-ppc.h
+index bbcaa525e49..b85e7868e13 100644
+--- a/src/codegen/ppc/register-ppc.h
++++ b/src/codegen/ppc/register-ppc.h
+@@ -17,7 +17,7 @@ namespace internal {
+   V(r16) V(r17) V(r18) V(r19) V(r20) V(r21) V(r22) V(r23) \
+   V(r24) V(r25) V(r26) V(r27) V(r28) V(r29) V(r30) V(fp)
+ 
+-#if V8_EMBEDDED_CONSTANT_POOL
++#if V8_EMBEDDED_CONSTANT_POOL_BOOL
+ #define ALLOCATABLE_GENERAL_REGISTERS(V)                  \
+   V(r3)  V(r4)  V(r5)  V(r6)  V(r7)                       \
+   V(r8)  V(r9)  V(r10) V(r14) V(r15)                      \
+diff --git a/src/codegen/s390/macro-assembler-s390.cc b/src/codegen/s390/macro-assembler-s390.cc
+index 95d12464555..c693fbc3ac3 100644
+--- a/src/codegen/s390/macro-assembler-s390.cc
++++ b/src/codegen/s390/macro-assembler-s390.cc
+@@ -1165,12 +1165,12 @@ void TurboAssembler::PushStandardFrame(Register function_reg) {
+ }
+ 
+ void TurboAssembler::RestoreFrameStateForTailCall() {
+-  // if (v8_flags.enable_embedded_constant_pool) {
++  // if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
+   //   LoadU64(kConstantPoolRegister,
+   //         MemOperand(fp, StandardFrameConstants::kConstantPoolOffset));
+   //   set_constant_pool_available(false);
+   // }
+-  DCHECK(!v8_flags.enable_embedded_constant_pool);
++  DCHECK(!V8_EMBEDDED_CONSTANT_POOL_BOOL);
+   LoadU64(r14, MemOperand(fp, StandardFrameConstants::kCallerPCOffset));
+   LoadU64(fp, MemOperand(fp, StandardFrameConstants::kCallerFPOffset));
+ }
+diff --git a/src/common/globals.h b/src/common/globals.h
+index 9b317345c1b..5b77f582257 100644
+--- a/src/common/globals.h
++++ b/src/common/globals.h
+@@ -72,9 +72,9 @@ namespace internal {
+ // Determine whether the architecture uses an embedded constant pool
+ // (contiguous constant pool embedded in code object).
+ #if V8_TARGET_ARCH_PPC || V8_TARGET_ARCH_PPC64
+-#define V8_EMBEDDED_CONSTANT_POOL true
++#define V8_EMBEDDED_CONSTANT_POOL_BOOL true
+ #else
+-#define V8_EMBEDDED_CONSTANT_POOL false
++#define V8_EMBEDDED_CONSTANT_POOL_BOOL false
+ #endif
+ 
+ #ifdef DEBUG
+diff --git a/src/compiler/backend/code-generator.cc b/src/compiler/backend/code-generator.cc
+index a5dcbdbe273..929fc7eb778 100644
+--- a/src/compiler/backend/code-generator.cc
++++ b/src/compiler/backend/code-generator.cc
+@@ -314,7 +314,7 @@ void CodeGenerator::AssembleCode() {
+     // within the block.
+     tasm()->VU.clear();
+ #endif
+-    if (v8_flags.enable_embedded_constant_pool && !block->needs_frame()) {
++    if (V8_EMBEDDED_CONSTANT_POOL_BOOL && !block->needs_frame()) {
+       ConstantPoolUnavailableScope constant_pool_unavailable(tasm());
+       result_ = AssembleBlock(block);
+     } else {
+diff --git a/src/compiler/backend/ppc/code-generator-ppc.cc b/src/compiler/backend/ppc/code-generator-ppc.cc
+index b98a329c3c9..efb233ea85b 100644
+--- a/src/compiler/backend/ppc/code-generator-ppc.cc
++++ b/src/compiler/backend/ppc/code-generator-ppc.cc
+@@ -3572,13 +3572,13 @@ void CodeGenerator::FinishFrame(Frame* frame) {
+   }
+   // Save callee-saved registers.
+   const RegList saves =
+-      v8_flags.enable_embedded_constant_pool
++      V8_EMBEDDED_CONSTANT_POOL_BOOL
+           ? call_descriptor->CalleeSavedRegisters() - kConstantPoolRegister
+           : call_descriptor->CalleeSavedRegisters();
+   if (!saves.is_empty()) {
+     // register save area does not include the fp or constant pool pointer.
+     const int num_saves =
+-        kNumCalleeSaved - 1 - (v8_flags.enable_embedded_constant_pool ? 1 : 0);
++        kNumCalleeSaved - 1 - (V8_EMBEDDED_CONSTANT_POOL_BOOL ? 1 : 0);
+     frame->AllocateSavedCalleeRegisterSlots(num_saves);
+   }
+ }
+@@ -3598,7 +3598,7 @@ void CodeGenerator::AssembleConstructFrame() {
+ #endif  // V8_ENABLE_WEBASSEMBLY
+       } else {
+         __ mflr(r0);
+-        if (v8_flags.enable_embedded_constant_pool) {
++        if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
+           __ Push(r0, fp, kConstantPoolRegister);
+           // Adjust FP to point to saved FP.
+           __ SubS64(fp, sp,
+@@ -3647,7 +3647,7 @@ void CodeGenerator::AssembleConstructFrame() {
+ 
+   const DoubleRegList saves_fp = call_descriptor->CalleeSavedFPRegisters();
+   const RegList saves =
+-      v8_flags.enable_embedded_constant_pool
++      V8_EMBEDDED_CONSTANT_POOL_BOOL
+           ? call_descriptor->CalleeSavedRegisters() - kConstantPoolRegister
+           : call_descriptor->CalleeSavedRegisters();
+ 
+@@ -3723,7 +3723,7 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
+ 
+   // Restore registers.
+   const RegList saves =
+-      v8_flags.enable_embedded_constant_pool
++      V8_EMBEDDED_CONSTANT_POOL_BOOL
+           ? call_descriptor->CalleeSavedRegisters() - kConstantPoolRegister
+           : call_descriptor->CalleeSavedRegisters();
+   if (!saves.is_empty()) {
+diff --git a/src/compiler/linkage.h b/src/compiler/linkage.h
+index e65efa8db68..3b41f3bc199 100644
+--- a/src/compiler/linkage.h
++++ b/src/compiler/linkage.h
+@@ -108,7 +108,7 @@ class LinkageLocation {
+   }
+ 
+   static LinkageLocation ForSavedCallerConstantPool() {
+-    DCHECK(V8_EMBEDDED_CONSTANT_POOL);
++    DCHECK(V8_EMBEDDED_CONSTANT_POOL_BOOL);
+     return ForCalleeFrameSlot((StandardFrameConstants::kCallerPCOffset -
+                                StandardFrameConstants::kConstantPoolOffset) /
+                                   kSystemPointerSize,
+diff --git a/src/deoptimizer/deoptimizer.cc b/src/deoptimizer/deoptimizer.cc
+index 1f58108b73b..376ce2f24aa 100644
+--- a/src/deoptimizer/deoptimizer.cc
++++ b/src/deoptimizer/deoptimizer.cc
+@@ -813,7 +813,7 @@ void Deoptimizer::DoComputeOutputFrames() {
+     actual_argument_count_ = static_cast<int>(
+         Memory<intptr_t>(fp_address + StandardFrameConstants::kArgCOffset));
+ 
+-    if (FLAG_enable_embedded_constant_pool) {
++    if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
+       caller_constant_pool_ = Memory<intptr_t>(
+           fp_address + CommonFrameConstants::kConstantPoolOffset);
+     }
+@@ -1095,7 +1095,7 @@ void Deoptimizer::DoComputeUnoptimizedFrame(TranslatedFrame* translated_frame,
+     output_frame->SetRegister(fp_reg.code(), fp_value);
+   }
+ 
+-  if (FLAG_enable_embedded_constant_pool) {
++  if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
+     // For the bottommost output frame the constant pool pointer can be gotten
+     // from the input frame. For subsequent output frames, it can be read from
+     // the previous frame.
+@@ -1243,7 +1243,7 @@ void Deoptimizer::DoComputeUnoptimizedFrame(TranslatedFrame* translated_frame,
+   }
+ 
+   // Update constant pool.
+-  if (FLAG_enable_embedded_constant_pool) {
++  if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
+     intptr_t constant_pool_value =
+         static_cast<intptr_t>(dispatch_builtin.constant_pool());
+     output_frame->SetConstantPool(constant_pool_value);
+@@ -1408,7 +1408,7 @@ void Deoptimizer::DoComputeConstructStubFrame(TranslatedFrame* translated_frame,
+     output_frame->SetRegister(fp_reg.code(), fp_value);
+   }
+ 
+-  if (FLAG_enable_embedded_constant_pool) {
++  if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
+     // Read the caller's constant pool from the previous frame.
+     const intptr_t caller_cp = output_[frame_index - 1]->GetConstantPool();
+     frame_writer.PushCallerConstantPool(caller_cp);
+@@ -1473,7 +1473,7 @@ void Deoptimizer::DoComputeConstructStubFrame(TranslatedFrame* translated_frame,
+   }
+ 
+   // Update constant pool.
+-  if (FLAG_enable_embedded_constant_pool) {
++  if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
+     intptr_t constant_pool_value =
+         static_cast<intptr_t>(construct_stub.constant_pool());
+     output_frame->SetConstantPool(constant_pool_value);
+@@ -1822,7 +1822,7 @@ void Deoptimizer::DoComputeBuiltinContinuation(
+ 
+   DCHECK_EQ(output_frame_size_above_fp, frame_writer.top_offset());
+ 
+-  if (FLAG_enable_embedded_constant_pool) {
++  if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
+     // Read the caller's constant pool from the previous frame.
+     const intptr_t caller_cp =
+         is_bottommost ? caller_constant_pool_
+diff --git a/src/deoptimizer/ppc/deoptimizer-ppc.cc b/src/deoptimizer/ppc/deoptimizer-ppc.cc
+index 63843b32618..c4c9bffec69 100644
+--- a/src/deoptimizer/ppc/deoptimizer-ppc.cc
++++ b/src/deoptimizer/ppc/deoptimizer-ppc.cc
+@@ -35,7 +35,7 @@ void FrameDescription::SetCallerFp(unsigned offset, intptr_t value) {
+ }
+ 
+ void FrameDescription::SetCallerConstantPool(unsigned offset, intptr_t value) {
+-  DCHECK(FLAG_enable_embedded_constant_pool);
++  DCHECK(V8_EMBEDDED_CONSTANT_POOL_BOOL);
+   SetFrameSlot(offset, value);
+ }
+ 
+diff --git a/src/execution/frame-constants.h b/src/execution/frame-constants.h
+index 423f41bcdd1..34291940b8d 100644
+--- a/src/execution/frame-constants.h
++++ b/src/execution/frame-constants.h
+@@ -55,14 +55,14 @@ class CommonFrameConstants : public AllStatic {
+   static constexpr int kCallerSPOffset = kCallerPCOffset + 1 * kPCOnStackSize;
+ 
+   // Fixed part of the frame consists of return address, caller fp,
+-  // constant pool (if v8_flags.enable_embedded_constant_pool), context, and
++  // constant pool (if V8_EMBEDDED_CONSTANT_POOL_BOOL), context, and
+   // function. CommonFrame::IterateExpressions assumes that kLastObjectOffset
+   // is the last object pointer.
+   static constexpr int kFixedFrameSizeAboveFp = kPCOnStackSize + kFPOnStackSize;
+   static constexpr int kFixedSlotCountAboveFp =
+       kFixedFrameSizeAboveFp / kSystemPointerSize;
+   static constexpr int kCPSlotSize =
+-      v8_flags.enable_embedded_constant_pool.value() ? kSystemPointerSize : 0;
++      V8_EMBEDDED_CONSTANT_POOL_BOOL ? kSystemPointerSize : 0;
+   static constexpr int kCPSlotCount = kCPSlotSize / kSystemPointerSize;
+   static constexpr int kConstantPoolOffset =
+       kCPSlotSize ? -1 * kSystemPointerSize : 0;
+diff --git a/src/execution/frames.cc b/src/execution/frames.cc
+index 47e52d40be1..985b38f13cf 100644
+--- a/src/execution/frames.cc
++++ b/src/execution/frames.cc
+@@ -607,7 +607,7 @@ void StackFrame::IteratePc(RootVisitor* v, Address* pc_address,
+   Address pc = holder.InstructionStart(isolate_, old_pc) + pc_offset;
+   // TODO(v8:10026): avoid replacing a signed pointer.
+   PointerAuthentication::ReplacePC(pc_address, pc, kSystemPointerSize);
+-  if (v8_flags.enable_embedded_constant_pool && constant_pool_address) {
++  if (V8_EMBEDDED_CONSTANT_POOL_BOOL && constant_pool_address) {
+     *constant_pool_address = holder.constant_pool();
+   }
+ }
+@@ -842,7 +842,7 @@ void ExitFrame::ComputeCallerState(State* state) const {
+   state->pc_address = ResolveReturnAddressLocation(
+       reinterpret_cast<Address*>(fp() + ExitFrameConstants::kCallerPCOffset));
+   state->callee_pc_address = nullptr;
+-  if (v8_flags.enable_embedded_constant_pool) {
++  if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
+     state->constant_pool_address = reinterpret_cast<Address*>(
+         fp() + ExitFrameConstants::kConstantPoolOffset);
+   }
+diff --git a/src/execution/ppc/frame-constants-ppc.cc b/src/execution/ppc/frame-constants-ppc.cc
+index 757d20249e6..45a53b07b6d 100644
+--- a/src/execution/ppc/frame-constants-ppc.cc
++++ b/src/execution/ppc/frame-constants-ppc.cc
+@@ -16,7 +16,7 @@ namespace internal {
+ Register JavaScriptFrame::fp_register() { return v8::internal::fp; }
+ Register JavaScriptFrame::context_register() { return cp; }
+ Register JavaScriptFrame::constant_pool_pointer_register() {
+-  DCHECK(v8_flags.enable_embedded_constant_pool);
++  DCHECK(V8_EMBEDDED_CONSTANT_POOL_BOOL);
+   return kConstantPoolRegister;
+ }
+ 
+diff --git a/src/execution/ppc/frame-constants-ppc.h b/src/execution/ppc/frame-constants-ppc.h
+index 6c82a864fe5..352d309379d 100644
+--- a/src/execution/ppc/frame-constants-ppc.h
++++ b/src/execution/ppc/frame-constants-ppc.h
+@@ -16,9 +16,9 @@ namespace internal {
+ class EntryFrameConstants : public AllStatic {
+  public:
+   // Need to take constant pool into account.
+-  static constexpr int kCallerFPOffset =
+-      v8_flags.enable_embedded_constant_pool.value() ? -4 * kSystemPointerSize
+-                                                     : -3 * kSystemPointerSize;
++  static constexpr int kCallerFPOffset = V8_EMBEDDED_CONSTANT_POOL_BOOL
++                                             ? -4 * kSystemPointerSize
++                                             : -3 * kSystemPointerSize;
+ };
+ 
+ class WasmCompileLazyFrameConstants : public TypedFrameConstants {
+diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
+index 435e9601ee1..32cf3e4c138 100644
+--- a/src/flags/flag-definitions.h
++++ b/src/flags/flag-definitions.h
+@@ -2355,16 +2355,6 @@ DEFINE_IMPLICATION(verify_predictable, predictable)
+ DEFINE_INT(dump_allocations_digest_at_alloc, -1,
+            "dump allocations digest each n-th allocation")
+ 
+-//
+-// Read-only flags
+-//
+-#undef FLAG
+-#define FLAG FLAG_READONLY
+-
+-// assembler.h
+-DEFINE_BOOL(enable_embedded_constant_pool, V8_EMBEDDED_CONSTANT_POOL,
+-            "enable use of embedded constant pools (PPC only)")
+-
+ // Cleanup...
+ #undef FLAG_FULL
+ #undef FLAG_READONLY
+diff --git a/src/objects/code-inl.h b/src/objects/code-inl.h
+index 75b5610585b..1c631363d4a 100644
+--- a/src/objects/code-inl.h
++++ b/src/objects/code-inl.h
+@@ -787,7 +787,7 @@ bool CodeDataContainer::has_handler_table() const {
+ 
+ int Code::constant_pool_size() const {
+   const int size = code_comments_offset() - constant_pool_offset();
+-  if (!v8_flags.enable_embedded_constant_pool) {
++  if (!V8_EMBEDDED_CONSTANT_POOL_BOOL) {
+     DCHECK_EQ(size, 0);
+     return 0;
+   }
+@@ -1232,7 +1232,7 @@ bool CodeDataContainer::is_wasm_code() const {
+ #endif
+ 
+ int Code::constant_pool_offset() const {
+-  if (!v8_flags.enable_embedded_constant_pool) {
++  if (!V8_EMBEDDED_CONSTANT_POOL_BOOL) {
+     // Redirection needed since the field doesn't exist in this case.
+     return code_comments_offset();
+   }
+@@ -1240,7 +1240,7 @@ int Code::constant_pool_offset() const {
+ }
+ 
+ void Code::set_constant_pool_offset(int value) {
+-  if (!v8_flags.enable_embedded_constant_pool) {
++  if (!V8_EMBEDDED_CONSTANT_POOL_BOOL) {
+     // Redirection needed since the field doesn't exist in this case.
+     return;
+   }
+diff --git a/src/objects/code.h b/src/objects/code.h
+index 26068b3ab45..65720ab7c68 100644
+--- a/src/objects/code.h
++++ b/src/objects/code.h
+@@ -733,8 +733,7 @@ class Code : public HeapObject {
+   V(kOsrOffsetOffset, kInt32Size)                                             \
+   /* Offsets describing inline metadata tables, relative to MetadataStart. */ \
+   V(kHandlerTableOffsetOffset, kIntSize)                                      \
+-  V(kConstantPoolOffsetOffset,                                                \
+-    v8_flags.enable_embedded_constant_pool.value() ? kIntSize : 0)            \
++  V(kConstantPoolOffsetOffset, V8_EMBEDDED_CONSTANT_POOL_BOOL ? kIntSize : 0) \
+   V(kCodeCommentsOffsetOffset, kIntSize)                                      \
+   V(kUnwindingInfoOffsetOffset, kInt32Size)                                   \
+   V(kUnalignedHeaderSize, 0)                                                  \
+@@ -766,9 +765,8 @@ class Code : public HeapObject {
+   static constexpr int kHeaderPaddingSize = 8;
+ #elif V8_TARGET_ARCH_PPC64
+   static constexpr int kHeaderPaddingSize =
+-      v8_flags.enable_embedded_constant_pool.value()
+-          ? (COMPRESS_POINTERS_BOOL ? 4 : 48)
+-          : (COMPRESS_POINTERS_BOOL ? 8 : 52);
++      V8_EMBEDDED_CONSTANT_POOL_BOOL ? (COMPRESS_POINTERS_BOOL ? 4 : 48)
++                                     : (COMPRESS_POINTERS_BOOL ? 8 : 52);
+ #elif V8_TARGET_ARCH_S390X
+   static constexpr int kHeaderPaddingSize = COMPRESS_POINTERS_BOOL ? 8 : 20;
+ #elif V8_TARGET_ARCH_RISCV64
+diff --git a/src/snapshot/deserializer.h b/src/snapshot/deserializer.h
+index 5e694513e59..b19f8813080 100644
+--- a/src/snapshot/deserializer.h
++++ b/src/snapshot/deserializer.h
+@@ -32,7 +32,7 @@ class Object;
+ #if defined(V8_TARGET_ARCH_MIPS64) || defined(V8_TARGET_ARCH_PPC) ||      \
+     defined(V8_TARGET_ARCH_S390) || defined(V8_TARGET_ARCH_PPC64) ||      \
+     defined(V8_TARGET_ARCH_RISCV32) || defined(V8_TARGET_ARCH_RISCV64) || \
+-    V8_EMBEDDED_CONSTANT_POOL
++    V8_EMBEDDED_CONSTANT_POOL_BOOL
+ #define V8_CODE_EMBEDS_OBJECT_POINTER 1
+ #else
+ #define V8_CODE_EMBEDS_OBJECT_POINTER 0
+diff --git a/src/snapshot/embedded/embedded-data-inl.h b/src/snapshot/embedded/embedded-data-inl.h
+index e2ebb85263e..028bdd07134 100644
+--- a/src/snapshot/embedded/embedded-data-inl.h
++++ b/src/snapshot/embedded/embedded-data-inl.h
+@@ -69,7 +69,7 @@ Address EmbeddedData::SafepointTableStartOf(Builtin builtin) const {
+ uint32_t EmbeddedData::SafepointTableSizeOf(Builtin builtin) const {
+   DCHECK(Builtins::IsBuiltinId(builtin));
+   const struct LayoutDescription& desc = LayoutDescription(builtin);
+-#if V8_EMBEDDED_CONSTANT_POOL
++#if V8_EMBEDDED_CONSTANT_POOL_BOOL
+   DCHECK_LE(desc.handler_table_offset, desc.constant_pool_offset);
+ #else
+   DCHECK_LE(desc.handler_table_offset, desc.code_comments_offset_offset);
+@@ -88,7 +88,7 @@ Address EmbeddedData::HandlerTableStartOf(Builtin builtin) const {
+ uint32_t EmbeddedData::HandlerTableSizeOf(Builtin builtin) const {
+   DCHECK(Builtins::IsBuiltinId(builtin));
+   const struct LayoutDescription& desc = LayoutDescription(builtin);
+-#if V8_EMBEDDED_CONSTANT_POOL
++#if V8_EMBEDDED_CONSTANT_POOL_BOOL
+   DCHECK_LE(desc.handler_table_offset, desc.constant_pool_offset);
+   return desc.constant_pool_offset - desc.handler_table_offset;
+ #else
+@@ -99,7 +99,7 @@ uint32_t EmbeddedData::HandlerTableSizeOf(Builtin builtin) const {
+ 
+ Address EmbeddedData::ConstantPoolStartOf(Builtin builtin) const {
+   DCHECK(Builtins::IsBuiltinId(builtin));
+-#if V8_EMBEDDED_CONSTANT_POOL
++#if V8_EMBEDDED_CONSTANT_POOL_BOOL
+   const struct LayoutDescription& desc = LayoutDescription(builtin);
+   const uint8_t* result = RawMetadata() + desc.constant_pool_offset;
+   DCHECK_LE(desc.constant_pool_offset, data_size_);
+@@ -111,7 +111,7 @@ Address EmbeddedData::ConstantPoolStartOf(Builtin builtin) const {
+ 
+ uint32_t EmbeddedData::ConstantPoolSizeOf(Builtin builtin) const {
+   DCHECK(Builtins::IsBuiltinId(builtin));
+-#if V8_EMBEDDED_CONSTANT_POOL
++#if V8_EMBEDDED_CONSTANT_POOL_BOOL
+   const struct LayoutDescription& desc = LayoutDescription(builtin);
+   DCHECK_LE(desc.constant_pool_offset, desc.code_comments_offset_offset);
+   return desc.code_comments_offset_offset - desc.constant_pool_offset;
+diff --git a/src/snapshot/embedded/embedded-data.cc b/src/snapshot/embedded/embedded-data.cc
+index 118eb8b581a..1260f1a6427 100644
+--- a/src/snapshot/embedded/embedded-data.cc
++++ b/src/snapshot/embedded/embedded-data.cc
+@@ -317,7 +317,7 @@ EmbeddedData EmbeddedData::FromIsolate(Isolate* isolate) {
+ 
+       layout_desc.handler_table_offset =
+           raw_data_size + static_cast<uint32_t>(code.handler_table_offset());
+-#if V8_EMBEDDED_CONSTANT_POOL
++#if V8_EMBEDDED_CONSTANT_POOL_BOOL
+       layout_desc.constant_pool_offset =
+           raw_data_size + static_cast<uint32_t>(code.constant_pool_offset());
+ #endif
+diff --git a/src/snapshot/embedded/embedded-data.h b/src/snapshot/embedded/embedded-data.h
+index a78c030ba88..4c5a1f998ac 100644
+--- a/src/snapshot/embedded/embedded-data.h
++++ b/src/snapshot/embedded/embedded-data.h
+@@ -197,7 +197,7 @@ class EmbeddedData final {
+     // The offsets describing inline metadata tables, relative to the start
+     // of the embedded data section.
+     uint32_t handler_table_offset;
+-#if V8_EMBEDDED_CONSTANT_POOL
++#if V8_EMBEDDED_CONSTANT_POOL_BOOL
+     uint32_t constant_pool_offset;
+ #endif
+     uint32_t code_comments_offset_offset;
+@@ -215,7 +215,7 @@ class EmbeddedData final {
+                 3 * kUInt32Size);
+   static_assert(offsetof(LayoutDescription, handler_table_offset) ==
+                 4 * kUInt32Size);
+-#if V8_EMBEDDED_CONSTANT_POOL
++#if V8_EMBEDDED_CONSTANT_POOL_BOOL
+   static_assert(offsetof(LayoutDescription, constant_pool_offset) ==
+                 5 * kUInt32Size);
+   static_assert(offsetof(LayoutDescription, code_comments_offset_offset) ==
+diff --git a/src/wasm/baseline/ppc/liftoff-assembler-ppc.h b/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
+index 4cdb0bd6af5..9deb677809c 100644
+--- a/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
++++ b/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
+@@ -46,11 +46,9 @@ namespace liftoff {
+ //
+ 
+ constexpr int32_t kInstanceOffset =
+-    (v8_flags.enable_embedded_constant_pool.value() ? 3 : 2) *
+-    kSystemPointerSize;
++    (V8_EMBEDDED_CONSTANT_POOL_BOOL ? 3 : 2) * kSystemPointerSize;
+ constexpr int kFeedbackVectorOffset =
+-    (v8_flags.enable_embedded_constant_pool.value() ? 4 : 3) *
+-    kSystemPointerSize;
++    (V8_EMBEDDED_CONSTANT_POOL_BOOL ? 4 : 3) * kSystemPointerSize;
+ 
+ inline MemOperand GetHalfStackSlot(int offset, RegPairHalf half) {
+   int32_t half_offset =
+@@ -143,7 +141,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
+     int offset, SafepointTableBuilder* safepoint_table_builder) {
+   int frame_size =
+       GetTotalFrameSize() -
+-      (v8_flags.enable_embedded_constant_pool ? 3 : 2) * kSystemPointerSize;
++      (V8_EMBEDDED_CONSTANT_POOL_BOOL ? 3 : 2) * kSystemPointerSize;
+ 
+   Assembler patching_assembler(
+       AssemblerOptions{},
+diff --git a/src/wasm/wasm-code-manager.cc b/src/wasm/wasm-code-manager.cc
+index 23db8f4caac..6f9bd745a93 100644
+--- a/src/wasm/wasm-code-manager.cc
++++ b/src/wasm/wasm-code-manager.cc
+@@ -152,7 +152,7 @@ base::AddressRegion DisjointAllocationPool::AllocateInRegion(
+ }
+ 
+ Address WasmCode::constant_pool() const {
+-  if (v8_flags.enable_embedded_constant_pool) {
++  if (V8_EMBEDDED_CONSTANT_POOL_BOOL) {
+     if (constant_pool_offset_ < code_comments_offset_) {
+       return instruction_start() + constant_pool_offset_;
+     }
+-- 
+2.35.1
+

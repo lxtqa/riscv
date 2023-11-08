@@ -1,0 +1,2355 @@
+From f9bb65eb9f960c3dda668f7f5fc7a96b171a23af Mon Sep 17 00:00:00 2001
+From: Clemens Backes <clemensb@chromium.org>
+Date: Thu, 15 Sep 2022 18:52:15 +0200
+Subject: [PATCH] [unittests] Use v8_flags for accessing flag values
+
+Avoid the deprecated FLAG_* syntax, access flag values via the
+{v8_flags} struct instead.
+
+R=mliedtke@chromium.org
+
+Bug: v8:12887
+Change-Id: I06e12314495c2d89135e58e5d3a01310f108e865
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3899303
+Reviewed-by: Matthias Liedtke <mliedtke@chromium.org>
+Commit-Queue: Matthias Liedtke <mliedtke@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#83233}
+---
+ test/unittests/api/accessor-unittest.cc       | 10 +-
+ test/unittests/api/deserialize-unittest.cc    |  3 +-
+ test/unittests/api/exception-unittest.cc      |  6 +-
+ test/unittests/api/gc-callbacks-unittest.cc   |  6 +-
+ test/unittests/api/v8-object-unittest.cc      |  6 +-
+ .../assembler/disasm-riscv-unittest.cc        |  2 +-
+ .../assembler/macro-assembler-x64-unittest.cc |  2 +-
+ .../assembler/turbo-assembler-arm-unittest.cc |  2 +-
+ .../turbo-assembler-arm64-unittest.cc         |  2 +-
+ test/unittests/base/functional-unittest.cc    |  2 +-
+ .../compiler-dispatcher-unittest.cc           | 24 ++---
+ .../deoptimizer/deoptimization-unittest.cc    | 52 +++++-----
+ .../execution/microtask-queue-unittest.cc     |  4 +-
+ .../execution/thread-termination-unittest.cc  | 12 +--
+ .../flags/flag-definitions-unittest.cc        | 91 +++++++++---------
+ .../unittests/inspector/inspector-unittest.cc |  2 +-
+ ...ngle-threaded-default-platform-unittest.cc |  2 +-
+ .../concurrent-feedback-vector-unittest.cc    |  2 +-
+ .../objects/concurrent-string-unittest.cc     | 12 +--
+ test/unittests/objects/dictionary-unittest.cc |  6 +-
+ .../objects/feedback-vector-unittest.cc       | 96 +++++++++----------
+ .../inobject-slack-tracking-unittest.cc       | 84 ++++++++--------
+ test/unittests/objects/modules-unittest.cc    |  6 +-
+ .../objects/value-serializer-unittest.cc      | 26 ++---
+ test/unittests/objects/weakmaps-unittest.cc   | 33 +++----
+ test/unittests/objects/weaksets-unittest.cc   | 28 +++---
+ test/unittests/parser/decls-unittest.cc       | 20 ++--
+ .../parser/parse-decision-unittest.cc         |  6 +-
+ test/unittests/parser/parsing-unittest.cc     | 34 +++----
+ .../parser/scanner-streams-unittest.cc        |  8 +-
+ test/unittests/regexp/regexp-unittest.cc      | 50 +++++-----
+ test/unittests/strings/unicode-unittest.cc    |  5 +-
+ .../tasks/background-compile-task-unittest.cc |  5 +-
+ test/unittests/test-utils.cc                  | 18 ++--
+ test/unittests/test-utils.h                   |  4 +-
+ test/unittests/utils/identity-map-unittest.cc |  6 +-
+ .../web-snapshot/web-snapshot-unittest.cc     |  8 +-
+ 37 files changed, 345 insertions(+), 340 deletions(-)
+
+diff --git a/test/unittests/api/accessor-unittest.cc b/test/unittests/api/accessor-unittest.cc
+index ffddb2da1ac..8cd8a6fccff 100644
+--- a/test/unittests/api/accessor-unittest.cc
++++ b/test/unittests/api/accessor-unittest.cc
+@@ -33,7 +33,7 @@ static void UnreachableCallback(
+ TEST_F(AccessorTest, CachedAccessor) {
+   // TurboFan support for fast accessors is not implemented; turbofanned
+   // code uses the slow accessor which breaks this test's expectations.
+-  v8::internal::FLAG_always_turbofan = false;
++  i::v8_flags.always_turbofan = false;
+   v8::Isolate* isolate = context()->GetIsolate();
+   v8::HandleScope scope(isolate);
+ 
+@@ -78,8 +78,8 @@ TEST_F(AccessorTest, CachedAccessor) {
+ }
+ 
+ TEST_F(AccessorTest, CachedAccessorTurboFan) {
+-  i::FLAG_allow_natives_syntax = true;
+-  // v8::internal::FLAG_always_turbofan = false;
++  i::v8_flags.allow_natives_syntax = true;
++  // i::v8_flags.always_turbofan = false;
+   v8::Isolate* isolate = context()->GetIsolate();
+   v8::HandleScope scope(isolate);
+ 
+@@ -162,7 +162,7 @@ TEST_F(AccessorTest, CachedAccessorTurboFan) {
+ }
+ 
+ TEST_F(AccessorTest, CachedAccessorOnGlobalObject) {
+-  i::FLAG_allow_natives_syntax = true;
++  i::v8_flags.allow_natives_syntax = true;
+   v8::HandleScope scope(isolate());
+ 
+   v8::Local<v8::FunctionTemplate> templ = v8::FunctionTemplate::New(isolate());
+@@ -845,7 +845,7 @@ v8::MaybeLocal<v8::Context> TestHostCreateShadowRealmContextCallback(
+ }  // namespace
+ 
+ TEST_F(AccessorTest, WrapFunctionTemplateSetNativeDataProperty) {
+-  i::FLAG_harmony_shadow_realm = true;
++  i::v8_flags.harmony_shadow_realm = true;
+   isolate()->SetHostCreateShadowRealmContextCallback(
+       TestHostCreateShadowRealmContextCallback);
+ 
+diff --git a/test/unittests/api/deserialize-unittest.cc b/test/unittests/api/deserialize-unittest.cc
+index a1237b6bc32..80c53b0d2d5 100644
+--- a/test/unittests/api/deserialize-unittest.cc
++++ b/test/unittests/api/deserialize-unittest.cc
+@@ -402,7 +402,8 @@ class MergeDeserializedCodeTest : public DeserializeTest {
+                           ScriptObjectFlag aged_after_background_merge,
+                           bool lazy_should_be_compiled = false,
+                           bool eager_should_be_compiled = true) {
+-    i::FLAG_merge_background_deserialized_script_with_compilation_cache = true;
++    i::v8_flags.merge_background_deserialized_script_with_compilation_cache =
++        true;
+     std::unique_ptr<v8::ScriptCompiler::CachedData> cached_data;
+     IsolateAndContextScope scope(this);
+     i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate());
+diff --git a/test/unittests/api/exception-unittest.cc b/test/unittests/api/exception-unittest.cc
+index cda1d9defe1..2455e4c78f9 100644
+--- a/test/unittests/api/exception-unittest.cc
++++ b/test/unittests/api/exception-unittest.cc
+@@ -44,10 +44,10 @@ class APIExceptionTest : public TestWithIsolate {
+ 
+ class V8_NODISCARD ScopedExposeGc {
+  public:
+-  ScopedExposeGc() : was_exposed_(i::FLAG_expose_gc) {
+-    i::FLAG_expose_gc = true;
++  ScopedExposeGc() : was_exposed_(i::v8_flags.expose_gc) {
++    i::v8_flags.expose_gc = true;
+   }
+-  ~ScopedExposeGc() { i::FLAG_expose_gc = was_exposed_; }
++  ~ScopedExposeGc() { i::v8_flags.expose_gc = was_exposed_; }
+ 
+  private:
+   const bool was_exposed_;
+diff --git a/test/unittests/api/gc-callbacks-unittest.cc b/test/unittests/api/gc-callbacks-unittest.cc
+index edbc9d1af70..1603d770962 100644
+--- a/test/unittests/api/gc-callbacks-unittest.cc
++++ b/test/unittests/api/gc-callbacks-unittest.cc
+@@ -20,7 +20,7 @@ class GCCallbacksTest : public internal::TestWithHeapInternalsAndContext {
+     CHECK_EQ(current_test_->gc_callbacks_isolate_, isolate);
+     ++current_test_->prologue_call_count_alloc_;
+ 
+-    if (!v8::internal::FLAG_single_generation) {
++    if (!i::v8_flags.single_generation) {
+       // Simulate full heap to see if we will reenter this callback
+       current_test_->SimulateFullSpace(current_test_->heap()->new_space());
+     }
+@@ -39,7 +39,7 @@ class GCCallbacksTest : public internal::TestWithHeapInternalsAndContext {
+     CHECK_EQ(current_test_->gc_callbacks_isolate_, isolate);
+     ++current_test_->epilogue_call_count_alloc_;
+ 
+-    if (!v8::internal::FLAG_single_generation) {
++    if (!i::v8_flags.single_generation) {
+       // Simulate full heap to see if we will reenter this callback
+       current_test_->SimulateFullSpace(current_test_->heap()->new_space());
+     }
+@@ -120,7 +120,7 @@ GCCallbacksTest* GCCallbacksTest::current_test_ = nullptr;
+ 
+ TEST_F(GCCallbacksTest, GCCallbacks) {
+   // For SimulateFullSpace in PrologueCallbackAlloc and EpilogueCallbackAlloc.
+-  i::FLAG_stress_concurrent_allocation = false;
++  i::v8_flags.stress_concurrent_allocation = false;
+   v8::Isolate* isolate = context()->GetIsolate();
+   gc_callbacks_isolate_ = isolate;
+   isolate->AddGCPrologueCallback(PrologueCallback);
+diff --git a/test/unittests/api/v8-object-unittest.cc b/test/unittests/api/v8-object-unittest.cc
+index a4b5dc76e5a..9fcb9a40208 100644
+--- a/test/unittests/api/v8-object-unittest.cc
++++ b/test/unittests/api/v8-object-unittest.cc
+@@ -101,7 +101,7 @@ TEST_F(LapContextTest, CurrentContextInLazyAccessorOnPrototype) {
+       "%OptimizeFunctionOnNextCall(f); "
+       "f();";
+   Context::Scope scope(caller_context);
+-  internal::FLAG_allow_natives_syntax = true;
++  internal::v8_flags.allow_natives_syntax = true;
+   Script::Compile(caller_context, String::NewFromUtf8Literal(isolate(), script))
+       .ToLocalChecked()
+       ->Run(caller_context)
+@@ -153,7 +153,7 @@ TEST_F(LapContextTest, CurrentContextInLazyAccessorOnPlatformObject) {
+       "%OptimizeFunctionOnNextCall(f); "
+       "f();";
+   Context::Scope scope(caller_context);
+-  internal::FLAG_allow_natives_syntax = true;
++  internal::v8_flags.allow_natives_syntax = true;
+   Script::Compile(caller_context, String::NewFromUtf8Literal(isolate(), script))
+       .ToLocalChecked()
+       ->Run(caller_context)
+@@ -204,7 +204,7 @@ TEST_F(LapContextTest, CurrentContextInLazyAccessorOnInterface) {
+       "%OptimizeFunctionOnNextCall(f); "
+       "f();";
+   Context::Scope scope(caller_context);
+-  internal::FLAG_allow_natives_syntax = true;
++  internal::v8_flags.allow_natives_syntax = true;
+   Script::Compile(caller_context, String::NewFromUtf8Literal(isolate(), script))
+       .ToLocalChecked()
+       ->Run(caller_context)
+diff --git a/test/unittests/assembler/disasm-riscv-unittest.cc b/test/unittests/assembler/disasm-riscv-unittest.cc
+index f2b83adb852..7bc9ca42cb3 100644
+--- a/test/unittests/assembler/disasm-riscv-unittest.cc
++++ b/test/unittests/assembler/disasm-riscv-unittest.cc
+@@ -469,7 +469,7 @@ TEST_F(DisasmRiscv64Test, PSEUDO) {
+ }
+ #ifdef V8_TARGET_ARCH_RISCV64
+ TEST_F(DisasmRiscv64Test, RV64C) {
+-  i::FLAG_riscv_c_extension = true;
++  i::v8_flags.riscv_c_extension = true;
+   SET_UP();
+ 
+   COMPARE(c_nop(), "00000001       nop");
+diff --git a/test/unittests/assembler/macro-assembler-x64-unittest.cc b/test/unittests/assembler/macro-assembler-x64-unittest.cc
+index 5cc8f9856b7..b7e5b0ffbe7 100644
+--- a/test/unittests/assembler/macro-assembler-x64-unittest.cc
++++ b/test/unittests/assembler/macro-assembler-x64-unittest.cc
+@@ -440,7 +440,7 @@ void TestSmiIndex(MacroAssembler* masm, Label* exit, int id, int x) {
+ 
+ TEST_F(MacroAssemblerX64Test, EmbeddedObj) {
+ #ifdef V8_COMPRESS_POINTERS
+-  FLAG_compact_on_every_full_gc = true;
++  v8_flags.compact_on_every_full_gc = true;
+ 
+   Isolate* isolate = i_isolate();
+   HandleScope handles(isolate);
+diff --git a/test/unittests/assembler/turbo-assembler-arm-unittest.cc b/test/unittests/assembler/turbo-assembler-arm-unittest.cc
+index b04f7806aa5..6fa1bd59273 100644
+--- a/test/unittests/assembler/turbo-assembler-arm-unittest.cc
++++ b/test/unittests/assembler/turbo-assembler-arm-unittest.cc
+@@ -153,7 +153,7 @@ TEST_P(TurboAssemblerTestMoveObjectAndSlot, MoveObjectAndSlot) {
+ 
+     CodeDesc desc;
+     tasm.GetCode(nullptr, &desc);
+-    if (FLAG_print_code) {
++    if (v8_flags.print_code) {
+       Handle<Code> code =
+           Factory::CodeBuilder(isolate(), desc, CodeKind::FOR_TESTING).Build();
+       StdoutStream os;
+diff --git a/test/unittests/assembler/turbo-assembler-arm64-unittest.cc b/test/unittests/assembler/turbo-assembler-arm64-unittest.cc
+index 9ac58a82762..77123ef5651 100644
+--- a/test/unittests/assembler/turbo-assembler-arm64-unittest.cc
++++ b/test/unittests/assembler/turbo-assembler-arm64-unittest.cc
+@@ -216,7 +216,7 @@ TEST_P(TurboAssemblerTestMoveObjectAndSlot, MoveObjectAndSlot) {
+ 
+       CodeDesc desc;
+       tasm.GetCode(nullptr, &desc);
+-      if (FLAG_print_code) {
++      if (v8_flags.print_code) {
+         Handle<Code> code =
+             Factory::CodeBuilder(isolate(), desc, CodeKind::FOR_TESTING)
+                 .Build();
+diff --git a/test/unittests/base/functional-unittest.cc b/test/unittests/base/functional-unittest.cc
+index efcabb75a25..95e79b5176b 100644
+--- a/test/unittests/base/functional-unittest.cc
++++ b/test/unittests/base/functional-unittest.cc
+@@ -43,7 +43,7 @@ template <typename T>
+ class FunctionalTest : public ::testing::Test {
+  public:
+   FunctionalTest()
+-      : rng_(GetRandomSeedFromFlag(::v8::internal::FLAG_random_seed)) {}
++      : rng_(GetRandomSeedFromFlag(::v8::internal::v8_flags.random_seed)) {}
+   ~FunctionalTest() override = default;
+   FunctionalTest(const FunctionalTest&) = delete;
+   FunctionalTest& operator=(const FunctionalTest&) = delete;
+diff --git a/test/unittests/compiler-dispatcher/compiler-dispatcher-unittest.cc b/test/unittests/compiler-dispatcher/compiler-dispatcher-unittest.cc
+index 3f50f5a091d..2e777256ae2 100644
+--- a/test/unittests/compiler-dispatcher/compiler-dispatcher-unittest.cc
++++ b/test/unittests/compiler-dispatcher/compiler-dispatcher-unittest.cc
+@@ -43,7 +43,7 @@ class LazyCompileDispatcherTestFlags {
+   static void SetFlagsForTest() {
+     CHECK_NULL(save_flags_);
+     save_flags_ = new SaveFlags();
+-    FLAG_lazy_compile_dispatcher = true;
++    v8_flags.lazy_compile_dispatcher = true;
+     FlagList::EnforceFlagImplications();
+   }
+ 
+@@ -334,13 +334,13 @@ class MockPlatform : public v8::Platform {
+ 
+ TEST_F(LazyCompileDispatcherTest, Construct) {
+   MockPlatform platform;
+-  LazyCompileDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
++  LazyCompileDispatcher dispatcher(i_isolate(), &platform, v8_flags.stack_size);
+   dispatcher.AbortAll();
+ }
+ 
+ TEST_F(LazyCompileDispatcherTest, IsEnqueued) {
+   MockPlatform platform;
+-  LazyCompileDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
++  LazyCompileDispatcher dispatcher(i_isolate(), &platform, v8_flags.stack_size);
+ 
+   Handle<SharedFunctionInfo> shared =
+       test::CreateSharedFunctionInfo(i_isolate(), nullptr);
+@@ -360,7 +360,7 @@ TEST_F(LazyCompileDispatcherTest, IsEnqueued) {
+ 
+ TEST_F(LazyCompileDispatcherTest, FinishNow) {
+   MockPlatform platform;
+-  LazyCompileDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
++  LazyCompileDispatcher dispatcher(i_isolate(), &platform, v8_flags.stack_size);
+ 
+   Handle<SharedFunctionInfo> shared =
+       test::CreateSharedFunctionInfo(i_isolate(), nullptr);
+@@ -379,7 +379,7 @@ TEST_F(LazyCompileDispatcherTest, FinishNow) {
+ 
+ TEST_F(LazyCompileDispatcherTest, CompileAndFinalize) {
+   MockPlatform platform;
+-  LazyCompileDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
++  LazyCompileDispatcher dispatcher(i_isolate(), &platform, v8_flags.stack_size);
+ 
+   Handle<SharedFunctionInfo> shared =
+       test::CreateSharedFunctionInfo(i_isolate(), nullptr);
+@@ -407,7 +407,7 @@ TEST_F(LazyCompileDispatcherTest, CompileAndFinalize) {
+ 
+ TEST_F(LazyCompileDispatcherTest, IdleTaskNoIdleTime) {
+   MockPlatform platform;
+-  LazyCompileDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
++  LazyCompileDispatcher dispatcher(i_isolate(), &platform, v8_flags.stack_size);
+ 
+   Handle<SharedFunctionInfo> shared =
+       test::CreateSharedFunctionInfo(i_isolate(), nullptr);
+@@ -458,7 +458,7 @@ TEST_F(LazyCompileDispatcherTest, IdleTaskNoIdleTime) {
+ 
+ TEST_F(LazyCompileDispatcherTest, IdleTaskSmallIdleTime) {
+   MockPlatform platform;
+-  LazyCompileDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
++  LazyCompileDispatcher dispatcher(i_isolate(), &platform, v8_flags.stack_size);
+ 
+   Handle<SharedFunctionInfo> shared_1 =
+       test::CreateSharedFunctionInfo(i_isolate(), nullptr);
+@@ -556,7 +556,7 @@ TEST_F(LazyCompileDispatcherTest, IdleTaskException) {
+ 
+ TEST_F(LazyCompileDispatcherTest, FinishNowWithWorkerTask) {
+   MockPlatform platform;
+-  LazyCompileDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
++  LazyCompileDispatcher dispatcher(i_isolate(), &platform, v8_flags.stack_size);
+ 
+   Handle<SharedFunctionInfo> shared =
+       test::CreateSharedFunctionInfo(i_isolate(), nullptr);
+@@ -589,7 +589,7 @@ TEST_F(LazyCompileDispatcherTest, FinishNowWithWorkerTask) {
+ 
+ TEST_F(LazyCompileDispatcherTest, IdleTaskMultipleJobs) {
+   MockPlatform platform;
+-  LazyCompileDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
++  LazyCompileDispatcher dispatcher(i_isolate(), &platform, v8_flags.stack_size);
+ 
+   Handle<SharedFunctionInfo> shared_1 =
+       test::CreateSharedFunctionInfo(i_isolate(), nullptr);
+@@ -648,7 +648,7 @@ TEST_F(LazyCompileDispatcherTest, FinishNowException) {
+ 
+ TEST_F(LazyCompileDispatcherTest, AbortJobNotStarted) {
+   MockPlatform platform;
+-  LazyCompileDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
++  LazyCompileDispatcher dispatcher(i_isolate(), &platform, v8_flags.stack_size);
+ 
+   Handle<SharedFunctionInfo> shared =
+       test::CreateSharedFunctionInfo(i_isolate(), nullptr);
+@@ -675,7 +675,7 @@ TEST_F(LazyCompileDispatcherTest, AbortJobNotStarted) {
+ 
+ TEST_F(LazyCompileDispatcherTest, AbortJobAlreadyStarted) {
+   MockPlatform platform;
+-  LazyCompileDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
++  LazyCompileDispatcher dispatcher(i_isolate(), &platform, v8_flags.stack_size);
+ 
+   Handle<SharedFunctionInfo> shared =
+       test::CreateSharedFunctionInfo(i_isolate(), nullptr);
+@@ -789,7 +789,7 @@ TEST_F(LazyCompileDispatcherTest, CompileLazy2FinishesDispatcherJob) {
+ 
+ TEST_F(LazyCompileDispatcherTest, CompileMultipleOnBackgroundThread) {
+   MockPlatform platform;
+-  LazyCompileDispatcher dispatcher(i_isolate(), &platform, FLAG_stack_size);
++  LazyCompileDispatcher dispatcher(i_isolate(), &platform, v8_flags.stack_size);
+ 
+   Handle<SharedFunctionInfo> shared_1 =
+       test::CreateSharedFunctionInfo(i_isolate(), nullptr);
+diff --git a/test/unittests/deoptimizer/deoptimization-unittest.cc b/test/unittests/deoptimizer/deoptimization-unittest.cc
+index 42a5cc0b862..6db03235c8d 100644
+--- a/test/unittests/deoptimizer/deoptimization-unittest.cc
++++ b/test/unittests/deoptimizer/deoptimization-unittest.cc
+@@ -67,18 +67,18 @@ class DeoptimizationTest : public TestWithContext {
+ class AlwaysOptimizeAllowNativesSyntaxNoInlining {
+  public:
+   AlwaysOptimizeAllowNativesSyntaxNoInlining()
+-      : always_turbofan_(i::FLAG_always_turbofan),
+-        allow_natives_syntax_(i::FLAG_allow_natives_syntax),
+-        turbo_inlining_(i::FLAG_turbo_inlining) {
+-    i::FLAG_always_turbofan = true;
+-    i::FLAG_allow_natives_syntax = true;
+-    i::FLAG_turbo_inlining = false;
++      : always_turbofan_(i::v8_flags.always_turbofan),
++        allow_natives_syntax_(i::v8_flags.allow_natives_syntax),
++        turbo_inlining_(i::v8_flags.turbo_inlining) {
++    i::v8_flags.always_turbofan = true;
++    i::v8_flags.allow_natives_syntax = true;
++    i::v8_flags.turbo_inlining = false;
+   }
+ 
+   ~AlwaysOptimizeAllowNativesSyntaxNoInlining() {
+-    i::FLAG_always_turbofan = always_turbofan_;
+-    i::FLAG_allow_natives_syntax = allow_natives_syntax_;
+-    i::FLAG_turbo_inlining = turbo_inlining_;
++    i::v8_flags.always_turbofan = always_turbofan_;
++    i::v8_flags.allow_natives_syntax = allow_natives_syntax_;
++    i::v8_flags.turbo_inlining = turbo_inlining_;
+   }
+ 
+  private:
+@@ -93,15 +93,15 @@ class AlwaysOptimizeAllowNativesSyntaxNoInlining {
+ class AllowNativesSyntaxNoInlining {
+  public:
+   AllowNativesSyntaxNoInlining()
+-      : allow_natives_syntax_(i::FLAG_allow_natives_syntax),
+-        turbo_inlining_(i::FLAG_turbo_inlining) {
+-    i::FLAG_allow_natives_syntax = true;
+-    i::FLAG_turbo_inlining = false;
++      : allow_natives_syntax_(i::v8_flags.allow_natives_syntax),
++        turbo_inlining_(i::v8_flags.turbo_inlining) {
++    i::v8_flags.allow_natives_syntax = true;
++    i::v8_flags.turbo_inlining = false;
+   }
+ 
+   ~AllowNativesSyntaxNoInlining() {
+-    i::FLAG_allow_natives_syntax = allow_natives_syntax_;
+-    i::FLAG_turbo_inlining = turbo_inlining_;
++    i::v8_flags.allow_natives_syntax = allow_natives_syntax_;
++    i::v8_flags.turbo_inlining = turbo_inlining_;
+   }
+ 
+  private:
+@@ -418,7 +418,7 @@ class DeoptimizationDisableConcurrentRecompilationTest
+         "  if (deopt) { count++; %DeoptimizeFunction(f); } return 8"
+         "};");
+   }
+-  static void SetUpTestSuite() { i::FLAG_concurrent_recompilation = false; }
++  static void SetUpTestSuite() { i::v8_flags.concurrent_recompilation = false; }
+   void TestDeoptimizeBinaryOp(const char* binary_op) {
+     v8::base::EmbeddedVector<char, SMALL_STRING_BUFFER_SIZE> f_source_buffer;
+     v8::base::SNPrintF(f_source_buffer, "function f(x, y) { return x %s y; };",
+@@ -428,7 +428,7 @@ class DeoptimizationDisableConcurrentRecompilationTest
+     AllowNativesSyntaxNoInlining options;
+     // Compile function f and collect to type feedback to insert binary op stub
+     // call in the optimized code.
+-    i::FLAG_prepare_always_turbofan = true;
++    i::v8_flags.prepare_always_turbofan = true;
+     CompileConstructorWithDeoptimizingValueOf();
+     RunJS(f_source);
+     RunJS(
+@@ -437,7 +437,7 @@ class DeoptimizationDisableConcurrentRecompilationTest
+         "};");
+ 
+     // Compile an optimized version of f.
+-    i::FLAG_always_turbofan = true;
++    i::v8_flags.always_turbofan = true;
+     RunJS(f_source);
+     RunJS("f(7, new X());");
+     CHECK(!i_isolate()->use_optimizer() ||
+@@ -464,7 +464,7 @@ TEST_F(DeoptimizationDisableConcurrentRecompilationTest,
+   {
+     // Compile function f and collect to type feedback to insert binary op
+     // stub call in the optimized code.
+-    i::FLAG_prepare_always_turbofan = true;
++    i::v8_flags.prepare_always_turbofan = true;
+     RunJS(
+         "var count = 0;"
+         "var result = 0;"
+@@ -480,7 +480,7 @@ TEST_F(DeoptimizationDisableConcurrentRecompilationTest,
+         "};");
+ 
+     // Compile an optimized version of f.
+-    i::FLAG_always_turbofan = true;
++    i::v8_flags.always_turbofan = true;
+     RunJS(f_source);
+     RunJS("f('a+', new X());");
+     CHECK(!i_isolate()->use_optimizer() ||
+@@ -629,7 +629,7 @@ TEST_F(DeoptimizationDisableConcurrentRecompilationTest, DeoptimizeCompare) {
+     AllowNativesSyntaxNoInlining options;
+     // Compile function f and collect to type feedback to insert compare ic
+     // call in the optimized code.
+-    i::FLAG_prepare_always_turbofan = true;
++    i::v8_flags.prepare_always_turbofan = true;
+     RunJS(
+         "var count = 0;"
+         "var result = 0;"
+@@ -645,7 +645,7 @@ TEST_F(DeoptimizationDisableConcurrentRecompilationTest, DeoptimizeCompare) {
+         "};");
+ 
+     // Compile an optimized version of f.
+-    i::FLAG_always_turbofan = true;
++    i::v8_flags.always_turbofan = true;
+     RunJS(f_source);
+     RunJS("f('a', new X());");
+     CHECK(!i_isolate()->use_optimizer() ||
+@@ -688,7 +688,7 @@ TEST_F(DeoptimizationDisableConcurrentRecompilationTest,
+     AllowNativesSyntaxNoInlining options;
+     // Compile functions and collect to type feedback to insert ic
+     // calls in the optimized code.
+-    i::FLAG_prepare_always_turbofan = true;
++    i::v8_flags.prepare_always_turbofan = true;
+     RunJS(
+         "var count = 0;"
+         "var result = 0;"
+@@ -721,7 +721,7 @@ TEST_F(DeoptimizationDisableConcurrentRecompilationTest,
+         "};");
+ 
+     // Compile an optimized version of the functions.
+-    i::FLAG_always_turbofan = true;
++    i::v8_flags.always_turbofan = true;
+     RunJS(f1_source);
+     RunJS(g1_source);
+     RunJS(f2_source);
+@@ -780,7 +780,7 @@ TEST_F(DeoptimizationDisableConcurrentRecompilationTest,
+     AllowNativesSyntaxNoInlining options;
+     // Compile functions and collect to type feedback to insert ic
+     // calls in the optimized code.
+-    i::FLAG_prepare_always_turbofan = true;
++    i::v8_flags.prepare_always_turbofan = true;
+     RunJS(
+         "var count = 0;"
+         "var result = 0;"
+@@ -817,7 +817,7 @@ TEST_F(DeoptimizationDisableConcurrentRecompilationTest,
+         "};");
+ 
+     // Compile an optimized version of the functions.
+-    i::FLAG_always_turbofan = true;
++    i::v8_flags.always_turbofan = true;
+     RunJS(f1_source);
+     RunJS(g1_source);
+     RunJS(f2_source);
+diff --git a/test/unittests/execution/microtask-queue-unittest.cc b/test/unittests/execution/microtask-queue-unittest.cc
+index 55e36c9f444..c8b3f4a3ce6 100644
+--- a/test/unittests/execution/microtask-queue-unittest.cc
++++ b/test/unittests/execution/microtask-queue-unittest.cc
+@@ -42,8 +42,8 @@ class WithFinalizationRegistryMixin : public TMixin {
+   static void SetUpTestSuite() {
+     CHECK_NULL(save_flags_);
+     save_flags_ = new SaveFlags();
+-    FLAG_expose_gc = true;
+-    FLAG_allow_natives_syntax = true;
++    v8_flags.expose_gc = true;
++    v8_flags.allow_natives_syntax = true;
+     TMixin::SetUpTestSuite();
+   }
+ 
+diff --git a/test/unittests/execution/thread-termination-unittest.cc b/test/unittests/execution/thread-termination-unittest.cc
+index ef23af37fdc..25bcf414a14 100644
+--- a/test/unittests/execution/thread-termination-unittest.cc
++++ b/test/unittests/execution/thread-termination-unittest.cc
+@@ -235,7 +235,7 @@ TEST_F(ThreadTerminationTest, TerminateBigIntMultiplication) {
+ }
+ 
+ TEST_F(ThreadTerminationTest, TerminateOptimizedBigIntMultiplication) {
+-  i::FLAG_allow_natives_syntax = true;
++  i::v8_flags.allow_natives_syntax = true;
+   TestTerminatingFromCurrentThread(
+       "function foo(a, b) { return a * b; }"
+       "%PrepareFunctionForOptimization(foo);"
+@@ -260,7 +260,7 @@ TEST_F(ThreadTerminationTest, TerminateBigIntDivision) {
+ }
+ 
+ TEST_F(ThreadTerminationTest, TerminateOptimizedBigIntDivision) {
+-  i::FLAG_allow_natives_syntax = true;
++  i::v8_flags.allow_natives_syntax = true;
+   TestTerminatingFromCurrentThread(
+       "function foo(a, b) { return a / b; }"
+       "%PrepareFunctionForOptimization(foo);"
+@@ -822,7 +822,7 @@ TEST_F(ThreadTerminationTest, TerminationInInnerTryCall) {
+ }
+ 
+ TEST_F(ThreadTerminationTest, TerminateAndTryCall) {
+-  i::FLAG_allow_natives_syntax = true;
++  i::v8_flags.allow_natives_syntax = true;
+   HandleScope scope(isolate());
+   Local<ObjectTemplate> global = CreateGlobalTemplate(
+       isolate(), TerminateCurrentThread, DoLoopCancelTerminate);
+@@ -863,7 +863,7 @@ class ConsoleImpl : public debug::ConsoleDelegate {
+ };
+ 
+ TEST_F(ThreadTerminationTest, TerminateConsole) {
+-  i::FLAG_allow_natives_syntax = true;
++  i::v8_flags.allow_natives_syntax = true;
+   ConsoleImpl console;
+   debug::SetConsoleDelegate(isolate(), &console);
+   HandleScope scope(isolate());
+@@ -907,12 +907,12 @@ class TerminatorSleeperThread : public base::Thread {
+ };
+ 
+ TEST_F(ThreadTerminationTest, TerminateRegExp) {
+-  i::FLAG_allow_natives_syntax = true;
++  i::v8_flags.allow_natives_syntax = true;
+   // We want to be stuck regexp execution, so no fallback to linear-time
+   // engine.
+   // TODO(mbid,v8:10765): Find a way to test interrupt support of the
+   // experimental engine.
+-  i::FLAG_enable_experimental_regexp_engine_on_excessive_backtracks = false;
++  i::v8_flags.enable_experimental_regexp_engine_on_excessive_backtracks = false;
+ 
+   HandleScope scope(isolate());
+   Local<ObjectTemplate> global = CreateGlobalTemplate(
+diff --git a/test/unittests/flags/flag-definitions-unittest.cc b/test/unittests/flags/flag-definitions-unittest.cc
+index ee18fe00bde..89022cc95e7 100644
+--- a/test/unittests/flags/flag-definitions-unittest.cc
++++ b/test/unittests/flags/flag-definitions-unittest.cc
+@@ -41,10 +41,10 @@ class FlagDefinitionsTest : public ::testing::Test {
+ };
+ 
+ void TestDefault() {
+-  CHECK(FLAG_testing_bool_flag);
+-  CHECK_EQ(13, FLAG_testing_int_flag);
+-  CHECK_EQ(2.5, FLAG_testing_float_flag);
+-  CHECK_EQ(0, strcmp(FLAG_testing_string_flag, "Hello, world!"));
++  CHECK(v8_flags.testing_bool_flag);
++  CHECK_EQ(13, v8_flags.testing_int_flag);
++  CHECK_EQ(2.5, v8_flags.testing_float_flag);
++  CHECK_EQ(0, strcmp(v8_flags.testing_string_flag, "Hello, world!"));
+ }
+ 
+ // This test must be executed first!
+@@ -65,12 +65,12 @@ TEST_F(FlagDefinitionsTest, Flags2) {
+   CHECK_EQ(0, FlagList::SetFlagsFromCommandLine(&argc, const_cast<char**>(argv),
+                                                 false));
+   CHECK_EQ(8, argc);
+-  CHECK(!FLAG_testing_bool_flag);
+-  CHECK(FLAG_testing_maybe_bool_flag.value().has_value());
+-  CHECK(!FLAG_testing_maybe_bool_flag.value().value());
+-  CHECK_EQ(77, FLAG_testing_int_flag);
+-  CHECK_EQ(.25, FLAG_testing_float_flag);
+-  CHECK_EQ(0, strcmp(FLAG_testing_string_flag, "no way!"));
++  CHECK(!v8_flags.testing_bool_flag);
++  CHECK(v8_flags.testing_maybe_bool_flag.value().has_value());
++  CHECK(!v8_flags.testing_maybe_bool_flag.value().value());
++  CHECK_EQ(77, v8_flags.testing_int_flag);
++  CHECK_EQ(.25, v8_flags.testing_float_flag);
++  CHECK_EQ(0, strcmp(v8_flags.testing_string_flag, "no way!"));
+ }
+ 
+ TEST_F(FlagDefinitionsTest, Flags2b) {
+@@ -80,12 +80,12 @@ TEST_F(FlagDefinitionsTest, Flags2b) {
+       "-testing_float_flag=.25  "
+       "--testing_string_flag   no_way!  ";
+   CHECK_EQ(0, FlagList::SetFlagsFromString(str, strlen(str)));
+-  CHECK(!FLAG_testing_bool_flag);
+-  CHECK(FLAG_testing_maybe_bool_flag.value().has_value());
+-  CHECK(!FLAG_testing_maybe_bool_flag.value().value());
+-  CHECK_EQ(77, FLAG_testing_int_flag);
+-  CHECK_EQ(.25, FLAG_testing_float_flag);
+-  CHECK_EQ(0, strcmp(FLAG_testing_string_flag, "no_way!"));
++  CHECK(!v8_flags.testing_bool_flag);
++  CHECK(v8_flags.testing_maybe_bool_flag.value().has_value());
++  CHECK(!v8_flags.testing_maybe_bool_flag.value().value());
++  CHECK_EQ(77, v8_flags.testing_int_flag);
++  CHECK_EQ(.25, v8_flags.testing_float_flag);
++  CHECK_EQ(0, strcmp(v8_flags.testing_string_flag, "no_way!"));
+ }
+ 
+ TEST_F(FlagDefinitionsTest, Flags3) {
+@@ -102,12 +102,12 @@ TEST_F(FlagDefinitionsTest, Flags3) {
+   CHECK_EQ(0, FlagList::SetFlagsFromCommandLine(&argc, const_cast<char**>(argv),
+                                                 true));
+   CHECK_EQ(2, argc);
+-  CHECK(FLAG_testing_bool_flag);
+-  CHECK(FLAG_testing_maybe_bool_flag.value().has_value());
+-  CHECK(FLAG_testing_maybe_bool_flag.value().value());
+-  CHECK_EQ(-666, FLAG_testing_int_flag);
+-  CHECK_EQ(-12E10, FLAG_testing_float_flag);
+-  CHECK_EQ(0, strcmp(FLAG_testing_string_flag, "foo-bar"));
++  CHECK(v8_flags.testing_bool_flag);
++  CHECK(v8_flags.testing_maybe_bool_flag.value().has_value());
++  CHECK(v8_flags.testing_maybe_bool_flag.value().value());
++  CHECK_EQ(-666, v8_flags.testing_int_flag);
++  CHECK_EQ(-12E10, v8_flags.testing_float_flag);
++  CHECK_EQ(0, strcmp(v8_flags.testing_string_flag, "foo-bar"));
+ }
+ 
+ TEST_F(FlagDefinitionsTest, Flags3b) {
+@@ -117,12 +117,12 @@ TEST_F(FlagDefinitionsTest, Flags3b) {
+       "--testing_float_flag -12E10 "
+       "-testing-string-flag=foo-bar";
+   CHECK_EQ(0, FlagList::SetFlagsFromString(str, strlen(str)));
+-  CHECK(FLAG_testing_bool_flag);
+-  CHECK(FLAG_testing_maybe_bool_flag.value().has_value());
+-  CHECK(FLAG_testing_maybe_bool_flag.value().value());
+-  CHECK_EQ(-666, FLAG_testing_int_flag);
+-  CHECK_EQ(-12E10, FLAG_testing_float_flag);
+-  CHECK_EQ(0, strcmp(FLAG_testing_string_flag, "foo-bar"));
++  CHECK(v8_flags.testing_bool_flag);
++  CHECK(v8_flags.testing_maybe_bool_flag.value().has_value());
++  CHECK(v8_flags.testing_maybe_bool_flag.value().value());
++  CHECK_EQ(-666, v8_flags.testing_int_flag);
++  CHECK_EQ(-12E10, v8_flags.testing_float_flag);
++  CHECK_EQ(0, strcmp(v8_flags.testing_string_flag, "foo-bar"));
+ }
+ 
+ TEST_F(FlagDefinitionsTest, Flags4) {
+@@ -131,13 +131,13 @@ TEST_F(FlagDefinitionsTest, Flags4) {
+   CHECK_EQ(0, FlagList::SetFlagsFromCommandLine(&argc, const_cast<char**>(argv),
+                                                 true));
+   CHECK_EQ(2, argc);
+-  CHECK(!FLAG_testing_maybe_bool_flag.value().has_value());
++  CHECK(!v8_flags.testing_maybe_bool_flag.value().has_value());
+ }
+ 
+ TEST_F(FlagDefinitionsTest, Flags4b) {
+   const char* str = "--testing_bool_flag --foo";
+   CHECK_EQ(2, FlagList::SetFlagsFromString(str, strlen(str)));
+-  CHECK(!FLAG_testing_maybe_bool_flag.value().has_value());
++  CHECK(!v8_flags.testing_maybe_bool_flag.value().has_value());
+ }
+ 
+ TEST_F(FlagDefinitionsTest, Flags5) {
+@@ -179,44 +179,45 @@ TEST_F(FlagDefinitionsTest, FlagsRemoveIncomplete) {
+ }
+ 
+ TEST_F(FlagDefinitionsTest, FlagsJitlessImplications) {
+-  if (FLAG_jitless) {
++  if (v8_flags.jitless) {
+     // Double-check implications work as expected. Our implication system is
+     // fairly primitive and can break easily depending on the implication
+     // definition order in flag-definitions.h.
+-    CHECK(!FLAG_turbofan);
+-    CHECK(!FLAG_maglev);
+-    CHECK(!FLAG_sparkplug);
++    CHECK(!v8_flags.turbofan);
++    CHECK(!v8_flags.maglev);
++    CHECK(!v8_flags.sparkplug);
+ #if V8_ENABLE_WEBASSEMBLY
+-    CHECK(!FLAG_validate_asm);
+-    CHECK(!FLAG_asm_wasm_lazy_compilation);
+-    CHECK(!FLAG_wasm_lazy_compilation);
++    CHECK(!v8_flags.validate_asm);
++    CHECK(!v8_flags.asm_wasm_lazy_compilation);
++    CHECK(!v8_flags.wasm_lazy_compilation);
+ #endif  // V8_ENABLE_WEBASSEMBLY
+   }
+ }
+ 
+ TEST_F(FlagDefinitionsTest, FreezeFlags) {
+   // Before freezing, we can arbitrarily change values.
+-  CHECK_EQ(13, FLAG_testing_int_flag);  // Initial (default) value.
+-  FLAG_testing_int_flag = 27;
+-  CHECK_EQ(27, FLAG_testing_int_flag);
++  CHECK_EQ(13, v8_flags.testing_int_flag);  // Initial (default) value.
++  v8_flags.testing_int_flag = 27;
++  CHECK_EQ(27, v8_flags.testing_int_flag);
+ 
+   // Get a direct pointer to the flag storage.
+-  static_assert(sizeof(FLAG_testing_int_flag) == sizeof(int));
+-  int* direct_testing_int_ptr = reinterpret_cast<int*>(&FLAG_testing_int_flag);
++  static_assert(sizeof(v8_flags.testing_int_flag) == sizeof(int));
++  int* direct_testing_int_ptr =
++      reinterpret_cast<int*>(&v8_flags.testing_int_flag);
+   CHECK_EQ(27, *direct_testing_int_ptr);
+   *direct_testing_int_ptr = 42;
+-  CHECK_EQ(42, FLAG_testing_int_flag);
++  CHECK_EQ(42, v8_flags.testing_int_flag);
+ 
+   // Now freeze flags. Accesses via the API and via the direct pointer should
+   // both crash.
+   FlagList::FreezeFlags();
+   // Accessing via the API fails with a CHECK.
+-  ASSERT_DEATH_IF_SUPPORTED(FLAG_testing_int_flag = 41,
++  ASSERT_DEATH_IF_SUPPORTED(v8_flags.testing_int_flag = 41,
+                             "Check failed: !IsFrozen\\(\\)");
+   // Writing to the memory directly results in a segfault.
+   ASSERT_DEATH_IF_SUPPORTED(*direct_testing_int_ptr = 41, "");
+   // We can still read the old value.
+-  CHECK_EQ(42, FLAG_testing_int_flag);
++  CHECK_EQ(42, v8_flags.testing_int_flag);
+   CHECK_EQ(42, *direct_testing_int_ptr);
+ }
+ 
+diff --git a/test/unittests/inspector/inspector-unittest.cc b/test/unittests/inspector/inspector-unittest.cc
+index 442c32a118f..0ca795ecc7c 100644
+--- a/test/unittests/inspector/inspector-unittest.cc
++++ b/test/unittests/inspector/inspector-unittest.cc
+@@ -259,7 +259,7 @@ TEST_F(InspectorTest, NoConsoleAPIForUntrustedClient) {
+ }
+ 
+ TEST_F(InspectorTest, ApiCreatedTasksAreCleanedUp) {
+-  i::FLAG_experimental_async_stack_tagging_api = true;
++  i::v8_flags.experimental_async_stack_tagging_api = true;
+   v8::Isolate* isolate = v8_isolate();
+   v8::HandleScope handle_scope(isolate);
+ 
+diff --git a/test/unittests/libplatform/single-threaded-default-platform-unittest.cc b/test/unittests/libplatform/single-threaded-default-platform-unittest.cc
+index 33b26af40ff..d3d9580a21d 100644
+--- a/test/unittests/libplatform/single-threaded-default-platform-unittest.cc
++++ b/test/unittests/libplatform/single-threaded-default-platform-unittest.cc
+@@ -37,7 +37,7 @@ class SingleThreadedDefaultPlatformTest
+                   ::testing::Test>>> {
+  public:
+   static void SetUpTestSuite() {
+-    i::FLAG_single_threaded = true;
++    i::v8_flags.single_threaded = true;
+     i::FlagList::EnforceFlagImplications();
+     WithIsolateScopeMixin::SetUpTestSuite();
+   }
+diff --git a/test/unittests/objects/concurrent-feedback-vector-unittest.cc b/test/unittests/objects/concurrent-feedback-vector-unittest.cc
+index f329e38495b..9ed7e76ad36 100644
+--- a/test/unittests/objects/concurrent-feedback-vector-unittest.cc
++++ b/test/unittests/objects/concurrent-feedback-vector-unittest.cc
+@@ -161,7 +161,7 @@ static void CheckedWait(base::Semaphore& semaphore) {
+ // Verify that a LoadIC can be cycled through different states and safely
+ // read on a background thread.
+ TEST_F(ConcurrentFeedbackVectorTest, CheckLoadICStates) {
+-  FLAG_lazy_feedback_allocation = false;
++  v8_flags.lazy_feedback_allocation = false;
+ 
+   std::unique_ptr<PersistentHandles> ph = i_isolate()->NewPersistentHandles();
+   HandleScope handle_scope(i_isolate());
+diff --git a/test/unittests/objects/concurrent-string-unittest.cc b/test/unittests/objects/concurrent-string-unittest.cc
+index 604b6f017cf..569bceb01c8 100644
+--- a/test/unittests/objects/concurrent-string-unittest.cc
++++ b/test/unittests/objects/concurrent-string-unittest.cc
+@@ -234,9 +234,9 @@ TEST_F(ConcurrentStringTest, InspectTwoByteExternalizing) {
+ // InspectOneByteExternalizing, but using thin strings.
+ TEST_F(ConcurrentStringTest, InspectOneByteExternalizing_ThinString) {
+   // We will not create a thin string if single_generation is turned on.
+-  if (FLAG_single_generation) return;
++  if (v8_flags.single_generation) return;
+   // We don't create ThinStrings immediately when using the forwarding table.
+-  if (FLAG_always_use_string_forwarding_table) return;
++  if (v8_flags.always_use_string_forwarding_table) return;
+   std::unique_ptr<PersistentHandles> ph = i_isolate()->NewPersistentHandles();
+ 
+   auto factory = i_isolate()->factory();
+@@ -296,9 +296,9 @@ TEST_F(ConcurrentStringTest, InspectOneByteExternalizing_ThinString) {
+ // strings.
+ TEST_F(ConcurrentStringTest, InspectOneIntoTwoByteExternalizing_ThinString) {
+   // We will not create a thin string if single_generation is turned on.
+-  if (FLAG_single_generation) return;
++  if (v8_flags.single_generation) return;
+   // We don't create ThinStrings immediately when using the forwarding table.
+-  if (FLAG_always_use_string_forwarding_table) return;
++  if (v8_flags.always_use_string_forwarding_table) return;
+   std::unique_ptr<PersistentHandles> ph = i_isolate()->NewPersistentHandles();
+ 
+   auto factory = i_isolate()->factory();
+@@ -358,9 +358,9 @@ TEST_F(ConcurrentStringTest, InspectOneIntoTwoByteExternalizing_ThinString) {
+ // InspectTwoByteExternalizing, but using thin strings.
+ TEST_F(ConcurrentStringTest, InspectTwoByteExternalizing_ThinString) {
+   // We will not create a thin string if single_generation is turned on.
+-  if (FLAG_single_generation) return;
++  if (v8_flags.single_generation) return;
+   // We don't create ThinStrings immediately when using the forwarding table.
+-  if (FLAG_always_use_string_forwarding_table) return;
++  if (v8_flags.always_use_string_forwarding_table) return;
+   std::unique_ptr<PersistentHandles> ph = i_isolate()->NewPersistentHandles();
+ 
+   auto factory = i_isolate()->factory();
+diff --git a/test/unittests/objects/dictionary-unittest.cc b/test/unittests/objects/dictionary-unittest.cc
+index ecdf0ec7109..28bda6116f7 100644
+--- a/test/unittests/objects/dictionary-unittest.cc
++++ b/test/unittests/objects/dictionary-unittest.cc
+@@ -204,7 +204,7 @@ class DictionaryTest : public TestWithHeapInternalsAndContext {
+ 
+     // Even though we simulate a full heap, generating an identity hash
+     // code in subsequent calls will not request GC.
+-    if (!FLAG_single_generation) {
++    if (!v8_flags.single_generation) {
+       SimulateFullSpace(heap()->new_space());
+     }
+     SimulateFullSpace(heap()->old_space());
+@@ -276,9 +276,9 @@ TEST_F(DictionaryTest, HashTableRehash) {
+ 
+ #ifdef DEBUG
+ TEST_F(DictionaryTest, ObjectHashTableCausesGC) {
+-  i::FLAG_stress_compaction = false;
++  i::v8_flags.stress_compaction = false;
+   // For SimulateFullSpace in TestHashMapDoesNotCauseGC.
+-  i::FLAG_stress_concurrent_allocation = false;
++  i::v8_flags.stress_concurrent_allocation = false;
+   TestHashMapDoesNotCauseGC(ObjectHashTable::New(isolate(), 1));
+ }
+ #endif
+diff --git a/test/unittests/objects/feedback-vector-unittest.cc b/test/unittests/objects/feedback-vector-unittest.cc
+index 4730536afb3..c9eedf28b54 100644
+--- a/test/unittests/objects/feedback-vector-unittest.cc
++++ b/test/unittests/objects/feedback-vector-unittest.cc
+@@ -144,9 +144,9 @@ TEST_F(FeedbackVectorTest, VectorICMetadata) {
+ }
+ 
+ TEST_F(FeedbackVectorTest, VectorCallICStates) {
+-  if (!i::FLAG_use_ic) return;
+-  if (i::FLAG_always_turbofan) return;
+-  FLAG_allow_natives_syntax = true;
++  if (!i::v8_flags.use_ic) return;
++  if (i::v8_flags.always_turbofan) return;
++  v8_flags.allow_natives_syntax = true;
+ 
+   v8::HandleScope scope(v8_isolate());
+   Isolate* isolate = i_isolate();
+@@ -173,9 +173,9 @@ TEST_F(FeedbackVectorTest, VectorCallICStates) {
+ 
+ // Test the Call IC states transfer with Function.prototype.apply
+ TEST_F(FeedbackVectorTest, VectorCallICStateApply) {
+-  if (!i::FLAG_use_ic) return;
+-  if (i::FLAG_always_turbofan) return;
+-  FLAG_allow_natives_syntax = true;
++  if (!i::v8_flags.use_ic) return;
++  if (i::v8_flags.always_turbofan) return;
++  v8_flags.allow_natives_syntax = true;
+ 
+   v8::HandleScope scope(v8_isolate());
+   Isolate* isolate = i_isolate();
+@@ -213,9 +213,9 @@ TEST_F(FeedbackVectorTest, VectorCallICStateApply) {
+ }
+ 
+ TEST_F(FeedbackVectorTest, VectorCallFeedback) {
+-  if (!i::FLAG_use_ic) return;
+-  if (i::FLAG_always_turbofan) return;
+-  FLAG_allow_natives_syntax = true;
++  if (!i::v8_flags.use_ic) return;
++  if (i::v8_flags.always_turbofan) return;
++  v8_flags.allow_natives_syntax = true;
+ 
+   v8::HandleScope scope(v8_isolate());
+   Isolate* isolate = i_isolate();
+@@ -243,10 +243,10 @@ TEST_F(FeedbackVectorTest, VectorCallFeedback) {
+ }
+ 
+ TEST_F(FeedbackVectorTest, VectorPolymorphicCallFeedback) {
+-  if (!i::FLAG_use_ic) return;
+-  if (i::FLAG_always_turbofan) return;
+-  FLAG_allow_natives_syntax = true;
+-  FLAG_lazy_feedback_allocation = false;
++  if (!i::v8_flags.use_ic) return;
++  if (i::v8_flags.always_turbofan) return;
++  v8_flags.allow_natives_syntax = true;
++  v8_flags.lazy_feedback_allocation = false;
+ 
+   v8::HandleScope scope(v8_isolate());
+   Isolate* isolate = i_isolate();
+@@ -274,9 +274,9 @@ TEST_F(FeedbackVectorTest, VectorPolymorphicCallFeedback) {
+ }
+ 
+ TEST_F(FeedbackVectorTest, VectorCallFeedbackForArray) {
+-  if (!i::FLAG_use_ic) return;
+-  if (i::FLAG_always_turbofan) return;
+-  FLAG_allow_natives_syntax = true;
++  if (!i::v8_flags.use_ic) return;
++  if (i::v8_flags.always_turbofan) return;
++  v8_flags.allow_natives_syntax = true;
+ 
+   v8::HandleScope scope(v8_isolate());
+   Isolate* isolate = i_isolate();
+@@ -303,9 +303,9 @@ TEST_F(FeedbackVectorTest, VectorCallFeedbackForArray) {
+ }
+ 
+ TEST_F(FeedbackVectorTest, VectorCallCounts) {
+-  if (!i::FLAG_use_ic) return;
+-  if (i::FLAG_always_turbofan) return;
+-  FLAG_allow_natives_syntax = true;
++  if (!i::v8_flags.use_ic) return;
++  if (i::v8_flags.always_turbofan) return;
++  v8_flags.allow_natives_syntax = true;
+ 
+   v8::HandleScope scope(v8_isolate());
+   Isolate* isolate = i_isolate();
+@@ -334,9 +334,9 @@ TEST_F(FeedbackVectorTest, VectorCallCounts) {
+ }
+ 
+ TEST_F(FeedbackVectorTest, VectorConstructCounts) {
+-  if (!i::FLAG_use_ic) return;
+-  if (i::FLAG_always_turbofan) return;
+-  FLAG_allow_natives_syntax = true;
++  if (!i::v8_flags.use_ic) return;
++  if (i::v8_flags.always_turbofan) return;
++  v8_flags.allow_natives_syntax = true;
+ 
+   v8::HandleScope scope(v8_isolate());
+   Isolate* isolate = i_isolate();
+@@ -367,9 +367,9 @@ TEST_F(FeedbackVectorTest, VectorConstructCounts) {
+ }
+ 
+ TEST_F(FeedbackVectorTest, VectorSpeculationMode) {
+-  if (!i::FLAG_use_ic) return;
+-  if (i::FLAG_always_turbofan) return;
+-  FLAG_allow_natives_syntax = true;
++  if (!i::v8_flags.use_ic) return;
++  if (i::v8_flags.always_turbofan) return;
++  v8_flags.allow_natives_syntax = true;
+ 
+   v8::HandleScope scope(v8_isolate());
+   Isolate* isolate = i_isolate();
+@@ -401,11 +401,11 @@ TEST_F(FeedbackVectorTest, VectorSpeculationMode) {
+ }
+ 
+ TEST_F(FeedbackVectorTest, VectorCallSpeculationModeAndFeedbackContent) {
+-  if (!i::FLAG_use_ic) return;
+-  if (!i::FLAG_turbofan) return;
+-  if (i::FLAG_always_turbofan) return;
+-  if (i::FLAG_jitless) return;
+-  FLAG_allow_natives_syntax = true;
++  if (!i::v8_flags.use_ic) return;
++  if (!i::v8_flags.turbofan) return;
++  if (i::v8_flags.always_turbofan) return;
++  if (i::v8_flags.jitless) return;
++  v8_flags.allow_natives_syntax = true;
+ 
+   v8::HandleScope scope(v8_isolate());
+   Isolate* isolate = i_isolate();
+@@ -436,9 +436,9 @@ TEST_F(FeedbackVectorTest, VectorCallSpeculationModeAndFeedbackContent) {
+ }
+ 
+ TEST_F(FeedbackVectorTest, VectorLoadICStates) {
+-  if (!i::FLAG_use_ic) return;
+-  if (i::FLAG_always_turbofan) return;
+-  FLAG_allow_natives_syntax = true;
++  if (!i::v8_flags.use_ic) return;
++  if (i::v8_flags.always_turbofan) return;
++  v8_flags.allow_natives_syntax = true;
+ 
+   v8::HandleScope scope(v8_isolate());
+   Isolate* isolate = i_isolate();
+@@ -489,9 +489,9 @@ TEST_F(FeedbackVectorTest, VectorLoadICStates) {
+ }
+ 
+ TEST_F(FeedbackVectorTest, VectorLoadGlobalICSlotSharing) {
+-  if (!i::FLAG_use_ic) return;
+-  if (i::FLAG_always_turbofan) return;
+-  FLAG_allow_natives_syntax = true;
++  if (!i::v8_flags.use_ic) return;
++  if (i::v8_flags.always_turbofan) return;
++  v8_flags.allow_natives_syntax = true;
+ 
+   v8::HandleScope scope(v8_isolate());
+   Isolate* isolate = i_isolate();
+@@ -525,9 +525,9 @@ TEST_F(FeedbackVectorTest, VectorLoadGlobalICSlotSharing) {
+ }
+ 
+ TEST_F(FeedbackVectorTest, VectorLoadICOnSmi) {
+-  if (!i::FLAG_use_ic) return;
+-  if (i::FLAG_always_turbofan) return;
+-  FLAG_allow_natives_syntax = true;
++  if (!i::v8_flags.use_ic) return;
++  if (i::v8_flags.always_turbofan) return;
++  v8_flags.allow_natives_syntax = true;
+ 
+   v8::HandleScope scope(v8_isolate());
+   Isolate* isolate = i_isolate();
+@@ -581,9 +581,9 @@ TEST_F(FeedbackVectorTest, VectorLoadICOnSmi) {
+ }
+ 
+ TEST_F(FeedbackVectorTest, ReferenceContextAllocatesNoSlots) {
+-  if (!i::FLAG_use_ic) return;
+-  if (i::FLAG_always_turbofan) return;
+-  FLAG_allow_natives_syntax = true;
++  if (!i::v8_flags.use_ic) return;
++  if (i::v8_flags.always_turbofan) return;
++  v8_flags.allow_natives_syntax = true;
+ 
+   v8::HandleScope scope(v8_isolate());
+   Isolate* isolate = i_isolate();
+@@ -725,9 +725,9 @@ TEST_F(FeedbackVectorTest, ReferenceContextAllocatesNoSlots) {
+ }
+ 
+ TEST_F(FeedbackVectorTest, VectorStoreICBasic) {
+-  if (!i::FLAG_use_ic) return;
+-  if (i::FLAG_always_turbofan) return;
+-  FLAG_allow_natives_syntax = true;
++  if (!i::v8_flags.use_ic) return;
++  if (i::v8_flags.always_turbofan) return;
++  v8_flags.allow_natives_syntax = true;
+ 
+   v8::HandleScope scope(v8_isolate());
+ 
+@@ -751,9 +751,9 @@ TEST_F(FeedbackVectorTest, VectorStoreICBasic) {
+ }
+ 
+ TEST_F(FeedbackVectorTest, DefineNamedOwnIC) {
+-  if (!i::FLAG_use_ic) return;
+-  if (i::FLAG_always_turbofan) return;
+-  FLAG_allow_natives_syntax = true;
++  if (!i::v8_flags.use_ic) return;
++  if (i::v8_flags.always_turbofan) return;
++  v8_flags.allow_natives_syntax = true;
+ 
+   v8::HandleScope scope(v8_isolate());
+ 
+diff --git a/test/unittests/objects/inobject-slack-tracking-unittest.cc b/test/unittests/objects/inobject-slack-tracking-unittest.cc
+index f2e1e12bb37..2be8c2ec8bb 100644
+--- a/test/unittests/objects/inobject-slack-tracking-unittest.cc
++++ b/test/unittests/objects/inobject-slack-tracking-unittest.cc
+@@ -314,7 +314,7 @@ class InObjectSlackTrackingTest : public TestWithContext {
+ 
+   void TestSubclassChain(const std::vector<int>& hierarchy_desc) {
+     // Avoid eventual completion of in-object slack tracking.
+-    FLAG_always_turbofan = false;
++    v8_flags.always_turbofan = false;
+ 
+     CreateClassHierarchy(hierarchy_desc);
+     TestClassHierarchy(hierarchy_desc, static_cast<int>(hierarchy_desc.size()));
+@@ -325,7 +325,7 @@ class InObjectSlackTrackingTest : public TestWithContext {
+ 
+ TEST_F(InObjectSlackTrackingTest, JSObjectBasic) {
+   // Avoid eventual completion of in-object slack tracking.
+-  FLAG_always_turbofan = false;
++  v8_flags.always_turbofan = false;
+   const char* source =
+       "function A() {"
+       "  this.a = 42;"
+@@ -373,13 +373,13 @@ TEST_F(InObjectSlackTrackingTest, JSObjectBasic) {
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, JSObjectBasicNoInlineNew) {
+-  FLAG_inline_new = false;
++  v8_flags.inline_new = false;
+   TestJSObjectBasic();
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, JSObjectComplex) {
+   // Avoid eventual completion of in-object slack tracking.
+-  FLAG_always_turbofan = false;
++  v8_flags.always_turbofan = false;
+   const char* source =
+       "function A(n) {"
+       "  if (n > 0) this.a = 42;"
+@@ -449,13 +449,13 @@ TEST_F(InObjectSlackTrackingTest, JSObjectComplex) {
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, JSObjectComplexNoInlineNew) {
+-  FLAG_inline_new = false;
++  v8_flags.inline_new = false;
+   TestJSObjectComplex();
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, JSGeneratorObjectBasic) {
+   // Avoid eventual completion of in-object slack tracking.
+-  FLAG_always_turbofan = false;
++  v8_flags.always_turbofan = false;
+   const char* source =
+       "function* A() {"
+       "  var i = 0;"
+@@ -511,13 +511,13 @@ TEST_F(InObjectSlackTrackingTest, JSGeneratorObjectBasic) {
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, JSGeneratorObjectBasicNoInlineNew) {
+-  FLAG_inline_new = false;
++  v8_flags.inline_new = false;
+   TestJSGeneratorObjectBasic();
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, SubclassBasicNoBaseClassInstances) {
+   // Avoid eventual completion of in-object slack tracking.
+-  FLAG_always_turbofan = false;
++  v8_flags.always_turbofan = false;
+ 
+   // Check that base class' and subclass' slack tracking do not interfere with
+   // each other.
+@@ -600,13 +600,13 @@ TEST_F(InObjectSlackTrackingTest, SubclassBasicNoBaseClassInstances) {
+ 
+ TEST_F(InObjectSlackTrackingTest,
+        SubclassBasicNoBaseClassInstancesNoInlineNew) {
+-  FLAG_inline_new = false;
++  v8_flags.inline_new = false;
+   TestSubclassBasicNoBaseClassInstances();
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, SubclassBasic) {
+   // Avoid eventual completion of in-object slack tracking.
+-  FLAG_always_turbofan = false;
++  v8_flags.always_turbofan = false;
+ 
+   // Check that base class' and subclass' slack tracking do not interfere with
+   // each other.
+@@ -699,7 +699,7 @@ TEST_F(InObjectSlackTrackingTest, SubclassBasic) {
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, SubclassBasicNoInlineNew) {
+-  FLAG_inline_new = false;
++  v8_flags.inline_new = false;
+   TestSubclassBasic();
+ }
+ 
+@@ -738,7 +738,7 @@ TEST_F(InObjectSlackTrackingTest, LongSubclassChain3) {
+ 
+ TEST_F(InObjectSlackTrackingTest, InobjectPropetiesCountOverflowInSubclass) {
+   // Avoid eventual completion of in-object slack tracking.
+-  FLAG_always_turbofan = false;
++  v8_flags.always_turbofan = false;
+ 
+   std::vector<int> hierarchy_desc;
+   const int kNoOverflowCount = 5;
+@@ -910,10 +910,10 @@ TEST_F(InObjectSlackTrackingTest, ObjectLiteralPropertyBackingStoreSize) {
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, SlowModeSubclass) {
+-  if (FLAG_stress_concurrent_allocation) return;
++  if (v8_flags.stress_concurrent_allocation) return;
+ 
+   // Avoid eventual completion of in-object slack tracking.
+-  FLAG_always_turbofan = false;
++  v8_flags.always_turbofan = false;
+ 
+   std::vector<int> hierarchy_desc;
+   const int kNoOverflowCount = 5;
+@@ -969,46 +969,46 @@ TEST_F(InObjectSlackTrackingTest, SlowModeSubclass) {
+ 
+ TEST_F(InObjectSlackTrackingTest, SubclassObjectBuiltin) {
+   // Avoid eventual completion of in-object slack tracking.
+-  FLAG_always_turbofan = false;
++  v8_flags.always_turbofan = false;
+   TestSubclassBuiltin("A1", JS_OBJECT_TYPE, "Object", "true");
+   TestSubclassBuiltin("A2", JS_OBJECT_TYPE, "Object", "42");
+   TestSubclassBuiltin("A3", JS_OBJECT_TYPE, "Object", "'some string'");
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, SubclassObjectBuiltinNoInlineNew) {
+-  FLAG_inline_new = false;
++  v8_flags.inline_new = false;
+   TestSubclassObjectBuiltin();
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, SubclassFunctionBuiltin) {
+   // Avoid eventual completion of in-object slack tracking.
+-  FLAG_always_turbofan = false;
++  v8_flags.always_turbofan = false;
+ 
+   TestSubclassBuiltin("A1", JS_FUNCTION_TYPE, "Function", "'return 153;'");
+   TestSubclassBuiltin("A2", JS_FUNCTION_TYPE, "Function", "'this.a = 44;'");
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, SubclassFunctionBuiltinNoInlineNew) {
+-  FLAG_inline_new = false;
++  v8_flags.inline_new = false;
+   TestSubclassFunctionBuiltin();
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, SubclassBooleanBuiltin) {
+   // Avoid eventual completion of in-object slack tracking.
+-  FLAG_always_turbofan = false;
++  v8_flags.always_turbofan = false;
+ 
+   TestSubclassBuiltin("A1", JS_PRIMITIVE_WRAPPER_TYPE, "Boolean", "true");
+   TestSubclassBuiltin("A2", JS_PRIMITIVE_WRAPPER_TYPE, "Boolean", "false");
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, SubclassBooleanBuiltinNoInlineNew) {
+-  FLAG_inline_new = false;
++  v8_flags.inline_new = false;
+   TestSubclassBooleanBuiltin();
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, SubclassErrorBuiltin) {
+   // Avoid eventual completion of in-object slack tracking.
+-  FLAG_always_turbofan = false;
++  v8_flags.always_turbofan = false;
+ 
+   const int first_field = 2;
+   TestSubclassBuiltin("A1", JS_ERROR_TYPE, "Error", "'err'", first_field);
+@@ -1022,38 +1022,38 @@ TEST_F(InObjectSlackTrackingTest, SubclassErrorBuiltin) {
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, SubclassErrorBuiltinNoInlineNew) {
+-  FLAG_inline_new = false;
++  v8_flags.inline_new = false;
+   TestSubclassErrorBuiltin();
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, SubclassNumberBuiltin) {
+   // Avoid eventual completion of in-object slack tracking.
+-  FLAG_always_turbofan = false;
++  v8_flags.always_turbofan = false;
+ 
+   TestSubclassBuiltin("A1", JS_PRIMITIVE_WRAPPER_TYPE, "Number", "42");
+   TestSubclassBuiltin("A2", JS_PRIMITIVE_WRAPPER_TYPE, "Number", "4.2");
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, SubclassNumberBuiltinNoInlineNew) {
+-  FLAG_inline_new = false;
++  v8_flags.inline_new = false;
+   TestSubclassNumberBuiltin();
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, SubclassDateBuiltin) {
+   // Avoid eventual completion of in-object slack tracking.
+-  FLAG_always_turbofan = false;
++  v8_flags.always_turbofan = false;
+ 
+   TestSubclassBuiltin("A1", JS_DATE_TYPE, "Date", "123456789");
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, SubclassDateBuiltinNoInlineNew) {
+-  FLAG_inline_new = false;
++  v8_flags.inline_new = false;
+   TestSubclassDateBuiltin();
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, SubclassStringBuiltin) {
+   // Avoid eventual completion of in-object slack tracking.
+-  FLAG_always_turbofan = false;
++  v8_flags.always_turbofan = false;
+ 
+   TestSubclassBuiltin("A1", JS_PRIMITIVE_WRAPPER_TYPE, "String",
+                       "'some string'");
+@@ -1061,12 +1061,12 @@ TEST_F(InObjectSlackTrackingTest, SubclassStringBuiltin) {
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, SubclassStringBuiltinNoInlineNew) {
+-  FLAG_inline_new = false;
++  v8_flags.inline_new = false;
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, SubclassRegExpBuiltin) {
+   // Avoid eventual completion of in-object slack tracking.
+-  FLAG_always_turbofan = false;
++  v8_flags.always_turbofan = false;
+ 
+   const int first_field = 1;
+   TestSubclassBuiltin("A1", JS_REG_EXP_TYPE, "RegExp", "'o(..)h', 'g'",
+@@ -1074,25 +1074,25 @@ TEST_F(InObjectSlackTrackingTest, SubclassRegExpBuiltin) {
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, SubclassRegExpBuiltinNoInlineNew) {
+-  FLAG_inline_new = false;
++  v8_flags.inline_new = false;
+   TestSubclassRegExpBuiltin();
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, SubclassArrayBuiltin) {
+   // Avoid eventual completion of in-object slack tracking.
+-  FLAG_always_turbofan = false;
++  v8_flags.always_turbofan = false;
+ 
+   TestSubclassBuiltin("A1", JS_ARRAY_TYPE, "Array", "42");
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, SubclassArrayBuiltinNoInlineNew) {
+-  FLAG_inline_new = false;
++  v8_flags.inline_new = false;
+   TestSubclassArrayBuiltin();
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, SubclassTypedArrayBuiltin) {
+   // Avoid eventual completion of in-object slack tracking.
+-  FLAG_always_turbofan = false;
++  v8_flags.always_turbofan = false;
+ 
+ #define TYPED_ARRAY_TEST_F(InObjectSlackTrackingTest, Type, type, TYPE, \
+                            elementType)                                 \
+@@ -1104,13 +1104,13 @@ TEST_F(InObjectSlackTrackingTest, SubclassTypedArrayBuiltin) {
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, SubclassTypedArrayBuiltinNoInlineNew) {
+-  FLAG_inline_new = false;
++  v8_flags.inline_new = false;
+   TestSubclassTypedArrayBuiltin();
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, SubclassCollectionBuiltin) {
+   // Avoid eventual completion of in-object slack tracking.
+-  FLAG_always_turbofan = false;
++  v8_flags.always_turbofan = false;
+   CcTest::InitializeVM();
+   v8::HandleScope scope(CcTest::isolate());
+ 
+@@ -1121,13 +1121,13 @@ TEST_F(InObjectSlackTrackingTest, SubclassCollectionBuiltin) {
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, SubclassCollectionBuiltinNoInlineNew) {
+-  FLAG_inline_new = false;
++  v8_flags.inline_new = false;
+   TestSubclassCollectionBuiltin();
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, SubclassArrayBufferBuiltin) {
+   // Avoid eventual completion of in-object slack tracking.
+-  FLAG_always_turbofan = false;
++  v8_flags.always_turbofan = false;
+   CcTest::InitializeVM();
+   v8::HandleScope scope(CcTest::isolate());
+ 
+@@ -1137,13 +1137,13 @@ TEST_F(InObjectSlackTrackingTest, SubclassArrayBufferBuiltin) {
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, SubclassArrayBufferBuiltinNoInlineNew) {
+-  FLAG_inline_new = false;
++  v8_flags.inline_new = false;
+   TestSubclassArrayBufferBuiltin();
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, SubclassPromiseBuiltin) {
+   // Avoid eventual completion of in-object slack tracking.
+-  FLAG_always_turbofan = false;
++  v8_flags.always_turbofan = false;
+   CcTest::InitializeVM();
+   v8::HandleScope scope(CcTest::isolate());
+ 
+@@ -1152,7 +1152,7 @@ TEST_F(InObjectSlackTrackingTest, SubclassPromiseBuiltin) {
+ }
+ 
+ TEST_F(InObjectSlackTrackingTest, SubclassPromiseBuiltinNoInlineNew) {
+-  FLAG_inline_new = false;
++  v8_flags.inline_new = false;
+   TestSubclassPromiseBuiltin();
+ }
+ 
+@@ -1362,7 +1362,7 @@ TEST_F(InObjectSlackTrackingTest,
+ 
+ TEST_F(InObjectSlackTrackingTest,
+        InstanceFieldsArePropertiesDefaultConstructorEager) {
+-  i::FLAG_lazy = false;
++  i::v8_flags.lazy = false;
+   CcTest::InitializeVM();
+   v8::HandleScope scope(CcTest::isolate());
+ 
+@@ -1385,7 +1385,7 @@ TEST_F(InObjectSlackTrackingTest,
+ 
+ TEST_F(InObjectSlackTrackingTest,
+        InstanceFieldsArePropertiesFieldsAndConstructorEager) {
+-  i::FLAG_lazy = false;
++  i::v8_flags.lazy = false;
+   CcTest::InitializeVM();
+   v8::HandleScope scope(CcTest::isolate());
+ 
+diff --git a/test/unittests/objects/modules-unittest.cc b/test/unittests/objects/modules-unittest.cc
+index 677ae0da0e3..d3ac95a3e35 100644
+--- a/test/unittests/objects/modules-unittest.cc
++++ b/test/unittests/objects/modules-unittest.cc
+@@ -177,8 +177,8 @@ MaybeLocal<Module> ResolveCallbackWithImportAssertions(
+ }
+ 
+ TEST_F(ModuleTest, ModuleInstantiationWithImportAssertions) {
+-  bool prev_import_assertions = i::FLAG_harmony_import_assertions;
+-  i::FLAG_harmony_import_assertions = true;
++  bool prev_import_assertions = i::v8_flags.harmony_import_assertions;
++  i::v8_flags.harmony_import_assertions = true;
+   HandleScope scope(isolate());
+   v8::TryCatch try_catch(isolate());
+ 
+@@ -269,7 +269,7 @@ TEST_F(ModuleTest, ModuleInstantiationWithImportAssertions) {
+     CHECK_EQ(42, result->Int32Value(context()).FromJust());
+   }
+   CHECK(!try_catch.HasCaught());
+-  i::FLAG_harmony_import_assertions = prev_import_assertions;
++  i::v8_flags.harmony_import_assertions = prev_import_assertions;
+ }
+ 
+ TEST_F(ModuleTest, ModuleInstantiationFailures2) {
+diff --git a/test/unittests/objects/value-serializer-unittest.cc b/test/unittests/objects/value-serializer-unittest.cc
+index d2c20339ab6..5621aafbe35 100644
+--- a/test/unittests/objects/value-serializer-unittest.cc
++++ b/test/unittests/objects/value-serializer-unittest.cc
+@@ -1668,13 +1668,13 @@ TEST_F(ValueSerializerTest, DecodeRegExpDotAll) {
+ }
+ 
+ TEST_F(ValueSerializerTest, DecodeLinearRegExp) {
+-  bool flag_was_enabled = i::FLAG_enable_experimental_regexp_engine;
++  bool flag_was_enabled = i::v8_flags.enable_experimental_regexp_engine;
+ 
+   // The last byte encodes the regexp flags.
+   std::vector<uint8_t> regexp_encoding = {0xFF, 0x09, 0x3F, 0x00, 0x52,
+                                           0x03, 0x66, 0x6F, 0x6F, 0x6D};
+ 
+-  i::FLAG_enable_experimental_regexp_engine = true;
++  i::v8_flags.enable_experimental_regexp_engine = true;
+   // DecodeTestUpToVersion will overwrite the version number in the data but
+   // it's fine.
+   DecodeTestUpToVersion(
+@@ -1684,10 +1684,10 @@ TEST_F(ValueSerializerTest, DecodeLinearRegExp) {
+         ExpectScriptTrue("result.toString() === '/foo/glmsy'");
+       });
+ 
+-  i::FLAG_enable_experimental_regexp_engine = false;
++  i::v8_flags.enable_experimental_regexp_engine = false;
+   InvalidDecodeTest(regexp_encoding);
+ 
+-  i::FLAG_enable_experimental_regexp_engine = flag_was_enabled;
++  i::v8_flags.enable_experimental_regexp_engine = flag_was_enabled;
+ }
+ 
+ TEST_F(ValueSerializerTest, DecodeHasIndicesRegExp) {
+@@ -2485,14 +2485,14 @@ class ValueSerializerTestWithSharedArrayBufferClone
+   }
+ 
+   static void SetUpTestSuite() {
+-    flag_was_enabled_ = i::FLAG_harmony_sharedarraybuffer;
+-    i::FLAG_harmony_sharedarraybuffer = true;
++    flag_was_enabled_ = i::v8_flags.harmony_sharedarraybuffer;
++    i::v8_flags.harmony_sharedarraybuffer = true;
+     ValueSerializerTest::SetUpTestSuite();
+   }
+ 
+   static void TearDownTestSuite() {
+     ValueSerializerTest::TearDownTestSuite();
+-    i::FLAG_harmony_sharedarraybuffer = flag_was_enabled_;
++    i::v8_flags.harmony_sharedarraybuffer = flag_was_enabled_;
+     flag_was_enabled_ = false;
+   }
+ 
+@@ -2590,8 +2590,8 @@ TEST_F(ValueSerializerTestWithSharedArrayBufferClone,
+ #if V8_ENABLE_WEBASSEMBLY
+ TEST_F(ValueSerializerTestWithSharedArrayBufferClone,
+        RoundTripWebAssemblyMemory) {
+-  bool flag_was_enabled = i::FLAG_experimental_wasm_threads;
+-  i::FLAG_experimental_wasm_threads = true;
++  bool flag_was_enabled = i::v8_flags.experimental_wasm_threads;
++  i::v8_flags.experimental_wasm_threads = true;
+ 
+   std::vector<uint8_t> data = {0x00, 0x01, 0x80, 0xFF};
+   data.resize(65536);
+@@ -2618,7 +2618,7 @@ TEST_F(ValueSerializerTestWithSharedArrayBufferClone,
+   ExpectScriptTrue(
+       "new Uint8Array(result.buffer, 0, 4).toString() === '0,1,128,255'");
+ 
+-  i::FLAG_experimental_wasm_threads = flag_was_enabled;
++  i::v8_flags.experimental_wasm_threads = flag_was_enabled;
+ }
+ #endif  // V8_ENABLE_WEBASSEMBLY
+ 
+@@ -2942,14 +2942,14 @@ class ValueSerializerTestWithWasm : public ValueSerializerTest {
+ 
+  protected:
+   static void SetUpTestSuite() {
+-    g_saved_flag = i::FLAG_expose_wasm;
+-    i::FLAG_expose_wasm = true;
++    g_saved_flag = i::v8_flags.expose_wasm;
++    i::v8_flags.expose_wasm = true;
+     ValueSerializerTest::SetUpTestSuite();
+   }
+ 
+   static void TearDownTestSuite() {
+     ValueSerializerTest::TearDownTestSuite();
+-    i::FLAG_expose_wasm = g_saved_flag;
++    i::v8_flags.expose_wasm = g_saved_flag;
+     g_saved_flag = false;
+   }
+ 
+diff --git a/test/unittests/objects/weakmaps-unittest.cc b/test/unittests/objects/weakmaps-unittest.cc
+index cd2aad1269a..cbd66b5df29 100644
+--- a/test/unittests/objects/weakmaps-unittest.cc
++++ b/test/unittests/objects/weakmaps-unittest.cc
+@@ -55,7 +55,7 @@ static void WeakPointerCallback(const v8::WeakCallbackInfo<void>& data) {
+ }
+ 
+ TEST_F(WeakMapsTest, Weakness) {
+-  FLAG_incremental_marking = false;
++  v8_flags.incremental_marking = false;
+   Isolate* isolate = i_isolate();
+   Factory* factory = isolate->factory();
+   HandleScope scope(isolate);
+@@ -185,7 +185,8 @@ TEST_F(WeakMapsTest, WeakMapPromotionMarkCompact) {
+ }
+ 
+ TEST_F(WeakMapsTest, WeakMapScavenge) {
+-  if (i::FLAG_single_generation || i::FLAG_stress_incremental_marking) return;
++  if (i::v8_flags.single_generation) return;
++  if (i::v8_flags.stress_incremental_marking) return;
+   Isolate* isolate = i_isolate();
+   Factory* factory = isolate->factory();
+   HandleScope scope(isolate);
+@@ -203,7 +204,7 @@ TEST_F(WeakMapsTest, WeakMapScavenge) {
+   CHECK(EphemeronHashTableContainsKey(
+       EphemeronHashTable::cast(weakmap->table()), *object));
+ 
+-  if (!FLAG_minor_mc) {
++  if (!v8_flags.minor_mc) {
+     GcAndSweep(NEW_SPACE);
+     CHECK(ObjectInYoungGeneration(*object));
+     CHECK(!ObjectInYoungGeneration(weakmap->table()));
+@@ -221,10 +222,10 @@ TEST_F(WeakMapsTest, WeakMapScavenge) {
+ // Test that weak map values on an evacuation candidate which are not reachable
+ // by other paths are correctly recorded in the slots buffer.
+ TEST_F(WeakMapsTest, Regress2060a) {
+-  if (!i::FLAG_compact) return;
+-  if (i::FLAG_enable_third_party_heap) return;
+-  FLAG_compact_on_every_full_gc = true;
+-  FLAG_stress_concurrent_allocation = false;  // For SimulateFullSpace.
++  if (!i::v8_flags.compact) return;
++  if (i::v8_flags.enable_third_party_heap) return;
++  v8_flags.compact_on_every_full_gc = true;
++  v8_flags.stress_concurrent_allocation = false;  // For SimulateFullSpace.
+   Isolate* isolate = i_isolate();
+   Factory* factory = isolate->factory();
+   Heap* heap = isolate->heap();
+@@ -245,7 +246,7 @@ TEST_F(WeakMapsTest, Regress2060a) {
+       Handle<JSObject> object =
+           factory->NewJSObject(function, AllocationType::kOld);
+       CHECK(!Heap::InYoungGeneration(*object));
+-      CHECK_IMPLIES(!FLAG_enable_third_party_heap,
++      CHECK_IMPLIES(!v8_flags.enable_third_party_heap,
+                     !first_page->Contains(object->address()));
+       int32_t hash = key->GetOrCreateHash(isolate).value();
+       JSWeakCollection::Set(weakmap, key, object, hash);
+@@ -253,19 +254,19 @@ TEST_F(WeakMapsTest, Regress2060a) {
+   }
+ 
+   // Force compacting garbage collection.
+-  CHECK(FLAG_compact_on_every_full_gc);
++  CHECK(v8_flags.compact_on_every_full_gc);
+   CollectAllGarbage();
+ }
+ 
+ // Test that weak map keys on an evacuation candidate which are reachable by
+ // other strong paths are correctly recorded in the slots buffer.
+ TEST_F(WeakMapsTest, Regress2060b) {
+-  if (!i::FLAG_compact) return;
+-  FLAG_compact_on_every_full_gc = true;
++  if (!i::v8_flags.compact) return;
++  v8_flags.compact_on_every_full_gc = true;
+ #ifdef VERIFY_HEAP
+-  FLAG_verify_heap = true;
++  v8_flags.verify_heap = true;
+ #endif
+-  FLAG_stress_concurrent_allocation = false;  // For SimulateFullSpace.
++  v8_flags.stress_concurrent_allocation = false;  // For SimulateFullSpace.
+ 
+   Isolate* isolate = i_isolate();
+   Factory* factory = isolate->factory();
+@@ -283,7 +284,7 @@ TEST_F(WeakMapsTest, Regress2060b) {
+   for (int i = 0; i < 32; i++) {
+     keys[i] = factory->NewJSObject(function, AllocationType::kOld);
+     CHECK(!Heap::InYoungGeneration(*keys[i]));
+-    CHECK_IMPLIES(!FLAG_enable_third_party_heap,
++    CHECK_IMPLIES(!v8_flags.enable_third_party_heap,
+                   !first_page->Contains(keys[i]->address()));
+   }
+   Handle<JSWeakMap> weakmap = isolate->factory()->NewJSWeakMap();
+@@ -295,14 +296,14 @@ TEST_F(WeakMapsTest, Regress2060b) {
+ 
+   // Force compacting garbage collection. The subsequent collections are used
+   // to verify that key references were actually updated.
+-  CHECK(FLAG_compact_on_every_full_gc);
++  CHECK(v8_flags.compact_on_every_full_gc);
+   CollectAllGarbage();
+   CollectAllGarbage();
+   CollectAllGarbage();
+ }
+ 
+ TEST_F(WeakMapsTest, Regress399527) {
+-  if (!FLAG_incremental_marking) return;
++  if (!v8_flags.incremental_marking) return;
+   v8::HandleScope scope(v8_isolate());
+   Isolate* isolate = i_isolate();
+   Heap* heap = isolate->heap();
+diff --git a/test/unittests/objects/weaksets-unittest.cc b/test/unittests/objects/weaksets-unittest.cc
+index e8cc9577956..b2a9df3a0cc 100644
+--- a/test/unittests/objects/weaksets-unittest.cc
++++ b/test/unittests/objects/weaksets-unittest.cc
+@@ -71,7 +71,7 @@ static void WeakPointerCallback(const v8::WeakCallbackInfo<void>& data) {
+ }
+ 
+ TEST_F(WeakSetsTest, WeakSet_Weakness) {
+-  FLAG_incremental_marking = false;
++  v8_flags.incremental_marking = false;
+   Factory* factory = i_isolate()->factory();
+   HandleScope scope(i_isolate());
+   Handle<JSWeakSet> weakset = AllocateJSWeakSet();
+@@ -156,10 +156,10 @@ TEST_F(WeakSetsTest, WeakSet_Shrinking) {
+ // Test that weak set values on an evacuation candidate which are not reachable
+ // by other paths are correctly recorded in the slots buffer.
+ TEST_F(WeakSetsTest, WeakSet_Regress2060a) {
+-  if (!i::FLAG_compact) return;
+-  if (i::FLAG_enable_third_party_heap) return;
+-  FLAG_compact_on_every_full_gc = true;
+-  FLAG_stress_concurrent_allocation = false;  // For SimulateFullSpace.
++  if (!i::v8_flags.compact) return;
++  if (i::v8_flags.enable_third_party_heap) return;
++  v8_flags.compact_on_every_full_gc = true;
++  v8_flags.stress_concurrent_allocation = false;  // For SimulateFullSpace.
+   Factory* factory = i_isolate()->factory();
+   Heap* heap = i_isolate()->heap();
+   HandleScope scope(i_isolate());
+@@ -179,7 +179,7 @@ TEST_F(WeakSetsTest, WeakSet_Regress2060a) {
+       Handle<JSObject> object =
+           factory->NewJSObject(function, AllocationType::kOld);
+       CHECK(!Heap::InYoungGeneration(*object));
+-      CHECK_IMPLIES(!FLAG_enable_third_party_heap,
++      CHECK_IMPLIES(!v8_flags.enable_third_party_heap,
+                     !first_page->Contains(object->address()));
+       int32_t hash = key->GetOrCreateHash(i_isolate()).value();
+       JSWeakCollection::Set(weakset, key, object, hash);
+@@ -187,20 +187,20 @@ TEST_F(WeakSetsTest, WeakSet_Regress2060a) {
+   }
+ 
+   // Force compacting garbage collection.
+-  CHECK(FLAG_compact_on_every_full_gc);
++  CHECK(v8_flags.compact_on_every_full_gc);
+   CollectAllGarbage();
+ }
+ 
+ // Test that weak set keys on an evacuation candidate which are reachable by
+ // other strong paths are correctly recorded in the slots buffer.
+ TEST_F(WeakSetsTest, WeakSet_Regress2060b) {
+-  if (!i::FLAG_compact) return;
+-  if (i::FLAG_enable_third_party_heap) return;
+-  FLAG_compact_on_every_full_gc = true;
++  if (!i::v8_flags.compact) return;
++  if (i::v8_flags.enable_third_party_heap) return;
++  v8_flags.compact_on_every_full_gc = true;
+ #ifdef VERIFY_HEAP
+-  FLAG_verify_heap = true;
++  v8_flags.verify_heap = true;
+ #endif
+-  FLAG_stress_concurrent_allocation = false;  // For SimulateFullSpace.
++  v8_flags.stress_concurrent_allocation = false;  // For SimulateFullSpace.
+ 
+   Factory* factory = i_isolate()->factory();
+   Heap* heap = i_isolate()->heap();
+@@ -217,7 +217,7 @@ TEST_F(WeakSetsTest, WeakSet_Regress2060b) {
+   for (int i = 0; i < 32; i++) {
+     keys[i] = factory->NewJSObject(function, AllocationType::kOld);
+     CHECK(!Heap::InYoungGeneration(*keys[i]));
+-    CHECK_IMPLIES(!FLAG_enable_third_party_heap,
++    CHECK_IMPLIES(!v8_flags.enable_third_party_heap,
+                   !first_page->Contains(keys[i]->address()));
+   }
+   Handle<JSWeakSet> weakset = AllocateJSWeakSet();
+@@ -229,7 +229,7 @@ TEST_F(WeakSetsTest, WeakSet_Regress2060b) {
+ 
+   // Force compacting garbage collection. The subsequent collections are used
+   // to verify that key references were actually updated.
+-  CHECK(FLAG_compact_on_every_full_gc);
++  CHECK(v8_flags.compact_on_every_full_gc);
+   CollectAllGarbage();
+   CollectAllGarbage();
+   CollectAllGarbage();
+diff --git a/test/unittests/parser/decls-unittest.cc b/test/unittests/parser/decls-unittest.cc
+index ed35baf8ab1..8b12db12e3e 100644
+--- a/test/unittests/parser/decls-unittest.cc
++++ b/test/unittests/parser/decls-unittest.cc
+@@ -466,7 +466,7 @@ TEST_F(DeclsTest, CrossScriptReferences) {
+ }
+ 
+ TEST_F(DeclsTest, CrossScriptReferences_Simple) {
+-  i::FLAG_use_strict = true;
++  i::v8_flags.use_strict = true;
+ 
+   HandleScope scope(isolate());
+ 
+@@ -478,7 +478,7 @@ TEST_F(DeclsTest, CrossScriptReferences_Simple) {
+ }
+ 
+ TEST_F(DeclsTest, CrossScriptReferences_Simple2) {
+-  i::FLAG_use_strict = true;
++  i::v8_flags.use_strict = true;
+ 
+   HandleScope scope(isolate());
+ 
+@@ -657,7 +657,7 @@ TEST_F(DeclsTest, CrossScriptReferencesHarmonyRegress) {
+ }
+ 
+ TEST_F(DeclsTest, GlobalLexicalOSR) {
+-  i::FLAG_use_strict = true;
++  i::v8_flags.use_strict = true;
+ 
+   HandleScope scope(isolate());
+   SimpleContext context;
+@@ -680,7 +680,7 @@ TEST_F(DeclsTest, GlobalLexicalOSR) {
+ }
+ 
+ TEST_F(DeclsTest, CrossScriptConflicts) {
+-  i::FLAG_use_strict = true;
++  i::v8_flags.use_strict = true;
+ 
+   HandleScope scope(isolate());
+ 
+@@ -805,7 +805,7 @@ TEST_F(DeclsTest, CrossScriptStaticLookupUndeclared) {
+ }
+ 
+ TEST_F(DeclsTest, CrossScriptLoadICs) {
+-  i::FLAG_allow_natives_syntax = true;
++  i::v8_flags.allow_natives_syntax = true;
+ 
+   HandleScope handle_scope(isolate());
+ 
+@@ -863,7 +863,7 @@ TEST_F(DeclsTest, CrossScriptLoadICs) {
+ }
+ 
+ TEST_F(DeclsTest, CrossScriptStoreICs) {
+-  i::FLAG_allow_natives_syntax = true;
++  i::v8_flags.allow_natives_syntax = true;
+ 
+   HandleScope handle_scope(isolate());
+ 
+@@ -932,7 +932,7 @@ TEST_F(DeclsTest, CrossScriptStoreICs) {
+ }
+ 
+ TEST_F(DeclsTest, CrossScriptAssignmentToConst) {
+-  i::FLAG_allow_natives_syntax = true;
++  i::v8_flags.allow_natives_syntax = true;
+ 
+   HandleScope handle_scope(isolate());
+ 
+@@ -953,7 +953,7 @@ TEST_F(DeclsTest, CrossScriptAssignmentToConst) {
+ }
+ 
+ TEST_F(DeclsTest, Regress425510) {
+-  i::FLAG_allow_natives_syntax = true;
++  i::v8_flags.allow_natives_syntax = true;
+ 
+   HandleScope handle_scope(isolate());
+ 
+@@ -969,7 +969,7 @@ TEST_F(DeclsTest, Regress425510) {
+ }
+ 
+ TEST_F(DeclsTest, Regress3941) {
+-  i::FLAG_allow_natives_syntax = true;
++  i::v8_flags.allow_natives_syntax = true;
+ 
+   HandleScope handle_scope(isolate());
+ 
+@@ -1009,7 +1009,7 @@ TEST_F(DeclsTest, Regress3941) {
+ }
+ 
+ TEST_F(DeclsTest, Regress3941_Reads) {
+-  i::FLAG_allow_natives_syntax = true;
++  i::v8_flags.allow_natives_syntax = true;
+ 
+   HandleScope handle_scope(isolate());
+ 
+diff --git a/test/unittests/parser/parse-decision-unittest.cc b/test/unittests/parser/parse-decision-unittest.cc
+index 67c217d24fd..8ac2bf23c03 100644
+--- a/test/unittests/parser/parse-decision-unittest.cc
++++ b/test/unittests/parser/parse-decision-unittest.cc
+@@ -55,7 +55,7 @@ void GetTopLevelFunctionInfo(
+ }  // anonymous namespace
+ 
+ TEST_F(ParseDecisionTest, GetTopLevelFunctionInfo) {
+-  if (!FLAG_lazy) return;
++  if (!v8_flags.lazy) return;
+ 
+   HandleScope scope(i_isolate());
+ 
+@@ -69,7 +69,7 @@ TEST_F(ParseDecisionTest, GetTopLevelFunctionInfo) {
+ }
+ 
+ TEST_F(ParseDecisionTest, EagerlyCompileImmediateUseFunctions) {
+-  if (!FLAG_lazy) return;
++  if (!v8_flags.lazy) return;
+ 
+   HandleScope scope(i_isolate());
+ 
+@@ -100,7 +100,7 @@ TEST_F(ParseDecisionTest, EagerlyCompileImmediateUseFunctions) {
+ }
+ 
+ TEST_F(ParseDecisionTest, CommaFunctionSequence) {
+-  if (!FLAG_lazy) return;
++  if (!v8_flags.lazy) return;
+ 
+   HandleScope scope(i_isolate());
+ 
+diff --git a/test/unittests/parser/parsing-unittest.cc b/test/unittests/parser/parsing-unittest.cc
+index 965a628571a..aa023ae4d6b 100644
+--- a/test/unittests/parser/parsing-unittest.cc
++++ b/test/unittests/parser/parsing-unittest.cc
+@@ -51,7 +51,7 @@ enum ParserFlag {
+ enum ParserSyncTestResult { kSuccessOrError, kSuccess, kError };
+ 
+ void SetGlobalFlags(base::EnumSet<ParserFlag> flags) {
+-  i::FLAG_allow_natives_syntax = flags.contains(kAllowNatives);
++  i::v8_flags.allow_natives_syntax = flags.contains(kAllowNatives);
+ }
+ 
+ void SetParserFlags(i::UnoptimizedCompileFlags* compile_flags,
+@@ -226,7 +226,7 @@ class ParsingTest : public TestWithContextAndZone {
+     i::UnoptimizedCompileFlags compile_flags =
+         i::UnoptimizedCompileFlags::ForToplevelCompile(
+             isolate, true, LanguageMode::kSloppy, REPLMode::kNo,
+-            ScriptType::kClassic, FLAG_lazy);
++            ScriptType::kClassic, v8_flags.lazy);
+     SetParserFlags(&compile_flags, flags);
+     compile_flags.set_is_module(is_module);
+ 
+@@ -3122,7 +3122,7 @@ TEST_F(ParsingTest, InvalidLeftHandSide) {
+ 
+ TEST_F(ParsingTest, FuncNameInferrerBasic) {
+   // Tests that function names are inferred properly.
+-  i::FLAG_allow_natives_syntax = true;
++  i::v8_flags.allow_natives_syntax = true;
+ 
+   RunJS(
+       "var foo1 = function() {}; "
+@@ -3160,7 +3160,7 @@ TEST_F(ParsingTest, FuncNameInferrerBasic) {
+ TEST_F(ParsingTest, FuncNameInferrerTwoByte) {
+   // Tests function name inferring in cases where some parts of the inferred
+   // function name are two-byte strings.
+-  i::FLAG_allow_natives_syntax = true;
++  i::v8_flags.allow_natives_syntax = true;
+   v8::Isolate* isolate = v8_isolate();
+ 
+   uint16_t* two_byte_source = AsciiToTwoByteString(
+@@ -3183,7 +3183,7 @@ TEST_F(ParsingTest, FuncNameInferrerTwoByte) {
+ TEST_F(ParsingTest, FuncNameInferrerEscaped) {
+   // The same as FuncNameInferrerTwoByte, except that we express the two-byte
+   // character as a Unicode escape.
+-  i::FLAG_allow_natives_syntax = true;
++  i::v8_flags.allow_natives_syntax = true;
+   v8::Isolate* isolate = v8_isolate();
+ 
+   uint16_t* two_byte_source = AsciiToTwoByteString(
+@@ -4164,7 +4164,7 @@ i::Scope* DeserializeFunctionScope(i::Isolate* isolate, i::Zone* zone,
+ }  // namespace
+ 
+ TEST_F(ParsingTest, AsmModuleFlag) {
+-  i::FLAG_validate_asm = false;
++  i::v8_flags.validate_asm = false;
+   i::Isolate* isolate = i_isolate();
+ 
+   const char* src =
+@@ -4211,8 +4211,8 @@ TEST_F(ParsingTest, SloppyModeUseCount) {
+   int use_counts[v8::Isolate::kUseCounterFeatureCount] = {};
+   global_use_counts = use_counts;
+   // Force eager parsing (preparser doesn't update use counts).
+-  i::FLAG_lazy = false;
+-  i::FLAG_lazy_streaming = false;
++  i::v8_flags.lazy = false;
++  i::v8_flags.lazy_streaming = false;
+   v8_isolate()->SetUseCounterCallback(MockUseCounterCallback);
+   RunJS("function bar() { var baz = 1; }");
+   CHECK_LT(0, use_counts[v8::Isolate::kSloppyMode]);
+@@ -4222,8 +4222,8 @@ TEST_F(ParsingTest, SloppyModeUseCount) {
+ TEST_F(ParsingTest, BothModesUseCount) {
+   int use_counts[v8::Isolate::kUseCounterFeatureCount] = {};
+   global_use_counts = use_counts;
+-  i::FLAG_lazy = false;
+-  i::FLAG_lazy_streaming = false;
++  i::v8_flags.lazy = false;
++  i::v8_flags.lazy_streaming = false;
+   v8_isolate()->SetUseCounterCallback(MockUseCounterCallback);
+   RunJS("function bar() { 'use strict'; var baz = 1; }");
+   CHECK_LT(0, use_counts[v8::Isolate::kSloppyMode]);
+@@ -4647,7 +4647,7 @@ TEST_F(ParsingTest, ImportExpressionSuccess) {
+ }
+ 
+ TEST_F(ParsingTest, ImportExpressionWithImportAssertionSuccess) {
+-  i::FLAG_harmony_import_assertions = true;
++  i::v8_flags.harmony_import_assertions = true;
+ 
+   // clang-format off
+   const char* context_data[][2] = {
+@@ -4778,7 +4778,7 @@ TEST_F(ParsingTest, ImportExpressionErrors) {
+ 
+ TEST_F(ParsingTest, ImportExpressionWithImportAssertionErrors) {
+   {
+-    i::FLAG_harmony_import_assertions = true;
++    i::v8_flags.harmony_import_assertions = true;
+ 
+     // clang-format off
+     const char* context_data[][2] = {
+@@ -4880,7 +4880,7 @@ TEST_F(ParsingTest, BasicImportAssertionParsing) {
+   };
+   // clang-format on
+ 
+-  i::FLAG_harmony_import_assertions = true;
++  i::v8_flags.harmony_import_assertions = true;
+   i::Isolate* isolate = i_isolate();
+   i::Factory* factory = isolate->factory();
+ 
+@@ -4947,7 +4947,7 @@ TEST_F(ParsingTest, ImportAssertionParsingErrors) {
+   };
+   // clang-format on
+ 
+-  i::FLAG_harmony_import_assertions = true;
++  i::v8_flags.harmony_import_assertions = true;
+   i::Isolate* isolate = i_isolate();
+   i::Factory* factory = isolate->factory();
+ 
+@@ -7956,7 +7956,7 @@ TEST_F(ParsingTest, ModuleParsingInternals) {
+ }
+ 
+ TEST_F(ParsingTest, ModuleParsingInternalsWithImportAssertions) {
+-  i::FLAG_harmony_import_assertions = true;
++  i::v8_flags.harmony_import_assertions = true;
+   i::Isolate* isolate = i_isolate();
+   i::Factory* factory = isolate->factory();
+   isolate->stack_guard()->SetStackLimit(base::Stack::GetCurrentStackPosition() -
+@@ -8049,7 +8049,7 @@ TEST_F(ParsingTest, ModuleParsingInternalsWithImportAssertions) {
+ }
+ 
+ TEST_F(ParsingTest, ModuleParsingModuleRequestOrdering) {
+-  i::FLAG_harmony_import_assertions = true;
++  i::v8_flags.harmony_import_assertions = true;
+   i::Isolate* isolate = i_isolate();
+   i::Factory* factory = isolate->factory();
+   isolate->stack_guard()->SetStackLimit(base::Stack::GetCurrentStackPosition() -
+@@ -8317,7 +8317,7 @@ TEST_F(ParsingTest, ModuleParsingModuleRequestOrdering) {
+ }
+ 
+ TEST_F(ParsingTest, ModuleParsingImportAssertionKeySorting) {
+-  i::FLAG_harmony_import_assertions = true;
++  i::v8_flags.harmony_import_assertions = true;
+   i::Isolate* isolate = i_isolate();
+   i::Factory* factory = isolate->factory();
+   isolate->stack_guard()->SetStackLimit(base::Stack::GetCurrentStackPosition() -
+diff --git a/test/unittests/parser/scanner-streams-unittest.cc b/test/unittests/parser/scanner-streams-unittest.cc
+index c8f697c87cb..41355df10ff 100644
+--- a/test/unittests/parser/scanner-streams-unittest.cc
++++ b/test/unittests/parser/scanner-streams-unittest.cc
+@@ -760,8 +760,8 @@ TEST_F(ScannerStreamsTest, TestOverlongAndInvalidSequences) {
+ 
+ TEST_F(ScannerStreamsTest, RelocatingCharacterStream) {
+   // This test relies on the invariant that the scavenger will move objects
+-  if (i::FLAG_single_generation) return;
+-  i::FLAG_manual_evacuation_candidates_selection = true;
++  if (i::v8_flags.single_generation) return;
++  i::v8_flags.manual_evacuation_candidates_selection = true;
+   v8::internal::ManualGCScope manual_gc_scope(i_isolate());
+   v8::HandleScope scope(isolate());
+ 
+@@ -798,8 +798,8 @@ TEST_F(ScannerStreamsTest, RelocatingCharacterStream) {
+ 
+ TEST_F(ScannerStreamsTest, RelocatingUnbufferedCharacterStream) {
+   // This test relies on the invariant that the scavenger will move objects
+-  if (i::FLAG_single_generation) return;
+-  i::FLAG_manual_evacuation_candidates_selection = true;
++  if (i::v8_flags.single_generation) return;
++  i::v8_flags.manual_evacuation_candidates_selection = true;
+   v8::internal::ManualGCScope manual_gc_scope(i_isolate());
+   v8::HandleScope scope(isolate());
+ 
+diff --git a/test/unittests/regexp/regexp-unittest.cc b/test/unittests/regexp/regexp-unittest.cc
+index f4e0f957763..065eea336f4 100644
+--- a/test/unittests/regexp/regexp-unittest.cc
++++ b/test/unittests/regexp/regexp-unittest.cc
+@@ -576,10 +576,10 @@ static void Execute(const char* input, bool multiline, bool unicode,
+ #ifdef DEBUG
+ 
+ TEST_F(RegExpTest, ParsePossessiveRepetition) {
+-  bool old_flag_value = FLAG_regexp_possessive_quantifier;
++  bool old_flag_value = v8_flags.regexp_possessive_quantifier;
+ 
+   // Enable possessive quantifier syntax.
+-  FLAG_regexp_possessive_quantifier = true;
++  v8_flags.regexp_possessive_quantifier = true;
+ 
+   CheckParseEq("a*+", "(# 0 - p 'a')");
+   CheckParseEq("a++", "(# 1 - p 'a')");
+@@ -588,7 +588,7 @@ TEST_F(RegExpTest, ParsePossessiveRepetition) {
+   CheckParseEq("za{10,20}+b", "(: 'z' (# 10 20 p 'a') 'b')");
+ 
+   // Disable possessive quantifier syntax.
+-  FLAG_regexp_possessive_quantifier = false;
++  v8_flags.regexp_possessive_quantifier = false;
+ 
+   CHECK_PARSE_ERROR("a*+");
+   CHECK_PARSE_ERROR("a++");
+@@ -596,7 +596,7 @@ TEST_F(RegExpTest, ParsePossessiveRepetition) {
+   CHECK_PARSE_ERROR("a{10,20}+");
+   CHECK_PARSE_ERROR("a{10,20}+b");
+ 
+-  FLAG_regexp_possessive_quantifier = old_flag_value;
++  v8_flags.regexp_possessive_quantifier = old_flag_value;
+ }
+ 
+ #endif
+@@ -1783,12 +1783,12 @@ TEST_F(RegExpTest, PeepholeNoChange) {
+ 
+   Handle<String> source = factory->NewStringFromStaticChars("^foo");
+ 
+-  i::FLAG_regexp_peephole_optimization = false;
++  v8_flags.regexp_peephole_optimization = false;
+   Handle<ByteArray> array = Handle<ByteArray>::cast(orig.GetCode(source));
+   int length = array->length();
+   byte* byte_array = array->GetDataStartAddress();
+ 
+-  i::FLAG_regexp_peephole_optimization = true;
++  v8_flags.regexp_peephole_optimization = true;
+   Handle<ByteArray> array_optimized =
+       Handle<ByteArray>::cast(opt.GetCode(source));
+   byte* byte_array_optimized = array_optimized->GetDataStartAddress();
+@@ -1818,11 +1818,11 @@ TEST_F(RegExpTest, PeepholeSkipUntilChar) {
+ 
+   Handle<String> source = factory->NewStringFromStaticChars("dummy");
+ 
+-  i::FLAG_regexp_peephole_optimization = false;
++  v8_flags.regexp_peephole_optimization = false;
+   Handle<ByteArray> array = Handle<ByteArray>::cast(orig.GetCode(source));
+   int length = array->length();
+ 
+-  i::FLAG_regexp_peephole_optimization = true;
++  v8_flags.regexp_peephole_optimization = true;
+   Handle<ByteArray> array_optimized =
+       Handle<ByteArray>::cast(opt.GetCode(source));
+   int length_optimized = array_optimized->length();
+@@ -1871,11 +1871,11 @@ TEST_F(RegExpTest, PeepholeSkipUntilBitInTable) {
+ 
+   Handle<String> source = factory->NewStringFromStaticChars("dummy");
+ 
+-  i::FLAG_regexp_peephole_optimization = false;
++  v8_flags.regexp_peephole_optimization = false;
+   Handle<ByteArray> array = Handle<ByteArray>::cast(orig.GetCode(source));
+   int length = array->length();
+ 
+-  i::FLAG_regexp_peephole_optimization = true;
++  v8_flags.regexp_peephole_optimization = true;
+   Handle<ByteArray> array_optimized =
+       Handle<ByteArray>::cast(opt.GetCode(source));
+   int length_optimized = array_optimized->length();
+@@ -1918,11 +1918,11 @@ TEST_F(RegExpTest, PeepholeSkipUntilCharPosChecked) {
+ 
+   Handle<String> source = factory->NewStringFromStaticChars("dummy");
+ 
+-  i::FLAG_regexp_peephole_optimization = false;
++  v8_flags.regexp_peephole_optimization = false;
+   Handle<ByteArray> array = Handle<ByteArray>::cast(orig.GetCode(source));
+   int length = array->length();
+ 
+-  i::FLAG_regexp_peephole_optimization = true;
++  v8_flags.regexp_peephole_optimization = true;
+   Handle<ByteArray> array_optimized =
+       Handle<ByteArray>::cast(opt.GetCode(source));
+   int length_optimized = array_optimized->length();
+@@ -1966,11 +1966,11 @@ TEST_F(RegExpTest, PeepholeSkipUntilCharAnd) {
+ 
+   Handle<String> source = factory->NewStringFromStaticChars("dummy");
+ 
+-  i::FLAG_regexp_peephole_optimization = false;
++  v8_flags.regexp_peephole_optimization = false;
+   Handle<ByteArray> array = Handle<ByteArray>::cast(orig.GetCode(source));
+   int length = array->length();
+ 
+-  i::FLAG_regexp_peephole_optimization = true;
++  v8_flags.regexp_peephole_optimization = true;
+   Handle<ByteArray> array_optimized =
+       Handle<ByteArray>::cast(opt.GetCode(source));
+   int length_optimized = array_optimized->length();
+@@ -2014,11 +2014,11 @@ TEST_F(RegExpTest, PeepholeSkipUntilCharOrChar) {
+ 
+   Handle<String> source = factory->NewStringFromStaticChars("dummy");
+ 
+-  i::FLAG_regexp_peephole_optimization = false;
++  v8_flags.regexp_peephole_optimization = false;
+   Handle<ByteArray> array = Handle<ByteArray>::cast(orig.GetCode(source));
+   int length = array->length();
+ 
+-  i::FLAG_regexp_peephole_optimization = true;
++  v8_flags.regexp_peephole_optimization = true;
+   Handle<ByteArray> array_optimized =
+       Handle<ByteArray>::cast(opt.GetCode(source));
+   int length_optimized = array_optimized->length();
+@@ -2073,11 +2073,11 @@ TEST_F(RegExpTest, PeepholeSkipUntilGtOrNotBitInTable) {
+ 
+   Handle<String> source = factory->NewStringFromStaticChars("dummy");
+ 
+-  i::FLAG_regexp_peephole_optimization = false;
++  v8_flags.regexp_peephole_optimization = false;
+   Handle<ByteArray> array = Handle<ByteArray>::cast(orig.GetCode(source));
+   int length = array->length();
+ 
+-  i::FLAG_regexp_peephole_optimization = true;
++  v8_flags.regexp_peephole_optimization = true;
+   Handle<ByteArray> array_optimized =
+       Handle<ByteArray>::cast(opt.GetCode(source));
+   int length_optimized = array_optimized->length();
+@@ -2152,7 +2152,7 @@ TEST_F(RegExpTest, PeepholeLabelFixupsInside) {
+ 
+   Handle<String> source = factory->NewStringFromStaticChars("dummy");
+ 
+-  i::FLAG_regexp_peephole_optimization = false;
++  v8_flags.regexp_peephole_optimization = false;
+   Handle<ByteArray> array = Handle<ByteArray>::cast(orig.GetCode(source));
+ 
+   for (int label_idx = 0; label_idx < 3; label_idx++) {
+@@ -2162,7 +2162,7 @@ TEST_F(RegExpTest, PeepholeLabelFixupsInside) {
+     }
+   }
+ 
+-  i::FLAG_regexp_peephole_optimization = true;
++  v8_flags.regexp_peephole_optimization = true;
+   Handle<ByteArray> array_optimized =
+       Handle<ByteArray>::cast(opt.GetCode(source));
+ 
+@@ -2258,7 +2258,7 @@ TEST_F(RegExpTest, PeepholeLabelFixupsComplex) {
+ 
+   Handle<String> source = factory->NewStringFromStaticChars("dummy");
+ 
+-  i::FLAG_regexp_peephole_optimization = false;
++  v8_flags.regexp_peephole_optimization = false;
+   Handle<ByteArray> array = Handle<ByteArray>::cast(orig.GetCode(source));
+ 
+   for (int label_idx = 0; label_idx < 4; label_idx++) {
+@@ -2268,7 +2268,7 @@ TEST_F(RegExpTest, PeepholeLabelFixupsComplex) {
+     }
+   }
+ 
+-  i::FLAG_regexp_peephole_optimization = true;
++  v8_flags.regexp_peephole_optimization = true;
+   Handle<ByteArray> array_optimized =
+       Handle<ByteArray>::cast(opt.GetCode(source));
+ 
+@@ -2300,7 +2300,7 @@ TEST_F(RegExpTest, PeepholeLabelFixupsComplex) {
+ }
+ 
+ TEST_F(RegExpTestWithContext, UnicodePropertyEscapeCodeSize) {
+-  i::FlagScope<bool> f(&v8::internal::FLAG_regexp_tier_up, false);
++  FlagScope<bool> f(&v8_flags.regexp_tier_up, false);
+ 
+   v8::HandleScope scope(isolate());
+   i::Handle<i::JSRegExp> re = Utils::OpenHandle(
+@@ -2347,8 +2347,8 @@ void ReenterRegExp(v8::Isolate* isolate, void* data) {
+ 
+ // Tests reentrant irregexp calls.
+ TEST_F(RegExpTestWithContext, RegExpInterruptReentrantExecution) {
+-  CHECK(!i::FLAG_jitless);
+-  i::FLAG_regexp_tier_up = false;  // Enter irregexp, not the interpreter.
++  CHECK(!v8_flags.jitless);
++  v8_flags.regexp_tier_up = false;  // Enter irregexp, not the interpreter.
+ 
+   v8::HandleScope scope(isolate());
+ 
+diff --git a/test/unittests/strings/unicode-unittest.cc b/test/unittests/strings/unicode-unittest.cc
+index d32ed8871f5..5d647279732 100644
+--- a/test/unittests/strings/unicode-unittest.cc
++++ b/test/unittests/strings/unicode-unittest.cc
+@@ -499,7 +499,8 @@ class UnicodeWithGCTest : public TestWithHeapInternals {};
+ 
+ #define GC_INSIDE_NEW_STRING_FROM_UTF8_SUB_STRING(NAME, STRING)                \
+   TEST_F(UnicodeWithGCTest, GCInsideNewStringFromUtf8SubStringWith##NAME) {    \
+-    FLAG_stress_concurrent_allocation = false; /* For SimulateFullSpace. */    \
++    v8_flags.stress_concurrent_allocation =                                    \
++        false; /* For SimulateFullSpace. */                                    \
+     v8::HandleScope scope(reinterpret_cast<v8::Isolate*>(isolate()));          \
+     Factory* factory = isolate()->factory();                                   \
+     /* Length must be bigger than the buffer size of the Utf8Decoder. */       \
+@@ -510,7 +511,7 @@ class UnicodeWithGCTest : public TestWithHeapInternals {};
+             ->NewStringFromOneByte(v8::base::Vector<const uint8_t>(            \
+                 reinterpret_cast<const uint8_t*>(buf), len))                   \
+             .ToHandleChecked();                                                \
+-    if (FLAG_single_generation) {                                              \
++    if (v8_flags.single_generation) {                                          \
+       CHECK(!Heap::InYoungGeneration(*main_string));                           \
+       SimulateFullSpace(heap()->old_space());                                  \
+     } else {                                                                   \
+diff --git a/test/unittests/tasks/background-compile-task-unittest.cc b/test/unittests/tasks/background-compile-task-unittest.cc
+index 5ad5279a72f..1dba91de98f 100644
+--- a/test/unittests/tasks/background-compile-task-unittest.cc
++++ b/test/unittests/tasks/background-compile-task-unittest.cc
+@@ -50,11 +50,12 @@ class BackgroundCompileTaskTest : public TestWithNativeContext {
+ 
+   BackgroundCompileTask* NewBackgroundCompileTask(
+       Isolate* isolate, Handle<SharedFunctionInfo> shared,
+-      size_t stack_size = FLAG_stack_size) {
++      size_t stack_size = v8_flags.stack_size) {
+     return new BackgroundCompileTask(
+         isolate, shared, test::SourceCharacterStreamForShared(isolate, shared),
+         isolate->counters()->worker_thread_runtime_call_stats(),
+-        isolate->counters()->compile_function_on_background(), FLAG_stack_size);
++        isolate->counters()->compile_function_on_background(),
++        v8_flags.stack_size);
+   }
+ 
+  private:
+diff --git a/test/unittests/test-utils.cc b/test/unittests/test-utils.cc
+index f6f9ac78b18..da5f9dcd558 100644
+--- a/test/unittests/test-utils.cc
++++ b/test/unittests/test-utils.cc
+@@ -68,7 +68,7 @@ namespace internal {
+ SaveFlags::SaveFlags() {
+   // For each flag, save the current flag value.
+ #define FLAG_MODE_APPLY(ftype, ctype, nam, def, cmt) \
+-  SAVED_##nam = FLAG_##nam.value();
++  SAVED_##nam = v8_flags.nam.value();
+ #include "src/flags/flag-definitions.h"
+ #undef FLAG_MODE_APPLY
+ }
+@@ -77,8 +77,8 @@ SaveFlags::~SaveFlags() {
+   // For each flag, set back the old flag value if it changed (don't write the
+   // flag if it didn't change, to keep TSAN happy).
+ #define FLAG_MODE_APPLY(ftype, ctype, nam, def, cmt) \
+-  if (SAVED_##nam != FLAG_##nam.value()) {           \
+-    FLAG_##nam = SAVED_##nam;                        \
++  if (SAVED_##nam != v8_flags.nam.value()) {         \
++    v8_flags.nam = SAVED_##nam;                      \
+   }
+ #include "src/flags/flag-definitions.h"  // NOLINT
+ #undef FLAG_MODE_APPLY
+@@ -95,13 +95,13 @@ ManualGCScope::ManualGCScope(i::Isolate* isolate) {
+     isolate->heap()->CompleteSweepingFull();
+   }
+ 
+-  i::FLAG_concurrent_marking = false;
+-  i::FLAG_concurrent_sweeping = false;
+-  i::FLAG_stress_incremental_marking = false;
+-  i::FLAG_stress_concurrent_allocation = false;
++  i::v8_flags.concurrent_marking = false;
++  i::v8_flags.concurrent_sweeping = false;
++  i::v8_flags.stress_incremental_marking = false;
++  i::v8_flags.stress_concurrent_allocation = false;
+   // Parallel marking has a dependency on concurrent marking.
+-  i::FLAG_parallel_marking = false;
+-  i::FLAG_detect_ineffective_gcs_near_heap_limit = false;
++  i::v8_flags.parallel_marking = false;
++  i::v8_flags.detect_ineffective_gcs_near_heap_limit = false;
+ }
+ 
+ }  // namespace internal
+diff --git a/test/unittests/test-utils.h b/test/unittests/test-utils.h
+index 967b70bfd04..010c47735d7 100644
+--- a/test/unittests/test-utils.h
++++ b/test/unittests/test-utils.h
+@@ -41,7 +41,7 @@ class WithDefaultPlatformMixin : public TMixin {
+     // Allow changing flags in unit tests.
+     // TODO(12887): Fix tests to avoid changing flag values after
+     // initialization.
+-    i::FLAG_freeze_flags_after_init = false;
++    i::v8_flags.freeze_flags_after_init = false;
+     v8::V8::Initialize();
+   }
+ 
+@@ -60,7 +60,7 @@ class WithDefaultPlatformMixin : public TMixin {
+ template <typename TMixin>
+ class WithJSSharedMemoryFeatureFlagsMixin : public TMixin {
+  public:
+-  WithJSSharedMemoryFeatureFlagsMixin() { i::FLAG_harmony_struct = true; }
++  WithJSSharedMemoryFeatureFlagsMixin() { i::v8_flags.harmony_struct = true; }
+ };
+ 
+ using CounterMap = std::map<std::string, int>;
+diff --git a/test/unittests/utils/identity-map-unittest.cc b/test/unittests/utils/identity-map-unittest.cc
+index 337ef8e5ff0..f61559f7503 100644
+--- a/test/unittests/utils/identity-map-unittest.cc
++++ b/test/unittests/utils/identity-map-unittest.cc
+@@ -785,9 +785,9 @@ TEST_F(IdentityMapTest, CanonicalHandleScope) {
+ }
+ 
+ TEST_F(IdentityMapTest, GCShortCutting) {
+-  if (FLAG_single_generation) return;
++  if (v8_flags.single_generation) return;
+   // We don't create ThinStrings immediately when using the forwarding table.
+-  if (FLAG_always_use_string_forwarding_table) return;
++  if (v8_flags.always_use_string_forwarding_table) return;
+   ManualGCScope manual_gc_scope(isolate());
+   IdentityMapTester t(isolate()->heap(), zone());
+   Factory* factory = isolate()->factory();
+@@ -816,7 +816,7 @@ TEST_F(IdentityMapTest, GCShortCutting) {
+     // Do an explicit, real GC, this should short-cut the thin string to point
+     // to the internalized string (this is not implemented for MinorMC).
+     CollectGarbage(i::NEW_SPACE);
+-    DCHECK_IMPLIES(!FLAG_minor_mc && !FLAG_optimize_for_size,
++    DCHECK_IMPLIES(!v8_flags.minor_mc && !v8_flags.optimize_for_size,
+                    *thin_string == *internalized_string);
+ 
+     // Check that getting the object points to one of the handles.
+diff --git a/test/unittests/web-snapshot/web-snapshot-unittest.cc b/test/unittests/web-snapshot/web-snapshot-unittest.cc
+index 9c15622183d..5573f753114 100644
+--- a/test/unittests/web-snapshot/web-snapshot-unittest.cc
++++ b/test/unittests/web-snapshot/web-snapshot-unittest.cc
+@@ -503,8 +503,8 @@ TEST_F(WebSnapshotTest, SFIDeduplicationClasses) {
+ }
+ 
+ TEST_F(WebSnapshotTest, SFIDeduplicationAfterBytecodeFlushing) {
+-  FLAG_stress_flush_code = true;
+-  FLAG_flush_bytecode = true;
++  v8_flags.stress_flush_code = true;
++  v8_flags.flush_bytecode = true;
+   v8::Isolate* isolate = v8_isolate();
+ 
+   WebSnapshotData snapshot_data;
+@@ -587,8 +587,8 @@ TEST_F(WebSnapshotTest, SFIDeduplicationAfterBytecodeFlushing) {
+ }
+ 
+ TEST_F(WebSnapshotTest, SFIDeduplicationAfterBytecodeFlushingClasses) {
+-  FLAG_stress_flush_code = true;
+-  FLAG_flush_bytecode = true;
++  v8_flags.stress_flush_code = true;
++  v8_flags.flush_bytecode = true;
+   v8::Isolate* isolate = v8_isolate();
+ 
+   WebSnapshotData snapshot_data;
+-- 
+2.35.1
+

@@ -1,0 +1,913 @@
+From a29eca72d8c39382add61cea64ce0cb081cdeda1 Mon Sep 17 00:00:00 2001
+From: Yuxiang Cao <caoyxsh@outlook.com>
+Date: Mon, 14 Feb 2022 00:40:04 -0800
+Subject: [PATCH] [riscv64] Add RVV Float-Point Widening Instructions
+
+Implement vector widening floating-point instructions:
+add/subtract/multiply/multiply-add/reduction instructions,
+eg. `vfwadd.vf`, `vfwmacc.vf`, `vfwredosum.vs`.
+Add tests and simulator support for all newly added instructions.
+
+Bug: v8:11976
+Change-Id: I0909eeab24ba075c5a21743bb49538f154ce8aa2
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3442257
+Reviewed-by: ji qiu <qiuji@iscas.ac.cn>
+Reviewed-by: Jakob Gruber <jgruber@chromium.org>
+Commit-Queue: Yahan Lu <yahan@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#79205}
+---
+ AUTHORS                                    |   1 +
+ src/codegen/riscv64/assembler-riscv64.cc   |  42 ++++
+ src/codegen/riscv64/assembler-riscv64.h    |  38 ++++
+ src/codegen/riscv64/constants-riscv64.h    |  46 ++++
+ src/diagnostics/riscv64/disasm-riscv64.cc  |  60 +++++
+ src/execution/riscv64/simulator-riscv64.cc | 246 +++++++++++++++++++++
+ test/cctest/test-assembler-riscv64.cc      | 206 ++++++++++++++++-
+ test/cctest/test-disasm-riscv64.cc         |  34 +++
+ test/cctest/test-helper-riscv64.h          |   1 -
+ 9 files changed, 669 insertions(+), 5 deletions(-)
+
+diff --git a/AUTHORS b/AUTHORS
+index c89610aa91f..bef493120f5 100644
+--- a/AUTHORS
++++ b/AUTHORS
+@@ -260,6 +260,7 @@ Yu Yin <xwafish@gmail.com>
+ Yujie Wang <hex6770@gmail.com>
+ Yuri Iozzelli <yuri@leaningtech.com>
+ Yusif Khudhur <yusif.khudhur@gmail.com>
++Yuxiang Cao <caoyxsh@outlook.com>
+ Zac Hansen <xaxxon@gmail.com>
+ Zeynep Cankara <zeynepcankara402@gmail.com>
+ Zhao Jiazhong <kyslie3100@gmail.com>
+diff --git a/src/codegen/riscv64/assembler-riscv64.cc b/src/codegen/riscv64/assembler-riscv64.cc
+index 198e4f65ba8..be532da27f8 100644
+--- a/src/codegen/riscv64/assembler-riscv64.cc
++++ b/src/codegen/riscv64/assembler-riscv64.cc
+@@ -2589,6 +2589,12 @@ void Assembler::vid_v(VRegister vd, MaskType mask) {
+     GenInstrV(funct6, OP_FVV, vd, vs1, vs2, mask);                      \
+   }
+ 
++#define DEFINE_OPFWV(name, funct6)                                      \
++  void Assembler::name##_wv(VRegister vd, VRegister vs2, VRegister vs1, \
++                            MaskType mask) {                            \
++    GenInstrV(funct6, OP_FVV, vd, vs1, vs2, mask);                      \
++  }
++
+ #define DEFINE_OPFRED(name, funct6)                                     \
+   void Assembler::name##_vs(VRegister vd, VRegister vs2, VRegister vs1, \
+                             MaskType mask) {                            \
+@@ -2627,6 +2633,12 @@ void Assembler::vid_v(VRegister vd, MaskType mask) {
+     GenInstrV(funct6, OP_FVF, vd, fs1, vs2, mask);                        \
+   }
+ 
++#define DEFINE_OPFWF(name, funct6)                                        \
++  void Assembler::name##_wf(VRegister vd, VRegister vs2, FPURegister fs1, \
++                            MaskType mask) {                              \
++    GenInstrV(funct6, OP_FVF, vd, fs1, vs2, mask);                        \
++  }
++
+ #define DEFINE_OPFVV_FMA(name, funct6)                                  \
+   void Assembler::name##_vv(VRegister vd, VRegister vs1, VRegister vs2, \
+                             MaskType mask) {                            \
+@@ -2772,6 +2784,24 @@ DEFINE_OPFVV(vmfle, VMFLE_FUNCT6)
+ DEFINE_OPFVV(vfmax, VFMAX_FUNCT6)
+ DEFINE_OPFVV(vfmin, VFMIN_FUNCT6)
+ 
++// Vector Widening Floating-Point Add/Subtract Instructions
++DEFINE_OPFVV(vfwadd, VFWADD_FUNCT6)
++DEFINE_OPFVF(vfwadd, VFWADD_FUNCT6)
++DEFINE_OPFVV(vfwsub, VFWSUB_FUNCT6)
++DEFINE_OPFVF(vfwsub, VFWSUB_FUNCT6)
++DEFINE_OPFWV(vfwadd, VFWADD_W_FUNCT6)
++DEFINE_OPFWF(vfwadd, VFWADD_W_FUNCT6)
++DEFINE_OPFWV(vfwsub, VFWSUB_W_FUNCT6)
++DEFINE_OPFWF(vfwsub, VFWSUB_W_FUNCT6)
++
++// Vector Widening Floating-Point Reduction Instructions
++DEFINE_OPFVV(vfwredusum, VFWREDUSUM_FUNCT6)
++DEFINE_OPFVV(vfwredosum, VFWREDOSUM_FUNCT6)
++
++// Vector Widening Floating-Point Multiply
++DEFINE_OPFVV(vfwmul, VFWMUL_FUNCT6)
++DEFINE_OPFVF(vfwmul, VFWMUL_FUNCT6)
++
+ DEFINE_OPFRED(vfredmax, VFREDMAX_FUNCT6)
+ 
+ DEFINE_OPFVV(vfsngj, VFSGNJ_FUNCT6)
+@@ -2799,6 +2829,16 @@ DEFINE_OPFVF_FMA(vfnmacc, VFNMACC_FUNCT6)
+ DEFINE_OPFVV_FMA(vfnmsac, VFNMSAC_FUNCT6)
+ DEFINE_OPFVF_FMA(vfnmsac, VFNMSAC_FUNCT6)
+ 
++// Vector Widening Floating-Point Fused Multiply-Add Instructions
++DEFINE_OPFVV_FMA(vfwmacc, VFWMACC_FUNCT6)
++DEFINE_OPFVF_FMA(vfwmacc, VFWMACC_FUNCT6)
++DEFINE_OPFVV_FMA(vfwnmacc, VFWNMACC_FUNCT6)
++DEFINE_OPFVF_FMA(vfwnmacc, VFWNMACC_FUNCT6)
++DEFINE_OPFVV_FMA(vfwmsac, VFWMSAC_FUNCT6)
++DEFINE_OPFVF_FMA(vfwmsac, VFWMSAC_FUNCT6)
++DEFINE_OPFVV_FMA(vfwnmsac, VFWNMSAC_FUNCT6)
++DEFINE_OPFVF_FMA(vfwnmsac, VFWNMSAC_FUNCT6)
++
+ // Vector Narrowing Fixed-Point Clip Instructions
+ DEFINE_OPIVV(vnclip, VNCLIP_FUNCT6)
+ DEFINE_OPIVX(vnclip, VNCLIP_FUNCT6)
+@@ -2819,7 +2859,9 @@ DEFINE_OPMVV_VIE(vsext_vf2, 0b00111)
+ #undef DEFINE_OPIVV
+ #undef DEFINE_OPIVX
+ #undef DEFINE_OPFVV
++#undef DEFINE_OPFWV
+ #undef DEFINE_OPFVF
++#undef DEFINE_OPFWF
+ #undef DEFINE_OPFVV_FMA
+ #undef DEFINE_OPFVF_FMA
+ #undef DEFINE_OPMVV_VIE
+diff --git a/src/codegen/riscv64/assembler-riscv64.h b/src/codegen/riscv64/assembler-riscv64.h
+index 99abea53dd1..522c967947d 100644
+--- a/src/codegen/riscv64/assembler-riscv64.h
++++ b/src/codegen/riscv64/assembler-riscv64.h
+@@ -769,6 +769,10 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   void name##_vv(VRegister vd, VRegister vs2, VRegister vs1, \
+                  MaskType mask = NoMask);
+ 
++#define DEFINE_OPFWV(name, funct6)                           \
++  void name##_wv(VRegister vd, VRegister vs2, VRegister vs1, \
++                 MaskType mask = NoMask);
++
+ #define DEFINE_OPFRED(name, funct6)                          \
+   void name##_vs(VRegister vd, VRegister vs2, VRegister vs1, \
+                  MaskType mask = NoMask);
+@@ -777,6 +781,10 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   void name##_vf(VRegister vd, VRegister vs2, FPURegister fs1, \
+                  MaskType mask = NoMask);
+ 
++#define DEFINE_OPFWF(name, funct6)                             \
++  void name##_wf(VRegister vd, VRegister vs2, FPURegister fs1, \
++                 MaskType mask = NoMask);
++
+ #define DEFINE_OPFVV_FMA(name, funct6)                       \
+   void name##_vv(VRegister vd, VRegister vs1, VRegister vs2, \
+                  MaskType mask = NoMask);
+@@ -900,6 +908,24 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   DEFINE_OPFVV(vfmul, VFMUL_FUNCT6)
+   DEFINE_OPFVF(vfmul, VFMUL_FUNCT6)
+ 
++  // Vector Widening Floating-Point Add/Subtract Instructions
++  DEFINE_OPFVV(vfwadd, VFWADD_FUNCT6)
++  DEFINE_OPFVF(vfwadd, VFWADD_FUNCT6)
++  DEFINE_OPFVV(vfwsub, VFWSUB_FUNCT6)
++  DEFINE_OPFVF(vfwsub, VFWSUB_FUNCT6)
++  DEFINE_OPFWV(vfwadd, VFWADD_W_FUNCT6)
++  DEFINE_OPFWF(vfwadd, VFWADD_W_FUNCT6)
++  DEFINE_OPFWV(vfwsub, VFWSUB_W_FUNCT6)
++  DEFINE_OPFWF(vfwsub, VFWSUB_W_FUNCT6)
++
++  // Vector Widening Floating-Point Reduction Instructions
++  DEFINE_OPFVV(vfwredusum, VFWREDUSUM_FUNCT6)
++  DEFINE_OPFVV(vfwredosum, VFWREDOSUM_FUNCT6)
++
++  // Vector Widening Floating-Point Multiply
++  DEFINE_OPFVV(vfwmul, VFWMUL_FUNCT6)
++  DEFINE_OPFVF(vfwmul, VFWMUL_FUNCT6)
++
+   DEFINE_OPFVV(vmfeq, VMFEQ_FUNCT6)
+   DEFINE_OPFVV(vmfne, VMFNE_FUNCT6)
+   DEFINE_OPFVV(vmflt, VMFLT_FUNCT6)
+@@ -933,6 +959,16 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   DEFINE_OPFVV_FMA(vfnmsac, VFNMSAC_FUNCT6)
+   DEFINE_OPFVF_FMA(vfnmsac, VFNMSAC_FUNCT6)
+ 
++  // Vector Widening Floating-Point Fused Multiply-Add Instructions
++  DEFINE_OPFVV_FMA(vfwmacc, VFWMACC_FUNCT6)
++  DEFINE_OPFVF_FMA(vfwmacc, VFWMACC_FUNCT6)
++  DEFINE_OPFVV_FMA(vfwnmacc, VFWNMACC_FUNCT6)
++  DEFINE_OPFVF_FMA(vfwnmacc, VFWNMACC_FUNCT6)
++  DEFINE_OPFVV_FMA(vfwmsac, VFWMSAC_FUNCT6)
++  DEFINE_OPFVF_FMA(vfwmsac, VFWMSAC_FUNCT6)
++  DEFINE_OPFVV_FMA(vfwnmsac, VFWNMSAC_FUNCT6)
++  DEFINE_OPFVF_FMA(vfwnmsac, VFWNMSAC_FUNCT6)
++
+   // Vector Narrowing Fixed-Point Clip Instructions
+   DEFINE_OPIVV(vnclip, VNCLIP_FUNCT6)
+   DEFINE_OPIVX(vnclip, VNCLIP_FUNCT6)
+@@ -955,7 +991,9 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+ #undef DEFINE_OPMVV
+ #undef DEFINE_OPMVX
+ #undef DEFINE_OPFVV
++#undef DEFINE_OPFWV
+ #undef DEFINE_OPFVF
++#undef DEFINE_OPFWF
+ #undef DEFINE_OPFVV_FMA
+ #undef DEFINE_OPFVF_FMA
+ #undef DEFINE_OPMVV_VIE
+diff --git a/src/codegen/riscv64/constants-riscv64.h b/src/codegen/riscv64/constants-riscv64.h
+index 105cad15c82..67856b771b0 100644
+--- a/src/codegen/riscv64/constants-riscv64.h
++++ b/src/codegen/riscv64/constants-riscv64.h
+@@ -976,6 +976,35 @@ enum Opcode : uint32_t {
+   RO_V_VFMUL_VV = OP_FVV | (VFMUL_FUNCT6 << kRvvFunct6Shift),
+   RO_V_VFMUL_VF = OP_FVF | (VFMUL_FUNCT6 << kRvvFunct6Shift),
+ 
++  // Vector Widening Floating-Point Add/Subtract Instructions
++  VFWADD_FUNCT6 = 0b110000,
++  RO_V_VFWADD_VV = OP_FVV | (VFWADD_FUNCT6 << kRvvFunct6Shift),
++  RO_V_VFWADD_VF = OP_FVF | (VFWADD_FUNCT6 << kRvvFunct6Shift),
++
++  VFWSUB_FUNCT6 = 0b110010,
++  RO_V_VFWSUB_VV = OP_FVV | (VFWSUB_FUNCT6 << kRvvFunct6Shift),
++  RO_V_VFWSUB_VF = OP_FVF | (VFWSUB_FUNCT6 << kRvvFunct6Shift),
++
++  VFWADD_W_FUNCT6 = 0b110100,
++  RO_V_VFWADD_W_VV = OP_FVV | (VFWADD_W_FUNCT6 << kRvvFunct6Shift),
++  RO_V_VFWADD_W_VF = OP_FVF | (VFWADD_W_FUNCT6 << kRvvFunct6Shift),
++
++  VFWSUB_W_FUNCT6 = 0b110110,
++  RO_V_VFWSUB_W_VV = OP_FVV | (VFWSUB_W_FUNCT6 << kRvvFunct6Shift),
++  RO_V_VFWSUB_W_VF = OP_FVF | (VFWSUB_W_FUNCT6 << kRvvFunct6Shift),
++
++  // Vector Widening Floating-Point Reduction Instructions
++  VFWREDUSUM_FUNCT6 = 0b110001,
++  RO_V_VFWREDUSUM_VV = OP_FVV | (VFWREDUSUM_FUNCT6 << kRvvFunct6Shift),
++
++  VFWREDOSUM_FUNCT6 = 0b110011,
++  RO_V_VFWREDOSUM_VV = OP_FVV | (VFWREDOSUM_FUNCT6 << kRvvFunct6Shift),
++
++  // Vector Widening Floating-Point Multiply
++  VFWMUL_FUNCT6 = 0b111000,
++  RO_V_VFWMUL_VV = OP_FVV | (VFWMUL_FUNCT6 << kRvvFunct6Shift),
++  RO_V_VFWMUL_VF = OP_FVF | (VFWMUL_FUNCT6 << kRvvFunct6Shift),
++
+   VMFEQ_FUNCT6 = 0b011000,
+   RO_V_VMFEQ_VV = OP_FVV | (VMFEQ_FUNCT6 << kRvvFunct6Shift),
+   RO_V_VMFEQ_VF = OP_FVF | (VMFEQ_FUNCT6 << kRvvFunct6Shift),
+@@ -1053,6 +1082,23 @@ enum Opcode : uint32_t {
+   RO_V_VFNMSAC_VV = OP_FVV | (VFNMSAC_FUNCT6 << kRvvFunct6Shift),
+   RO_V_VFNMSAC_VF = OP_FVF | (VFNMSAC_FUNCT6 << kRvvFunct6Shift),
+ 
++  // Vector Widening Floating-Point Fused Multiply-Add Instructions
++  VFWMACC_FUNCT6 = 0b111100,
++  RO_V_VFWMACC_VV = OP_FVV | (VFWMACC_FUNCT6 << kRvvFunct6Shift),
++  RO_V_VFWMACC_VF = OP_FVF | (VFWMACC_FUNCT6 << kRvvFunct6Shift),
++
++  VFWNMACC_FUNCT6 = 0b111101,
++  RO_V_VFWNMACC_VV = OP_FVV | (VFWNMACC_FUNCT6 << kRvvFunct6Shift),
++  RO_V_VFWNMACC_VF = OP_FVF | (VFWNMACC_FUNCT6 << kRvvFunct6Shift),
++
++  VFWMSAC_FUNCT6 = 0b111110,
++  RO_V_VFWMSAC_VV = OP_FVV | (VFWMSAC_FUNCT6 << kRvvFunct6Shift),
++  RO_V_VFWMSAC_VF = OP_FVF | (VFWMSAC_FUNCT6 << kRvvFunct6Shift),
++
++  VFWNMSAC_FUNCT6 = 0b111111,
++  RO_V_VFWNMSAC_VV = OP_FVV | (VFWNMSAC_FUNCT6 << kRvvFunct6Shift),
++  RO_V_VFWNMSAC_VF = OP_FVF | (VFWNMSAC_FUNCT6 << kRvvFunct6Shift),
++
+   VNCLIP_FUNCT6 = 0b101111,
+   RO_V_VNCLIP_WV = OP_IVV | (VNCLIP_FUNCT6 << kRvvFunct6Shift),
+   RO_V_VNCLIP_WX = OP_IVX | (VNCLIP_FUNCT6 << kRvvFunct6Shift),
+diff --git a/src/diagnostics/riscv64/disasm-riscv64.cc b/src/diagnostics/riscv64/disasm-riscv64.cc
+index 0348943f665..4d9a0d17480 100644
+--- a/src/diagnostics/riscv64/disasm-riscv64.cc
++++ b/src/diagnostics/riscv64/disasm-riscv64.cc
+@@ -2495,6 +2495,39 @@ void Decoder::DecodeRvvFVV(Instruction* instr) {
+         UNSUPPORTED_RISCV();
+       }
+       break;
++    case RO_V_VFWADD_VV:
++      Format(instr, "vfwadd.vv 'vd, 'vs2, 'vs1'vm");
++      break;
++    case RO_V_VFWSUB_VV:
++      Format(instr, "vfwsub.vv 'vd, 'vs2, 'vs1'vm");
++      break;
++    case RO_V_VFWADD_W_VV:
++      Format(instr, "vfwadd.wv 'vd, 'vs2, 'vs1'vm");
++      break;
++    case RO_V_VFWSUB_W_VV:
++      Format(instr, "vfwsub.wv 'vd, 'vs2, 'vs1'vm");
++      break;
++    case RO_V_VFWREDUSUM_VV:
++      Format(instr, "vfwredusum.vs 'vd, 'vs2, 'vs1'vm");
++      break;
++    case RO_V_VFWREDOSUM_VV:
++      Format(instr, "vfwredosum.vs 'vd, 'vs2, 'vs1'vm");
++      break;
++    case RO_V_VFWMUL_VV:
++      Format(instr, "vfwmul.vv 'vd, 'vs2, 'vs1'vm");
++      break;
++    case RO_V_VFWMACC_VV:
++      Format(instr, "vfwmacc.vv 'vd, 'vs1, 'vs2'vm");
++      break;
++    case RO_V_VFWNMACC_VV:
++      Format(instr, "vfwnmacc.vv 'vd, 'vs1, 'vs2'vm");
++      break;
++    case RO_V_VFWMSAC_VV:
++      Format(instr, "vfwmsac.vv 'vd, 'vs1, 'vs2'vm");
++      break;
++    case RO_V_VFWNMSAC_VV:
++      Format(instr, "vfwnmsac.vv 'vd, 'vs1, 'vs2'vm");
++      break;
+     default:
+       UNSUPPORTED_RISCV();
+       break;
+@@ -2540,6 +2573,33 @@ void Decoder::DecodeRvvFVF(Instruction* instr) {
+     case RO_V_VFNMSAC_VF:
+       Format(instr, "vfnmsac.vf 'vd, 'fs1, 'vs2'vm");
+       break;
++    case RO_V_VFWADD_VF:
++      Format(instr, "vfwadd.vf 'vd, 'vs2, 'fs1'vm");
++      break;
++    case RO_V_VFWSUB_VF:
++      Format(instr, "vfwsub.vf 'vd, 'vs2, 'fs1'vm");
++      break;
++    case RO_V_VFWADD_W_VF:
++      Format(instr, "vfwadd.wf 'vd, 'vs2, 'fs1'vm");
++      break;
++    case RO_V_VFWSUB_W_VF:
++      Format(instr, "vfwsub.wf 'vd, 'vs2, 'fs1'vm");
++      break;
++    case RO_V_VFWMUL_VF:
++      Format(instr, "vfwmul.vf 'vd, 'vs2, 'fs1'vm");
++      break;
++    case RO_V_VFWMACC_VF:
++      Format(instr, "vfwmacc.vf 'vd, 'fs1, 'vs2'vm");
++      break;
++    case RO_V_VFWNMACC_VF:
++      Format(instr, "vfwnmacc.vf 'vd, 'fs1, 'vs2'vm");
++      break;
++    case RO_V_VFWMSAC_VF:
++      Format(instr, "vfwmsac.vf 'vd, 'fs1, 'vs2'vm");
++      break;
++    case RO_V_VFWNMSAC_VF:
++      Format(instr, "vfwnmsac.vf 'vd, 'fs1, 'vs2'vm");
++      break;
+     default:
+       UNSUPPORTED_RISCV();
+       break;
+diff --git a/src/execution/riscv64/simulator-riscv64.cc b/src/execution/riscv64/simulator-riscv64.cc
+index 50d7250f13b..16fe499017b 100644
+--- a/src/execution/riscv64/simulator-riscv64.cc
++++ b/src/execution/riscv64/simulator-riscv64.cc
+@@ -844,6 +844,94 @@ struct type_sew_t<128> {
+   RVV_VI_VFP_LOOP_END                                     \
+   rvv_trace_vd();
+ 
++#define RVV_VI_VFP_VF_LOOP_WIDEN(BODY32, vs2_is_widen)                       \
++  RVV_VI_VFP_LOOP_BASE                                                       \
++  switch (rvv_vsew()) {                                                      \
++    case E16:                                                                \
++    case E64: {                                                              \
++      UNIMPLEMENTED();                                                       \
++      break;                                                                 \
++    }                                                                        \
++    case E32: {                                                              \
++      double& vd = Rvvelt<double>(rvv_vd_reg(), i, true);                    \
++      float fs1 = (get_fpu_register_float(rs1_reg()));                       \
++      float vs2 = vs2_is_widen                                               \
++                      ? static_cast<float>(Rvvelt<double>(rvv_vs2_reg(), i)) \
++                      : Rvvelt<float>(rvv_vs2_reg(), i);                     \
++      float vs3 = static_cast<float>(Rvvelt<float>(rvv_vd_reg(), i));        \
++      BODY32;                                                                \
++      break;                                                                 \
++    }                                                                        \
++    default:                                                                 \
++      UNREACHABLE();                                                         \
++      break;                                                                 \
++  }                                                                          \
++  RVV_VI_VFP_LOOP_END                                                        \
++  rvv_trace_vd();
++
++#define RVV_VI_VFP_VV_LOOP_WIDEN(BODY32, vs2_is_widen)                       \
++  RVV_VI_VFP_LOOP_BASE                                                       \
++  switch (rvv_vsew()) {                                                      \
++    case E16:                                                                \
++    case E64: {                                                              \
++      UNIMPLEMENTED();                                                       \
++      break;                                                                 \
++    }                                                                        \
++    case E32: {                                                              \
++      double& vd = Rvvelt<double>(rvv_vd_reg(), i, true);                    \
++      float vs2 = vs2_is_widen                                               \
++                      ? static_cast<float>(Rvvelt<double>(rvv_vs2_reg(), i)) \
++                      : Rvvelt<float>(rvv_vs2_reg(), i);                     \
++      float vs1 = Rvvelt<float>(rvv_vs1_reg(), i);                           \
++      float vs3 = static_cast<float>(Rvvelt<float>(rvv_vd_reg(), i));        \
++      BODY32;                                                                \
++      break;                                                                 \
++    }                                                                        \
++    default:                                                                 \
++      require(0);                                                            \
++      break;                                                                 \
++  }                                                                          \
++  RVV_VI_VFP_LOOP_END                                                        \
++  rvv_trace_vd();
++
++#define RVV_VI_VFP_VV_ARITH_CHECK_COMPUTE(type, check_fn, op)      \
++  auto fn = [this](type frs1, type frs2) {                         \
++    if (check_fn(frs1, frs2)) {                                    \
++      this->set_fflags(kInvalidOperation);                         \
++      return std::numeric_limits<type>::quiet_NaN();               \
++    } else {                                                       \
++      return frs2 op frs1;                                         \
++    }                                                              \
++  };                                                               \
++  auto alu_out = fn(vs1, vs2);                                     \
++  /** if any input or result is NaN, the result is quiet_NaN*/     \
++  if (std::isnan(alu_out) || std::isnan(vs1) || std::isnan(vs2)) { \
++    /** signaling_nan sets kInvalidOperation bit*/                 \
++    if (isSnan(alu_out) || isSnan(vs1) || isSnan(vs2))             \
++      set_fflags(kInvalidOperation);                               \
++    alu_out = std::numeric_limits<type>::quiet_NaN();              \
++  }                                                                \
++  vd = alu_out;
++
++#define RVV_VI_VFP_VF_ARITH_CHECK_COMPUTE(type, check_fn, op)      \
++  auto fn = [this](type frs1, type frs2) {                         \
++    if (check_fn(frs1, frs2)) {                                    \
++      this->set_fflags(kInvalidOperation);                         \
++      return std::numeric_limits<type>::quiet_NaN();               \
++    } else {                                                       \
++      return frs2 op frs1;                                         \
++    }                                                              \
++  };                                                               \
++  auto alu_out = fn(fs1, vs2);                                     \
++  /** if any input or result is NaN, the result is quiet_NaN*/     \
++  if (std::isnan(alu_out) || std::isnan(fs1) || std::isnan(vs2)) { \
++    /** signaling_nan sets kInvalidOperation bit*/                 \
++    if (isSnan(alu_out) || isSnan(fs1) || isSnan(vs2))             \
++      set_fflags(kInvalidOperation);                               \
++    alu_out = std::numeric_limits<type>::quiet_NaN();              \
++  }                                                                \
++  vd = alu_out;
++
+ #define RVV_VI_VFP_FMA(type, _f1, _f2, _a)                                \
+   auto fn = [](type f1, type f2, type a) { return std::fma(f1, f2, a); }; \
+   vd = CanonicalizeFPUOpFMA<type>(fn, _f1, _f2, _a);
+@@ -6383,6 +6471,87 @@ void Simulator::DecodeRvvFVV() {
+             vd = alu_out;
+           })
+       break;
++    case RO_V_VFWADD_VV:
++      RVV_VI_CHECK_DSS(true);
++      RVV_VI_VFP_VV_LOOP_WIDEN(
++          {
++            RVV_VI_VFP_VV_ARITH_CHECK_COMPUTE(float, is_invalid_fadd, +);
++            USE(vs3);
++          },
++          false)
++      break;
++    case RO_V_VFWSUB_VV:
++      RVV_VI_CHECK_DSS(true);
++      RVV_VI_VFP_VV_LOOP_WIDEN(
++          {
++            RVV_VI_VFP_VV_ARITH_CHECK_COMPUTE(float, is_invalid_fsub, -);
++            USE(vs3);
++          },
++          false)
++      break;
++    case RO_V_VFWADD_W_VV:
++      RVV_VI_CHECK_DSS(true);
++      RVV_VI_VFP_VV_LOOP_WIDEN(
++          {
++            RVV_VI_VFP_VV_ARITH_CHECK_COMPUTE(float, is_invalid_fadd, +);
++            USE(vs3);
++          },
++          true)
++      break;
++    case RO_V_VFWSUB_W_VV:
++      RVV_VI_CHECK_DSS(true);
++      RVV_VI_VFP_VV_LOOP_WIDEN(
++          {
++            RVV_VI_VFP_VV_ARITH_CHECK_COMPUTE(float, is_invalid_fsub, -);
++            USE(vs3);
++          },
++          true)
++      break;
++    case RO_V_VFWMUL_VV:
++      RVV_VI_CHECK_DSS(true);
++      RVV_VI_VFP_VV_LOOP_WIDEN(
++          {
++            RVV_VI_VFP_VV_ARITH_CHECK_COMPUTE(float, is_invalid_fmul, *);
++            USE(vs3);
++          },
++          false)
++      break;
++    case RO_V_VFWREDUSUM_VV:
++    case RO_V_VFWREDOSUM_VV:
++      RVV_VI_CHECK_DSS(true);
++      switch (rvv_vsew()) {
++        case E16:
++        case E64: {
++          UNIMPLEMENTED();
++        }
++        case E32: {
++          double& vd = Rvvelt<double>(rvv_vd_reg(), 0, true);
++          float vs1 = Rvvelt<float>(rvv_vs1_reg(), 0);
++          double alu_out = vs1;
++          for (uint64_t i = rvv_vstart(); i < rvv_vl(); ++i) {
++            double vs2 = static_cast<double>(Rvvelt<float>(rvv_vs2_reg(), i));
++            if (is_invalid_fadd(alu_out, vs2)) {
++              set_fflags(kInvalidOperation);
++              alu_out = std::numeric_limits<float>::quiet_NaN();
++              break;
++            }
++            alu_out = alu_out + vs2;
++            if (std::isnan(alu_out) || std::isnan(vs2)) {
++              // signaling_nan sets kInvalidOperation bit
++              if (isSnan(alu_out) || isSnan(vs2)) set_fflags(kInvalidOperation);
++              alu_out = std::numeric_limits<float>::quiet_NaN();
++              break;
++            }
++          }
++          vd = alu_out;
++          break;
++        }
++        default:
++          require(false);
++          break;
++      }
++
++      break;
+     case RO_V_VFMADD_VV:
+       RVV_VI_VFP_FMA_VV_LOOP({RVV_VI_VFP_FMA(float, vd, vs1, vs2)},
+                              {RVV_VI_VFP_FMA(double, vd, vs1, vs2)})
+@@ -6415,6 +6584,22 @@ void Simulator::DecodeRvvFVV() {
+       RVV_VI_VFP_FMA_VV_LOOP({RVV_VI_VFP_FMA(float, -vs2, vs1, +vd)},
+                              {RVV_VI_VFP_FMA(double, -vs2, vs1, +vd)})
+       break;
++    case RO_V_VFWMACC_VV:
++      RVV_VI_CHECK_DSS(true);
++      RVV_VI_VFP_VV_LOOP_WIDEN({RVV_VI_VFP_FMA(float, vs2, vs1, vs3)}, false)
++      break;
++    case RO_V_VFWNMACC_VV:
++      RVV_VI_CHECK_DSS(true);
++      RVV_VI_VFP_VV_LOOP_WIDEN({RVV_VI_VFP_FMA(float, -vs2, vs1, -vs3)}, false)
++      break;
++    case RO_V_VFWMSAC_VV:
++      RVV_VI_CHECK_DSS(true);
++      RVV_VI_VFP_VV_LOOP_WIDEN({RVV_VI_VFP_FMA(float, vs2, vs1, -vs3)}, false)
++      break;
++    case RO_V_VFWNMSAC_VV:
++      RVV_VI_CHECK_DSS(true);
++      RVV_VI_VFP_VV_LOOP_WIDEN({RVV_VI_VFP_FMA(float, -vs2, vs1, +vs3)}, false)
++      break;
+     case RO_V_VFMV_FS:
+       switch (rvv_vsew()) {
+         case E16: {
+@@ -6472,6 +6657,51 @@ void Simulator::DecodeRvvFVF() {
+             USE(vs2);
+           })
+       break;
++    case RO_V_VFWADD_VF:
++      RVV_VI_CHECK_DSS(true);
++      RVV_VI_VFP_VF_LOOP_WIDEN(
++          {
++            RVV_VI_VFP_VF_ARITH_CHECK_COMPUTE(float, is_invalid_fadd, +);
++            USE(vs3);
++          },
++          false)
++      break;
++    case RO_V_VFWSUB_VF:
++      RVV_VI_CHECK_DSS(true);
++      RVV_VI_VFP_VF_LOOP_WIDEN(
++          {
++            RVV_VI_VFP_VF_ARITH_CHECK_COMPUTE(float, is_invalid_fsub, -);
++            USE(vs3);
++          },
++          false)
++      break;
++    case RO_V_VFWADD_W_VF:
++      RVV_VI_CHECK_DSS(true);
++      RVV_VI_VFP_VF_LOOP_WIDEN(
++          {
++            RVV_VI_VFP_VF_ARITH_CHECK_COMPUTE(float, is_invalid_fadd, +);
++            USE(vs3);
++          },
++          true)
++      break;
++    case RO_V_VFWSUB_W_VF:
++      RVV_VI_CHECK_DSS(true);
++      RVV_VI_VFP_VF_LOOP_WIDEN(
++          {
++            RVV_VI_VFP_VF_ARITH_CHECK_COMPUTE(float, is_invalid_fsub, -);
++            USE(vs3);
++          },
++          true)
++      break;
++    case RO_V_VFWMUL_VF:
++      RVV_VI_CHECK_DSS(true);
++      RVV_VI_VFP_VF_LOOP_WIDEN(
++          {
++            RVV_VI_VFP_VF_ARITH_CHECK_COMPUTE(float, is_invalid_fmul, *);
++            USE(vs3);
++          },
++          false)
++      break;
+     case RO_V_VFMADD_VF:
+       RVV_VI_VFP_FMA_VF_LOOP({RVV_VI_VFP_FMA(float, vd, fs1, vs2)},
+                              {RVV_VI_VFP_FMA(double, vd, fs1, vs2)})
+@@ -6504,6 +6734,22 @@ void Simulator::DecodeRvvFVF() {
+       RVV_VI_VFP_FMA_VF_LOOP({RVV_VI_VFP_FMA(float, -vs2, fs1, vd)},
+                              {RVV_VI_VFP_FMA(double, -vs2, fs1, vd)})
+       break;
++    case RO_V_VFWMACC_VF:
++      RVV_VI_CHECK_DSS(true);
++      RVV_VI_VFP_VF_LOOP_WIDEN({RVV_VI_VFP_FMA(float, vs2, fs1, vs3)}, false)
++      break;
++    case RO_V_VFWNMACC_VF:
++      RVV_VI_CHECK_DSS(true);
++      RVV_VI_VFP_VF_LOOP_WIDEN({RVV_VI_VFP_FMA(float, -vs2, fs1, -vs3)}, false)
++      break;
++    case RO_V_VFWMSAC_VF:
++      RVV_VI_CHECK_DSS(true);
++      RVV_VI_VFP_VF_LOOP_WIDEN({RVV_VI_VFP_FMA(float, vs2, fs1, -vs3)}, false)
++      break;
++    case RO_V_VFWNMSAC_VF:
++      RVV_VI_CHECK_DSS(true);
++      RVV_VI_VFP_VF_LOOP_WIDEN({RVV_VI_VFP_FMA(float, -vs2, fs1, vs3)}, false)
++      break;
+     default:
+       UNSUPPORTED_RISCV();
+       break;
+diff --git a/test/cctest/test-assembler-riscv64.cc b/test/cctest/test-assembler-riscv64.cc
+index 7d695a865d9..76a273784c2 100644
+--- a/test/cctest/test-assembler-riscv64.cc
++++ b/test/cctest/test-assembler-riscv64.cc
+@@ -2270,8 +2270,173 @@ UTEST_RVV_VF_VV_FORM_WITH_OP(vfdiv_vv, /)
+ #undef ARRAY_FLOAT
+ #undef UTEST_RVV_VF_VV_FORM_WITH_OP
+ #undef UTEST_RVV_VF_VF_FORM_WITH_OP
+-#undef UTEST_RVV_VF_VV_FORM
+-#undef UTEST_RVV_VF_VF_FORM
++
++// Tests for vector widening floating-point arithmetic instructions between
++// vector and vector
++#define UTEST_RVV_VFW_VV_FORM_WITH_RES(instr_name, expect_res,             \
++                                       is_first_double)                    \
++  TEST(RISCV_UTEST_FLOAT_WIDENING_##instr_name) {                          \
++    if (!CpuFeatures::IsSupported(RISCV_SIMD)) return;                     \
++    CcTest::InitializeVM();                                                \
++    constexpr size_t n = kRvvVLEN / 32;                                    \
++    double result[n] = {0.0};                                              \
++    auto fn = [&result](MacroAssembler& assm) {                            \
++      if (is_first_double) {                                               \
++        __ fcvt_d_s(fa0, fa0);                                             \
++        __ VU.set(t0, VSew::E64, Vlmul::m2);                               \
++        __ vfmv_vf(v2, fa0);                                               \
++      }                                                                    \
++      __ VU.set(t0, VSew::E32, Vlmul::m1);                                 \
++      if (!is_first_double) {                                              \
++        __ vfmv_vf(v2, fa0);                                               \
++      }                                                                    \
++      __ vfmv_vf(v4, fa1);                                                 \
++      __ instr_name(v0, v2, v4);                                           \
++      __ li(t1, Operand(int64_t(result)));                                 \
++      __ vs(v0, t1, 0, VSew::E64);                                         \
++    };                                                                     \
++    for (float rs1_fval : compiler::ValueHelper::GetVector<float>()) {     \
++      for (float rs2_fval : compiler::ValueHelper::GetVector<float>()) {   \
++        GenAndRunTest<double, float>(rs1_fval, rs2_fval, fn);              \
++        for (size_t i = 0; i < n; i++) {                                   \
++          CHECK_DOUBLE_EQ(UseCanonicalNan<double>(expect_res), result[i]); \
++          result[i] = 0.0;                                                 \
++        }                                                                  \
++      }                                                                    \
++    }                                                                      \
++  }
++
++// Tests for vector widening floating-point arithmetic instructions between
++// vector and scalar
++#define UTEST_RVV_VFW_VF_FORM_WITH_RES(instr_name, expect_res,             \
++                                       is_first_double)                    \
++  TEST(RISCV_UTEST_FLOAT_WIDENING_##instr_name) {                          \
++    if (!CpuFeatures::IsSupported(RISCV_SIMD)) return;                     \
++    CcTest::InitializeVM();                                                \
++    constexpr size_t n = kRvvVLEN / 32;                                    \
++    double result[n] = {0.0};                                              \
++    auto fn = [&result](MacroAssembler& assm) {                            \
++      __ VU.set(t0, VSew::E32, Vlmul::m1);                                 \
++      if (is_first_double) {                                               \
++        __ fcvt_d_s(fa0, fa0);                                             \
++        __ VU.set(t0, VSew::E64, Vlmul::m2);                               \
++        __ vfmv_vf(v2, fa0);                                               \
++      }                                                                    \
++      __ VU.set(t0, VSew::E32, Vlmul::m1);                                 \
++      if (!is_first_double) {                                              \
++        __ vfmv_vf(v2, fa0);                                               \
++      }                                                                    \
++      __ instr_name(v0, v2, fa1);                                          \
++      __ li(t1, Operand(int64_t(result)));                                 \
++      __ li(t2, Operand(int64_t(&result[n / 2])));                         \
++      __ vs(v0, t1, 0, VSew::E64);                                         \
++      __ vs(v1, t2, 0, VSew::E64);                                         \
++    };                                                                     \
++    for (float rs1_fval : compiler::ValueHelper::GetVector<float>()) {     \
++      for (float rs2_fval : compiler::ValueHelper::GetVector<float>()) {   \
++        GenAndRunTest<double, float>(rs1_fval, rs2_fval, fn);              \
++        for (size_t i = 0; i < n; i++) {                                   \
++          CHECK_DOUBLE_EQ(UseCanonicalNan<double>(expect_res), result[i]); \
++          result[i] = 0.0;                                                 \
++        }                                                                  \
++      }                                                                    \
++    }                                                                      \
++  }
++
++#define UTEST_RVV_VFW_VV_FORM_WITH_OP(instr_name, tested_op, is_first_double) \
++  UTEST_RVV_VFW_VV_FORM_WITH_RES(instr_name, ((rs1_fval)tested_op(rs2_fval)), \
++                                 is_first_double)
++
++#define UTEST_RVV_VFW_VF_FORM_WITH_OP(instr_name, tested_op, is_first_double) \
++  UTEST_RVV_VFW_VF_FORM_WITH_RES(instr_name, ((rs1_fval)tested_op(rs2_fval)), \
++                                 is_first_double)
++
++UTEST_RVV_VFW_VV_FORM_WITH_OP(vfwadd_vv, +, false)
++UTEST_RVV_VFW_VF_FORM_WITH_OP(vfwadd_vf, +, false)
++UTEST_RVV_VFW_VV_FORM_WITH_OP(vfwsub_vv, -, false)
++UTEST_RVV_VFW_VF_FORM_WITH_OP(vfwsub_vf, -, false)
++UTEST_RVV_VFW_VV_FORM_WITH_OP(vfwadd_wv, +, true)
++UTEST_RVV_VFW_VF_FORM_WITH_OP(vfwadd_wf, +, true)
++UTEST_RVV_VFW_VV_FORM_WITH_OP(vfwsub_wv, -, true)
++UTEST_RVV_VFW_VF_FORM_WITH_OP(vfwsub_wf, -, true)
++UTEST_RVV_VFW_VV_FORM_WITH_OP(vfwmul_vv, *, false)
++UTEST_RVV_VFW_VF_FORM_WITH_OP(vfwmul_vf, *, false)
++
++#undef UTEST_RVV_VF_VV_FORM_WITH_OP
++#undef UTEST_RVV_VF_VF_FORM_WITH_OP
++
++// Tests for vector widening floating-point fused multiply-add Instructions
++// between vectors
++#define UTEST_RVV_VFW_FMA_VV_FORM_WITH_RES(instr_name, array, expect_res)     \
++  TEST(RISCV_UTEST_FLOAT_WIDENING_##instr_name) {                             \
++    if (!CpuFeatures::IsSupported(RISCV_SIMD)) return;                        \
++    CcTest::InitializeVM();                                                   \
++    auto fn = [](MacroAssembler& assm) {                                      \
++      __ VU.set(t0, VSew::E32, Vlmul::m1);                                    \
++      __ vfmv_vf(v0, fa0);                                                    \
++      __ vfmv_vf(v2, fa1);                                                    \
++      __ vfmv_vf(v4, fa2);                                                    \
++      __ instr_name(v0, v2, v4);                                              \
++      __ VU.set(t0, VSew::E64, Vlmul::m1);                                    \
++      __ vfmv_fs(fa0, v0);                                                    \
++    };                                                                        \
++    for (float rs1_fval : array) {                                            \
++      for (float rs2_fval : array) {                                          \
++        for (float rs3_fval : array) {                                        \
++          double res =                                                        \
++              GenAndRunTest<double, float>(rs1_fval, rs2_fval, rs3_fval, fn); \
++          CHECK_DOUBLE_EQ((expect_res), res);                                 \
++        }                                                                     \
++      }                                                                       \
++    }                                                                         \
++  }
++
++// Tests for vector single-width floating-point fused multiply-add Instructions
++// between vectors and scalar
++#define UTEST_RVV_VFW_FMA_VF_FORM_WITH_RES(instr_name, array, expect_res)     \
++  TEST(RISCV_UTEST_FLOAT_WIDENING_##instr_name) {                             \
++    if (!CpuFeatures::IsSupported(RISCV_SIMD)) return;                        \
++    CcTest::InitializeVM();                                                   \
++    auto fn = [](MacroAssembler& assm) {                                      \
++      __ VU.set(t0, VSew::E32, Vlmul::m1);                                    \
++      __ vfmv_vf(v0, fa0);                                                    \
++      __ vfmv_vf(v2, fa2);                                                    \
++      __ instr_name(v0, fa1, v2);                                             \
++      __ VU.set(t0, VSew::E64, Vlmul::m1);                                    \
++      __ vfmv_fs(fa0, v0);                                                    \
++    };                                                                        \
++    for (float rs1_fval : array) {                                            \
++      for (float rs2_fval : array) {                                          \
++        for (float rs3_fval : array) {                                        \
++          double res =                                                        \
++              GenAndRunTest<double, float>(rs1_fval, rs2_fval, rs3_fval, fn); \
++          CHECK_DOUBLE_EQ((expect_res), res);                                 \
++        }                                                                     \
++      }                                                                       \
++    }                                                                         \
++  }
++
++#define ARRAY_FLOAT compiler::ValueHelper::GetVector<float>()
++UTEST_RVV_VFW_FMA_VV_FORM_WITH_RES(vfwmacc_vv, ARRAY_FLOAT,
++                                   std::fma(rs2_fval, rs3_fval, rs1_fval))
++UTEST_RVV_VFW_FMA_VF_FORM_WITH_RES(vfwmacc_vf, ARRAY_FLOAT,
++                                   std::fma(rs2_fval, rs3_fval, rs1_fval))
++UTEST_RVV_VFW_FMA_VV_FORM_WITH_RES(vfwnmacc_vv, ARRAY_FLOAT,
++                                   std::fma(rs2_fval, -rs3_fval, -rs1_fval))
++UTEST_RVV_VFW_FMA_VF_FORM_WITH_RES(vfwnmacc_vf, ARRAY_FLOAT,
++                                   std::fma(rs2_fval, -rs3_fval, -rs1_fval))
++UTEST_RVV_VFW_FMA_VV_FORM_WITH_RES(vfwmsac_vv, ARRAY_FLOAT,
++                                   std::fma(rs2_fval, rs3_fval, -rs1_fval))
++UTEST_RVV_VFW_FMA_VF_FORM_WITH_RES(vfwmsac_vf, ARRAY_FLOAT,
++                                   std::fma(rs2_fval, rs3_fval, -rs1_fval))
++UTEST_RVV_VFW_FMA_VV_FORM_WITH_RES(vfwnmsac_vv, ARRAY_FLOAT,
++                                   std::fma(rs2_fval, -rs3_fval, rs1_fval))
++UTEST_RVV_VFW_FMA_VF_FORM_WITH_RES(vfwnmsac_vf, ARRAY_FLOAT,
++                                   std::fma(rs2_fval, -rs3_fval, rs1_fval))
++
++#undef ARRAY_FLOAT
++#undef UTEST_RVV_VFW_FMA_VV_FORM_WITH_RES
++#undef UTEST_RVV_VFW_FMA_VF_FORM_WITH_RES
+ 
+ // Tests for vector single-width floating-point fused multiply-add Instructions
+ // between vectors
+@@ -2358,9 +2523,42 @@ UTEST_RVV_FMA_VF_FORM_WITH_RES(vfnmsac_vf, ARRAY_FLOAT,
+                                std::fma(rs2_fval, -rs3_fval, rs1_fval))
+ 
+ #undef ARRAY_FLOAT
+-#undef UTEST_RVV_FMA_VV_FORM
+-#undef UTEST_RVV_FMA_VF_FORM
++#undef UTEST_RVV_FMA_VV_FORM_WITH_RES
++#undef UTEST_RVV_FMA_VF_FORM_WITH_RES
+ 
++// Tests for vector Widening Floating-Point Reduction Instructions
++#define UTEST_RVV_VFW_REDSUM_VV_FORM_WITH_RES(instr_name)              \
++  TEST(RISCV_UTEST_FLOAT_WIDENING_##instr_name) {                      \
++    if (!CpuFeatures::IsSupported(RISCV_SIMD)) return;                 \
++    CcTest::InitializeVM();                                            \
++    auto fn = [](MacroAssembler& assm) {                               \
++      __ VU.set(t0, VSew::E32, Vlmul::m1);                             \
++      __ vfmv_vf(v2, fa0);                                             \
++      __ vfmv_vf(v4, fa0);                                             \
++      __ instr_name(v0, v2, v4);                                       \
++      __ VU.set(t0, VSew::E64, Vlmul::m1);                             \
++      __ vfmv_fs(fa0, v0);                                             \
++    };                                                                 \
++    for (float rs1_fval : compiler::ValueHelper::GetVector<float>()) { \
++      std::vector<double> temp_arr(kRvvVLEN / 32,                      \
++                                   static_cast<double>(rs1_fval));     \
++      double expect_res = rs1_fval;                                    \
++      for (double val : temp_arr) {                                    \
++        expect_res += val;                                             \
++        if (std::isnan(expect_res)) {                                  \
++          expect_res = std::numeric_limits<double>::quiet_NaN();       \
++          break;                                                       \
++        }                                                              \
++      }                                                                \
++      double res = GenAndRunTest<double, float>(rs1_fval, fn);         \
++      CHECK_DOUBLE_EQ(UseCanonicalNan<double>(expect_res), res);       \
++    }                                                                  \
++  }
++
++UTEST_RVV_VFW_REDSUM_VV_FORM_WITH_RES(vfwredusum_vv)
++UTEST_RVV_VFW_REDSUM_VV_FORM_WITH_RES(vfwredosum_vv)
++
++#undef UTEST_RVV_VFW_REDSUM_VV_FORM_WITH_RES
+ // calculate the value of r used in rounding
+ static inline uint8_t get_round(int vxrm, uint64_t v, uint8_t shift) {
+   // uint8_t d = extract64(v, shift, 1);
+diff --git a/test/cctest/test-disasm-riscv64.cc b/test/cctest/test-disasm-riscv64.cc
+index 9d7d7b241a8..22108d2ca33 100644
+--- a/test/cctest/test-disasm-riscv64.cc
++++ b/test/cctest/test-disasm-riscv64.cc
+@@ -632,6 +632,40 @@ TEST(RVV) {
+   COMPARE(vfrec7_v(v17, v28), "4fc298d7       vfrec7.v  v17, v28")
+   COMPARE(vfclass_v(v17, v28), "4fc818d7       vfclass.v  v17, v28")
+ 
++  // Vector Widening Floating-Point Add/Subtract Instructions
++  COMPARE(vfwadd_vv(v17, v14, v28), "c2ee18d7       vfwadd.vv v17, v14, v28");
++  COMPARE(vfwsub_vv(v17, v14, v28), "caee18d7       vfwsub.vv v17, v14, v28");
++  COMPARE(vfwadd_wv(v17, v14, v28), "d2ee18d7       vfwadd.wv v17, v14, v28");
++  COMPARE(vfwsub_wv(v17, v14, v28), "daee18d7       vfwsub.wv v17, v14, v28");
++  COMPARE(vfwadd_vf(v17, v28, fa5), "c3c7d8d7       vfwadd.vf v17, v28, fa5");
++  COMPARE(vfwsub_vf(v17, v28, fa5), "cbc7d8d7       vfwsub.vf v17, v28, fa5");
++  COMPARE(vfwadd_wf(v17, v28, fa5), "d3c7d8d7       vfwadd.wf v17, v28, fa5");
++  COMPARE(vfwsub_wf(v17, v28, fa5), "dbc7d8d7       vfwsub.wf v17, v28, fa5");
++
++  // Vector Widening Floating-Point Reduction Instructions
++  COMPARE(vfwredusum_vv(v17, v14, v28),
++          "c6ee18d7       vfwredusum.vs v17, v14, v28");
++  COMPARE(vfwredosum_vv(v17, v14, v28),
++          "ceee18d7       vfwredosum.vs v17, v14, v28");
++
++  // Vector Widening Floating-Point Multiply
++  COMPARE(vfwmul_vv(v17, v14, v28), "e2ee18d7       vfwmul.vv v17, v14, v28");
++  COMPARE(vfwmul_vf(v17, v28, fa5), "e3c7d8d7       vfwmul.vf v17, v28, fa5");
++
++  // Vector Widening Floating-Point Fused Multiply-Add Instructions
++  COMPARE(vfwmacc_vv(v17, v14, v28), "f3c718d7       vfwmacc.vv v17, v14, v28");
++  COMPARE(vfwnmacc_vv(v17, v14, v28),
++          "f7c718d7       vfwnmacc.vv v17, v14, v28");
++  COMPARE(vfwmsac_vv(v17, v14, v28), "fbc718d7       vfwmsac.vv v17, v14, v28");
++  COMPARE(vfwnmsac_vv(v17, v14, v28),
++          "ffc718d7       vfwnmsac.vv v17, v14, v28");
++  COMPARE(vfwmacc_vf(v17, fa5, v28), "f3c7d8d7       vfwmacc.vf v17, fa5, v28");
++  COMPARE(vfwnmacc_vf(v17, fa5, v28),
++          "f7c7d8d7       vfwnmacc.vf v17, fa5, v28");
++  COMPARE(vfwmsac_vf(v17, fa5, v28), "fbc7d8d7       vfwmsac.vf v17, fa5, v28");
++  COMPARE(vfwnmsac_vf(v17, fa5, v28),
++          "ffc7d8d7       vfwnmsac.vf v17, fa5, v28");
++
+   VERIFY_RUN();
+ }
+ 
+diff --git a/test/cctest/test-helper-riscv64.h b/test/cctest/test-helper-riscv64.h
+index 0380f6bd394..79a6dca9893 100644
+--- a/test/cctest/test-helper-riscv64.h
++++ b/test/cctest/test-helper-riscv64.h
+@@ -127,7 +127,6 @@ template <typename OUTPUT_T, typename INPUT_T>
+ OUTPUT_T GenAndRunTest(INPUT_T input0, INPUT_T input1, INPUT_T input2,
+                        Func test_generator) {
+   DCHECK((sizeof(INPUT_T) == 4 || sizeof(INPUT_T) == 8));
+-  DCHECK(sizeof(OUTPUT_T) == sizeof(INPUT_T));
+ 
+   Isolate* isolate = CcTest::i_isolate();
+   HandleScope scope(isolate);
+-- 
+2.35.1
+

@@ -1,0 +1,764 @@
+From fea3983dd946fbc917a01399748abb23b73900e9 Mon Sep 17 00:00:00 2001
+From: Leszek Swirski <leszeks@chromium.org>
+Date: Tue, 27 Jun 2023 17:21:44 +0200
+Subject: [PATCH] [assembler] Make GetCode take a LocalIsolate
+
+GetCode doesn't need the Isolate for anything but heap number
+allocation, so this can be done with a LocalIsolate to make it possible
+to do background code allocation.
+
+Change-Id: Ifb98069ad406d987feef15e35640cdfe8d827a19
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4648352
+Auto-Submit: Leszek Swirski <leszeks@chromium.org>
+Reviewed-by: Igor Sheludko <ishell@chromium.org>
+Reviewed-by: Darius Mercadier <dmercadier@chromium.org>
+Commit-Queue: Darius Mercadier <dmercadier@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#88511}
+---
+ src/baseline/baseline-assembler-inl.h              |  2 +-
+ src/baseline/baseline-assembler.h                  |  2 +-
+ src/baseline/baseline-compiler.cc                  |  2 +-
+ src/builtins/setup-builtins-internal.cc            |  4 ++--
+ src/codegen/arm/assembler-arm.cc                   |  7 +++++--
+ src/codegen/arm/assembler-arm.h                    |  8 +++++---
+ src/codegen/arm64/assembler-arm64.cc               |  7 +++++--
+ src/codegen/arm64/assembler-arm64.h                |  8 +++++---
+ src/codegen/ia32/assembler-ia32.cc                 |  7 +++++--
+ src/codegen/ia32/assembler-ia32.h                  |  8 +++++---
+ src/codegen/loong64/assembler-loong64.cc           |  7 +++++--
+ src/codegen/loong64/assembler-loong64.h            |  8 +++++---
+ src/codegen/mips64/assembler-mips64.cc             |  7 +++++--
+ src/codegen/mips64/assembler-mips64.h              |  8 +++++---
+ src/codegen/ppc/assembler-ppc.cc                   |  7 +++++--
+ src/codegen/ppc/assembler-ppc.h                    |  8 +++++---
+ src/codegen/riscv/assembler-riscv.cc               |  7 +++++--
+ src/codegen/riscv/assembler-riscv.h                |  8 +++++---
+ src/codegen/s390/assembler-s390.cc                 |  7 +++++--
+ src/codegen/s390/assembler-s390.h                  |  8 +++++---
+ src/codegen/x64/assembler-x64.cc                   |  7 +++++--
+ src/codegen/x64/assembler-x64.h                    | 12 +++++++-----
+ src/compiler/backend/code-generator.cc             |  3 ++-
+ src/maglev/maglev-code-generator.cc                |  4 ++--
+ .../assembler/macro-assembler-arm-unittest.cc      |  2 +-
+ .../assembler/macro-assembler-arm64-unittest.cc    |  2 +-
+ .../assembler/macro-assembler-riscv-unittest.cc    |  4 ++--
+ .../wasm/trap-handler-simulator-unittest.cc        |  2 +-
+ .../wasm/trap-handler-x64-arm64-unittest.cc        | 14 +++++++-------
+ 29 files changed, 113 insertions(+), 67 deletions(-)
+
+diff --git a/src/baseline/baseline-assembler-inl.h b/src/baseline/baseline-assembler-inl.h
+index 7a952ca7247..bb365587129 100644
+--- a/src/baseline/baseline-assembler-inl.h
++++ b/src/baseline/baseline-assembler-inl.h
+@@ -48,7 +48,7 @@ namespace baseline {
+ 
+ #define __ masm_->
+ 
+-void BaselineAssembler::GetCode(Isolate* isolate, CodeDesc* desc) {
++void BaselineAssembler::GetCode(LocalIsolate* isolate, CodeDesc* desc) {
+   __ GetCode(isolate, desc);
+ }
+ int BaselineAssembler::pc_offset() const { return __ pc_offset(); }
+diff --git a/src/baseline/baseline-assembler.h b/src/baseline/baseline-assembler.h
+index e65fc02790d..6dc174e3d14 100644
+--- a/src/baseline/baseline-assembler.h
++++ b/src/baseline/baseline-assembler.h
+@@ -31,7 +31,7 @@ class BaselineAssembler {
+   inline MemOperand FunctionOperand();
+   inline MemOperand FeedbackVectorOperand();
+ 
+-  inline void GetCode(Isolate* isolate, CodeDesc* desc);
++  inline void GetCode(LocalIsolate* isolate, CodeDesc* desc);
+   inline int pc_offset() const;
+   inline void CodeEntry() const;
+   inline void ExceptionHandler() const;
+diff --git a/src/baseline/baseline-compiler.cc b/src/baseline/baseline-compiler.cc
+index 760cefb3bf6..1c971ff04cf 100644
+--- a/src/baseline/baseline-compiler.cc
++++ b/src/baseline/baseline-compiler.cc
+@@ -339,7 +339,7 @@ void BaselineCompiler::GenerateCode() {
+ 
+ MaybeHandle<Code> BaselineCompiler::Build(LocalIsolate* local_isolate) {
+   CodeDesc desc;
+-  __ GetCode(local_isolate->GetMainThreadIsolateUnsafe(), &desc);
++  __ GetCode(local_isolate, &desc);
+ 
+   // Allocate the bytecode offset table.
+   Handle<ByteArray> bytecode_offset_table =
+diff --git a/src/builtins/setup-builtins-internal.cc b/src/builtins/setup-builtins-internal.cc
+index cbf64c42e3b..fc018085774 100644
+--- a/src/builtins/setup-builtins-internal.cc
++++ b/src/builtins/setup-builtins-internal.cc
+@@ -136,8 +136,8 @@ Code BuildWithMacroAssembler(Isolate* isolate, Builtin builtin,
+ #endif
+ 
+   CodeDesc desc;
+-  masm.GetCode(isolate, &desc, MacroAssembler::kNoSafepointTable,
+-               handler_table_offset);
++  masm.GetCode(isolate->main_thread_local_isolate(), &desc,
++               MacroAssembler::kNoSafepointTable, handler_table_offset);
+ 
+   Handle<Code> code = Factory::CodeBuilder(isolate, desc, CodeKind::BUILTIN)
+                           .set_self_reference(masm.CodeObject())
+diff --git a/src/codegen/arm/assembler-arm.cc b/src/codegen/arm/assembler-arm.cc
+index ac48ca4b287..defa349c741 100644
+--- a/src/codegen/arm/assembler-arm.cc
++++ b/src/codegen/arm/assembler-arm.cc
+@@ -455,7 +455,7 @@ void NeonMemOperand::SetAlignment(int align) {
+   }
+ }
+ 
+-void Assembler::AllocateAndInstallRequestedHeapNumbers(Isolate* isolate) {
++void Assembler::AllocateAndInstallRequestedHeapNumbers(LocalIsolate* isolate) {
+   DCHECK_IMPLIES(isolate == nullptr, heap_number_requests_.empty());
+   for (auto& request : heap_number_requests_) {
+     Handle<HeapObject> object =
+@@ -559,7 +559,10 @@ VfpRegList Assembler::DefaultFPTmpList() {
+   }
+ }
+ 
+-void Assembler::GetCode(Isolate* isolate, CodeDesc* desc,
++void Assembler::GetCode(Isolate* isolate, CodeDesc* desc) {
++  GetCode(isolate->main_thread_local_isolate(), desc);
++}
++void Assembler::GetCode(LocalIsolate* isolate, CodeDesc* desc,
+                         SafepointTableBuilderBase* safepoint_table_builder,
+                         int handler_table_offset) {
+   // As a crutch to avoid having to add manual Align calls wherever we use a
+diff --git a/src/codegen/arm/assembler-arm.h b/src/codegen/arm/assembler-arm.h
+index e34f521e10a..1c6ade36053 100644
+--- a/src/codegen/arm/assembler-arm.h
++++ b/src/codegen/arm/assembler-arm.h
+@@ -320,12 +320,14 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // GetCode emits any pending (non-emitted) code and fills the descriptor desc.
+   static constexpr int kNoHandlerTable = 0;
+   static constexpr SafepointTableBuilderBase* kNoSafepointTable = nullptr;
+-  void GetCode(Isolate* isolate, CodeDesc* desc,
++  void GetCode(LocalIsolate* isolate, CodeDesc* desc,
+                SafepointTableBuilderBase* safepoint_table_builder,
+                int handler_table_offset);
+ 
++  // Convenience wrapper for allocating with an Isolate.
++  void GetCode(Isolate* isolate, CodeDesc* desc);
+   // Convenience wrapper for code without safepoint or handler tables.
+-  void GetCode(Isolate* isolate, CodeDesc* desc) {
++  void GetCode(LocalIsolate* isolate, CodeDesc* desc) {
+     GetCode(isolate, desc, kNoSafepointTable, kNoHandlerTable);
+   }
+ 
+@@ -1344,7 +1346,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   void RecordRelocInfo(RelocInfo::Mode rmode, intptr_t data = 0);
+   void ConstantPoolAddEntry(int position, RelocInfo::Mode rmode,
+                             intptr_t value);
+-  void AllocateAndInstallRequestedHeapNumbers(Isolate* isolate);
++  void AllocateAndInstallRequestedHeapNumbers(LocalIsolate* isolate);
+ 
+   int WriteCodeComments();
+ 
+diff --git a/src/codegen/arm64/assembler-arm64.cc b/src/codegen/arm64/assembler-arm64.cc
+index bee62b25637..eebe450dea0 100644
+--- a/src/codegen/arm64/assembler-arm64.cc
++++ b/src/codegen/arm64/assembler-arm64.cc
+@@ -403,7 +403,7 @@ win64_unwindinfo::BuiltinUnwindInfo Assembler::GetUnwindInfo() const {
+ }
+ #endif
+ 
+-void Assembler::AllocateAndInstallRequestedHeapNumbers(Isolate* isolate) {
++void Assembler::AllocateAndInstallRequestedHeapNumbers(LocalIsolate* isolate) {
+   DCHECK_IMPLIES(isolate == nullptr, heap_number_requests_.empty());
+   for (auto& request : heap_number_requests_) {
+     Address pc = reinterpret_cast<Address>(buffer_start_) + request.offset();
+@@ -415,7 +415,10 @@ void Assembler::AllocateAndInstallRequestedHeapNumbers(Isolate* isolate) {
+   }
+ }
+ 
+-void Assembler::GetCode(Isolate* isolate, CodeDesc* desc,
++void Assembler::GetCode(Isolate* isolate, CodeDesc* desc) {
++  GetCode(isolate->main_thread_local_isolate(), desc);
++}
++void Assembler::GetCode(LocalIsolate* isolate, CodeDesc* desc,
+                         SafepointTableBuilderBase* safepoint_table_builder,
+                         int handler_table_offset) {
+   // As a crutch to avoid having to add manual Align calls wherever we use a
+diff --git a/src/codegen/arm64/assembler-arm64.h b/src/codegen/arm64/assembler-arm64.h
+index 93c984eba00..9e8586617f9 100644
+--- a/src/codegen/arm64/assembler-arm64.h
++++ b/src/codegen/arm64/assembler-arm64.h
+@@ -192,12 +192,14 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // GetCode emits any pending (non-emitted) code and fills the descriptor desc.
+   static constexpr int kNoHandlerTable = 0;
+   static constexpr SafepointTableBuilderBase* kNoSafepointTable = nullptr;
+-  void GetCode(Isolate* isolate, CodeDesc* desc,
++  void GetCode(LocalIsolate* isolate, CodeDesc* desc,
+                SafepointTableBuilderBase* safepoint_table_builder,
+                int handler_table_offset);
+ 
++  // Convenience wrapper for allocating with an Isolate.
++  void GetCode(Isolate* isolate, CodeDesc* desc);
+   // Convenience wrapper for code without safepoint or handler tables.
+-  void GetCode(Isolate* isolate, CodeDesc* desc) {
++  void GetCode(LocalIsolate* isolate, CodeDesc* desc) {
+     GetCode(isolate, desc, kNoSafepointTable, kNoHandlerTable);
+   }
+ 
+@@ -3381,7 +3383,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // the length of the label chain.
+   void DeleteUnresolvedBranchInfoForLabelTraverse(Label* label);
+ 
+-  void AllocateAndInstallRequestedHeapNumbers(Isolate* isolate);
++  void AllocateAndInstallRequestedHeapNumbers(LocalIsolate* isolate);
+ 
+   int WriteCodeComments();
+ 
+diff --git a/src/codegen/ia32/assembler-ia32.cc b/src/codegen/ia32/assembler-ia32.cc
+index c7867969483..a3e725e2d98 100644
+--- a/src/codegen/ia32/assembler-ia32.cc
++++ b/src/codegen/ia32/assembler-ia32.cc
+@@ -285,7 +285,7 @@ Register Operand::reg() const {
+ 
+ bool operator!=(Operand op, XMMRegister r) { return !op.is_reg(r); }
+ 
+-void Assembler::AllocateAndInstallRequestedHeapNumbers(Isolate* isolate) {
++void Assembler::AllocateAndInstallRequestedHeapNumbers(LocalIsolate* isolate) {
+   DCHECK_IMPLIES(isolate == nullptr, heap_number_requests_.empty());
+   for (auto& request : heap_number_requests_) {
+     Handle<HeapObject> object =
+@@ -317,7 +317,10 @@ Assembler::Assembler(const AssemblerOptions& options,
+   }
+ }
+ 
+-void Assembler::GetCode(Isolate* isolate, CodeDesc* desc,
++void Assembler::GetCode(Isolate* isolate, CodeDesc* desc) {
++  GetCode(isolate->main_thread_local_isolate(), desc);
++}
++void Assembler::GetCode(LocalIsolate* isolate, CodeDesc* desc,
+                         SafepointTableBuilder* safepoint_table_builder,
+                         int handler_table_offset) {
+   // As a crutch to avoid having to add manual Align calls wherever we use a
+diff --git a/src/codegen/ia32/assembler-ia32.h b/src/codegen/ia32/assembler-ia32.h
+index 8251a5d5874..5d9f17cf6b7 100644
+--- a/src/codegen/ia32/assembler-ia32.h
++++ b/src/codegen/ia32/assembler-ia32.h
+@@ -397,12 +397,14 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // GetCode emits any pending (non-emitted) code and fills the descriptor desc.
+   static constexpr int kNoHandlerTable = 0;
+   static constexpr SafepointTableBuilder* kNoSafepointTable = nullptr;
+-  void GetCode(Isolate* isolate, CodeDesc* desc,
++  void GetCode(LocalIsolate* isolate, CodeDesc* desc,
+                SafepointTableBuilder* safepoint_table_builder,
+                int handler_table_offset);
+ 
++  // Convenience wrapper for allocating with an Isolate.
++  void GetCode(Isolate* isolate, CodeDesc* desc);
+   // Convenience wrapper for code without safepoint or handler tables.
+-  void GetCode(Isolate* isolate, CodeDesc* desc) {
++  void GetCode(LocalIsolate* isolate, CodeDesc* desc) {
+     GetCode(isolate, desc, kNoSafepointTable, kNoHandlerTable);
+   }
+ 
+@@ -1784,7 +1786,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+ 
+   bool is_optimizable_farjmp(int idx);
+ 
+-  void AllocateAndInstallRequestedHeapNumbers(Isolate* isolate);
++  void AllocateAndInstallRequestedHeapNumbers(LocalIsolate* isolate);
+ 
+   int WriteCodeComments();
+ 
+diff --git a/src/codegen/loong64/assembler-loong64.cc b/src/codegen/loong64/assembler-loong64.cc
+index 9e2071ab14a..ae92d8faa27 100644
+--- a/src/codegen/loong64/assembler-loong64.cc
++++ b/src/codegen/loong64/assembler-loong64.cc
+@@ -135,7 +135,7 @@ MemOperand::MemOperand(Register base, int32_t offset)
+ MemOperand::MemOperand(Register base, Register index)
+     : base_(base), index_(index), offset_(0) {}
+ 
+-void Assembler::AllocateAndInstallRequestedHeapNumbers(Isolate* isolate) {
++void Assembler::AllocateAndInstallRequestedHeapNumbers(LocalIsolate* isolate) {
+   DCHECK_IMPLIES(isolate == nullptr, heap_number_requests_.empty());
+   for (auto& request : heap_number_requests_) {
+     Handle<HeapObject> object;
+@@ -177,7 +177,10 @@ Assembler::Assembler(const AssemblerOptions& options,
+   block_buffer_growth_ = false;
+ }
+ 
+-void Assembler::GetCode(Isolate* isolate, CodeDesc* desc,
++void Assembler::GetCode(Isolate* isolate, CodeDesc* desc) {
++  GetCode(isolate->main_thread_local_isolate(), desc);
++}
++void Assembler::GetCode(LocalIsolate* isolate, CodeDesc* desc,
+                         SafepointTableBuilderBase* safepoint_table_builder,
+                         int handler_table_offset) {
+   // As a crutch to avoid having to add manual Align calls wherever we use a
+diff --git a/src/codegen/loong64/assembler-loong64.h b/src/codegen/loong64/assembler-loong64.h
+index e574b055b06..20d24e3c6e4 100644
+--- a/src/codegen/loong64/assembler-loong64.h
++++ b/src/codegen/loong64/assembler-loong64.h
+@@ -128,12 +128,14 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // GetCode emits any pending (non-emitted) code and fills the descriptor desc.
+   static constexpr int kNoHandlerTable = 0;
+   static constexpr SafepointTableBuilderBase* kNoSafepointTable = nullptr;
+-  void GetCode(Isolate* isolate, CodeDesc* desc,
++  void GetCode(LocalIsolate* isolate, CodeDesc* desc,
+                SafepointTableBuilderBase* safepoint_table_builder,
+                int handler_table_offset);
+ 
++  // Convenience wrapper for allocating with an Isolate.
++  void GetCode(Isolate* isolate, CodeDesc* desc);
+   // Convenience wrapper for code without safepoint or handler tables.
+-  void GetCode(Isolate* isolate, CodeDesc* desc) {
++  void GetCode(LocalIsolate* isolate, CodeDesc* desc) {
+     GetCode(isolate, desc, kNoSafepointTable, kNoHandlerTable);
+   }
+ 
+@@ -1089,7 +1091,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   DoubleRegList scratch_fpregister_list_;
+ 
+  private:
+-  void AllocateAndInstallRequestedHeapNumbers(Isolate* isolate);
++  void AllocateAndInstallRequestedHeapNumbers(LocalIsolate* isolate);
+ 
+   int WriteCodeComments();
+ 
+diff --git a/src/codegen/mips64/assembler-mips64.cc b/src/codegen/mips64/assembler-mips64.cc
+index 97c6114b0b7..7a4e35e1ea3 100644
+--- a/src/codegen/mips64/assembler-mips64.cc
++++ b/src/codegen/mips64/assembler-mips64.cc
+@@ -201,7 +201,7 @@ MemOperand::MemOperand(Register rm, int32_t unit, int32_t multiplier,
+   offset_ = unit * multiplier + offset_addend;
+ }
+ 
+-void Assembler::AllocateAndInstallRequestedHeapNumbers(Isolate* isolate) {
++void Assembler::AllocateAndInstallRequestedHeapNumbers(LocalIsolate* isolate) {
+   DCHECK_IMPLIES(isolate == nullptr, heap_number_requests_.empty());
+   for (auto& request : heap_number_requests_) {
+     Handle<HeapObject> object;
+@@ -271,7 +271,10 @@ Assembler::Assembler(const AssemblerOptions& options,
+   block_buffer_growth_ = false;
+ }
+ 
+-void Assembler::GetCode(Isolate* isolate, CodeDesc* desc,
++void Assembler::GetCode(Isolate* isolate, CodeDesc* desc) {
++  GetCode(isolate->main_thread_local_isolate(), desc);
++}
++void Assembler::GetCode(LocalIsolate* isolate, CodeDesc* desc,
+                         SafepointTableBuilderBase* safepoint_table_builder,
+                         int handler_table_offset) {
+   // As a crutch to avoid having to add manual Align calls wherever we use a
+diff --git a/src/codegen/mips64/assembler-mips64.h b/src/codegen/mips64/assembler-mips64.h
+index 904106eaddf..703611cf682 100644
+--- a/src/codegen/mips64/assembler-mips64.h
++++ b/src/codegen/mips64/assembler-mips64.h
+@@ -157,12 +157,14 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // GetCode emits any pending (non-emitted) code and fills the descriptor desc.
+   static constexpr int kNoHandlerTable = 0;
+   static constexpr SafepointTableBuilderBase* kNoSafepointTable = nullptr;
+-  void GetCode(Isolate* isolate, CodeDesc* desc,
++  void GetCode(LocalIsolate* isolate, CodeDesc* desc,
+                SafepointTableBuilderBase* safepoint_table_builder,
+                int handler_table_offset);
+ 
++  // Convenience wrapper for allocating with an Isolate.
++  void GetCode(Isolate* isolate, CodeDesc* desc);
+   // Convenience wrapper for code without safepoint or handler tables.
+-  void GetCode(Isolate* isolate, CodeDesc* desc) {
++  void GetCode(LocalIsolate* isolate, CodeDesc* desc) {
+     GetCode(isolate, desc, kNoSafepointTable, kNoHandlerTable);
+   }
+ 
+@@ -1905,7 +1907,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   RegList scratch_register_list_;
+ 
+  private:
+-  void AllocateAndInstallRequestedHeapNumbers(Isolate* isolate);
++  void AllocateAndInstallRequestedHeapNumbers(LocalIsolate* isolate);
+ 
+   int WriteCodeComments();
+ 
+diff --git a/src/codegen/ppc/assembler-ppc.cc b/src/codegen/ppc/assembler-ppc.cc
+index 1cf56a3feb6..84e7581f776 100644
+--- a/src/codegen/ppc/assembler-ppc.cc
++++ b/src/codegen/ppc/assembler-ppc.cc
+@@ -207,7 +207,7 @@ MemOperand::MemOperand(Register ra, Register rb)
+ MemOperand::MemOperand(Register ra, Register rb, int64_t offset)
+     : ra_(ra), offset_(offset), rb_(rb) {}
+ 
+-void Assembler::AllocateAndInstallRequestedHeapNumbers(Isolate* isolate) {
++void Assembler::AllocateAndInstallRequestedHeapNumbers(LocalIsolate* isolate) {
+   DCHECK_IMPLIES(isolate == nullptr, heap_number_requests_.empty());
+   for (auto& request : heap_number_requests_) {
+     Handle<HeapObject> object =
+@@ -242,7 +242,10 @@ Assembler::Assembler(const AssemblerOptions& options,
+   relocations_.reserve(128);
+ }
+ 
+-void Assembler::GetCode(Isolate* isolate, CodeDesc* desc,
++void Assembler::GetCode(Isolate* isolate, CodeDesc* desc) {
++  GetCode(isolate->main_thread_local_isolate(), desc);
++}
++void Assembler::GetCode(LocalIsolate* isolate, CodeDesc* desc,
+                         SafepointTableBuilderBase* safepoint_table_builder,
+                         int handler_table_offset) {
+   // As a crutch to avoid having to add manual Align calls wherever we use a
+diff --git a/src/codegen/ppc/assembler-ppc.h b/src/codegen/ppc/assembler-ppc.h
+index 99fd3798bad..6d1f9b2d136 100644
+--- a/src/codegen/ppc/assembler-ppc.h
++++ b/src/codegen/ppc/assembler-ppc.h
+@@ -185,12 +185,14 @@ class Assembler : public AssemblerBase {
+   // GetCode emits any pending (non-emitted) code and fills the descriptor desc.
+   static constexpr int kNoHandlerTable = 0;
+   static constexpr SafepointTableBuilderBase* kNoSafepointTable = nullptr;
+-  void GetCode(Isolate* isolate, CodeDesc* desc,
++  void GetCode(LocalIsolate* isolate, CodeDesc* desc,
+                SafepointTableBuilderBase* safepoint_table_builder,
+                int handler_table_offset);
+ 
++  // Convenience wrapper for allocating with an Isolate.
++  void GetCode(Isolate* isolate, CodeDesc* desc);
+   // Convenience wrapper for code without safepoint or handler tables.
+-  void GetCode(Isolate* isolate, CodeDesc* desc) {
++  void GetCode(LocalIsolate* isolate, CodeDesc* desc) {
+     GetCode(isolate, desc, kNoSafepointTable, kNoHandlerTable);
+   }
+ 
+@@ -1533,7 +1535,7 @@ class Assembler : public AssemblerBase {
+   Trampoline trampoline_;
+   bool internal_trampoline_exception_;
+ 
+-  void AllocateAndInstallRequestedHeapNumbers(Isolate* isolate);
++  void AllocateAndInstallRequestedHeapNumbers(LocalIsolate* isolate);
+ 
+   int WriteCodeComments();
+ 
+diff --git a/src/codegen/riscv/assembler-riscv.cc b/src/codegen/riscv/assembler-riscv.cc
+index 0ffe0854587..433875bcf5c 100644
+--- a/src/codegen/riscv/assembler-riscv.cc
++++ b/src/codegen/riscv/assembler-riscv.cc
+@@ -183,7 +183,7 @@ MemOperand::MemOperand(Register rm, int32_t unit, int32_t multiplier,
+   offset_ = unit * multiplier + offset_addend;
+ }
+ 
+-void Assembler::AllocateAndInstallRequestedHeapNumbers(Isolate* isolate) {
++void Assembler::AllocateAndInstallRequestedHeapNumbers(LocalIsolate* isolate) {
+   DCHECK_IMPLIES(isolate == nullptr, heap_number_requests_.empty());
+   for (auto& request : heap_number_requests_) {
+     Handle<HeapObject> object =
+@@ -224,7 +224,10 @@ Assembler::Assembler(const AssemblerOptions& options,
+ void Assembler::AbortedCodeGeneration() { constpool_.Clear(); }
+ Assembler::~Assembler() { CHECK(constpool_.IsEmpty()); }
+ 
+-void Assembler::GetCode(Isolate* isolate, CodeDesc* desc,
++void Assembler::GetCode(Isolate* isolate, CodeDesc* desc) {
++  GetCode(isolate->main_thread_local_isolate(), desc);
++}
++void Assembler::GetCode(LocalIsolate* isolate, CodeDesc* desc,
+                         SafepointTableBuilder* safepoint_table_builder,
+                         int handler_table_offset) {
+   // As a crutch to avoid having to add manual Align calls wherever we use a
+diff --git a/src/codegen/riscv/assembler-riscv.h b/src/codegen/riscv/assembler-riscv.h
+index 4b97e74ab42..65c317ad018 100644
+--- a/src/codegen/riscv/assembler-riscv.h
++++ b/src/codegen/riscv/assembler-riscv.h
+@@ -188,12 +188,14 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase,
+   // GetCode emits any pending (non-emitted) code and fills the descriptor desc.
+   static constexpr int kNoHandlerTable = 0;
+   static constexpr SafepointTableBuilder* kNoSafepointTable = nullptr;
+-  void GetCode(Isolate* isolate, CodeDesc* desc,
++  void GetCode(LocalIsolate* isolate, CodeDesc* desc,
+                SafepointTableBuilder* safepoint_table_builder,
+                int handler_table_offset);
+ 
++  // Convenience wrapper for allocating with an Isolate.
++  void GetCode(Isolate* isolate, CodeDesc* desc);
+   // Convenience wrapper for code without safepoint or handler tables.
+-  void GetCode(Isolate* isolate, CodeDesc* desc) {
++  void GetCode(LocalIsolate* isolate, CodeDesc* desc) {
+     GetCode(isolate, desc, kNoSafepointTable, kNoHandlerTable);
+   }
+ 
+@@ -823,7 +825,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase,
+  private:
+   ConstantPool constpool_;
+ 
+-  void AllocateAndInstallRequestedHeapNumbers(Isolate* isolate);
++  void AllocateAndInstallRequestedHeapNumbers(LocalIsolate* isolate);
+ 
+   int WriteCodeComments();
+ 
+diff --git a/src/codegen/s390/assembler-s390.cc b/src/codegen/s390/assembler-s390.cc
+index 7db36d755c3..c78cb668651 100644
+--- a/src/codegen/s390/assembler-s390.cc
++++ b/src/codegen/s390/assembler-s390.cc
+@@ -338,7 +338,7 @@ MemOperand::MemOperand(Register rn, int32_t offset)
+ MemOperand::MemOperand(Register rx, Register rb, int32_t offset)
+     : baseRegister(rb), indexRegister(rx), offset_(offset) {}
+ 
+-void Assembler::AllocateAndInstallRequestedHeapNumbers(Isolate* isolate) {
++void Assembler::AllocateAndInstallRequestedHeapNumbers(LocalIsolate* isolate) {
+   DCHECK_IMPLIES(isolate == nullptr, heap_number_requests_.empty());
+   for (auto& request : heap_number_requests_) {
+     Address pc = reinterpret_cast<Address>(buffer_start_) + request.offset();
+@@ -361,7 +361,10 @@ Assembler::Assembler(const AssemblerOptions& options,
+   relocations_.reserve(128);
+ }
+ 
+-void Assembler::GetCode(Isolate* isolate, CodeDesc* desc,
++void Assembler::GetCode(Isolate* isolate, CodeDesc* desc) {
++  GetCode(isolate->main_thread_local_isolate(), desc);
++}
++void Assembler::GetCode(LocalIsolate* isolate, CodeDesc* desc,
+                         SafepointTableBuilderBase* safepoint_table_builder,
+                         int handler_table_offset) {
+   // As a crutch to avoid having to add manual Align calls wherever we use a
+diff --git a/src/codegen/s390/assembler-s390.h b/src/codegen/s390/assembler-s390.h
+index 755d43c3c88..57afa704e31 100644
+--- a/src/codegen/s390/assembler-s390.h
++++ b/src/codegen/s390/assembler-s390.h
+@@ -231,12 +231,14 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   // GetCode emits any pending (non-emitted) code and fills the descriptor desc.
+   static constexpr int kNoHandlerTable = 0;
+   static constexpr SafepointTableBuilderBase* kNoSafepointTable = nullptr;
+-  void GetCode(Isolate* isolate, CodeDesc* desc,
++  void GetCode(LocalIsolate* isolate, CodeDesc* desc,
+                SafepointTableBuilderBase* safepoint_table_builder,
+                int handler_table_offset);
+ 
++  // Convenience wrapper for allocating with an Isolate.
++  void GetCode(Isolate* isolate, CodeDesc* desc);
+   // Convenience wrapper for code without safepoint or handler tables.
+-  void GetCode(Isolate* isolate, CodeDesc* desc) {
++  void GetCode(LocalIsolate* isolate, CodeDesc* desc) {
+     GetCode(isolate, desc, kNoSafepointTable, kNoHandlerTable);
+   }
+ 
+@@ -1465,7 +1467,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   void bind_to(Label* L, int pos);
+   void next(Label* L);
+ 
+-  void AllocateAndInstallRequestedHeapNumbers(Isolate* isolate);
++  void AllocateAndInstallRequestedHeapNumbers(LocalIsolate* isolate);
+ 
+   int WriteCodeComments();
+ 
+diff --git a/src/codegen/x64/assembler-x64.cc b/src/codegen/x64/assembler-x64.cc
+index ef92bd495df..5631e67f141 100644
+--- a/src/codegen/x64/assembler-x64.cc
++++ b/src/codegen/x64/assembler-x64.cc
+@@ -243,7 +243,7 @@ bool Operand::AddressUsesRegister(Register reg) const {
+   }
+ }
+ 
+-void Assembler::AllocateAndInstallRequestedHeapNumbers(Isolate* isolate) {
++void Assembler::AllocateAndInstallRequestedHeapNumbers(LocalIsolate* isolate) {
+   DCHECK_IMPLIES(isolate == nullptr, heap_number_requests_.empty());
+   for (auto& request : heap_number_requests_) {
+     Address pc = reinterpret_cast<Address>(buffer_start_) + request.offset();
+@@ -367,7 +367,10 @@ Assembler::Assembler(const AssemblerOptions& options,
+ #endif
+ }
+ 
+-void Assembler::GetCode(Isolate* isolate, CodeDesc* desc,
++void Assembler::GetCode(Isolate* isolate, CodeDesc* desc) {
++  GetCode(isolate->main_thread_local_isolate(), desc);
++}
++void Assembler::GetCode(LocalIsolate* isolate, CodeDesc* desc,
+                         SafepointTableBuilderBase* safepoint_table_builder,
+                         int handler_table_offset) {
+   // As a crutch to avoid having to add manual Align calls wherever we use a
+diff --git a/src/codegen/x64/assembler-x64.h b/src/codegen/x64/assembler-x64.h
+index aa67811e3c7..f4a3da2acbc 100644
+--- a/src/codegen/x64/assembler-x64.h
++++ b/src/codegen/x64/assembler-x64.h
+@@ -495,12 +495,14 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   static constexpr int kNoHandlerTable = 0;
+   static constexpr SafepointTableBuilderBase* kNoSafepointTable = nullptr;
+ 
+-  void GetCode(Isolate* isolate, CodeDesc* desc,
++  void GetCode(LocalIsolate* isolate, CodeDesc* desc,
+                SafepointTableBuilderBase* safepoint_table_builder,
+                int handler_table_offset);
+ 
++  // Convenience wrapper for allocating with an Isolate.
++  void GetCode(Isolate* isolate, CodeDesc* desc);
+   // Convenience wrapper for code without safepoint or handler tables.
+-  void GetCode(Isolate* isolate, CodeDesc* desc) {
++  void GetCode(LocalIsolate* isolate, CodeDesc* desc) {
+     GetCode(isolate, desc, kNoSafepointTable, kNoHandlerTable);
+   }
+ 
+@@ -2700,12 +2702,12 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+ 
+   bool is_optimizable_farjmp(int idx);
+ 
+-  void AllocateAndInstallRequestedHeapNumbers(Isolate* isolate);
++  void AllocateAndInstallRequestedHeapNumbers(LocalIsolate* isolate);
+ 
+   int WriteCodeComments();
+ 
+-  void GetCode(Isolate* isolate, CodeDesc* desc, int safepoint_table_offset,
+-               int handler_table_offset);
++  void GetCode(LocalIsolate* isolate, CodeDesc* desc,
++               int safepoint_table_offset, int handler_table_offset);
+ 
+   friend class EnsureSpace;
+   friend class RegExpMacroAssemblerX64;
+diff --git a/src/compiler/backend/code-generator.cc b/src/compiler/backend/code-generator.cc
+index 065dc1bdcb5..cb91d872d32 100644
+--- a/src/compiler/backend/code-generator.cc
++++ b/src/compiler/backend/code-generator.cc
+@@ -491,7 +491,8 @@ MaybeHandle<Code> CodeGenerator::FinalizeCode() {
+ 
+   // Allocate and install the code.
+   CodeDesc desc;
+-  masm()->GetCode(isolate(), &desc, safepoints(), handler_table_offset_);
++  masm()->GetCode(isolate()->main_thread_local_isolate(), &desc, safepoints(),
++                  handler_table_offset_);
+ 
+ #if defined(V8_OS_WIN64)
+   if (Builtins::IsBuiltinId(info_->builtin())) {
+diff --git a/src/maglev/maglev-code-generator.cc b/src/maglev/maglev-code-generator.cc
+index e55b27600aa..78413292b93 100644
+--- a/src/maglev/maglev-code-generator.cc
++++ b/src/maglev/maglev-code-generator.cc
+@@ -1603,8 +1603,8 @@ MaybeHandle<Code> MaglevCodeGenerator::BuildCodeObject(Isolate* isolate) {
+   if (code_gen_failed_) return {};
+ 
+   CodeDesc desc;
+-  masm()->GetCode(isolate, &desc, &safepoint_table_builder_,
+-                  handler_table_offset_);
++  masm()->GetCode(isolate->main_thread_local_isolate(), &desc,
++                  &safepoint_table_builder_, handler_table_offset_);
+   if (!v8_flags.maglev_deopt_data_on_background) {
+     GenerateDeoptimizationData(isolate->main_thread_local_isolate());
+   }
+diff --git a/test/unittests/assembler/macro-assembler-arm-unittest.cc b/test/unittests/assembler/macro-assembler-arm-unittest.cc
+index 875d7ba4cba..96073bc0c6c 100644
+--- a/test/unittests/assembler/macro-assembler-arm-unittest.cc
++++ b/test/unittests/assembler/macro-assembler-arm-unittest.cc
+@@ -152,7 +152,7 @@ TEST_P(MacroAssemblerTestMoveObjectAndSlot, MoveObjectAndSlot) {
+     __ Ret();
+ 
+     CodeDesc desc;
+-    masm.GetCode(nullptr, &desc);
++    masm.GetCode(static_cast<LocalIsolate*>(nullptr), &desc);
+     if (v8_flags.print_code) {
+       Handle<Code> code =
+           Factory::CodeBuilder(isolate(), desc, CodeKind::FOR_TESTING).Build();
+diff --git a/test/unittests/assembler/macro-assembler-arm64-unittest.cc b/test/unittests/assembler/macro-assembler-arm64-unittest.cc
+index c93a06acfe6..68a35afc19a 100644
+--- a/test/unittests/assembler/macro-assembler-arm64-unittest.cc
++++ b/test/unittests/assembler/macro-assembler-arm64-unittest.cc
+@@ -215,7 +215,7 @@ TEST_P(MacroAssemblerTestMoveObjectAndSlot, MoveObjectAndSlot) {
+       __ Ret();
+ 
+       CodeDesc desc;
+-      masm.GetCode(nullptr, &desc);
++      masm.GetCode(static_cast<LocalIsolate*>(nullptr), &desc);
+       if (v8_flags.print_code) {
+         Handle<Code> code =
+             Factory::CodeBuilder(isolate(), desc, CodeKind::FOR_TESTING)
+diff --git a/test/unittests/assembler/macro-assembler-riscv-unittest.cc b/test/unittests/assembler/macro-assembler-riscv-unittest.cc
+index 8e74ae692c4..028a66dede6 100644
+--- a/test/unittests/assembler/macro-assembler-riscv-unittest.cc
++++ b/test/unittests/assembler/macro-assembler-riscv-unittest.cc
+@@ -29,7 +29,7 @@ TEST_F(MacroAssemblerTest, TestHardAbort) {
+   __ Abort(AbortReason::kNoReason);
+ 
+   CodeDesc desc;
+-  masm.GetCode(nullptr, &desc);
++  masm.GetCode(static_cast<LocalIsolate*>(nullptr), &desc);
+   buffer->MakeExecutable();
+   // We need an isolate here to execute in the simulator.
+   auto f = GeneratedCode<void>::FromBuffer(isolate(), buffer->start());
+@@ -48,7 +48,7 @@ TEST_F(MacroAssemblerTest, TestCheck) {
+   __ Ret();
+ 
+   CodeDesc desc;
+-  masm.GetCode(nullptr, &desc);
++  masm.GetCode(static_cast<LocalIsolate*>(nullptr), &desc);
+   buffer->MakeExecutable();
+   // We need an isolate here to execute in the simulator.
+   auto f = GeneratedCode<void, int>::FromBuffer(isolate(), buffer->start());
+diff --git a/test/unittests/wasm/trap-handler-simulator-unittest.cc b/test/unittests/wasm/trap-handler-simulator-unittest.cc
+index 3af1dcaec55..74cef45a025 100644
+--- a/test/unittests/wasm/trap-handler-simulator-unittest.cc
++++ b/test/unittests/wasm/trap-handler-simulator-unittest.cc
+@@ -121,7 +121,7 @@ TEST_F(SimulatorTrapHandlerTest, ProbeMemoryWithLandingPad) {
+   masm.Ret();
+ 
+   CodeDesc desc;
+-  masm.GetCode(nullptr, &desc);
++  masm.GetCode(static_cast<LocalIsolate*>(nullptr), &desc);
+ 
+   constexpr bool kUseDefaultHandler = true;
+   CHECK(v8::V8::EnableWebAssemblyTrapHandler(kUseDefaultHandler));
+diff --git a/test/unittests/wasm/trap-handler-x64-arm64-unittest.cc b/test/unittests/wasm/trap-handler-x64-arm64-unittest.cc
+index 7f1a5ef2683..b5da3687a85 100644
+--- a/test/unittests/wasm/trap-handler-x64-arm64-unittest.cc
++++ b/test/unittests/wasm/trap-handler-x64-arm64-unittest.cc
+@@ -173,7 +173,7 @@ class TrapHandlerTest : public TestWithIsolate,
+ #endif
+     __ Ret();
+     CodeDesc desc;
+-    masm.GetCode(nullptr, &desc);
++    masm.GetCode(static_cast<LocalIsolate*>(nullptr), &desc);
+     recovery_buffer_->MakeExecutable();
+     g_recovery_address =
+         reinterpret_cast<Address>(desc.buffer + recovery_offset);
+@@ -353,7 +353,7 @@ TEST_P(TrapHandlerTest, TestTrapHandlerRecovery) {
+ #endif
+   __ Ret();
+   CodeDesc desc;
+-  masm.GetCode(nullptr, &desc);
++  masm.GetCode(static_cast<LocalIsolate*>(nullptr), &desc);
+ 
+   trap_handler::ProtectedInstructionData protected_instruction{crash_offset,
+                                                                recovery_offset};
+@@ -391,7 +391,7 @@ TEST_P(TrapHandlerTest, TestReleaseHandlerData) {
+ #endif
+   __ Ret();
+   CodeDesc desc;
+-  masm.GetCode(nullptr, &desc);
++  masm.GetCode(static_cast<LocalIsolate*>(nullptr), &desc);
+ 
+   trap_handler::ProtectedInstructionData protected_instruction{crash_offset,
+                                                                recovery_offset};
+@@ -432,7 +432,7 @@ TEST_P(TrapHandlerTest, TestNoThreadInWasmFlag) {
+ #endif
+   __ Ret();
+   CodeDesc desc;
+-  masm.GetCode(nullptr, &desc);
++  masm.GetCode(static_cast<LocalIsolate*>(nullptr), &desc);
+ 
+   trap_handler::ProtectedInstructionData protected_instruction{crash_offset,
+                                                                recovery_offset};
+@@ -472,7 +472,7 @@ TEST_P(TrapHandlerTest, TestCrashInWasmNoProtectedInstruction) {
+ #endif
+   __ Ret();
+   CodeDesc desc;
+-  masm.GetCode(nullptr, &desc);
++  masm.GetCode(static_cast<LocalIsolate*>(nullptr), &desc);
+ 
+   trap_handler::ProtectedInstructionData protected_instruction{no_crash_offset,
+                                                                recovery_offset};
+@@ -510,7 +510,7 @@ TEST_P(TrapHandlerTest, TestCrashInWasmWrongCrashType) {
+ #endif
+   __ Ret();
+   CodeDesc desc;
+-  masm.GetCode(nullptr, &desc);
++  masm.GetCode(static_cast<LocalIsolate*>(nullptr), &desc);
+ 
+   trap_handler::ProtectedInstructionData protected_instruction{crash_offset,
+                                                                recovery_offset};
+@@ -580,7 +580,7 @@ TEST_P(TrapHandlerTest, TestCrashInOtherThread) {
+ #endif
+   __ Ret();
+   CodeDesc desc;
+-  masm.GetCode(nullptr, &desc);
++  masm.GetCode(static_cast<LocalIsolate*>(nullptr), &desc);
+ 
+   trap_handler::ProtectedInstructionData protected_instruction{crash_offset,
+                                                                recovery_offset};
+-- 
+2.35.1
+

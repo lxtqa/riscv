@@ -1,0 +1,239 @@
+From 562160fb98b4f592f476b2bed929c96e286d957c Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Thu, 9 Jun 2022 10:02:40 +0800
+Subject: [PATCH] [riscv64][heap] Remove write barrier builtin for incremental
+ marking
+
+Port commit e50d19cb1190735eaf42351b69bb2c3bd5f8b1b7
+
+Original Commit Message:
+
+    https://crrev.com/c/3471854 already disabled the RecordWrite builtin
+    specifically for incremental marking. Since this didn't regress performance as expected, we can now remove those versions of the
+    builtin.
+
+    This will simplify the barrier implementation a bit, but is also
+    required for the shared heap write barrier. Unlike the generational barrier, the shared heap barrier can't be elided for map values.
+
+
+Change-Id: Ie84c77c0d633a5835580a976b3f11736a68cde62
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3696492
+Reviewed-by: ji qiu <qiuji@iscas.ac.cn>
+Commit-Queue: ji qiu <qiuji@iscas.ac.cn>
+Auto-Submit: Yahan Lu <yahan@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#81016}
+---
+ src/builtins/riscv64/builtins-riscv64.cc      |  2 +-
+ .../riscv64/macro-assembler-riscv64.cc        | 36 ++++++++-----------
+ src/codegen/riscv64/macro-assembler-riscv64.h | 22 +++++-------
+ .../backend/riscv64/code-generator-riscv64.cc |  9 ++---
+ .../riscv64/liftoff-assembler-riscv64.h       |  5 ++-
+ 5 files changed, 27 insertions(+), 47 deletions(-)
+
+diff --git a/src/builtins/riscv64/builtins-riscv64.cc b/src/builtins/riscv64/builtins-riscv64.cc
+index f79e2997b57..acb9cb69000 100644
+--- a/src/builtins/riscv64/builtins-riscv64.cc
++++ b/src/builtins/riscv64/builtins-riscv64.cc
+@@ -858,7 +858,7 @@ static void ReplaceClosureCodeWithOptimizedCode(MacroAssembler* masm,
+   __ Move(scratch1, optimized_code);  // Write barrier clobbers scratch1 below.
+   __ RecordWriteField(closure, JSFunction::kCodeOffset, scratch1,
+                       kRAHasNotBeenSaved, SaveFPRegsMode::kIgnore,
+-                      RememberedSetAction::kOmit, SmiCheck::kOmit);
++                      SmiCheck::kOmit);
+ }
+ 
+ static void LeaveInterpreterFrame(MacroAssembler* masm, Register scratch1,
+diff --git a/src/codegen/riscv64/macro-assembler-riscv64.cc b/src/codegen/riscv64/macro-assembler-riscv64.cc
+index b93d54d0228..c1786a34c06 100644
+--- a/src/codegen/riscv64/macro-assembler-riscv64.cc
++++ b/src/codegen/riscv64/macro-assembler-riscv64.cc
+@@ -142,7 +142,6 @@ int MacroAssembler::SafepointRegisterStackIndex(int reg_code) {
+ void MacroAssembler::RecordWriteField(Register object, int offset,
+                                       Register value, RAStatus ra_status,
+                                       SaveFPRegsMode save_fp,
+-                                      RememberedSetAction remembered_set_action,
+                                       SmiCheck smi_check) {
+   DCHECK(!AreAliased(object, value));
+   // First, check if a write barrier is even needed. The tests below
+@@ -171,7 +170,7 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
+   }
+ 
+   RecordWrite(object, Operand(offset - kHeapObjectTag), value, ra_status,
+-              save_fp, remembered_set_action, SmiCheck::kOmit);
++              save_fp, SmiCheck::kOmit);
+ 
+   bind(&done);
+ }
+@@ -209,10 +208,10 @@ void TurboAssembler::CallEphemeronKeyBarrier(Register object,
+   MaybeRestoreRegisters(registers);
+ }
+ 
+-void TurboAssembler::CallRecordWriteStubSaveRegisters(
+-    Register object, Register slot_address,
+-    RememberedSetAction remembered_set_action, SaveFPRegsMode fp_mode,
+-    StubCallMode mode) {
++void TurboAssembler::CallRecordWriteStubSaveRegisters(Register object,
++                                                      Register slot_address,
++                                                      SaveFPRegsMode fp_mode,
++                                                      StubCallMode mode) {
+   DCHECK(!AreAliased(object, slot_address));
+   RegList registers =
+       WriteBarrierDescriptor::ComputeSavedRegisters(object, slot_address);
+@@ -227,26 +226,23 @@ void TurboAssembler::CallRecordWriteStubSaveRegisters(
+   Pop(slot_address_parameter);
+   Pop(object_parameter);
+ 
+-  CallRecordWriteStub(object_parameter, slot_address_parameter,
+-                      remembered_set_action, fp_mode, mode);
++  CallRecordWriteStub(object_parameter, slot_address_parameter, fp_mode, mode);
+ 
+   MaybeRestoreRegisters(registers);
+ }
+ 
+-void TurboAssembler::CallRecordWriteStub(
+-    Register object, Register slot_address,
+-    RememberedSetAction remembered_set_action, SaveFPRegsMode fp_mode,
+-    StubCallMode mode) {
++void TurboAssembler::CallRecordWriteStub(Register object, Register slot_address,
++                                         SaveFPRegsMode fp_mode,
++                                         StubCallMode mode) {
+   // Use CallRecordWriteStubSaveRegisters if the object and slot registers
+   // need to be caller saved.
+   DCHECK_EQ(WriteBarrierDescriptor::ObjectRegister(), object);
+   DCHECK_EQ(WriteBarrierDescriptor::SlotAddressRegister(), slot_address);
+   if (mode == StubCallMode::kCallWasmRuntimeStub) {
+-    auto wasm_target =
+-        wasm::WasmCode::GetRecordWriteStub(remembered_set_action, fp_mode);
++    auto wasm_target = wasm::WasmCode::GetRecordWriteStub(fp_mode);
+     Call(wasm_target, RelocInfo::WASM_STUB_CALL);
+   } else {
+-    auto builtin = Builtins::GetRecordWriteStub(remembered_set_action, fp_mode);
++    auto builtin = Builtins::GetRecordWriteStub(fp_mode);
+     if (options().inline_offheap_trampolines) {
+       // Inline the trampoline. //qj
+       RecordCommentForOffHeapTrampoline(builtin);
+@@ -269,9 +265,7 @@ void TurboAssembler::CallRecordWriteStub(
+ // tag is shifted away.
+ void MacroAssembler::RecordWrite(Register object, Operand offset,
+                                  Register value, RAStatus ra_status,
+-                                 SaveFPRegsMode fp_mode,
+-                                 RememberedSetAction remembered_set_action,
+-                                 SmiCheck smi_check) {
++                                 SaveFPRegsMode fp_mode, SmiCheck smi_check) {
+   DCHECK(!AreAliased(object, value));
+ 
+   if (FLAG_debug_code) {
+@@ -284,9 +278,7 @@ void MacroAssembler::RecordWrite(Register object, Operand offset,
+            Operand(value));
+   }
+ 
+-  if ((remembered_set_action == RememberedSetAction::kOmit &&
+-       !FLAG_incremental_marking) ||
+-      FLAG_disable_write_barriers) {
++  if (FLAG_disable_write_barriers) {
+     return;
+   }
+ 
+@@ -325,7 +317,7 @@ void MacroAssembler::RecordWrite(Register object, Operand offset,
+   // TODO(cbruni): Turn offset into int.
+   DCHECK(offset.IsImmediate());
+   Add64(slot_address, object, offset);
+-  CallRecordWriteStub(object, slot_address, remembered_set_action, fp_mode);
++  CallRecordWriteStub(object, slot_address, fp_mode);
+   if (ra_status == kRAHasNotBeenSaved) {
+     pop(ra);
+   }
+diff --git a/src/codegen/riscv64/macro-assembler-riscv64.h b/src/codegen/riscv64/macro-assembler-riscv64.h
+index dab92558ea0..4d63f18a688 100644
+--- a/src/codegen/riscv64/macro-assembler-riscv64.h
++++ b/src/codegen/riscv64/macro-assembler-riscv64.h
+@@ -346,12 +346,10 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+                                SaveFPRegsMode fp_mode);
+ 
+   void CallRecordWriteStubSaveRegisters(
+-      Register object, Register slot_address,
+-      RememberedSetAction remembered_set_action, SaveFPRegsMode fp_mode,
++      Register object, Register slot_address, SaveFPRegsMode fp_mode,
+       StubCallMode mode = StubCallMode::kCallBuiltinPointer);
+   void CallRecordWriteStub(
+-      Register object, Register slot_address,
+-      RememberedSetAction remembered_set_action, SaveFPRegsMode fp_mode,
++      Register object, Register slot_address, SaveFPRegsMode fp_mode,
+       StubCallMode mode = StubCallMode::kCallBuiltinPointer);
+ 
+   // Push multiple registers on the stack.
+@@ -1095,20 +1093,16 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   // stored.  value and scratch registers are clobbered by the operation.
+   // The offset is the offset from the start of the object, not the offset from
+   // the tagged HeapObject pointer.  For use with FieldOperand(reg, off).
+-  void RecordWriteField(
+-      Register object, int offset, Register value, RAStatus ra_status,
+-      SaveFPRegsMode save_fp,
+-      RememberedSetAction remembered_set_action = RememberedSetAction::kEmit,
+-      SmiCheck smi_check = SmiCheck::kInline);
++  void RecordWriteField(Register object, int offset, Register value,
++                        RAStatus ra_status, SaveFPRegsMode save_fp,
++                        SmiCheck smi_check = SmiCheck::kInline);
+ 
+   // For a given |object| notify the garbage collector that the slot |address|
+   // has been written.  |value| is the object being stored. The value and
+   // address registers are clobbered by the operation.
+-  void RecordWrite(
+-      Register object, Operand offset, Register value, RAStatus ra_status,
+-      SaveFPRegsMode save_fp,
+-      RememberedSetAction remembered_set_action = RememberedSetAction::kEmit,
+-      SmiCheck smi_check = SmiCheck::kInline);
++  void RecordWrite(Register object, Operand offset, Register value,
++                   RAStatus ra_status, SaveFPRegsMode save_fp,
++                   SmiCheck smi_check = SmiCheck::kInline);
+ 
+   // void Pref(int32_t hint, const MemOperand& rs);
+ 
+diff --git a/src/compiler/backend/riscv64/code-generator-riscv64.cc b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+index a35c677ef73..9003c1b9512 100644
+--- a/src/compiler/backend/riscv64/code-generator-riscv64.cc
++++ b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+@@ -181,9 +181,6 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
+                      MemoryChunk::kPointersToHereAreInterestingMask, eq,
+                      exit());
+     __ Add64(scratch1_, object_, index_);
+-    RememberedSetAction const remembered_set_action =
+-        mode_ > RecordWriteMode::kValueIsMap ? RememberedSetAction::kEmit
+-                                             : RememberedSetAction::kOmit;
+     SaveFPRegsMode const save_fp_mode = frame()->DidAllocateDoubleRegisters()
+                                             ? SaveFPRegsMode::kSave
+                                             : SaveFPRegsMode::kIgnore;
+@@ -197,12 +194,10 @@ class OutOfLineRecordWrite final : public OutOfLineCode {
+       // A direct call to a wasm runtime stub defined in this module.
+       // Just encode the stub index. This will be patched when the code
+       // is added to the native module and copied into wasm code space.
+-      __ CallRecordWriteStubSaveRegisters(object_, scratch1_,
+-                                          remembered_set_action, save_fp_mode,
++      __ CallRecordWriteStubSaveRegisters(object_, scratch1_, save_fp_mode,
+                                           StubCallMode::kCallWasmRuntimeStub);
+     } else {
+-      __ CallRecordWriteStubSaveRegisters(object_, scratch1_,
+-                                          remembered_set_action, save_fp_mode);
++      __ CallRecordWriteStubSaveRegisters(object_, scratch1_, save_fp_mode);
+     }
+     if (must_save_lr_) {
+       __ Pop(ra);
+diff --git a/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h b/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
+index 204c8b76bd6..efc82e1f62d 100644
+--- a/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
++++ b/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
+@@ -510,9 +510,8 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+   CheckPageFlag(src.gp(), scratch,
+                 MemoryChunk::kPointersToHereAreInterestingMask, eq, &exit);
+   Add64(scratch, dst_op.rm(), dst_op.offset());
+-  CallRecordWriteStubSaveRegisters(
+-      dst_addr, scratch, RememberedSetAction::kEmit, SaveFPRegsMode::kSave,
+-      StubCallMode::kCallWasmRuntimeStub);
++  CallRecordWriteStubSaveRegisters(dst_addr, scratch, SaveFPRegsMode::kSave,
++                                   StubCallMode::kCallWasmRuntimeStub);
+   bind(&exit);
+ }
+ 
+-- 
+2.35.1
+

@@ -1,0 +1,1910 @@
+From 4392e0a4adcb01c7d7f1a5afd91760f700a9d8c1 Mon Sep 17 00:00:00 2001
+From: Feng Yu <f3n67u@gmail.com>
+Date: Mon, 22 Aug 2022 23:42:07 +0800
+Subject: [PATCH] [test] Migrate cctest/compiler/test-codegen to unittests/
+
+This changeset include:
+1. [prepare for migrate] move `cctest/compiler/value-helper.h`,
+`cctest/compiler/c-signature.h`, and `cctest/compiler/call-tester.h` to
+`test/common` directory because both `test-codegen` and a lot of cctest file
+include it.
+2. [prepare for migrate] separate the tester helper part of `test-codegen`
+into a new `codegen-tester` file.
+3. finally, migrate test-codegen.cc to `codegen-unittest.cc`
+
+Bug: v8:12781
+Change-Id: Ia2f52c1d3b6b62501066dc1c4308a2c09d699e92
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3831146
+Reviewed-by: Clemens Backes <clemensb@chromium.org>
+Commit-Queue: Clemens Backes <clemensb@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#82630}
+---
+ test/cctest/BUILD.gn                          |  12 +-
+ test/cctest/cctest.status                     |   1 -
+ test/cctest/compiler/codegen-tester.cc        |  95 ++++
+ .../{test-codegen.h => codegen-tester.h}      |   2 +-
+ .../test-atomic-load-store-codegen.cc         |   4 +-
+ .../compiler/test-basic-block-profiler.cc     |   4 +-
+ test/cctest/compiler/test-branch-combine.cc   |   4 +-
+ test/cctest/compiler/test-code-generator.cc   |   6 +-
+ .../cctest/compiler/test-js-constant-cache.cc |   2 +-
+ .../compiler/test-machine-operator-reducer.cc |   2 +-
+ test/cctest/compiler/test-multiple-return.cc  |   4 +-
+ .../compiler/test-representation-change.cc    |   4 +-
+ .../test-run-calls-to-external-references.cc  |   4 +-
+ test/cctest/compiler/test-run-load-store.cc   |   5 +-
+ test/cctest/compiler/test-run-machops.cc      |   4 +-
+ test/cctest/compiler/test-run-native-calls.cc |   4 +-
+ test/cctest/test-assembler-arm.cc             |   2 +-
+ test/cctest/test-assembler-riscv32.cc         |   2 +-
+ test/cctest/test-assembler-riscv64.cc         |   2 +-
+ test/cctest/test-macro-assembler-riscv32.cc   |   2 +-
+ test/cctest/test-macro-assembler-riscv64.cc   |   2 +-
+ test/cctest/wasm/test-c-wasm-entry.cc         |   2 +-
+ test/cctest/wasm/test-run-wasm-64.cc          |   3 +-
+ test/cctest/wasm/test-run-wasm-asmjs.cc       |   3 +-
+ test/cctest/wasm/test-run-wasm-interpreter.cc |   2 +-
+ test/cctest/wasm/test-run-wasm-js.cc          |   2 +-
+ test/cctest/wasm/test-run-wasm-simd.cc        |   2 +-
+ test/cctest/wasm/test-run-wasm.cc             |   2 +-
+ test/cctest/wasm/test-wasm-breakpoints.cc     |   2 +-
+ test/cctest/wasm/test-wasm-stack.cc           |   2 +-
+ test/cctest/wasm/test-wasm-trap-position.cc   |   2 +-
+ test/cctest/wasm/wasm-atomics-utils.h         |   2 +-
+ test/cctest/wasm/wasm-run-utils.h             |   4 +-
+ test/cctest/wasm/wasm-simd-utils.cc           |   4 +-
+ .../{cctest/compiler => common}/c-signature.h |   8 +-
+ .../{cctest/compiler => common}/call-tester.h |  11 +-
+ .../compiler => common}/value-helper.cc       |   4 +-
+ .../compiler => common}/value-helper.h        |  38 +-
+ test/mjsunit/wasm/mutable-globals.js          |   2 +-
+ test/unittests/BUILD.gn                       |   7 +
+ test/unittests/compiler/codegen-tester.cc     |  94 ++++
+ test/unittests/compiler/codegen-tester.h      | 454 ++++++++++++++++++
+ .../compiler/codegen-unittest.cc}             | 236 ++++-----
+ test/unittests/unittests.status               |   1 +
+ 44 files changed, 800 insertions(+), 254 deletions(-)
+ create mode 100644 test/cctest/compiler/codegen-tester.cc
+ rename test/cctest/compiler/{test-codegen.h => codegen-tester.h} (99%)
+ rename test/{cctest/compiler => common}/c-signature.h (96%)
+ rename test/{cctest/compiler => common}/call-tester.h (88%)
+ rename test/{cctest/compiler => common}/value-helper.cc (84%)
+ rename test/{cctest/compiler => common}/value-helper.h (91%)
+ create mode 100644 test/unittests/compiler/codegen-tester.cc
+ create mode 100644 test/unittests/compiler/codegen-tester.h
+ rename test/{cctest/compiler/test-codegen.cc => unittests/compiler/codegen-unittest.cc} (81%)
+
+diff --git a/test/cctest/BUILD.gn b/test/cctest/BUILD.gn
+index 374534357a8..73191fa71e4 100644
+--- a/test/cctest/BUILD.gn
++++ b/test/cctest/BUILD.gn
+@@ -82,12 +82,16 @@ v8_source_set("cctest_sources") {
+   sources = [
+     ### gcmole(all) ###
+     "../common/assembler-tester.h",
++    "../common/c-signature.h",
++    "../common/call-tester.h",
+     "../common/flag-utils.h",
++    "../common/value-helper.cc",
++    "../common/value-helper.h",
+     "cctest-utils.h",
+     "collector.h",
+-    "compiler/c-signature.h",
+-    "compiler/call-tester.h",
+     "compiler/code-assembler-tester.h",
++    "compiler/codegen-tester.cc",
++    "compiler/codegen-tester.h",
+     "compiler/function-tester.cc",
+     "compiler/function-tester.h",
+     "compiler/node-observer-tester.h",
+@@ -97,8 +101,6 @@ v8_source_set("cctest_sources") {
+     "compiler/test-calls-with-arraylike-or-spread.cc",
+     "compiler/test-code-assembler.cc",
+     "compiler/test-code-generator.cc",
+-    "compiler/test-codegen.cc",
+-    "compiler/test-codegen.h",
+     "compiler/test-concurrent-shared-function-info.cc",
+     "compiler/test-gap-resolver.cc",
+     "compiler/test-graph-visualizer.cc",
+@@ -130,8 +132,6 @@ v8_source_set("cctest_sources") {
+     "compiler/test-run-variables.cc",
+     "compiler/test-sloppy-equality.cc",
+     "compiler/test-verify-type.cc",
+-    "compiler/value-helper.cc",
+-    "compiler/value-helper.h",
+     "expression-type-collector-macros.h",
+     "feedback-vector-helper.h",
+     "heap/heap-tester.h",
+diff --git a/test/cctest/cctest.status b/test/cctest/cctest.status
+index d1ece5a50f3..91e4935ac24 100644
+--- a/test/cctest/cctest.status
++++ b/test/cctest/cctest.status
+@@ -579,7 +579,6 @@
+   'test-heap/IncrementalMarkingStepMakesBigProgressWithLargeObjects': [SKIP],
+ 
+   # Tests that generate code at runtime.
+-  'test-codegen/*': [SKIP],
+   'test-accessor-assembler/*': [SKIP],
+   'test-assembler-*': [SKIP],
+   'test-atomic-load-store-codegen/*': [SKIP],
+diff --git a/test/cctest/compiler/codegen-tester.cc b/test/cctest/compiler/codegen-tester.cc
+new file mode 100644
+index 00000000000..c69e921e166
+--- /dev/null
++++ b/test/cctest/compiler/codegen-tester.cc
+@@ -0,0 +1,95 @@
++// Copyright 2014 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "test/cctest/compiler/codegen-tester.h"
++
++#include "src/base/overflowing-math.h"
++#include "src/objects/objects-inl.h"
++#include "test/cctest/cctest.h"
++#include "test/common/value-helper.h"
++
++namespace v8 {
++namespace internal {
++namespace compiler {
++
++void Int32BinopInputShapeTester::TestAllInputShapes() {
++  base::Vector<const int32_t> inputs = ValueHelper::int32_vector();
++  int num_int_inputs = static_cast<int>(inputs.size());
++  if (num_int_inputs > 16) num_int_inputs = 16;  // limit to 16 inputs
++
++  for (int i = -2; i < num_int_inputs; i++) {    // for all left shapes
++    for (int j = -2; j < num_int_inputs; j++) {  // for all right shapes
++      if (i >= 0 && j >= 0) break;               // No constant/constant combos
++      RawMachineAssemblerTester<int32_t> m(MachineType::Int32(),
++                                           MachineType::Int32());
++      Node* p0 = m.Parameter(0);
++      Node* p1 = m.Parameter(1);
++      Node* n0;
++      Node* n1;
++
++      // left = Parameter | Load | Constant
++      if (i == -2) {
++        n0 = p0;
++      } else if (i == -1) {
++        n0 = m.LoadFromPointer(&input_a, MachineType::Int32());
++      } else {
++        n0 = m.Int32Constant(inputs[i]);
++      }
++
++      // right = Parameter | Load | Constant
++      if (j == -2) {
++        n1 = p1;
++      } else if (j == -1) {
++        n1 = m.LoadFromPointer(&input_b, MachineType::Int32());
++      } else {
++        n1 = m.Int32Constant(inputs[j]);
++      }
++
++      gen->gen(&m, n0, n1);
++
++      if (i >= 0) {
++        input_a = inputs[i];
++        RunRight(&m);
++      } else if (j >= 0) {
++        input_b = inputs[j];
++        RunLeft(&m);
++      } else {
++        Run(&m);
++      }
++    }
++  }
++}
++
++void Int32BinopInputShapeTester::Run(RawMachineAssemblerTester<int32_t>* m) {
++  FOR_INT32_INPUTS(pl) {
++    FOR_INT32_INPUTS(pr) {
++      input_a = pl;
++      input_b = pr;
++      int32_t expect = gen->expected(input_a, input_b);
++      CHECK_EQ(expect, m->Call(input_a, input_b));
++    }
++  }
++}
++
++void Int32BinopInputShapeTester::RunLeft(
++    RawMachineAssemblerTester<int32_t>* m) {
++  FOR_UINT32_INPUTS(i) {
++    input_a = i;
++    int32_t expect = gen->expected(input_a, input_b);
++    CHECK_EQ(expect, m->Call(input_a, input_b));
++  }
++}
++
++void Int32BinopInputShapeTester::RunRight(
++    RawMachineAssemblerTester<int32_t>* m) {
++  FOR_UINT32_INPUTS(i) {
++    input_b = i;
++    int32_t expect = gen->expected(input_a, input_b);
++    CHECK_EQ(expect, m->Call(input_a, input_b));
++  }
++}
++
++}  // namespace compiler
++}  // namespace internal
++}  // namespace v8
+diff --git a/test/cctest/compiler/test-codegen.h b/test/cctest/compiler/codegen-tester.h
+similarity index 99%
+rename from test/cctest/compiler/test-codegen.h
+rename to test/cctest/compiler/codegen-tester.h
+index 108c67a2fbe..64637cfea2c 100644
+--- a/test/cctest/compiler/test-codegen.h
++++ b/test/cctest/compiler/codegen-tester.h
+@@ -12,7 +12,7 @@
+ #include "src/compiler/raw-machine-assembler.h"
+ #include "src/objects/code-inl.h"
+ #include "test/cctest/cctest.h"
+-#include "test/cctest/compiler/call-tester.h"
++#include "test/common/call-tester.h"
+ 
+ namespace v8 {
+ namespace internal {
+diff --git a/test/cctest/compiler/test-atomic-load-store-codegen.cc b/test/cctest/compiler/test-atomic-load-store-codegen.cc
+index 9352e855bd2..2b39cca0ef7 100644
+--- a/test/cctest/compiler/test-atomic-load-store-codegen.cc
++++ b/test/cctest/compiler/test-atomic-load-store-codegen.cc
+@@ -5,8 +5,8 @@
+ #include "src/base/bits.h"
+ #include "src/objects/objects-inl.h"
+ #include "test/cctest/cctest.h"
+-#include "test/cctest/compiler/test-codegen.h"
+-#include "test/cctest/compiler/value-helper.h"
++#include "test/cctest/compiler/codegen-tester.h"
++#include "test/common/value-helper.h"
+ 
+ namespace v8 {
+ namespace internal {
+diff --git a/test/cctest/compiler/test-basic-block-profiler.cc b/test/cctest/compiler/test-basic-block-profiler.cc
+index 8d99cdc935b..011bc1f11e1 100644
+--- a/test/cctest/compiler/test-basic-block-profiler.cc
++++ b/test/cctest/compiler/test-basic-block-profiler.cc
+@@ -5,7 +5,7 @@
+ #include "src/diagnostics/basic-block-profiler.h"
+ #include "src/objects/objects-inl.h"
+ #include "test/cctest/cctest.h"
+-#include "test/cctest/compiler/test-codegen.h"
++#include "test/cctest/compiler/codegen-tester.h"
+ 
+ namespace v8 {
+ namespace internal {
+@@ -47,7 +47,6 @@ class BasicBlockProfilerTest : public RawMachineAssemblerTester<int32_t> {
+   }
+ };
+ 
+-
+ TEST(ProfileDiamond) {
+   BasicBlockProfilerTest m;
+ 
+@@ -102,7 +101,6 @@ TEST(ProfileDiamond) {
+   }
+ }
+ 
+-
+ TEST(ProfileLoop) {
+   BasicBlockProfilerTest m;
+ 
+diff --git a/test/cctest/compiler/test-branch-combine.cc b/test/cctest/compiler/test-branch-combine.cc
+index b892b151d9b..2cc87a9c8dd 100644
+--- a/test/cctest/compiler/test-branch-combine.cc
++++ b/test/cctest/compiler/test-branch-combine.cc
+@@ -5,8 +5,8 @@
+ #include "src/base/overflowing-math.h"
+ #include "src/objects/objects-inl.h"
+ #include "test/cctest/cctest.h"
+-#include "test/cctest/compiler/test-codegen.h"
+-#include "test/cctest/compiler/value-helper.h"
++#include "test/cctest/compiler/codegen-tester.h"
++#include "test/common/value-helper.h"
+ 
+ namespace v8 {
+ namespace internal {
+diff --git a/test/cctest/compiler/test-code-generator.cc b/test/cctest/compiler/test-code-generator.cc
+index 990dbc8edb0..6886d695efd 100644
+--- a/test/cctest/compiler/test-code-generator.cc
++++ b/test/cctest/compiler/test-code-generator.cc
+@@ -16,8 +16,8 @@
+ #include "src/objects/smi.h"
+ #include "test/cctest/cctest.h"
+ #include "test/cctest/compiler/code-assembler-tester.h"
++#include "test/cctest/compiler/codegen-tester.h"
+ #include "test/cctest/compiler/function-tester.h"
+-#include "test/cctest/compiler/test-codegen.h"
+ 
+ #if V8_ENABLE_WEBASSEMBLY
+ #include "src/compiler/wasm-compiler.h"
+@@ -301,9 +301,7 @@ void PrintStateValue(std::ostream& os, Isolate* isolate, Handle<Object> value,
+   os << ")";
+ }
+ 
+-bool TestSimd128Moves() {
+-  return CpuFeatures::SupportsWasmSimd128();
+-}
++bool TestSimd128Moves() { return CpuFeatures::SupportsWasmSimd128(); }
+ 
+ }  // namespace
+ 
+diff --git a/test/cctest/compiler/test-js-constant-cache.cc b/test/cctest/compiler/test-js-constant-cache.cc
+index 709dee1baea..3713ef14cac 100644
+--- a/test/cctest/compiler/test-js-constant-cache.cc
++++ b/test/cctest/compiler/test-js-constant-cache.cc
+@@ -8,7 +8,7 @@
+ #include "src/compiler/node-properties.h"
+ #include "src/heap/factory-inl.h"
+ #include "test/cctest/cctest.h"
+-#include "test/cctest/compiler/value-helper.h"
++#include "test/common/value-helper.h"
+ 
+ namespace v8 {
+ namespace internal {
+diff --git a/test/cctest/compiler/test-machine-operator-reducer.cc b/test/cctest/compiler/test-machine-operator-reducer.cc
+index 8a69b80088f..b10c3368510 100644
+--- a/test/cctest/compiler/test-machine-operator-reducer.cc
++++ b/test/cctest/compiler/test-machine-operator-reducer.cc
+@@ -11,7 +11,7 @@
+ #include "src/compiler/typer.h"
+ #include "src/objects/objects-inl.h"
+ #include "test/cctest/cctest.h"
+-#include "test/cctest/compiler/value-helper.h"
++#include "test/common/value-helper.h"
+ 
+ namespace v8 {
+ namespace internal {
+diff --git a/test/cctest/compiler/test-multiple-return.cc b/test/cctest/compiler/test-multiple-return.cc
+index cf2c20422e3..c9884226835 100644
+--- a/test/cctest/compiler/test-multiple-return.cc
++++ b/test/cctest/compiler/test-multiple-return.cc
+@@ -20,8 +20,8 @@
+ #include "src/wasm/wasm-objects-inl.h"
+ #include "src/wasm/wasm-opcodes.h"
+ #include "test/cctest/cctest.h"
+-#include "test/cctest/compiler/test-codegen.h"
+-#include "test/cctest/compiler/value-helper.h"
++#include "test/cctest/compiler/codegen-tester.h"
++#include "test/common/value-helper.h"
+ 
+ namespace v8 {
+ namespace internal {
+diff --git a/test/cctest/compiler/test-representation-change.cc b/test/cctest/compiler/test-representation-change.cc
+index 230c9410c6f..c9542cabc5a 100644
+--- a/test/cctest/compiler/test-representation-change.cc
++++ b/test/cctest/compiler/test-representation-change.cc
+@@ -11,9 +11,9 @@
+ #include "src/compiler/type-cache.h"
+ #include "src/objects/objects-inl.h"
+ #include "test/cctest/cctest.h"
++#include "test/cctest/compiler/codegen-tester.h"
+ #include "test/cctest/compiler/graph-and-builders.h"
+-#include "test/cctest/compiler/test-codegen.h"
+-#include "test/cctest/compiler/value-helper.h"
++#include "test/common/value-helper.h"
+ 
+ namespace v8 {
+ namespace internal {
+diff --git a/test/cctest/compiler/test-run-calls-to-external-references.cc b/test/cctest/compiler/test-run-calls-to-external-references.cc
+index 5b7d7d077f9..703f581e218 100644
+--- a/test/cctest/compiler/test-run-calls-to-external-references.cc
++++ b/test/cctest/compiler/test-run-calls-to-external-references.cc
+@@ -5,8 +5,8 @@
+ #include "src/base/memory.h"
+ #include "src/codegen/external-reference.h"
+ #include "test/cctest/cctest.h"
+-#include "test/cctest/compiler/test-codegen.h"
+-#include "test/cctest/compiler/value-helper.h"
++#include "test/cctest/compiler/codegen-tester.h"
++#include "test/common/value-helper.h"
+ 
+ #if V8_ENABLE_WEBASSEMBLY
+ #include "src/wasm/wasm-external-refs.h"
+diff --git a/test/cctest/compiler/test-run-load-store.cc b/test/cctest/compiler/test-run-load-store.cc
+index 49b7f24774f..a235c655883 100644
+--- a/test/cctest/compiler/test-run-load-store.cc
++++ b/test/cctest/compiler/test-run-load-store.cc
+@@ -11,9 +11,8 @@
+ #include "src/base/utils/random-number-generator.h"
+ #include "src/objects/objects-inl.h"
+ #include "test/cctest/cctest.h"
+-#include "test/cctest/compiler/test-codegen.h"
+-#include "test/cctest/compiler/value-helper.h"
+-
++#include "test/cctest/compiler/codegen-tester.h"
++#include "test/common/value-helper.h"
+ 
+ namespace v8 {
+ namespace internal {
+diff --git a/test/cctest/compiler/test-run-machops.cc b/test/cctest/compiler/test-run-machops.cc
+index cc36fab0700..7a565fcbb28 100644
+--- a/test/cctest/compiler/test-run-machops.cc
++++ b/test/cctest/compiler/test-run-machops.cc
+@@ -16,9 +16,9 @@
+ #include "src/utils/boxed-float.h"
+ #include "src/utils/utils.h"
+ #include "test/cctest/cctest.h"
+-#include "test/cctest/compiler/test-codegen.h"
+-#include "test/cctest/compiler/value-helper.h"
++#include "test/cctest/compiler/codegen-tester.h"
+ #include "test/common/flag-utils.h"
++#include "test/common/value-helper.h"
+ 
+ namespace v8 {
+ namespace internal {
+diff --git a/test/cctest/compiler/test-run-native-calls.cc b/test/cctest/compiler/test-run-native-calls.cc
+index 8f010218315..126bdc4c1fe 100644
+--- a/test/cctest/compiler/test-run-native-calls.cc
++++ b/test/cctest/compiler/test-run-native-calls.cc
+@@ -13,9 +13,9 @@
+ #include "src/objects/objects-inl.h"
+ #include "src/wasm/wasm-linkage.h"
+ #include "test/cctest/cctest.h"
++#include "test/cctest/compiler/codegen-tester.h"
+ #include "test/cctest/compiler/graph-and-builders.h"
+-#include "test/cctest/compiler/test-codegen.h"
+-#include "test/cctest/compiler/value-helper.h"
++#include "test/common/value-helper.h"
+ 
+ namespace v8 {
+ namespace internal {
+diff --git a/test/cctest/test-assembler-arm.cc b/test/cctest/test-assembler-arm.cc
+index 65dee3a07a3..210f6bf29c6 100644
+--- a/test/cctest/test-assembler-arm.cc
++++ b/test/cctest/test-assembler-arm.cc
+@@ -36,7 +36,7 @@
+ #include "src/utils/ostreams.h"
+ #include "test/cctest/assembler-helper-arm.h"
+ #include "test/cctest/cctest.h"
+-#include "test/cctest/compiler/value-helper.h"
++#include "test/common/value-helper.h"
+ 
+ namespace v8 {
+ namespace internal {
+diff --git a/test/cctest/test-assembler-riscv32.cc b/test/cctest/test-assembler-riscv32.cc
+index 5c0b12e680b..ac1f603e385 100644
+--- a/test/cctest/test-assembler-riscv32.cc
++++ b/test/cctest/test-assembler-riscv32.cc
+@@ -38,8 +38,8 @@
+ #include "src/init/v8.h"
+ #include "src/utils/utils.h"
+ #include "test/cctest/cctest.h"
+-#include "test/cctest/compiler/value-helper.h"
+ #include "test/cctest/test-helper-riscv32.h"
++#include "test/common/value-helper.h"
+ 
+ namespace v8 {
+ namespace internal {
+diff --git a/test/cctest/test-assembler-riscv64.cc b/test/cctest/test-assembler-riscv64.cc
+index 519a6ad27bd..73e68ec9534 100644
+--- a/test/cctest/test-assembler-riscv64.cc
++++ b/test/cctest/test-assembler-riscv64.cc
+@@ -38,8 +38,8 @@
+ #include "src/init/v8.h"
+ #include "src/utils/utils.h"
+ #include "test/cctest/cctest.h"
+-#include "test/cctest/compiler/value-helper.h"
+ #include "test/cctest/test-helper-riscv64.h"
++#include "test/common/value-helper.h"
+ 
+ namespace v8 {
+ namespace internal {
+diff --git a/test/cctest/test-macro-assembler-riscv32.cc b/test/cctest/test-macro-assembler-riscv32.cc
+index f5430b99067..64928a5eba0 100644
+--- a/test/cctest/test-macro-assembler-riscv32.cc
++++ b/test/cctest/test-macro-assembler-riscv32.cc
+@@ -39,9 +39,9 @@
+ #include "src/objects/objects-inl.h"
+ #include "src/utils/ostreams.h"
+ #include "test/cctest/cctest.h"
+-#include "test/cctest/compiler/value-helper.h"
+ #include "test/cctest/test-helper-riscv32.h"
+ #include "test/common/assembler-tester.h"
++#include "test/common/value-helper.h"
+ 
+ namespace v8 {
+ namespace internal {
+diff --git a/test/cctest/test-macro-assembler-riscv64.cc b/test/cctest/test-macro-assembler-riscv64.cc
+index 7ce6e5d3dbb..6769223a08e 100644
+--- a/test/cctest/test-macro-assembler-riscv64.cc
++++ b/test/cctest/test-macro-assembler-riscv64.cc
+@@ -36,9 +36,9 @@
+ #include "src/execution/simulator.h"
+ #include "src/objects/objects-inl.h"
+ #include "test/cctest/cctest.h"
+-#include "test/cctest/compiler/value-helper.h"
+ #include "test/cctest/test-helper-riscv64.h"
+ #include "test/common/assembler-tester.h"
++#include "test/common/value-helper.h"
+ 
+ namespace v8 {
+ namespace internal {
+diff --git a/test/cctest/wasm/test-c-wasm-entry.cc b/test/cctest/wasm/test-c-wasm-entry.cc
+index 2baa084dffc..0b12ef3174d 100644
+--- a/test/cctest/wasm/test-c-wasm-entry.cc
++++ b/test/cctest/wasm/test-c-wasm-entry.cc
+@@ -11,8 +11,8 @@
+ #include "src/wasm/wasm-arguments.h"
+ #include "src/wasm/wasm-objects.h"
+ #include "test/cctest/cctest.h"
+-#include "test/cctest/compiler/value-helper.h"
+ #include "test/cctest/wasm/wasm-run-utils.h"
++#include "test/common/value-helper.h"
+ #include "test/common/wasm/wasm-macro-gen.h"
+ 
+ namespace v8 {
+diff --git a/test/cctest/wasm/test-run-wasm-64.cc b/test/cctest/wasm/test-run-wasm-64.cc
+index 718a0d7aca6..79607439442 100644
+--- a/test/cctest/wasm/test-run-wasm-64.cc
++++ b/test/cctest/wasm/test-run-wasm-64.cc
+@@ -12,8 +12,8 @@
+ #include "src/codegen/assembler-inl.h"
+ #include "src/objects/objects-inl.h"
+ #include "test/cctest/cctest.h"
+-#include "test/cctest/compiler/value-helper.h"
+ #include "test/cctest/wasm/wasm-run-utils.h"
++#include "test/common/value-helper.h"
+ #include "test/common/wasm/test-signatures.h"
+ #include "test/common/wasm/wasm-macro-gen.h"
+ 
+@@ -1222,7 +1222,6 @@ WASM_EXEC_TEST(LoadStoreI64_sx) {
+   }
+ }
+ 
+-
+ WASM_EXEC_TEST(I64ReinterpretF64) {
+   WasmRunner<int64_t> r(execution_tier);
+   int64_t* memory =
+diff --git a/test/cctest/wasm/test-run-wasm-asmjs.cc b/test/cctest/wasm/test-run-wasm-asmjs.cc
+index 5f5d20d1298..2e71a86a1da 100644
+--- a/test/cctest/wasm/test-run-wasm-asmjs.cc
++++ b/test/cctest/wasm/test-run-wasm-asmjs.cc
+@@ -8,10 +8,9 @@
+ 
+ #include "src/base/platform/elapsed-timer.h"
+ #include "src/codegen/assembler-inl.h"
+-
+ #include "test/cctest/cctest.h"
+-#include "test/cctest/compiler/value-helper.h"
+ #include "test/cctest/wasm/wasm-run-utils.h"
++#include "test/common/value-helper.h"
+ #include "test/common/wasm/test-signatures.h"
+ #include "test/common/wasm/wasm-macro-gen.h"
+ 
+diff --git a/test/cctest/wasm/test-run-wasm-interpreter.cc b/test/cctest/wasm/test-run-wasm-interpreter.cc
+index 2d197d64e8a..4b6d5cd16fc 100644
+--- a/test/cctest/wasm/test-run-wasm-interpreter.cc
++++ b/test/cctest/wasm/test-run-wasm-interpreter.cc
+@@ -10,8 +10,8 @@
+ 
+ #include "src/codegen/assembler-inl.h"
+ #include "test/cctest/cctest.h"
+-#include "test/cctest/compiler/value-helper.h"
+ #include "test/cctest/wasm/wasm-run-utils.h"
++#include "test/common/value-helper.h"
+ #include "test/common/wasm/test-signatures.h"
+ #include "test/common/wasm/wasm-interpreter.h"
+ #include "test/common/wasm/wasm-macro-gen.h"
+diff --git a/test/cctest/wasm/test-run-wasm-js.cc b/test/cctest/wasm/test-run-wasm-js.cc
+index 88bc0d70a27..253dc56397d 100644
+--- a/test/cctest/wasm/test-run-wasm-js.cc
++++ b/test/cctest/wasm/test-run-wasm-js.cc
+@@ -12,8 +12,8 @@
+ #include "src/codegen/assembler-inl.h"
+ #include "src/objects/heap-number-inl.h"
+ #include "test/cctest/cctest.h"
+-#include "test/cctest/compiler/value-helper.h"
+ #include "test/cctest/wasm/wasm-run-utils.h"
++#include "test/common/value-helper.h"
+ #include "test/common/wasm/test-signatures.h"
+ #include "test/common/wasm/wasm-macro-gen.h"
+ 
+diff --git a/test/cctest/wasm/test-run-wasm-simd.cc b/test/cctest/wasm/test-run-wasm-simd.cc
+index e437758b3bc..8279ea540e9 100644
+--- a/test/cctest/wasm/test-run-wasm-simd.cc
++++ b/test/cctest/wasm/test-run-wasm-simd.cc
+@@ -32,10 +32,10 @@
+ #include "src/wasm/wasm-constants.h"
+ #include "src/wasm/wasm-opcodes.h"
+ #include "test/cctest/cctest.h"
+-#include "test/cctest/compiler/value-helper.h"
+ #include "test/cctest/wasm/wasm-run-utils.h"
+ #include "test/cctest/wasm/wasm-simd-utils.h"
+ #include "test/common/flag-utils.h"
++#include "test/common/value-helper.h"
+ #include "test/common/wasm/flag-utils.h"
+ #include "test/common/wasm/wasm-macro-gen.h"
+ 
+diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.cc
+index 97f26ae9c08..1d913a9ed5a 100644
+--- a/test/cctest/wasm/test-run-wasm.cc
++++ b/test/cctest/wasm/test-run-wasm.cc
+@@ -11,8 +11,8 @@
+ #include "src/wasm/code-space-access.h"
+ #include "src/wasm/wasm-opcodes-inl.h"
+ #include "test/cctest/cctest.h"
+-#include "test/cctest/compiler/value-helper.h"
+ #include "test/cctest/wasm/wasm-run-utils.h"
++#include "test/common/value-helper.h"
+ #include "test/common/wasm/test-signatures.h"
+ #include "test/common/wasm/wasm-macro-gen.h"
+ 
+diff --git a/test/cctest/wasm/test-wasm-breakpoints.cc b/test/cctest/wasm/test-wasm-breakpoints.cc
+index 142fd4246bd..86a4602516e 100644
+--- a/test/cctest/wasm/test-wasm-breakpoints.cc
++++ b/test/cctest/wasm/test-wasm-breakpoints.cc
+@@ -10,8 +10,8 @@
+ #include "src/wasm/wasm-debug.h"
+ #include "src/wasm/wasm-objects-inl.h"
+ #include "test/cctest/cctest.h"
+-#include "test/cctest/compiler/value-helper.h"
+ #include "test/cctest/wasm/wasm-run-utils.h"
++#include "test/common/value-helper.h"
+ #include "test/common/wasm/test-signatures.h"
+ #include "test/common/wasm/wasm-macro-gen.h"
+ 
+diff --git a/test/cctest/wasm/test-wasm-stack.cc b/test/cctest/wasm/test-wasm-stack.cc
+index 9dedd390db1..e5086553ea2 100644
+--- a/test/cctest/wasm/test-wasm-stack.cc
++++ b/test/cctest/wasm/test-wasm-stack.cc
+@@ -7,8 +7,8 @@
+ #include "src/codegen/assembler-inl.h"
+ #include "src/objects/call-site-info-inl.h"
+ #include "test/cctest/cctest.h"
+-#include "test/cctest/compiler/value-helper.h"
+ #include "test/cctest/wasm/wasm-run-utils.h"
++#include "test/common/value-helper.h"
+ #include "test/common/wasm/test-signatures.h"
+ #include "test/common/wasm/wasm-macro-gen.h"
+ 
+diff --git a/test/cctest/wasm/test-wasm-trap-position.cc b/test/cctest/wasm/test-wasm-trap-position.cc
+index f772b2abf69..9d3c158f50a 100644
+--- a/test/cctest/wasm/test-wasm-trap-position.cc
++++ b/test/cctest/wasm/test-wasm-trap-position.cc
+@@ -8,8 +8,8 @@
+ #include "src/objects/call-site-info-inl.h"
+ #include "src/trap-handler/trap-handler.h"
+ #include "test/cctest/cctest.h"
+-#include "test/cctest/compiler/value-helper.h"
+ #include "test/cctest/wasm/wasm-run-utils.h"
++#include "test/common/value-helper.h"
+ #include "test/common/wasm/test-signatures.h"
+ #include "test/common/wasm/wasm-macro-gen.h"
+ 
+diff --git a/test/cctest/wasm/wasm-atomics-utils.h b/test/cctest/wasm/wasm-atomics-utils.h
+index d9f033766fb..9ccc1898f47 100644
+--- a/test/cctest/wasm/wasm-atomics-utils.h
++++ b/test/cctest/wasm/wasm-atomics-utils.h
+@@ -6,8 +6,8 @@
+ #define WASM_ATOMICOP_UTILS_H
+ 
+ #include "test/cctest/cctest.h"
+-#include "test/cctest/compiler/value-helper.h"
+ #include "test/cctest/wasm/wasm-run-utils.h"
++#include "test/common/value-helper.h"
+ 
+ namespace v8 {
+ namespace internal {
+diff --git a/test/cctest/wasm/wasm-run-utils.h b/test/cctest/wasm/wasm-run-utils.h
+index 40a3940a2d5..d4b9c74efeb 100644
+--- a/test/cctest/wasm/wasm-run-utils.h
++++ b/test/cctest/wasm/wasm-run-utils.h
+@@ -34,9 +34,9 @@
+ #include "src/zone/accounting-allocator.h"
+ #include "src/zone/zone.h"
+ #include "test/cctest/cctest.h"
+-#include "test/cctest/compiler/call-tester.h"
+ #include "test/cctest/compiler/graph-and-builders.h"
+-#include "test/cctest/compiler/value-helper.h"
++#include "test/common/call-tester.h"
++#include "test/common/value-helper.h"
+ #include "test/common/wasm/flag-utils.h"
+ #include "test/common/wasm/wasm-interpreter.h"
+ 
+diff --git a/test/cctest/wasm/wasm-simd-utils.cc b/test/cctest/wasm/wasm-simd-utils.cc
+index c85a4f21792..5d280d6a583 100644
+--- a/test/cctest/wasm/wasm-simd-utils.cc
++++ b/test/cctest/wasm/wasm-simd-utils.cc
+@@ -14,9 +14,9 @@
+ #include "src/wasm/value-type.h"
+ #include "src/wasm/wasm-opcodes-inl.h"
+ #include "src/wasm/wasm-opcodes.h"
+-#include "test/cctest/compiler/c-signature.h"
+-#include "test/cctest/compiler/value-helper.h"
+ #include "test/cctest/wasm/wasm-run-utils.h"
++#include "test/common/c-signature.h"
++#include "test/common/value-helper.h"
+ #include "test/common/wasm/wasm-macro-gen.h"
+ 
+ namespace v8 {
+diff --git a/test/cctest/compiler/c-signature.h b/test/common/c-signature.h
+similarity index 96%
+rename from test/cctest/compiler/c-signature.h
+rename to test/common/c-signature.h
+index 2835d5ed0d9..b8cfdc97f29 100644
+--- a/test/cctest/compiler/c-signature.h
++++ b/test/common/c-signature.h
+@@ -1,9 +1,9 @@
+-// Copyright 2014 the V8 project authors. All rights reserved.
++// Copyright 2022 the V8 project authors. All rights reserved.
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
+-#ifndef V8_COMPILER_C_SIGNATURE_H_
+-#define V8_COMPILER_C_SIGNATURE_H_
++#ifndef V8_COMMON_C_SIGNATURE_H_
++#define V8_COMMON_C_SIGNATURE_H_
+ 
+ #ifdef V8_USE_SIMULATOR_WITH_GENERIC_C_CALLS
+ #include "include/v8-fast-api-calls.h"
+@@ -141,4 +141,4 @@ using CSignature_o_oo = CSignatureOf<Object, Object, Object>;
+ }  // namespace internal
+ }  // namespace v8
+ 
+-#endif  // V8_COMPILER_C_SIGNATURE_H_
++#endif  // V8_COMMON_C_SIGNATURE_H_
+diff --git a/test/cctest/compiler/call-tester.h b/test/common/call-tester.h
+similarity index 88%
+rename from test/cctest/compiler/call-tester.h
+rename to test/common/call-tester.h
+index ef39787bad0..81fe72f6194 100644
+--- a/test/cctest/compiler/call-tester.h
++++ b/test/common/call-tester.h
+@@ -1,14 +1,14 @@
+-// Copyright 2014 the V8 project authors. All rights reserved.
++// Copyright 2022 the V8 project authors. All rights reserved.
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
+-#ifndef V8_CCTEST_COMPILER_CALL_TESTER_H_
+-#define V8_CCTEST_COMPILER_CALL_TESTER_H_
++#ifndef V8_COMMON_CALL_TESTER_H_
++#define V8_COMMON_CALL_TESTER_H_
+ 
+ #include "src/execution/simulator.h"
+ #include "src/handles/handles.h"
+ #include "src/objects/code.h"
+-#include "test/cctest/compiler/c-signature.h"
++#include "test/common/c-signature.h"
+ 
+ namespace v8 {
+ namespace internal {
+@@ -67,9 +67,8 @@ class CodeRunner : public CallHelper<T> {
+   Handle<Code> code_;
+ };
+ 
+-
+ }  // namespace compiler
+ }  // namespace internal
+ }  // namespace v8
+ 
+-#endif  // V8_CCTEST_COMPILER_CALL_TESTER_H_
++#endif  // V8_COMMON_CALL_TESTER_H_
+diff --git a/test/cctest/compiler/value-helper.cc b/test/common/value-helper.cc
+similarity index 84%
+rename from test/cctest/compiler/value-helper.cc
+rename to test/common/value-helper.cc
+index abafa400392..6675dffc01b 100644
+--- a/test/cctest/compiler/value-helper.cc
++++ b/test/common/value-helper.cc
+@@ -1,8 +1,8 @@
+-// Copyright 2017 the V8 project authors. All rights reserved.
++// Copyright 2022 the V8 project authors. All rights reserved.
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
+-#include "test/cctest/compiler/value-helper.h"
++#include "test/common/value-helper.h"
+ 
+ namespace v8 {
+ namespace internal {
+diff --git a/test/cctest/compiler/value-helper.h b/test/common/value-helper.h
+similarity index 91%
+rename from test/cctest/compiler/value-helper.h
+rename to test/common/value-helper.h
+index a143aca72bd..a5c7c29ec3e 100644
+--- a/test/cctest/compiler/value-helper.h
++++ b/test/common/value-helper.h
+@@ -1,9 +1,9 @@
+-// Copyright 2014 the V8 project authors. All rights reserved.
++// Copyright 2022 the V8 project authors. All rights reserved.
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
+-#ifndef V8_CCTEST_COMPILER_VALUE_HELPER_H_
+-#define V8_CCTEST_COMPILER_VALUE_HELPER_H_
++#ifndef V8_COMMON_VALUE_HELPER_H_
++#define V8_COMMON_VALUE_HELPER_H_
+ 
+ #include <stdint.h>
+ 
+@@ -13,7 +13,6 @@
+ #include "src/compiler/node.h"
+ #include "src/execution/isolate.h"
+ #include "src/objects/objects.h"
+-#include "test/cctest/cctest.h"
+ 
+ namespace v8 {
+ namespace internal {
+@@ -24,35 +23,6 @@ namespace compiler {
+ // etc.
+ class ValueHelper {
+  public:
+-  Isolate* isolate_;
+-
+-  ValueHelper() : isolate_(CcTest::InitIsolateOnce()) {}
+-
+-  void CheckFloat64Constant(double expected, Node* node) {
+-    CHECK_EQ(IrOpcode::kFloat64Constant, node->opcode());
+-    CHECK_EQ(expected, OpParameter<double>(node->op()));
+-  }
+-
+-  void CheckNumberConstant(double expected, Node* node) {
+-    CHECK_EQ(IrOpcode::kNumberConstant, node->opcode());
+-    CHECK_EQ(expected, OpParameter<double>(node->op()));
+-  }
+-
+-  void CheckInt32Constant(int32_t expected, Node* node) {
+-    CHECK_EQ(IrOpcode::kInt32Constant, node->opcode());
+-    CHECK_EQ(expected, OpParameter<int32_t>(node->op()));
+-  }
+-
+-  void CheckUint32Constant(int32_t expected, Node* node) {
+-    CHECK_EQ(IrOpcode::kInt32Constant, node->opcode());
+-    CHECK_EQ(expected, OpParameter<int32_t>(node->op()));
+-  }
+-
+-  void CheckHeapConstant(HeapObject expected, Node* node) {
+-    CHECK_EQ(IrOpcode::kHeapConstant, node->opcode());
+-    CHECK_EQ(expected, *HeapConstantOf(node->op()));
+-  }
+-
+   static constexpr float float32_array[] = {
+       -std::numeric_limits<float>::infinity(),
+       -2.70497e+38f,
+@@ -428,4 +398,4 @@ std::ostream& operator<<(std::ostream& out, FloatCompareWrapper<type> wrapper) {
+ }  // namespace internal
+ }  // namespace v8
+ 
+-#endif  // V8_CCTEST_COMPILER_VALUE_HELPER_H_
++#endif  // V8_COMMON_VALUE_HELPER_H_
+diff --git a/test/mjsunit/wasm/mutable-globals.js b/test/mjsunit/wasm/mutable-globals.js
+index 80d3f3515d4..95a4eae7895 100644
+--- a/test/mjsunit/wasm/mutable-globals.js
++++ b/test/mjsunit/wasm/mutable-globals.js
+@@ -27,7 +27,7 @@ function assertGlobalIsValid(global) {
+   }
+ })();
+ 
+-// Copied from //src/v8/test/cctest/compiler/value-helper.h
++// Copied from //src/v8/test/common/value-helper.h
+ const u32_values = [
+   0x00000000, 0x00000001, 0xFFFFFFFF, 0x1B09788B, 0x04C5FCE8, 0xCC0DE5BF,
+   // This row is useful for testing lea optimizations on intel.
+diff --git a/test/unittests/BUILD.gn b/test/unittests/BUILD.gn
+index 9b6e7e1b9d5..703bfaf57f4 100644
+--- a/test/unittests/BUILD.gn
++++ b/test/unittests/BUILD.gn
+@@ -222,6 +222,10 @@ v8_source_set("unittests_sources") {
+     "../../test/common/assembler-tester.h",
+     "../../testing/gmock-support.h",
+     "../../testing/gtest-support.h",
++    "../common/c-signature.h",
++    "../common/call-tester.h",
++    "../common/value-helper.cc",
++    "../common/value-helper.h",
+     "api/access-check-unittest.cc",
+     "api/accessor-unittest.cc",
+     "api/api-icu-unittest.cc",
+@@ -288,6 +292,9 @@ v8_source_set("unittests_sources") {
+     "compiler/branch-elimination-unittest.cc",
+     "compiler/bytecode-analysis-unittest.cc",
+     "compiler/checkpoint-elimination-unittest.cc",
++    "compiler/codegen-tester.cc",
++    "compiler/codegen-tester.h",
++    "compiler/codegen-unittest.cc",
+     "compiler/common-operator-reducer-unittest.cc",
+     "compiler/common-operator-unittest.cc",
+     "compiler/compiler-test-utils.h",
+diff --git a/test/unittests/compiler/codegen-tester.cc b/test/unittests/compiler/codegen-tester.cc
+new file mode 100644
+index 00000000000..968dbe647c8
+--- /dev/null
++++ b/test/unittests/compiler/codegen-tester.cc
+@@ -0,0 +1,94 @@
++// Copyright 2022 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "test/unittests/compiler/codegen-tester.h"
++
++#include "src/base/overflowing-math.h"
++#include "src/objects/objects-inl.h"
++#include "test/common/value-helper.h"
++
++namespace v8 {
++namespace internal {
++namespace compiler {
++
++void Int32BinopInputShapeTester::TestAllInputShapes() {
++  base::Vector<const int32_t> inputs = ValueHelper::int32_vector();
++  int num_int_inputs = static_cast<int>(inputs.size());
++  if (num_int_inputs > 16) num_int_inputs = 16;  // limit to 16 inputs
++
++  for (int i = -2; i < num_int_inputs; i++) {    // for all left shapes
++    for (int j = -2; j < num_int_inputs; j++) {  // for all right shapes
++      if (i >= 0 && j >= 0) break;               // No constant/constant combos
++      RawMachineAssemblerTester<int32_t> m(
++          isolate_, zone_, MachineType::Int32(), MachineType::Int32());
++      Node* p0 = m.Parameter(0);
++      Node* p1 = m.Parameter(1);
++      Node* n0;
++      Node* n1;
++
++      // left = Parameter | Load | Constant
++      if (i == -2) {
++        n0 = p0;
++      } else if (i == -1) {
++        n0 = m.LoadFromPointer(&input_a, MachineType::Int32());
++      } else {
++        n0 = m.Int32Constant(inputs[i]);
++      }
++
++      // right = Parameter | Load | Constant
++      if (j == -2) {
++        n1 = p1;
++      } else if (j == -1) {
++        n1 = m.LoadFromPointer(&input_b, MachineType::Int32());
++      } else {
++        n1 = m.Int32Constant(inputs[j]);
++      }
++
++      gen->gen(&m, n0, n1);
++
++      if (i >= 0) {
++        input_a = inputs[i];
++        RunRight(&m);
++      } else if (j >= 0) {
++        input_b = inputs[j];
++        RunLeft(&m);
++      } else {
++        Run(&m);
++      }
++    }
++  }
++}
++
++void Int32BinopInputShapeTester::Run(RawMachineAssemblerTester<int32_t>* m) {
++  FOR_INT32_INPUTS(pl) {
++    FOR_INT32_INPUTS(pr) {
++      input_a = pl;
++      input_b = pr;
++      int32_t expect = gen->expected(input_a, input_b);
++      CHECK_EQ(expect, m->Call(input_a, input_b));
++    }
++  }
++}
++
++void Int32BinopInputShapeTester::RunLeft(
++    RawMachineAssemblerTester<int32_t>* m) {
++  FOR_UINT32_INPUTS(i) {
++    input_a = i;
++    int32_t expect = gen->expected(input_a, input_b);
++    CHECK_EQ(expect, m->Call(input_a, input_b));
++  }
++}
++
++void Int32BinopInputShapeTester::RunRight(
++    RawMachineAssemblerTester<int32_t>* m) {
++  FOR_UINT32_INPUTS(i) {
++    input_b = i;
++    int32_t expect = gen->expected(input_a, input_b);
++    CHECK_EQ(expect, m->Call(input_a, input_b));
++  }
++}
++
++}  // namespace compiler
++}  // namespace internal
++}  // namespace v8
+diff --git a/test/unittests/compiler/codegen-tester.h b/test/unittests/compiler/codegen-tester.h
+new file mode 100644
+index 00000000000..22ceedd382b
+--- /dev/null
++++ b/test/unittests/compiler/codegen-tester.h
+@@ -0,0 +1,454 @@
++// Copyright 2022 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef V8_UNITTESTS_COMPILER_CODEGEN_TESTER_H_
++#define V8_UNITTESTS_COMPILER_CODEGEN_TESTER_H_
++
++#include "src/codegen/assembler.h"
++#include "src/codegen/optimized-compilation-info.h"
++#include "src/compiler/backend/instruction-selector.h"
++#include "src/compiler/pipeline.h"
++#include "src/compiler/raw-machine-assembler.h"
++#include "src/objects/code-inl.h"
++#include "test/common/call-tester.h"
++
++namespace v8 {
++namespace internal {
++namespace compiler {
++
++template <typename ReturnType>
++class RawMachineAssemblerTester : public CallHelper<ReturnType>,
++                                  public RawMachineAssembler {
++ public:
++  template <typename... ParamMachTypes>
++  explicit RawMachineAssemblerTester(Isolate* isolate, Zone* zone,
++                                     ParamMachTypes... p)
++      : CallHelper<ReturnType>(
++            isolate,
++            CSignature::New(zone, MachineTypeForC<ReturnType>(), p...)),
++        RawMachineAssembler(
++            isolate, zone->template New<Graph>(zone),
++            Linkage::GetSimplifiedCDescriptor(
++                zone,
++                CSignature::New(zone, MachineTypeForC<ReturnType>(), p...),
++                CallDescriptor::kInitializeRootRegister),
++            MachineType::PointerRepresentation(),
++            InstructionSelector::SupportedMachineOperatorFlags(),
++            InstructionSelector::AlignmentRequirements()),
++        isolate_(isolate),
++        zone_(zone) {}
++
++  template <typename... ParamMachTypes>
++  RawMachineAssemblerTester(Isolate* isolate, Zone* zone, CodeKind kind,
++                            ParamMachTypes... p)
++      : CallHelper<ReturnType>(
++            isolate,
++            CSignature::New(zone, MachineTypeForC<ReturnType>(), p...)),
++        RawMachineAssembler(
++            isolate, zone->template New<Graph>(zone),
++            Linkage::GetSimplifiedCDescriptor(
++                zone,
++                CSignature::New(zone, MachineTypeForC<ReturnType>(), p...),
++                CallDescriptor::kInitializeRootRegister),
++            MachineType::PointerRepresentation(),
++            InstructionSelector::SupportedMachineOperatorFlags(),
++            InstructionSelector::AlignmentRequirements()),
++        isolate_(isolate),
++        zone_(zone),
++        kind_(kind) {}
++
++  ~RawMachineAssemblerTester() override = default;
++
++  void CheckNumber(double expected, Object number) {
++    CHECK(this->isolate()->factory()->NewNumber(expected)->SameValue(number));
++  }
++
++  void CheckString(const char* expected, Object string) {
++    CHECK(
++        this->isolate()->factory()->InternalizeUtf8String(expected)->SameValue(
++            string));
++  }
++
++  void GenerateCode() { Generate(); }
++
++  Handle<Code> GetCode() {
++    Generate();
++    return code_.ToHandleChecked();
++  }
++
++  Handle<CodeT> GetCodeT() { return ToCodeT(GetCode(), isolate_); }
++
++ protected:
++  Address Generate() override {
++    if (code_.is_null()) {
++      Schedule* schedule = this->ExportForTest();
++      auto call_descriptor = this->call_descriptor();
++      Graph* graph = this->graph();
++      OptimizedCompilationInfo info(base::ArrayVector("testing"), zone_, kind_);
++      code_ = Pipeline::GenerateCodeForTesting(
++          &info, isolate_, call_descriptor, graph,
++          AssemblerOptions::Default(isolate_), schedule);
++    }
++    return this->code_.ToHandleChecked()->entry();
++  }
++
++  Zone* zone() { return zone_; }
++
++ private:
++  Isolate* isolate_;
++  Zone* zone_;
++  CodeKind kind_ = CodeKind::FOR_TESTING;
++  MaybeHandle<Code> code_;
++};
++
++template <typename ReturnType>
++class BufferedRawMachineAssemblerTester
++    : public RawMachineAssemblerTester<int32_t> {
++ public:
++  template <typename... ParamMachTypes>
++  explicit BufferedRawMachineAssemblerTester(Isolate* isolate, Zone* zone,
++                                             ParamMachTypes... p)
++      : RawMachineAssemblerTester<int32_t>(
++            isolate, zone, MachineType::Pointer(),
++            ((void)p, MachineType::Pointer())...),
++        test_graph_signature_(
++            CSignature::New(this->zone(), MachineType::Int32(), p...)),
++        return_parameter_index_(sizeof...(p)) {
++    static_assert(sizeof...(p) <= arraysize(parameter_nodes_),
++                  "increase parameter_nodes_ array");
++    std::array<MachineType, sizeof...(p)> p_arr{{p...}};
++    for (size_t i = 0; i < p_arr.size(); ++i) {
++      parameter_nodes_[i] = Load(p_arr[i], RawMachineAssembler::Parameter(i));
++    }
++  }
++
++  Address Generate() override { return RawMachineAssemblerTester::Generate(); }
++
++  // The BufferedRawMachineAssemblerTester does not pass parameters directly
++  // to the constructed IR graph. Instead it passes a pointer to the parameter
++  // to the IR graph, and adds Load nodes to the IR graph to load the
++  // parameters from memory. Thereby it is possible to pass 64 bit parameters
++  // to the IR graph.
++  Node* Parameter(size_t index) {
++    CHECK_GT(arraysize(parameter_nodes_), index);
++    return parameter_nodes_[index];
++  }
++
++  // The BufferedRawMachineAssemblerTester adds a Store node to the IR graph
++  // to store the graph's return value in memory. The memory address for the
++  // Store node is provided as a parameter. By storing the return value in
++  // memory it is possible to return 64 bit values.
++  void Return(Node* input) {
++    if (COMPRESS_POINTERS_BOOL && MachineTypeForC<ReturnType>().IsTagged()) {
++      // Since we are returning values via storing to off-heap location
++      // generate full-word store here.
++      Store(MachineType::PointerRepresentation(),
++            RawMachineAssembler::Parameter(return_parameter_index_),
++            BitcastTaggedToWord(input), kNoWriteBarrier);
++
++    } else {
++      Store(MachineTypeForC<ReturnType>().representation(),
++            RawMachineAssembler::Parameter(return_parameter_index_), input,
++            kNoWriteBarrier);
++    }
++    RawMachineAssembler::Return(Int32Constant(1234));
++  }
++
++  template <typename... Params>
++  ReturnType Call(Params... p) {
++    uintptr_t zap_data[] = {kZapValue, kZapValue};
++    ReturnType return_value;
++    static_assert(sizeof(return_value) <= sizeof(zap_data));
++    MemCopy(&return_value, &zap_data, sizeof(return_value));
++    CSignature::VerifyParams<Params...>(test_graph_signature_);
++    CallHelper<int32_t>::Call(reinterpret_cast<void*>(&p)...,
++                              reinterpret_cast<void*>(&return_value));
++    return return_value;
++  }
++
++ private:
++  CSignature* test_graph_signature_;
++  Node* parameter_nodes_[4];
++  uint32_t return_parameter_index_;
++};
++
++template <>
++class BufferedRawMachineAssemblerTester<void>
++    : public RawMachineAssemblerTester<void> {
++ public:
++  template <typename... ParamMachTypes>
++  explicit BufferedRawMachineAssemblerTester(Isolate* isolate, Zone* zone,
++                                             ParamMachTypes... p)
++      : RawMachineAssemblerTester<void>(isolate, zone,
++                                        ((void)p, MachineType::Pointer())...),
++        test_graph_signature_(
++            CSignature::New(this->zone(), MachineType::None(), p...)) {
++    static_assert(sizeof...(p) <= arraysize(parameter_nodes_),
++                  "increase parameter_nodes_ array");
++    std::array<MachineType, sizeof...(p)> p_arr{{p...}};
++    for (size_t i = 0; i < p_arr.size(); ++i) {
++      parameter_nodes_[i] = Load(p_arr[i], RawMachineAssembler::Parameter(i));
++    }
++  }
++
++  Address Generate() override { return RawMachineAssemblerTester::Generate(); }
++
++  // The BufferedRawMachineAssemblerTester does not pass parameters directly
++  // to the constructed IR graph. Instead it passes a pointer to the parameter
++  // to the IR graph, and adds Load nodes to the IR graph to load the
++  // parameters from memory. Thereby it is possible to pass 64 bit parameters
++  // to the IR graph.
++  Node* Parameter(size_t index) {
++    CHECK_GT(arraysize(parameter_nodes_), index);
++    return parameter_nodes_[index];
++  }
++
++  template <typename... Params>
++  void Call(Params... p) {
++    CSignature::VerifyParams<Params...>(test_graph_signature_);
++    CallHelper<void>::Call(reinterpret_cast<void*>(&p)...);
++  }
++
++ private:
++  CSignature* test_graph_signature_;
++  Node* parameter_nodes_[4];
++};
++
++static const bool USE_RESULT_BUFFER = true;
++static const bool USE_RETURN_REGISTER = false;
++static const int32_t CHECK_VALUE = 0x99BEEDCE;
++
++// TODO(titzer): use the C-style calling convention, or any register-based
++// calling convention for binop tests.
++template <typename CType, bool use_result_buffer>
++class BinopTester {
++ public:
++  explicit BinopTester(RawMachineAssemblerTester<int32_t>* tester,
++                       MachineType type)
++      : T(tester),
++        param0(T->LoadFromPointer(&p0, type)),
++        param1(T->LoadFromPointer(&p1, type)),
++        type(type),
++        p0(static_cast<CType>(0)),
++        p1(static_cast<CType>(0)),
++        result(static_cast<CType>(0)) {}
++
++  RawMachineAssemblerTester<int32_t>* T;
++  Node* param0;
++  Node* param1;
++
++  CType call(CType a0, CType a1) {
++    p0 = a0;
++    p1 = a1;
++    if (use_result_buffer) {
++      CHECK_EQ(CHECK_VALUE, T->Call());
++      return result;
++    } else {
++      return static_cast<CType>(T->Call());
++    }
++  }
++
++  void AddReturn(Node* val) {
++    if (use_result_buffer) {
++      T->Store(type.representation(), T->PointerConstant(&result),
++               T->Int32Constant(0), val, kNoWriteBarrier);
++      T->Return(T->Int32Constant(CHECK_VALUE));
++    } else {
++      T->Return(val);
++    }
++  }
++
++  template <typename Ci, typename Cj, typename Fn>
++  void Run(const Ci& ci, const Cj& cj, const Fn& fn) {
++    typename Ci::const_iterator i;
++    typename Cj::const_iterator j;
++    for (i = ci.begin(); i != ci.end(); ++i) {
++      for (j = cj.begin(); j != cj.end(); ++j) {
++        CHECK_EQ(fn(*i, *j), this->call(*i, *j));
++      }
++    }
++  }
++
++ protected:
++  MachineType type;
++  CType p0;
++  CType p1;
++  CType result;
++};
++
++// A helper class for testing code sequences that take two int parameters and
++// return an int value.
++class Int32BinopTester : public BinopTester<int32_t, USE_RETURN_REGISTER> {
++ public:
++  explicit Int32BinopTester(RawMachineAssemblerTester<int32_t>* tester)
++      : BinopTester<int32_t, USE_RETURN_REGISTER>(tester,
++                                                  MachineType::Int32()) {}
++};
++
++// A helper class for testing code sequences that take two int parameters and
++// return an int value.
++class Int64BinopTester : public BinopTester<int64_t, USE_RETURN_REGISTER> {
++ public:
++  explicit Int64BinopTester(RawMachineAssemblerTester<int32_t>* tester)
++      : BinopTester<int64_t, USE_RETURN_REGISTER>(tester,
++                                                  MachineType::Int64()) {}
++};
++
++// A helper class for testing code sequences that take two uint parameters and
++// return an uint value.
++class Uint32BinopTester : public BinopTester<uint32_t, USE_RETURN_REGISTER> {
++ public:
++  explicit Uint32BinopTester(RawMachineAssemblerTester<int32_t>* tester)
++      : BinopTester<uint32_t, USE_RETURN_REGISTER>(tester,
++                                                   MachineType::Uint32()) {}
++
++  uint32_t call(uint32_t a0, uint32_t a1) {
++    p0 = a0;
++    p1 = a1;
++    return static_cast<uint32_t>(T->Call());
++  }
++};
++
++// A helper class for testing code sequences that take two float parameters and
++// return a float value.
++class Float32BinopTester : public BinopTester<float, USE_RESULT_BUFFER> {
++ public:
++  explicit Float32BinopTester(RawMachineAssemblerTester<int32_t>* tester)
++      : BinopTester<float, USE_RESULT_BUFFER>(tester, MachineType::Float32()) {}
++};
++
++// A helper class for testing code sequences that take two double parameters and
++// return a double value.
++class Float64BinopTester : public BinopTester<double, USE_RESULT_BUFFER> {
++ public:
++  explicit Float64BinopTester(RawMachineAssemblerTester<int32_t>* tester)
++      : BinopTester<double, USE_RESULT_BUFFER>(tester, MachineType::Float64()) {
++  }
++};
++
++// A helper class for testing code sequences that take two pointer parameters
++// and return a pointer value.
++// TODO(titzer): pick word size of pointers based on V8_TARGET.
++template <typename Type>
++class PointerBinopTester : public BinopTester<Type, USE_RETURN_REGISTER> {
++ public:
++  explicit PointerBinopTester(RawMachineAssemblerTester<int32_t>* tester)
++      : BinopTester<Type, USE_RETURN_REGISTER>(tester, MachineType::Pointer()) {
++  }
++};
++
++// A helper class for testing code sequences that take two tagged parameters and
++// return a tagged value.
++template <typename Type>
++class TaggedBinopTester : public BinopTester<Type, USE_RETURN_REGISTER> {
++ public:
++  explicit TaggedBinopTester(RawMachineAssemblerTester<int32_t>* tester)
++      : BinopTester<Type, USE_RETURN_REGISTER>(tester,
++                                               MachineType::AnyTagged()) {}
++};
++
++// A helper class for testing compares. Wraps a machine opcode and provides
++// evaluation routines and the operators.
++class CompareWrapper {
++ public:
++  explicit CompareWrapper(IrOpcode::Value op) : opcode(op) {}
++
++  Node* MakeNode(RawMachineAssemblerTester<int32_t>* m, Node* a, Node* b) {
++    return m->AddNode(op(m->machine()), a, b);
++  }
++
++  const Operator* op(MachineOperatorBuilder* machine) {
++    switch (opcode) {
++      case IrOpcode::kWord32Equal:
++        return machine->Word32Equal();
++      case IrOpcode::kInt32LessThan:
++        return machine->Int32LessThan();
++      case IrOpcode::kInt32LessThanOrEqual:
++        return machine->Int32LessThanOrEqual();
++      case IrOpcode::kUint32LessThan:
++        return machine->Uint32LessThan();
++      case IrOpcode::kUint32LessThanOrEqual:
++        return machine->Uint32LessThanOrEqual();
++      case IrOpcode::kFloat64Equal:
++        return machine->Float64Equal();
++      case IrOpcode::kFloat64LessThan:
++        return machine->Float64LessThan();
++      case IrOpcode::kFloat64LessThanOrEqual:
++        return machine->Float64LessThanOrEqual();
++      default:
++        UNREACHABLE();
++    }
++  }
++
++  bool Int32Compare(int32_t a, int32_t b) {
++    switch (opcode) {
++      case IrOpcode::kWord32Equal:
++        return a == b;
++      case IrOpcode::kInt32LessThan:
++        return a < b;
++      case IrOpcode::kInt32LessThanOrEqual:
++        return a <= b;
++      case IrOpcode::kUint32LessThan:
++        return static_cast<uint32_t>(a) < static_cast<uint32_t>(b);
++      case IrOpcode::kUint32LessThanOrEqual:
++        return static_cast<uint32_t>(a) <= static_cast<uint32_t>(b);
++      default:
++        UNREACHABLE();
++    }
++  }
++
++  bool Float64Compare(double a, double b) {
++    switch (opcode) {
++      case IrOpcode::kFloat64Equal:
++        return a == b;
++      case IrOpcode::kFloat64LessThan:
++        return a < b;
++      case IrOpcode::kFloat64LessThanOrEqual:
++        return a <= b;
++      default:
++        UNREACHABLE();
++    }
++  }
++
++  IrOpcode::Value opcode;
++};
++
++// A small closure class to generate code for a function of two inputs that
++// produces a single output so that it can be used in many different contexts.
++// The {expected()} method should compute the expected output for a given
++// pair of inputs.
++template <typename T>
++class BinopGen {
++ public:
++  virtual void gen(RawMachineAssemblerTester<int32_t>* m, Node* a, Node* b) = 0;
++  virtual T expected(T a, T b) = 0;
++  virtual ~BinopGen() = default;
++};
++
++// A helper class to generate various combination of input shape combinations
++// and run the generated code to ensure it produces the correct results.
++class Int32BinopInputShapeTester {
++ public:
++  explicit Int32BinopInputShapeTester(Isolate* isolate, Zone* zone,
++                                      BinopGen<int32_t>* g)
++      : isolate_(isolate), zone_(zone), gen(g), input_a(0), input_b(0) {}
++
++  void TestAllInputShapes();
++
++ private:
++  Isolate* isolate_;
++  Zone* zone_;
++  BinopGen<int32_t>* gen;
++  int32_t input_a;
++  int32_t input_b;
++
++  void Run(RawMachineAssemblerTester<int32_t>* m);
++  void RunLeft(RawMachineAssemblerTester<int32_t>* m);
++  void RunRight(RawMachineAssemblerTester<int32_t>* m);
++};
++}  // namespace compiler
++}  // namespace internal
++}  // namespace v8
++
++#endif  // V8_UNITTESTS_COMPILER_CODEGEN_TESTER_H_
+diff --git a/test/cctest/compiler/test-codegen.cc b/test/unittests/compiler/codegen-unittest.cc
+similarity index 81%
+rename from test/cctest/compiler/test-codegen.cc
+rename to test/unittests/compiler/codegen-unittest.cc
+index e46407ce57c..8112db62500 100644
+--- a/test/cctest/compiler/test-codegen.cc
++++ b/test/unittests/compiler/codegen-unittest.cc
+@@ -1,19 +1,47 @@
+-// Copyright 2014 the V8 project authors. All rights reserved.
++// Copyright 2022 the V8 project authors. All rights reserved.
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
+-#include "test/cctest/compiler/test-codegen.h"
+-
+ #include "src/base/overflowing-math.h"
+ #include "src/objects/objects-inl.h"
+-#include "test/cctest/cctest.h"
+-#include "test/cctest/compiler/value-helper.h"
++#include "test/common/value-helper.h"
++#include "test/unittests/compiler/codegen-tester.h"
++#include "test/unittests/test-utils.h"
+ 
+ namespace v8 {
+ namespace internal {
+ namespace compiler {
+ 
+-TEST(CompareWrapper) {
++class CodeGenTest : public TestWithIsolateAndZone {
++ public:
++  CodeGenTest() : TestWithIsolateAndZone(kCompressGraphZone) {}
++
++ protected:
++  void RunSmiConstant(int32_t v) {
++// TODO(dcarney): on x64 Smis are generated with the SmiConstantRegister
++#if !V8_TARGET_ARCH_X64
++    if (Smi::IsValid(v)) {
++      RawMachineAssemblerTester<Object> m(i_isolate(), zone());
++      m.Return(m.NumberConstant(v));
++      CHECK_EQ(Smi::FromInt(v), m.Call());
++    }
++#endif
++  }
++
++  void RunNumberConstant(double v) {
++    RawMachineAssemblerTester<Object> m(i_isolate(), zone());
++#if V8_TARGET_ARCH_X64
++    // TODO(dcarney): on x64 Smis are generated with the SmiConstantRegister
++    Handle<Object> number = m.isolate()->factory()->NewNumber(v);
++    if (number->IsSmi()) return;
++#endif
++    m.Return(m.NumberConstant(v));
++    Object result = m.Call();
++    m.CheckNumber(v, result);
++  }
++};
++
++TEST_F(CodeGenTest, CompareWrapper) {
+   // Who tests the testers?
+   // If CompareWrapper is broken, then test expectations will be broken.
+   CompareWrapper wWord32Equal(IrOpcode::kWord32Equal);
+@@ -277,86 +305,9 @@ TEST(CompareWrapper) {
+   CHECK_EQ(false, wFloat64LessThanOrEqual.Float64Compare(-1.8, -2.8));
+ }
+ 
+-void Int32BinopInputShapeTester::TestAllInputShapes() {
+-  base::Vector<const int32_t> inputs = ValueHelper::int32_vector();
+-  int num_int_inputs = static_cast<int>(inputs.size());
+-  if (num_int_inputs > 16) num_int_inputs = 16;  // limit to 16 inputs
+-
+-  for (int i = -2; i < num_int_inputs; i++) {    // for all left shapes
+-    for (int j = -2; j < num_int_inputs; j++) {  // for all right shapes
+-      if (i >= 0 && j >= 0) break;               // No constant/constant combos
+-      RawMachineAssemblerTester<int32_t> m(MachineType::Int32(),
+-                                           MachineType::Int32());
+-      Node* p0 = m.Parameter(0);
+-      Node* p1 = m.Parameter(1);
+-      Node* n0;
+-      Node* n1;
+-
+-      // left = Parameter | Load | Constant
+-      if (i == -2) {
+-        n0 = p0;
+-      } else if (i == -1) {
+-        n0 = m.LoadFromPointer(&input_a, MachineType::Int32());
+-      } else {
+-        n0 = m.Int32Constant(inputs[i]);
+-      }
+-
+-      // right = Parameter | Load | Constant
+-      if (j == -2) {
+-        n1 = p1;
+-      } else if (j == -1) {
+-        n1 = m.LoadFromPointer(&input_b, MachineType::Int32());
+-      } else {
+-        n1 = m.Int32Constant(inputs[j]);
+-      }
+-
+-      gen->gen(&m, n0, n1);
+-
+-      if (i >= 0) {
+-        input_a = inputs[i];
+-        RunRight(&m);
+-      } else if (j >= 0) {
+-        input_b = inputs[j];
+-        RunLeft(&m);
+-      } else {
+-        Run(&m);
+-      }
+-    }
+-  }
+-}
+-
+-void Int32BinopInputShapeTester::Run(RawMachineAssemblerTester<int32_t>* m) {
+-  FOR_INT32_INPUTS(pl) {
+-    FOR_INT32_INPUTS(pr) {
+-      input_a = pl;
+-      input_b = pr;
+-      int32_t expect = gen->expected(input_a, input_b);
+-      CHECK_EQ(expect, m->Call(input_a, input_b));
+-    }
+-  }
+-}
+-
+-void Int32BinopInputShapeTester::RunLeft(
+-    RawMachineAssemblerTester<int32_t>* m) {
+-  FOR_UINT32_INPUTS(i) {
+-    input_a = i;
+-    int32_t expect = gen->expected(input_a, input_b);
+-    CHECK_EQ(expect, m->Call(input_a, input_b));
+-  }
+-}
+-
+-void Int32BinopInputShapeTester::RunRight(
+-    RawMachineAssemblerTester<int32_t>* m) {
+-  FOR_UINT32_INPUTS(i) {
+-    input_b = i;
+-    int32_t expect = gen->expected(input_a, input_b);
+-    CHECK_EQ(expect, m->Call(input_a, input_b));
+-  }
+-}
+-
+-TEST(ParametersEqual) {
+-  RawMachineAssemblerTester<int32_t> m(MachineType::Int32(),
+-                                       MachineType::Int32());
++TEST_F(CodeGenTest, ParametersEqual) {
++  RawMachineAssemblerTester<int32_t> m(
++      i_isolate(), zone(), MachineType::Int32(), MachineType::Int32());
+   Node* p1 = m.Parameter(1);
+   CHECK(p1);
+   Node* p0 = m.Parameter(0);
+@@ -365,44 +316,21 @@ TEST(ParametersEqual) {
+   CHECK_EQ(p1, m.Parameter(1));
+ }
+ 
+-void RunSmiConstant(int32_t v) {
+-// TODO(dcarney): on x64 Smis are generated with the SmiConstantRegister
+-#if !V8_TARGET_ARCH_X64
+-  if (Smi::IsValid(v)) {
+-    RawMachineAssemblerTester<Object> m;
+-    m.Return(m.NumberConstant(v));
+-    CHECK_EQ(Smi::FromInt(v), m.Call());
+-  }
+-#endif
+-}
+-
+-void RunNumberConstant(double v) {
+-  RawMachineAssemblerTester<Object> m;
+-#if V8_TARGET_ARCH_X64
+-  // TODO(dcarney): on x64 Smis are generated with the SmiConstantRegister
+-  Handle<Object> number = m.isolate()->factory()->NewNumber(v);
+-  if (number->IsSmi()) return;
+-#endif
+-  m.Return(m.NumberConstant(v));
+-  Object result = m.Call();
+-  m.CheckNumber(v, result);
+-}
+-
+-TEST(RunEmpty) {
+-  RawMachineAssemblerTester<int32_t> m;
++TEST_F(CodeGenTest, RunEmpty) {
++  RawMachineAssemblerTester<int32_t> m(i_isolate(), zone());
+   m.Return(m.Int32Constant(0));
+   CHECK_EQ(0, m.Call());
+ }
+ 
+-TEST(RunInt32Constants) {
++TEST_F(CodeGenTest, RunInt32Constants) {
+   FOR_INT32_INPUTS(i) {
+-    RawMachineAssemblerTester<int32_t> m;
++    RawMachineAssemblerTester<int32_t> m(i_isolate(), zone());
+     m.Return(m.Int32Constant(i));
+     CHECK_EQ(i, m.Call());
+   }
+ }
+ 
+-TEST(RunSmiConstants) {
++TEST_F(CodeGenTest, RunSmiConstants) {
+   for (int32_t i = 1; i < Smi::kMaxValue && i != 0;
+        i = base::ShlWithWraparound(i, 1)) {
+     RunSmiConstant(i);
+@@ -420,7 +348,7 @@ TEST(RunSmiConstants) {
+   FOR_INT32_INPUTS(i) { RunSmiConstant(i); }
+ }
+ 
+-TEST(RunNumberConstants) {
++TEST_F(CodeGenTest, RunNumberConstants) {
+   FOR_FLOAT64_INPUTS(i) { RunNumberConstant(i); }
+   FOR_INT32_INPUTS(i) { RunNumberConstant(i); }
+ 
+@@ -437,20 +365,20 @@ TEST(RunNumberConstants) {
+   RunNumberConstant(Smi::kMinValue + 1);
+ }
+ 
+-TEST(RunEmptyString) {
+-  RawMachineAssemblerTester<Object> m;
++TEST_F(CodeGenTest, RunEmptyString) {
++  RawMachineAssemblerTester<Object> m(i_isolate(), zone());
+   m.Return(m.StringConstant("empty"));
+   m.CheckString("empty", m.Call());
+ }
+ 
+-TEST(RunHeapConstant) {
+-  RawMachineAssemblerTester<Object> m;
++TEST_F(CodeGenTest, RunHeapConstant) {
++  RawMachineAssemblerTester<Object> m(i_isolate(), zone());
+   m.Return(m.StringConstant("empty"));
+   m.CheckString("empty", m.Call());
+ }
+ 
+-TEST(RunHeapNumberConstant) {
+-  RawMachineAssemblerTester<void*> m;
++TEST_F(CodeGenTest, RunHeapNumberConstant) {
++  RawMachineAssemblerTester<void*> m(i_isolate(), zone());
+   Handle<HeapObject> number = m.isolate()->factory()->NewHeapNumber(100.5);
+   m.Return(m.HeapConstant(number));
+   HeapObject result =
+@@ -458,8 +386,9 @@ TEST(RunHeapNumberConstant) {
+   CHECK_EQ(result, *number);
+ }
+ 
+-TEST(RunParam1) {
+-  RawMachineAssemblerTester<int32_t> m(MachineType::Int32());
++TEST_F(CodeGenTest, RunParam1) {
++  RawMachineAssemblerTester<int32_t> m(i_isolate(), zone(),
++                                       MachineType::Int32());
+   m.Return(m.Parameter(0));
+ 
+   FOR_INT32_INPUTS(i) {
+@@ -468,9 +397,9 @@ TEST(RunParam1) {
+   }
+ }
+ 
+-TEST(RunParam2_1) {
+-  RawMachineAssemblerTester<int32_t> m(MachineType::Int32(),
+-                                       MachineType::Int32());
++TEST_F(CodeGenTest, RunParam2_1) {
++  RawMachineAssemblerTester<int32_t> m(
++      i_isolate(), zone(), MachineType::Int32(), MachineType::Int32());
+   Node* p0 = m.Parameter(0);
+   Node* p1 = m.Parameter(1);
+   m.Return(p0);
+@@ -482,9 +411,9 @@ TEST(RunParam2_1) {
+   }
+ }
+ 
+-TEST(RunParam2_2) {
+-  RawMachineAssemblerTester<int32_t> m(MachineType::Int32(),
+-                                       MachineType::Int32());
++TEST_F(CodeGenTest, RunParam2_2) {
++  RawMachineAssemblerTester<int32_t> m(
++      i_isolate(), zone(), MachineType::Int32(), MachineType::Int32());
+   Node* p0 = m.Parameter(0);
+   Node* p1 = m.Parameter(1);
+   m.Return(p1);
+@@ -496,10 +425,11 @@ TEST(RunParam2_2) {
+   }
+ }
+ 
+-TEST(RunParam3) {
++TEST_F(CodeGenTest, RunParam3) {
+   for (int i = 0; i < 3; i++) {
+     RawMachineAssemblerTester<int32_t> m(
+-        MachineType::Int32(), MachineType::Int32(), MachineType::Int32());
++        i_isolate(), zone(), MachineType::Int32(), MachineType::Int32(),
++        MachineType::Int32());
+     Node* nodes[] = {m.Parameter(0), m.Parameter(1), m.Parameter(2)};
+     m.Return(nodes[i]);
+ 
+@@ -512,9 +442,9 @@ TEST(RunParam3) {
+   }
+ }
+ 
+-TEST(RunBinopTester) {
++TEST_F(CodeGenTest, RunBinopTester) {
+   {
+-    RawMachineAssemblerTester<int32_t> m;
++    RawMachineAssemblerTester<int32_t> m(i_isolate(), zone());
+     Int32BinopTester bt(&m);
+     bt.AddReturn(bt.param0);
+ 
+@@ -522,7 +452,7 @@ TEST(RunBinopTester) {
+   }
+ 
+   {
+-    RawMachineAssemblerTester<int32_t> m;
++    RawMachineAssemblerTester<int32_t> m(i_isolate(), zone());
+     Int32BinopTester bt(&m);
+     bt.AddReturn(bt.param1);
+ 
+@@ -530,7 +460,7 @@ TEST(RunBinopTester) {
+   }
+ 
+   {
+-    RawMachineAssemblerTester<int32_t> m;
++    RawMachineAssemblerTester<int32_t> m(i_isolate(), zone());
+     Float64BinopTester bt(&m);
+     bt.AddReturn(bt.param0);
+ 
+@@ -538,7 +468,7 @@ TEST(RunBinopTester) {
+   }
+ 
+   {
+-    RawMachineAssemblerTester<int32_t> m;
++    RawMachineAssemblerTester<int32_t> m(i_isolate(), zone());
+     Float64BinopTester bt(&m);
+     bt.AddReturn(bt.param1);
+ 
+@@ -562,20 +492,21 @@ int64_t Add3(int64_t a, int64_t b, int64_t c) { return Add4(a, b, c, 0); }
+ 
+ }  // namespace
+ 
+-TEST(RunBufferedRawMachineAssemblerTesterTester) {
++TEST_F(CodeGenTest, RunBufferedRawMachineAssemblerTesterTester) {
+   {
+-    BufferedRawMachineAssemblerTester<int64_t> m;
++    BufferedRawMachineAssemblerTester<int64_t> m(i_isolate(), zone());
+     m.Return(m.Int64Constant(0x12500000000));
+     CHECK_EQ(0x12500000000, m.Call());
+   }
+   {
+-    BufferedRawMachineAssemblerTester<double> m(MachineType::Float64());
++    BufferedRawMachineAssemblerTester<double> m(i_isolate(), zone(),
++                                                MachineType::Float64());
+     m.Return(m.Parameter(0));
+     FOR_FLOAT64_INPUTS(i) { CHECK_DOUBLE_EQ(i, m.Call(i)); }
+   }
+   {
+-    BufferedRawMachineAssemblerTester<int64_t> m(MachineType::Int64(),
+-                                                 MachineType::Int64());
++    BufferedRawMachineAssemblerTester<int64_t> m(
++        i_isolate(), zone(), MachineType::Int64(), MachineType::Int64());
+     m.Return(m.Int64Add(m.Parameter(0), m.Parameter(1)));
+     FOR_INT64_INPUTS(i) {
+       FOR_INT64_INPUTS(j) {
+@@ -586,7 +517,8 @@ TEST(RunBufferedRawMachineAssemblerTesterTester) {
+   }
+   {
+     BufferedRawMachineAssemblerTester<int64_t> m(
+-        MachineType::Int64(), MachineType::Int64(), MachineType::Int64());
++        i_isolate(), zone(), MachineType::Int64(), MachineType::Int64(),
++        MachineType::Int64());
+     m.Return(
+         m.Int64Add(m.Int64Add(m.Parameter(0), m.Parameter(1)), m.Parameter(2)));
+     FOR_INT64_INPUTS(i) {
+@@ -599,8 +531,8 @@ TEST(RunBufferedRawMachineAssemblerTesterTester) {
+   }
+   {
+     BufferedRawMachineAssemblerTester<int64_t> m(
+-        MachineType::Int64(), MachineType::Int64(), MachineType::Int64(),
+-        MachineType::Int64());
++        i_isolate(), zone(), MachineType::Int64(), MachineType::Int64(),
++        MachineType::Int64(), MachineType::Int64());
+     m.Return(m.Int64Add(
+         m.Int64Add(m.Int64Add(m.Parameter(0), m.Parameter(1)), m.Parameter(2)),
+         m.Parameter(3)));
+@@ -614,7 +546,7 @@ TEST(RunBufferedRawMachineAssemblerTesterTester) {
+     }
+   }
+   {
+-    BufferedRawMachineAssemblerTester<void> m;
++    BufferedRawMachineAssemblerTester<void> m(i_isolate(), zone());
+     int64_t result;
+     m.Store(MachineTypeForC<int64_t>().representation(),
+             m.PointerConstant(&result), m.Int64Constant(0x12500000000),
+@@ -624,7 +556,8 @@ TEST(RunBufferedRawMachineAssemblerTesterTester) {
+     CHECK_EQ(0x12500000000, result);
+   }
+   {
+-    BufferedRawMachineAssemblerTester<void> m(MachineType::Float64());
++    BufferedRawMachineAssemblerTester<void> m(i_isolate(), zone(),
++                                              MachineType::Float64());
+     double result;
+     m.Store(MachineTypeForC<double>().representation(),
+             m.PointerConstant(&result), m.Parameter(0), kNoWriteBarrier);
+@@ -635,8 +568,8 @@ TEST(RunBufferedRawMachineAssemblerTesterTester) {
+     }
+   }
+   {
+-    BufferedRawMachineAssemblerTester<void> m(MachineType::Int64(),
+-                                              MachineType::Int64());
++    BufferedRawMachineAssemblerTester<void> m(
++        i_isolate(), zone(), MachineType::Int64(), MachineType::Int64());
+     int64_t result;
+     m.Store(MachineTypeForC<int64_t>().representation(),
+             m.PointerConstant(&result),
+@@ -654,7 +587,8 @@ TEST(RunBufferedRawMachineAssemblerTesterTester) {
+   }
+   {
+     BufferedRawMachineAssemblerTester<void> m(
+-        MachineType::Int64(), MachineType::Int64(), MachineType::Int64());
++        i_isolate(), zone(), MachineType::Int64(), MachineType::Int64(),
++        MachineType::Int64());
+     int64_t result;
+     m.Store(
+         MachineTypeForC<int64_t>().representation(), m.PointerConstant(&result),
+@@ -676,8 +610,8 @@ TEST(RunBufferedRawMachineAssemblerTesterTester) {
+   }
+   {
+     BufferedRawMachineAssemblerTester<void> m(
+-        MachineType::Int64(), MachineType::Int64(), MachineType::Int64(),
+-        MachineType::Int64());
++        i_isolate(), zone(), MachineType::Int64(), MachineType::Int64(),
++        MachineType::Int64(), MachineType::Int64());
+     int64_t result;
+     m.Store(MachineTypeForC<int64_t>().representation(),
+             m.PointerConstant(&result),
+diff --git a/test/unittests/unittests.status b/test/unittests/unittests.status
+index 9cf1195a03a..ecfbe39afba 100644
+--- a/test/unittests/unittests.status
++++ b/test/unittests/unittests.status
+@@ -243,6 +243,7 @@
+ ['lite_mode or variant == jitless', {
+ 
+   # Tests that generate code at runtime.
++  'CodeGenTest/*': [SKIP],
+   'MacroAssemblerX64Test.EmbeddedObj': [SKIP],
+   'RegExpTest.MacroAssemblernativeAtStart': [SKIP],
+   'RegExpTest.MacroAssemblerNativeBackReferenceLATIN1': [SKIP],
+-- 
+2.35.1
+

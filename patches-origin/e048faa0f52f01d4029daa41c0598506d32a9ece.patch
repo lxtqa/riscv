@@ -1,0 +1,133 @@
+From e048faa0f52f01d4029daa41c0598506d32a9ece Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Thu, 17 Nov 2022 17:14:19 +0800
+Subject: [PATCH] [riscv] Implement target_builtin_at func
+
+Refer commit
+447feef80e4021f32944b0d134fc2bbd7c148302
+
+Change-Id: Ib881597ac1d9e8ac7e4173d32956b8344cb50988
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4031878
+Reviewed-by: ji qiu <qiuji@iscas.ac.cn>
+Commit-Queue: Yahan Lu <yahan@iscas.ac.cn>
+Auto-Submit: Yahan Lu <yahan@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#84378}
+---
+ src/codegen/riscv/assembler-riscv-inl.h    | 18 ++++++++++++++--
+ src/codegen/riscv/assembler-riscv.h        |  5 +++++
+ src/codegen/riscv/macro-assembler-riscv.cc |  4 ++--
+ src/codegen/riscv/macro-assembler-riscv.h  | 24 ++++++++++++++++++++++
+ 4 files changed, 47 insertions(+), 4 deletions(-)
+
+diff --git a/src/codegen/riscv/assembler-riscv-inl.h b/src/codegen/riscv/assembler-riscv-inl.h
+index b8d3ededcd1..fd417bae66e 100644
+--- a/src/codegen/riscv/assembler-riscv-inl.h
++++ b/src/codegen/riscv/assembler-riscv-inl.h
+@@ -65,7 +65,8 @@ void RelocInfo::apply(intptr_t delta) {
+ }
+ 
+ Address RelocInfo::target_address() {
+-  DCHECK(IsCodeTargetMode(rmode_) || IsWasmCall(rmode_));
++  DCHECK(IsCodeTargetMode(rmode_) || IsWasmCall(rmode_) ||
++         IsNearBuiltinEntry(rmode_));
+   return Assembler::target_address_at(pc_, constant_pool_);
+ }
+ 
+@@ -244,7 +245,20 @@ Handle<Code> Assembler::relative_code_target_object_handle_at(
+   return Handle<Code>::cast(GetEmbeddedObject(code_target_index));
+ }
+ 
+-Builtin RelocInfo::target_builtin_at(Assembler* origin) { UNREACHABLE(); }
++Builtin Assembler::target_builtin_at(Address pc) {
++  Instr instr1 = Assembler::instr_at(pc);
++  Instr instr2 = Assembler::instr_at(pc + kInstrSize);
++  DCHECK(IsAuipc(instr1));
++  DCHECK(IsJalr(instr2));
++  int32_t builtin_id = BrachlongOffset(instr1, instr2);
++  DCHECK(Builtins::IsBuiltinId(builtin_id));
++  return static_cast<Builtin>(builtin_id);
++}
++
++Builtin RelocInfo::target_builtin_at(Assembler* origin) {
++  DCHECK(IsNearBuiltinEntry(rmode_));
++  return Assembler::target_builtin_at(pc_);
++}
+ 
+ Address RelocInfo::target_off_heap_target() {
+   DCHECK(IsOffHeapTarget(rmode_));
+diff --git a/src/codegen/riscv/assembler-riscv.h b/src/codegen/riscv/assembler-riscv.h
+index c08f82bc779..a6302b0f24c 100644
+--- a/src/codegen/riscv/assembler-riscv.h
++++ b/src/codegen/riscv/assembler-riscv.h
+@@ -239,6 +239,11 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase,
+   // The high 8 bits are set to zero.
+   void label_at_put(Label* L, int at_offset);
+ 
++  // During code generation builtin targets in PC-relative call/jump
++  // instructions are temporarily encoded as builtin ID until the generated
++  // code is moved into the code space.
++  static inline Builtin target_builtin_at(Address pc);
++
+   // Read/Modify the code target address in the branch/call instruction at pc.
+   // The isolate argument is unused (and may be nullptr) when skipping flushing.
+   static Address target_address_at(Address pc);
+diff --git a/src/codegen/riscv/macro-assembler-riscv.cc b/src/codegen/riscv/macro-assembler-riscv.cc
+index 00a89a40c18..3deac90238b 100644
+--- a/src/codegen/riscv/macro-assembler-riscv.cc
++++ b/src/codegen/riscv/macro-assembler-riscv.cc
+@@ -4405,7 +4405,7 @@ void TurboAssembler::CallBuiltin(Builtin builtin) {
+       break;
+     }
+     case BuiltinCallJumpMode::kPCRelative:
+-      Call(BuiltinEntry(builtin), RelocInfo::NEAR_BUILTIN_ENTRY);
++      near_call(static_cast<int>(builtin), RelocInfo::NEAR_BUILTIN_ENTRY);
+       break;
+     case BuiltinCallJumpMode::kIndirect: {
+       LoadEntryFromBuiltin(builtin, t6);
+@@ -4439,7 +4439,7 @@ void TurboAssembler::TailCallBuiltin(Builtin builtin) {
+       break;
+     }
+     case BuiltinCallJumpMode::kPCRelative:
+-      Jump(BuiltinEntry(builtin), RelocInfo::NEAR_BUILTIN_ENTRY);
++      near_jump(static_cast<int>(builtin), RelocInfo::NEAR_BUILTIN_ENTRY);
+       break;
+     case BuiltinCallJumpMode::kIndirect: {
+       LoadEntryFromBuiltin(builtin, t6);
+diff --git a/src/codegen/riscv/macro-assembler-riscv.h b/src/codegen/riscv/macro-assembler-riscv.h
+index 76c6436991c..7baf65844ca 100644
+--- a/src/codegen/riscv/macro-assembler-riscv.h
++++ b/src/codegen/riscv/macro-assembler-riscv.h
+@@ -228,6 +228,30 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+     auipc(rd, Hi20);  // Read PC + Hi20 into scratch.
+     jalr(rd, Lo12);   // jump PC + Hi20 + Lo12
+   }
++
++  // Generate a B immediate instruction with the corresponding relocation info.
++  // 'offset' is the immediate to encode in the B instruction (so it is the
++  // difference between the target and the PC of the instruction, divided by
++  // the instruction size).
++  void near_jump(int offset, RelocInfo::Mode rmode) {
++    UseScratchRegisterScope temps(this);
++    Register temp = temps.Acquire();
++    if (!RelocInfo::IsNoInfo(rmode)) RecordRelocInfo(rmode, offset);
++    GenPCRelativeJump(temp, offset);
++  }
++  // Generate a BL immediate instruction with the corresponding relocation info.
++  // As for near_jump, 'offset' is the immediate to encode in the BL
++  // instruction.
++  void near_call(int offset, RelocInfo::Mode rmode) {
++    UseScratchRegisterScope temps(this);
++    Register temp = temps.Acquire();
++    if (!RelocInfo::IsNoInfo(rmode)) RecordRelocInfo(rmode, offset);
++    GenPCRelativeJumpAndLink(temp, offset);
++  }
++  // Generate a BL immediate instruction with the corresponding relocation info
++  // for the input HeapNumberRequest.
++  void near_call(HeapNumberRequest request) { UNIMPLEMENTED(); }
++
+ // Jump, Call, and Ret pseudo instructions implementing inter-working.
+ #define COND_ARGS                              \
+   Condition cond = al, Register rs = zero_reg, \
+-- 
+2.35.1
+

@@ -1,0 +1,117 @@
+From 899b54439dc6e99c2d9c423f33505691e7deebbe Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Fri, 17 Sep 2021 15:08:56 +0800
+Subject: [PATCH] [riscv6] Add check into vrgather
+
+vragther require that the destination vector register group cannot overlap with the source vector
+register groups, otherwise an illegal instruction exception is raised.
+
+Change-Id: I6d23ea80edc4a80be961531ded855ff372ca0da0
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3161777
+Commit-Queue: Yahan Lu <yahan@iscas.ac.cn>
+Reviewed-by: Ji Qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#76895}
+---
+ src/codegen/riscv64/assembler-riscv64.cc      | 22 ++++++++++++++++---
+ src/execution/riscv64/simulator-riscv64.cc    |  2 ++
+ .../riscv64/liftoff-assembler-riscv64.h       | 20 ++++++++++-------
+ 3 files changed, 33 insertions(+), 11 deletions(-)
+
+diff --git a/src/codegen/riscv64/assembler-riscv64.cc b/src/codegen/riscv64/assembler-riscv64.cc
+index e8ebf1e431e..9754c9fa3b1 100644
+--- a/src/codegen/riscv64/assembler-riscv64.cc
++++ b/src/codegen/riscv64/assembler-riscv64.cc
+@@ -2506,6 +2506,25 @@ void Assembler::vmadc_vi(VRegister vd, uint8_t imm5, VRegister vs2) {
+   GenInstrV(VMADC_FUNCT6, vd, imm5, vs2, Mask);
+ }
+ 
++void Assembler::vrgather_vv(VRegister vd, VRegister vs2, VRegister vs1,
++                            MaskType mask) {
++  DCHECK_NE(vd, vs1);
++  DCHECK_NE(vd, vs2);
++  GenInstrV(VRGATHER_FUNCT6, OP_IVV, vd, vs1, vs2, mask);
++}
++
++void Assembler::vrgather_vi(VRegister vd, VRegister vs2, int8_t imm5,
++                            MaskType mask) {
++  DCHECK_NE(vd, vs2);
++  GenInstrV(VRGATHER_FUNCT6, vd, imm5, vs2, mask);
++}
++
++void Assembler::vrgather_vx(VRegister vd, VRegister vs2, Register rs1,
++                            MaskType mask) {
++  DCHECK_NE(vd, vs2);
++  GenInstrV(VRGATHER_FUNCT6, OP_IVX, vd, rs1, vs2, mask);
++}
++
+ #define DEFINE_OPIVV(name, funct6)                                      \
+   void Assembler::name##_vv(VRegister vd, VRegister vs2, VRegister vs1, \
+                             MaskType mask) {                            \
+@@ -2576,9 +2595,6 @@ DEFINE_OPIVI(vor, VOR_FUNCT6)
+ DEFINE_OPIVV(vxor, VXOR_FUNCT6)
+ DEFINE_OPIVX(vxor, VXOR_FUNCT6)
+ DEFINE_OPIVI(vxor, VXOR_FUNCT6)
+-DEFINE_OPIVV(vrgather, VRGATHER_FUNCT6)
+-DEFINE_OPIVX(vrgather, VRGATHER_FUNCT6)
+-DEFINE_OPIVI(vrgather, VRGATHER_FUNCT6)
+ 
+ DEFINE_OPIVX(vslidedown, VSLIDEDOWN_FUNCT6)
+ DEFINE_OPIVI(vslidedown, VSLIDEDOWN_FUNCT6)
+diff --git a/src/execution/riscv64/simulator-riscv64.cc b/src/execution/riscv64/simulator-riscv64.cc
+index 8e24427235c..8de25575f4e 100644
+--- a/src/execution/riscv64/simulator-riscv64.cc
++++ b/src/execution/riscv64/simulator-riscv64.cc
+@@ -4459,6 +4459,8 @@ void Simulator::DecodeRvvIVV() {
+     }
+     case RO_V_VRGATHER_VV: {
+       RVV_VI_GENERAL_LOOP_BASE
++      CHECK_NE(rvv_vs1_reg(), rvv_vd_reg());
++      CHECK_NE(rvv_vs2_reg(), rvv_vd_reg());
+       switch (rvv_vsew()) {
+         case E8: {
+           auto vs1 = Rvvelt<uint8_t>(rvv_vs1_reg(), i);
+diff --git a/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h b/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
+index 8d5051d5224..616f10fa8f6 100644
+--- a/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
++++ b/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
+@@ -1718,17 +1718,21 @@ void LiftoffAssembler::emit_i8x16_shuffle(LiftoffRegister dst,
+   vmerge_vx(kSimd128ScratchReg, kScratchReg, kSimd128ScratchReg);
+ 
+   VU.set(kScratchReg, E8, m1);
++  VRegister temp =
++      GetUnusedRegister(kFpReg, LiftoffRegList::ForRegs(lhs, rhs)).fp().toV();
+   if (dst_v == lhs_v) {
+-    vmv_vv(kSimd128ScratchReg2, lhs_v);
+-    lhs_v = kSimd128ScratchReg2;
++    vmv_vv(temp, lhs_v);
++    lhs_v = temp;
+   } else if (dst_v == rhs_v) {
+-    vmv_vv(kSimd128ScratchReg2, rhs_v);
+-    rhs_v = kSimd128ScratchReg2;
++    vmv_vv(temp, rhs_v);
++    rhs_v = temp;
+   }
+   vrgather_vv(dst_v, lhs_v, kSimd128ScratchReg);
+-  vadd_vi(kSimd128ScratchReg, kSimd128ScratchReg, -16);
+-  vrgather_vv(kSimd128ScratchReg, rhs_v, kSimd128ScratchReg);
+-  vor_vv(dst_v, dst_v, kSimd128ScratchReg);
++  vadd_vi(kSimd128ScratchReg, kSimd128ScratchReg,
++          -16);  // The indices in range [16, 31] select the i - 16-th element
++                 // of rhs
++  vrgather_vv(kSimd128ScratchReg2, rhs_v, kSimd128ScratchReg);
++  vor_vv(dst_v, dst_v, kSimd128ScratchReg2);
+ }
+ 
+ void LiftoffAssembler::emit_i8x16_popcnt(LiftoffRegister dst,
+@@ -2520,7 +2524,7 @@ void LiftoffAssembler::emit_i64x2_add(LiftoffRegister dst, LiftoffRegister lhs,
+ 
+ void LiftoffAssembler::emit_i64x2_sub(LiftoffRegister dst, LiftoffRegister lhs,
+                                       LiftoffRegister rhs) {
+-  VU.set(kScratchReg, E8, m1);
++  VU.set(kScratchReg, E64, m1);
+   vsub_vv(dst.fp().toV(), lhs.fp().toV(), rhs.fp().toV());
+ }
+ 
+-- 
+2.35.1
+

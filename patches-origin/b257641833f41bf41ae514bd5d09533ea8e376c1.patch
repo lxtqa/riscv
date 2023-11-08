@@ -1,0 +1,2790 @@
+From b257641833f41bf41ae514bd5d09533ea8e376c1 Mon Sep 17 00:00:00 2001
+From: Camillo <cbruni@chromium.org>
+Date: Wed, 7 Sep 2022 09:17:26 +0200
+Subject: [PATCH] [log][compiler] Enable first-execution logging
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Re-implement the --log-function-events functionality after
+refactoring the tiering state bits on the FeedbackVector.
+
+The new version also tries to log first-execution of non-interpreter
+code and will handle OSR events.
+
+Not-yet supported:
+- First-execution logging when OSR-ing in Sparkplug or Maglev
+
+Bug: v8:13146
+Change-Id: I2059c6d8105091f20586eaf157ef19d5e65295aa
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3832375
+Reviewed-by: Marja Hölttä <marja@chromium.org>
+Commit-Queue: Camillo Bruni <cbruni@chromium.org>
+Reviewed-by: Jakob Linke <jgruber@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#83019}
+---
+ src/builtins/arm/builtins-arm.cc              | 48 +++++------
+ src/builtins/arm64/builtins-arm64.cc          | 38 ++++-----
+ src/builtins/builtins-lazy-gen.cc             | 26 ++++--
+ src/builtins/ia32/builtins-ia32.cc            | 35 ++++----
+ src/builtins/loong64/builtins-loong64.cc      | 46 +++++------
+ src/builtins/mips/builtins-mips.cc            | 78 ++++++++----------
+ src/builtins/mips64/builtins-mips64.cc        | 46 +++++------
+ src/builtins/ppc/builtins-ppc.cc              | 38 ++++-----
+ src/builtins/riscv/builtins-riscv.cc          | 34 ++++----
+ src/builtins/s390/builtins-s390.cc            | 38 ++++-----
+ src/builtins/x64/builtins-x64.cc              | 41 +++++-----
+ src/codegen/arm/macro-assembler-arm.cc        | 47 ++++++-----
+ src/codegen/arm/macro-assembler-arm.h         |  8 +-
+ src/codegen/arm64/macro-assembler-arm64.cc    | 44 +++++-----
+ src/codegen/arm64/macro-assembler-arm64.h     |  8 +-
+ src/codegen/compiler.cc                       | 24 ++----
+ src/codegen/external-reference.cc             |  4 +-
+ src/codegen/external-reference.h              |  2 +-
+ src/codegen/ia32/macro-assembler-ia32.cc      | 49 +++++------
+ src/codegen/ia32/macro-assembler-ia32.h       |  8 +-
+ .../loong64/macro-assembler-loong64.cc        | 38 ++++-----
+ src/codegen/loong64/macro-assembler-loong64.h |  8 +-
+ src/codegen/mips64/macro-assembler-mips64.cc  | 32 ++++----
+ src/codegen/mips64/macro-assembler-mips64.h   |  8 +-
+ src/codegen/ppc/macro-assembler-ppc.cc        | 44 +++++-----
+ src/codegen/ppc/macro-assembler-ppc.h         |  8 +-
+ src/codegen/riscv/macro-assembler-riscv.cc    | 38 ++++-----
+ src/codegen/riscv/macro-assembler-riscv.h     |  8 +-
+ src/codegen/s390/macro-assembler-s390.cc      | 42 +++++-----
+ src/codegen/s390/macro-assembler-s390.h       |  8 +-
+ src/codegen/x64/macro-assembler-x64.cc        | 44 +++++-----
+ src/codegen/x64/macro-assembler-x64.h         |  8 +-
+ src/diagnostics/objects-debug.cc              |  2 +-
+ src/flags/flag-definitions.h                  |  6 ++
+ src/heap/factory.cc                           |  1 +
+ src/init/v8.cc                                |  2 +-
+ src/logging/log.cc                            | 10 +--
+ src/maglev/maglev-code-generator.cc           | 14 ++--
+ src/objects/elements.cc                       |  4 +-
+ src/objects/feedback-vector-inl.h             |  8 ++
+ src/objects/feedback-vector.cc                |  1 +
+ src/objects/feedback-vector.h                 | 23 ++++--
+ src/objects/feedback-vector.tq                |  5 +-
+ src/objects/js-array-buffer-inl.h             |  2 +-
+ src/objects/js-function-inl.h                 |  9 +-
+ src/objects/js-function.cc                    |  5 +-
+ src/objects/object-macros.h                   | 24 ++++--
+ src/objects/objects.cc                        |  5 +-
+ src/objects/script-inl.h                      |  2 +-
+ src/objects/string-forwarding-table.cc        |  2 +-
+ src/parsing/parser-base.h                     |  4 +-
+ src/parsing/parser.cc                         | 14 ++--
+ src/parsing/preparser.cc                      |  4 +-
+ src/runtime/runtime-compiler.cc               | 82 +++++++++++++++----
+ src/runtime/runtime.h                         |  3 +-
+ src/snapshot/code-serializer.cc               |  2 +-
+ test/mjsunit/tools/processor.mjs              |  1 +
+ test/unittests/logging/log-unittest.cc        |  2 +-
+ 58 files changed, 621 insertions(+), 564 deletions(-)
+
+diff --git a/src/builtins/arm/builtins-arm.cc b/src/builtins/arm/builtins-arm.cc
+index b41208b3e15..81f5c961bc4 100644
+--- a/src/builtins/arm/builtins-arm.cc
++++ b/src/builtins/arm/builtins-arm.cc
+@@ -950,16 +950,15 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+   __ AssertFeedbackVector(feedback_vector);
+ 
+   // Check the tiering state.
+-  Label has_optimized_code_or_state;
+-  Register optimization_state = no_reg;
++  Label flags_need_processing;
++  Register flags = no_reg;
+   {
+     UseScratchRegisterScope temps(masm);
+-    // optimization_state will be used only in |has_optimized_code_or_state|
++    // flags will be used only in |flags_need_processing|
+     // and outside it can be reused.
+-    optimization_state = temps.Acquire();
+-    __ LoadTieringStateAndJumpIfNeedsProcessing(
+-        optimization_state, feedback_vector, CodeKind::BASELINE,
+-        &has_optimized_code_or_state);
++    flags = temps.Acquire();
++    __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++        flags, feedback_vector, CodeKind::BASELINE, &flags_need_processing);
+   }
+ 
+   {
+@@ -1043,17 +1042,16 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+   __ LoadRoot(kInterpreterAccumulatorRegister, RootIndex::kUndefinedValue);
+   __ Ret();
+ 
+-  __ bind(&has_optimized_code_or_state);
++  __ bind(&flags_need_processing);
+   {
+     ASM_CODE_COMMENT_STRING(masm, "Optimized marker check");
+     UseScratchRegisterScope temps(masm);
+-    // Ensure the optimization_state is not allocated again.
+-    temps.Exclude(optimization_state);
++    // Ensure the flags is not allocated again.
++    temps.Exclude(flags);
+ 
+     // Drop the frame created by the baseline call.
+     __ ldm(ia_w, sp, {fp, lr});
+-    __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(optimization_state,
+-                                                    feedback_vector);
++    __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
+     __ Trap();
+   }
+ 
+@@ -1143,11 +1141,11 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+   __ cmp(r4, Operand(FEEDBACK_VECTOR_TYPE));
+   __ b(ne, &push_stack_frame);
+ 
+-  Register optimization_state = r4;
+-  Label has_optimized_code_or_state;
+-  __ LoadTieringStateAndJumpIfNeedsProcessing(
+-      optimization_state, feedback_vector, CodeKind::INTERPRETED_FUNCTION,
+-      &has_optimized_code_or_state);
++  Register flags = r4;
++  Label flags_need_processing;
++  __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++      flags, feedback_vector, CodeKind::INTERPRETED_FUNCTION,
++      &flags_need_processing);
+ 
+   {
+     UseScratchRegisterScope temps(masm);
+@@ -1301,9 +1299,8 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+ 
+   __ jmp(&after_stack_check_interrupt);
+ 
+-  __ bind(&has_optimized_code_or_state);
+-  __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(optimization_state,
+-                                                  feedback_vector);
++  __ bind(&flags_need_processing);
++  __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
+ 
+   __ bind(&is_baseline);
+   {
+@@ -1322,11 +1319,10 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+     __ b(ne, &install_baseline_code);
+ 
+     // Check the tiering state.
+-    __ LoadTieringStateAndJumpIfNeedsProcessing(
+-        optimization_state, feedback_vector, CodeKind::BASELINE,
+-        &has_optimized_code_or_state);
++    __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++        flags, feedback_vector, CodeKind::BASELINE, &flags_need_processing);
+ 
+-    // Load the baseline code into the closure.
++    // oad the baseline code into the closure.
+     __ mov(r2, kInterpreterBytecodeArrayRegister);
+     static_assert(kJavaScriptCallCodeStartRegister == r2, "ABI mismatch");
+     __ ReplaceClosureCodeWithOptimizedCode(r2, closure);
+@@ -1739,7 +1735,7 @@ void OnStackReplacement(MacroAssembler* masm, OsrSourceTier source,
+   // OSR entry tracing.
+   {
+     Label next;
+-    __ Move(r1, ExternalReference::address_of_FLAG_trace_osr());
++    __ Move(r1, ExternalReference::address_of_log_or_trace_osr());
+     __ ldrsb(r1, MemOperand(r1));
+     __ tst(r1, Operand(0xFF));  // Mask to the LSB.
+     __ b(eq, &next);
+@@ -1747,7 +1743,7 @@ void OnStackReplacement(MacroAssembler* masm, OsrSourceTier source,
+     {
+       FrameAndConstantPoolScope scope(masm, StackFrame::INTERNAL);
+       __ Push(r0);  // Preserve the code object.
+-      __ CallRuntime(Runtime::kTraceOptimizedOSREntry, 0);
++      __ CallRuntime(Runtime::kLogOrTraceOptimizedOSREntry, 0);
+       __ Pop(r0);
+     }
+ 
+diff --git a/src/builtins/arm64/builtins-arm64.cc b/src/builtins/arm64/builtins-arm64.cc
+index be6de04b544..6a1f33a60fe 100644
+--- a/src/builtins/arm64/builtins-arm64.cc
++++ b/src/builtins/arm64/builtins-arm64.cc
+@@ -1115,11 +1115,10 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+   __ AssertFeedbackVector(feedback_vector, x4);
+ 
+   // Check the tiering state.
+-  Label has_optimized_code_or_state;
+-  Register optimization_state = temps.AcquireW();
+-  __ LoadTieringStateAndJumpIfNeedsProcessing(
+-      optimization_state, feedback_vector, CodeKind::BASELINE,
+-      &has_optimized_code_or_state);
++  Label flags_need_processing;
++  Register flags = temps.AcquireW();
++  __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++      flags, feedback_vector, CodeKind::BASELINE, &flags_need_processing);
+ 
+   {
+     UseScratchRegisterScope temps(masm);
+@@ -1201,13 +1200,12 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+   }
+   __ Ret();
+ 
+-  __ bind(&has_optimized_code_or_state);
++  __ bind(&flags_need_processing);
+   {
+     ASM_CODE_COMMENT_STRING(masm, "Optimized marker check");
+     // Drop the frame created by the baseline call.
+     __ Pop<TurboAssembler::kAuthLR>(fp, lr);
+-    __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(optimization_state,
+-                                                    feedback_vector);
++    __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
+     __ Trap();
+   }
+ 
+@@ -1305,11 +1303,11 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+   __ B(ne, &push_stack_frame);
+ 
+   // Check the tiering state.
+-  Label has_optimized_code_or_state;
+-  Register optimization_state = w7;
+-  __ LoadTieringStateAndJumpIfNeedsProcessing(
+-      optimization_state, feedback_vector, CodeKind::INTERPRETED_FUNCTION,
+-      &has_optimized_code_or_state);
++  Label flags_need_processing;
++  Register flags = w7;
++  __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++      flags, feedback_vector, CodeKind::INTERPRETED_FUNCTION,
++      &flags_need_processing);
+ 
+   {
+     UseScratchRegisterScope temps(masm);
+@@ -1475,9 +1473,8 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+ 
+   __ jmp(&after_stack_check_interrupt);
+ 
+-  __ bind(&has_optimized_code_or_state);
+-  __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(optimization_state,
+-                                                  feedback_vector);
++  __ bind(&flags_need_processing);
++  __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
+ 
+   __ bind(&is_baseline);
+   {
+@@ -1498,9 +1495,8 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+     __ B(ne, &install_baseline_code);
+ 
+     // Check the tiering state.
+-    __ LoadTieringStateAndJumpIfNeedsProcessing(
+-        optimization_state, feedback_vector, CodeKind::BASELINE,
+-        &has_optimized_code_or_state);
++    __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++        flags, feedback_vector, CodeKind::BASELINE, &flags_need_processing);
+ 
+     // Load the baseline code into the closure.
+     __ Move(x2, kInterpreterBytecodeArrayRegister);
+@@ -1975,7 +1971,7 @@ void OnStackReplacement(MacroAssembler* masm, OsrSourceTier source,
+   // OSR entry tracing.
+   {
+     Label next;
+-    __ Mov(x1, ExternalReference::address_of_FLAG_trace_osr());
++    __ Mov(x1, ExternalReference::address_of_log_or_trace_osr());
+     __ Ldrsb(x1, MemOperand(x1));
+     __ Tst(x1, 0xFF);  // Mask to the LSB.
+     __ B(eq, &next);
+@@ -1983,7 +1979,7 @@ void OnStackReplacement(MacroAssembler* masm, OsrSourceTier source,
+     {
+       FrameScope scope(masm, StackFrame::INTERNAL);
+       __ Push(x0, padreg);  // Preserve the code object.
+-      __ CallRuntime(Runtime::kTraceOptimizedOSREntry, 0);
++      __ CallRuntime(Runtime::kLogOrTraceOptimizedOSREntry, 0);
+       __ Pop(padreg, x0);
+     }
+ 
+diff --git a/src/builtins/builtins-lazy-gen.cc b/src/builtins/builtins-lazy-gen.cc
+index ee581bb4c45..1c283a353ef 100644
+--- a/src/builtins/builtins-lazy-gen.cc
++++ b/src/builtins/builtins-lazy-gen.cc
+@@ -31,24 +31,32 @@ void LazyBuiltinsAssembler::GenerateTailCallToReturnedCode(
+ 
+ void LazyBuiltinsAssembler::MaybeTailCallOptimizedCodeSlot(
+     TNode<JSFunction> function, TNode<FeedbackVector> feedback_vector) {
+-  Label fallthrough(this), may_have_optimized_code(this);
++  Label fallthrough(this), may_have_optimized_code(this),
++      maybe_needs_logging(this);
+ 
+-  TNode<Uint16T> optimization_state =
++  TNode<Uint16T> flags =
+       LoadObjectField<Uint16T>(feedback_vector, FeedbackVector::kFlagsOffset);
+ 
+   // Fall through if no optimization trigger or optimized code.
+   GotoIfNot(
+-      IsSetWord32(
+-          optimization_state,
+-          FeedbackVector::kHasAnyOptimizedCodeOrTieringStateIsAnyRequestMask),
++      IsSetWord32(flags, FeedbackVector::kFlagsHasAnyOptimizedCode |
++                             FeedbackVector::kFlagsTieringStateIsAnyRequested |
++                             FeedbackVector::kFlagsLogNextExecution),
+       &fallthrough);
+ 
+-  GotoIfNot(IsSetWord32(optimization_state,
+-                        FeedbackVector::kTieringStateIsAnyRequestMask),
+-            &may_have_optimized_code);
+-
++  GotoIfNot(
++      IsSetWord32(flags, FeedbackVector::kFlagsTieringStateIsAnyRequested),
++      &maybe_needs_logging);
+   GenerateTailCallToReturnedCode(Runtime::kCompileOptimized, function);
+ 
++  BIND(&maybe_needs_logging);
++  {
++    GotoIfNot(IsSetWord32(flags, FeedbackVector::kFlagsLogNextExecution),
++              &may_have_optimized_code);
++    GenerateTailCallToReturnedCode(Runtime::kFunctionLogNextExecution,
++                                   function);
++  }
++
+   BIND(&may_have_optimized_code);
+   {
+     Label heal_optimized_code_slot(this);
+diff --git a/src/builtins/ia32/builtins-ia32.cc b/src/builtins/ia32/builtins-ia32.cc
+index 5acd4a35008..ecb1bd91362 100644
+--- a/src/builtins/ia32/builtins-ia32.cc
++++ b/src/builtins/ia32/builtins-ia32.cc
+@@ -923,11 +923,10 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+ 
+   // Load the optimization state from the feedback vector and re-use the
+   // register.
+-  Label has_optimized_code_or_state;
+-  Register optimization_state = ecx;
+-  __ LoadTieringStateAndJumpIfNeedsProcessing(optimization_state, xmm1,
+-                                              CodeKind::INTERPRETED_FUNCTION,
+-                                              &has_optimized_code_or_state);
++  Label flags_need_processing;
++  Register flags = ecx;
++  __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++      flags, xmm1, CodeKind::INTERPRETED_FUNCTION, &flags_need_processing);
+ 
+   // Reload the feedback vector.
+   // TODO(jgruber): Don't clobber it above.
+@@ -1108,11 +1107,11 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+ 
+   __ jmp(&after_stack_check_interrupt);
+ 
+-  __ bind(&has_optimized_code_or_state);
++  __ bind(&flags_need_processing);
+   {
+     // Restore actual argument count.
+     __ movd(eax, xmm0);
+-    __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(optimization_state, xmm1);
++    __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, xmm1);
+   }
+ 
+   __ bind(&compile_lazy);
+@@ -1136,9 +1135,8 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+     __ j(not_equal, &install_baseline_code);
+ 
+     // Check the tiering state.
+-    __ LoadTieringStateAndJumpIfNeedsProcessing(optimization_state, xmm1,
+-                                                CodeKind::BASELINE,
+-                                                &has_optimized_code_or_state);
++    __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++        flags, xmm1, CodeKind::BASELINE, &flags_need_processing);
+ 
+     // Load the baseline code into the closure.
+     __ movd(ecx, xmm2);
+@@ -1558,11 +1556,10 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+ 
+   // Load the optimization state from the feedback vector and re-use the
+   // register.
+-  Label has_optimized_code_or_state;
+-  Register optimization_state = ecx;
+-  __ LoadTieringStateAndJumpIfNeedsProcessing(
+-      optimization_state, saved_feedback_vector, CodeKind::BASELINE,
+-      &has_optimized_code_or_state);
++  Label flags_need_processing;
++  Register flags = ecx;
++  __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++      flags, saved_feedback_vector, CodeKind::BASELINE, &flags_need_processing);
+ 
+   // Reload the feedback vector.
+   __ movd(feedback_vector, saved_feedback_vector);
+@@ -1634,7 +1631,7 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+   __ LoadRoot(kInterpreterAccumulatorRegister, RootIndex::kUndefinedValue);
+   __ Ret();
+ 
+-  __ bind(&has_optimized_code_or_state);
++  __ bind(&flags_need_processing);
+   {
+     ASM_CODE_COMMENT_STRING(masm, "Optimized marker check");
+     // Drop the return address and bytecode array, rebalancing the return stack
+@@ -1643,7 +1640,7 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+     // requires the stack to only contain valid frames.
+     __ Drop(2);
+     __ movd(arg_count, saved_arg_count);  // Restore actual argument count.
+-    __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(optimization_state,
++    __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags,
+                                                     saved_feedback_vector);
+     __ Trap();
+   }
+@@ -2711,14 +2708,14 @@ void OnStackReplacement(MacroAssembler* masm, OsrSourceTier source,
+   {
+     Label next;
+     __ cmpb(__ ExternalReferenceAsOperand(
+-                ExternalReference::address_of_FLAG_trace_osr(), ecx),
++                ExternalReference::address_of_log_or_trace_osr(), ecx),
+             Immediate(0));
+     __ j(equal, &next, Label::kNear);
+ 
+     {
+       FrameScope scope(masm, StackFrame::INTERNAL);
+       __ Push(eax);  // Preserve the code object.
+-      __ CallRuntime(Runtime::kTraceOptimizedOSREntry, 0);
++      __ CallRuntime(Runtime::kLogOrTraceOptimizedOSREntry, 0);
+       __ Pop(eax);
+     }
+ 
+diff --git a/src/builtins/loong64/builtins-loong64.cc b/src/builtins/loong64/builtins-loong64.cc
+index ded0d0f0bc0..c147a80d1a3 100644
+--- a/src/builtins/loong64/builtins-loong64.cc
++++ b/src/builtins/loong64/builtins-loong64.cc
+@@ -924,16 +924,15 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+     __ AssertFeedbackVector(feedback_vector, scratch);
+   }
+   // Check for an tiering state.
+-  Label has_optimized_code_or_state;
+-  Register optimization_state = no_reg;
++  Label flags_need_processing;
++  Register flags = no_reg;
+   {
+     UseScratchRegisterScope temps(masm);
+-    optimization_state = temps.Acquire();
+-    // optimization_state will be used only in |has_optimized_code_or_state|
++    flags = temps.Acquire();
++    // flags will be used only in |flags_need_processing|
+     // and outside it can be reused.
+-    __ LoadTieringStateAndJumpIfNeedsProcessing(
+-        optimization_state, feedback_vector, CodeKind::BASELINE,
+-        &has_optimized_code_or_state);
++    __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++        flags, feedback_vector, CodeKind::BASELINE, &flags_need_processing);
+   }
+   {
+     UseScratchRegisterScope temps(masm);
+@@ -1015,16 +1014,15 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+   // TODO(v8:11429): Document this frame setup better.
+   __ Ret();
+ 
+-  __ bind(&has_optimized_code_or_state);
++  __ bind(&flags_need_processing);
+   {
+     ASM_CODE_COMMENT_STRING(masm, "Optimized marker check");
+     UseScratchRegisterScope temps(masm);
+-    temps.Exclude(optimization_state);
+-    // Ensure the optimization_state is not allocated again.
++    temps.Exclude(flags);
++    // Ensure the flags is not allocated again.
+     // Drop the frame created by the baseline call.
+     __ Pop(ra, fp);
+-    __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(optimization_state,
+-                                                    feedback_vector);
++    __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
+     __ Trap();
+   }
+ 
+@@ -1115,11 +1113,11 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+   __ Branch(&push_stack_frame, ne, a4, Operand(FEEDBACK_VECTOR_TYPE));
+ 
+   // Check the tiering state.
+-  Label has_optimized_code_or_state;
+-  Register optimization_state = a4;
+-  __ LoadTieringStateAndJumpIfNeedsProcessing(
+-      optimization_state, feedback_vector, CodeKind::INTERPRETED_FUNCTION,
+-      &has_optimized_code_or_state);
++  Label flags_need_processing;
++  Register flags = a4;
++  __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++      flags, feedback_vector, CodeKind::INTERPRETED_FUNCTION,
++      &flags_need_processing);
+ 
+   {
+     UseScratchRegisterScope temps(masm);
+@@ -1276,9 +1274,8 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+ 
+   __ jmp(&after_stack_check_interrupt);
+ 
+-  __ bind(&has_optimized_code_or_state);
+-  __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(optimization_state,
+-                                                  feedback_vector);
++  __ bind(&flags_need_processing);
++  __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
+ 
+   __ bind(&is_baseline);
+   {
+@@ -1296,9 +1293,8 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+     __ Branch(&install_baseline_code, ne, t0, Operand(FEEDBACK_VECTOR_TYPE));
+ 
+     // Check for an tiering state.
+-    __ LoadTieringStateAndJumpIfNeedsProcessing(
+-        optimization_state, feedback_vector, CodeKind::BASELINE,
+-        &has_optimized_code_or_state);
++    __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++        flags, feedback_vector, CodeKind::BASELINE, &flags_need_processing);
+ 
+     // Load the baseline code into the closure.
+     __ Move(a2, kInterpreterBytecodeArrayRegister);
+@@ -1705,14 +1701,14 @@ void OnStackReplacement(MacroAssembler* masm, OsrSourceTier source,
+   // OSR entry tracing.
+   {
+     Label next;
+-    __ li(a1, ExternalReference::address_of_FLAG_trace_osr());
++    __ li(a1, ExternalReference::address_of_log_or_trace_osr());
+     __ Ld_bu(a1, MemOperand(a1, 0));
+     __ Branch(&next, eq, a1, Operand(zero_reg));
+ 
+     {
+       FrameScope scope(masm, StackFrame::INTERNAL);
+       __ Push(a0);  // Preserve the code object.
+-      __ CallRuntime(Runtime::kTraceOptimizedOSREntry, 0);
++      __ CallRuntime(Runtime::kLogOrTraceOptimizedOSREntry, 0);
+       __ Pop(a0);
+     }
+ 
+diff --git a/src/builtins/mips/builtins-mips.cc b/src/builtins/mips/builtins-mips.cc
+index e2ab1d6df1a..0add10f2f6c 100644
+--- a/src/builtins/mips/builtins-mips.cc
++++ b/src/builtins/mips/builtins-mips.cc
+@@ -995,45 +995,43 @@ static void AdvanceBytecodeOffsetOrReturn(MacroAssembler* masm,
+   __ bind(&end);
+ }
+ 
+-// Read off the optimization state in the feedback vector and check if there
++// Read off the flags in the feedback vector and check if there
+ // is optimized code or a tiering state that needs to be processed.
+-static void LoadTieringStateAndJumpIfNeedsProcessing(
+-    MacroAssembler* masm, Register optimization_state, Register feedback_vector,
+-    CodeKind current_code_kind, Label* has_optimized_code_or_state) {
++static void LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++    MacroAssembler* masm, Register flags, Register feedback_vector,
++    CodeKind current_code_kind, Label* flags_need_processing) {
+   ASM_CODE_COMMENT(masm);
+   Register scratch = t6;
+-  __ lhu(optimization_state,
+-         FieldMemOperand(feedback_vector, FeedbackVector::kFlagsOffset));
+-  __ And(
+-      scratch, optimization_state,
+-      Operand(
+-          current_code_kind == CodeKind::MAGLEV
+-              ? FeedbackVector::kHasTurbofanCodeOrTieringStateIsAnyRequestMask
+-              : FeedbackVector::
+-                    kHasAnyOptimizedCodeOrTieringStateIsAnyRequestMask));
+-  __ Branch(has_optimized_code_or_state, ne, scratch, Operand(zero_reg));
++  __ lhu(flags, FieldMemOperand(feedback_vector, FeedbackVector::kFlagsOffset));
++  uint32_t kFlagsMask = FeedbackVector::kFlagsTieringStateIsAnyRequested |
++                        FeedbackVector::kFlagsMaybeHasTurbofanCode |
++                        FeedbackVector::kFlagsLogNextExecution;
++  if (current_code_kind != CodeKind::MAGLEV) {
++    kFlagsMask |= FeedbackVector::kFlagsMaybeHasMaglevCode;
++  }
++  __ And(scratch, flags, Operand(kFlagsMask));
++  __ Branch(flags_need_processing, ne, scratch, Operand(zero_reg));
+ }
+ 
+ static void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
+-    MacroAssembler* masm, Register optimization_state,
+-    Register feedback_vector) {
++    MacroAssembler* masm, Register flags, Register feedback_vector) {
+   ASM_CODE_COMMENT(masm);
+   Label maybe_has_optimized_code;
+   // Check if optimized code marker is available
+   {
+     UseScratchRegisterScope temps(masm);
+     Register scratch = temps.Acquire();
+-    __ And(scratch, optimization_state,
+-           Operand(FeedbackVector::kTieringStateIsAnyRequestMask));
++    __ And(scratch, flags,
++           Operand(FeedbackVector::kFlagsTieringStateIsAnyRequested));
+     __ Branch(&maybe_has_optimized_code, eq, scratch, Operand(zero_reg));
+   }
+ 
+-  Register tiering_state = optimization_state;
++  Register tiering_state = flags;
+   __ DecodeField<FeedbackVector::TieringStateBits>(tiering_state);
+   MaybeOptimizeCode(masm, feedback_vector, tiering_state);
+ 
+   __ bind(&maybe_has_optimized_code);
+-  Register optimized_code_entry = optimization_state;
++  Register optimized_code_entry = flags;
+   __ Lw(tiering_state,
+         FieldMemOperand(feedback_vector,
+                         FeedbackVector::kMaybeOptimizedCodeOffset));
+@@ -1081,16 +1079,15 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+               Operand(FEEDBACK_VECTOR_TYPE));
+   }
+   // Check for an tiering state.
+-  Label has_optimized_code_or_state;
+-  Register optimization_state = no_reg;
++  Label flags_need_processing;
++  Register flags = no_reg;
+   {
+     UseScratchRegisterScope temps(masm);
+-    optimization_state = temps.Acquire();
+-    // optimization_state will be used only in |has_optimized_code_or_state|
++    flags = temps.Acquire();
++    // flags will be used only in |flags_need_processing|
+     // and outside it can be reused.
+-    LoadTieringStateAndJumpIfNeedsProcessing(masm, optimization_state,
+-                                             feedback_vector,
+-                                             &has_optimized_code_or_state);
++    LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++        masm, flags, feedback_vector, &flags_need_processing);
+   }
+   {
+     UseScratchRegisterScope temps(masm);
+@@ -1174,16 +1171,15 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+   // TODO(v8:11429): Document this frame setup better.
+   __ Ret();
+ 
+-  __ bind(&has_optimized_code_or_state);
++  __ bind(&flags_need_processing);
+   {
+     ASM_CODE_COMMENT_STRING(masm, "Optimized marker check");
+     UseScratchRegisterScope temps(masm);
+-    temps.Exclude(optimization_state);
+-    // Ensure the optimization_state is not allocated again.
++    temps.Exclude(flags);
++    // Ensure the flags is not allocated again.
+     // Drop the frame created by the baseline call.
+     __ Pop(ra, fp);
+-    MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(masm, optimization_state,
+-                                                 feedback_vector);
++    MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(masm, flags, feedback_vector);
+     __ Trap();
+   }
+ 
+@@ -1251,10 +1247,10 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+   __ Branch(&push_stack_frame, ne, t0, Operand(FEEDBACK_VECTOR_TYPE));
+ 
+   // Check the tiering state.
+-  Label has_optimized_code_or_state;
+-  Register optimization_state = t0;
+-  LoadTieringStateAndJumpIfNeedsProcessing(
+-      masm, optimization_state, feedback_vector, &has_optimized_code_or_state);
++  Label flags_need_processing;
++  Register flags = t0;
++  LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(masm, flags, feedback_vector,
++                                                  &flags_need_processing);
+ 
+   {
+     UseScratchRegisterScope temps(masm);
+@@ -1409,9 +1405,8 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+ 
+   __ jmp(&after_stack_check_interrupt);
+ 
+-  __ bind(&has_optimized_code_or_state);
+-  MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(masm, optimization_state,
+-                                               feedback_vector);
++  __ bind(&flags_need_processing);
++  MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(masm, flags, feedback_vector);
+   __ bind(&is_baseline);
+   {
+     // Load the feedback vector from the closure.
+@@ -1428,9 +1423,8 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+     __ Branch(&install_baseline_code, ne, t4, Operand(FEEDBACK_VECTOR_TYPE));
+ 
+     // Check for an tiering state.
+-    LoadTieringStateAndJumpIfNeedsProcessing(masm, optimization_state,
+-                                             feedback_vector,
+-                                             &has_optimized_code_or_state);
++    LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++        masm, flags, feedback_vector, &flags_need_processing);
+ 
+     // Load the baseline code into the closure.
+     __ Move(a2, kInterpreterBytecodeArrayRegister);
+diff --git a/src/builtins/mips64/builtins-mips64.cc b/src/builtins/mips64/builtins-mips64.cc
+index e875c395cbd..f164f1d9b05 100644
+--- a/src/builtins/mips64/builtins-mips64.cc
++++ b/src/builtins/mips64/builtins-mips64.cc
+@@ -923,16 +923,15 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+     __ AssertFeedbackVector(feedback_vector, scratch);
+   }
+   // Check for an tiering state.
+-  Label has_optimized_code_or_state;
+-  Register optimization_state = no_reg;
++  Label flags_need_processing;
++  Register flags = no_reg;
+   {
+     UseScratchRegisterScope temps(masm);
+-    optimization_state = temps.Acquire();
+-    // optimization_state will be used only in |has_optimized_code_or_state|
++    flags = temps.Acquire();
++    // flags will be used only in |flags_need_processing|
+     // and outside it can be reused.
+-    __ LoadTieringStateAndJumpIfNeedsProcessing(
+-        optimization_state, feedback_vector, CodeKind::BASELINE,
+-        &has_optimized_code_or_state);
++    __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++        flags, feedback_vector, CodeKind::BASELINE, &flags_need_processing);
+   }
+   {
+     UseScratchRegisterScope temps(masm);
+@@ -1014,16 +1013,15 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+   // TODO(v8:11429): Document this frame setup better.
+   __ Ret();
+ 
+-  __ bind(&has_optimized_code_or_state);
++  __ bind(&flags_need_processing);
+   {
+     ASM_CODE_COMMENT_STRING(masm, "Optimized marker check");
+     UseScratchRegisterScope temps(masm);
+-    temps.Exclude(optimization_state);
+-    // Ensure the optimization_state is not allocated again.
++    temps.Exclude(flags);
++    // Ensure the flags is not allocated again.
+     // Drop the frame created by the baseline call.
+     __ Pop(ra, fp);
+-    __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(optimization_state,
+-                                                    feedback_vector);
++    __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
+     __ Trap();
+   }
+ 
+@@ -1111,11 +1109,11 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+   __ Branch(&push_stack_frame, ne, a4, Operand(FEEDBACK_VECTOR_TYPE));
+ 
+   // Check the tiering state.
+-  Label has_optimized_code_or_state;
+-  Register optimization_state = a4;
+-  __ LoadTieringStateAndJumpIfNeedsProcessing(
+-      optimization_state, feedback_vector, CodeKind::INTERPRETED_FUNCTION,
+-      &has_optimized_code_or_state);
++  Label flags_need_processing;
++  Register flags = a4;
++  __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++      flags, feedback_vector, CodeKind::INTERPRETED_FUNCTION,
++      &flags_need_processing);
+ 
+   {
+     UseScratchRegisterScope temps(masm);
+@@ -1271,9 +1269,8 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+ 
+   __ jmp(&after_stack_check_interrupt);
+ 
+-  __ bind(&has_optimized_code_or_state);
+-  __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(optimization_state,
+-                                                  feedback_vector);
++  __ bind(&flags_need_processing);
++  __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
+   __ bind(&is_baseline);
+   {
+     // Load the feedback vector from the closure.
+@@ -1290,9 +1287,8 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+     __ Branch(&install_baseline_code, ne, t0, Operand(FEEDBACK_VECTOR_TYPE));
+ 
+     // Check for an tiering state.
+-    __ LoadTieringStateAndJumpIfNeedsProcessing(
+-        optimization_state, feedback_vector, CodeKind::BASELINE,
+-        &has_optimized_code_or_state);
++    __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++        flags, feedback_vector, CodeKind::BASELINE, &flags_need_processing);
+ 
+     // Load the baseline code into the closure.
+     __ Move(a2, kInterpreterBytecodeArrayRegister);
+@@ -1697,14 +1693,14 @@ void OnStackReplacement(MacroAssembler* masm, OsrSourceTier source,
+   // OSR entry tracing.
+   {
+     Label next;
+-    __ li(a1, ExternalReference::address_of_FLAG_trace_osr());
++    __ li(a1, ExternalReference::address_of_log_or_trace_osr());
+     __ Lbu(a1, MemOperand(a1));
+     __ Branch(&next, eq, a1, Operand(zero_reg));
+ 
+     {
+       FrameScope scope(masm, StackFrame::INTERNAL);
+       __ Push(a0);  // Preserve the code object.
+-      __ CallRuntime(Runtime::kTraceOptimizedOSREntry, 0);
++      __ CallRuntime(Runtime::kLogOrTraceOptimizedOSREntry, 0);
+       __ Pop(a0);
+     }
+ 
+diff --git a/src/builtins/ppc/builtins-ppc.cc b/src/builtins/ppc/builtins-ppc.cc
+index be4f3f3bf12..4993dfccde4 100644
+--- a/src/builtins/ppc/builtins-ppc.cc
++++ b/src/builtins/ppc/builtins-ppc.cc
+@@ -402,7 +402,7 @@ void OnStackReplacement(MacroAssembler* masm, OsrSourceTier source,
+   // OSR entry tracing.
+   {
+     Label next;
+-    __ Move(r4, ExternalReference::address_of_FLAG_trace_osr());
++    __ Move(r4, ExternalReference::address_of_log_or_trace_osr());
+     __ LoadU8(r4, MemOperand(r4));
+     __ andi(r0, r4, Operand(0xFF));  // Mask to the LSB.
+     __ beq(&next, cr0);
+@@ -410,7 +410,7 @@ void OnStackReplacement(MacroAssembler* masm, OsrSourceTier source,
+     {
+       FrameAndConstantPoolScope scope(masm, StackFrame::INTERNAL);
+       __ Push(r3);  // Preserve the code object.
+-      __ CallRuntime(Runtime::kTraceOptimizedOSREntry, 0);
++      __ CallRuntime(Runtime::kLogOrTraceOptimizedOSREntry, 0);
+       __ Pop(r3);
+     }
+ 
+@@ -1205,12 +1205,11 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+   __ AssertFeedbackVector(feedback_vector, r11);
+ 
+   // Check for an tiering state.
+-  Label has_optimized_code_or_state;
+-  Register optimization_state = r10;
++  Label flags_need_processing;
++  Register flags = r10;
+   {
+-    __ LoadTieringStateAndJumpIfNeedsProcessing(
+-        optimization_state, feedback_vector, CodeKind::BASELINE,
+-        &has_optimized_code_or_state);
++    __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++        flags, feedback_vector, CodeKind::BASELINE, &flags_need_processing);
+   }
+ 
+   { ResetFeedbackVectorOsrUrgency(masm, feedback_vector, r11, r0); }
+@@ -1288,7 +1287,7 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+   __ LoadRoot(kInterpreterAccumulatorRegister, RootIndex::kUndefinedValue);
+   __ Ret();
+ 
+-  __ bind(&has_optimized_code_or_state);
++  __ bind(&flags_need_processing);
+   {
+     ASM_CODE_COMMENT_STRING(masm, "Optimized marker check");
+ 
+@@ -1299,8 +1298,7 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+       __ Pop(r0, fp);
+     }
+     __ mtlr(r0);
+-    __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(optimization_state,
+-                                                    feedback_vector);
++    __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
+     __ Trap();
+   }
+ 
+@@ -1399,11 +1397,11 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+   __ cmpi(r7, Operand(FEEDBACK_VECTOR_TYPE));
+   __ bne(&push_stack_frame);
+ 
+-  Register optimization_state = r7;
+-  Label has_optimized_code_or_state;
+-  __ LoadTieringStateAndJumpIfNeedsProcessing(
+-      optimization_state, feedback_vector, CodeKind::INTERPRETED_FUNCTION,
+-      &has_optimized_code_or_state);
++  Register flags = r7;
++  Label flags_need_processing;
++  __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++      flags, feedback_vector, CodeKind::INTERPRETED_FUNCTION,
++      &flags_need_processing);
+ 
+   {
+     UseScratchRegisterScope temps(masm);
+@@ -1569,9 +1567,8 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+ 
+   __ jmp(&after_stack_check_interrupt);
+ 
+-  __ bind(&has_optimized_code_or_state);
+-  __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(optimization_state,
+-                                                  feedback_vector);
++  __ bind(&flags_need_processing);
++  __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
+ 
+   __ bind(&is_baseline);
+   {
+@@ -1593,9 +1590,8 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+     __ b(ne, &install_baseline_code);
+ 
+     // Check for an tiering state.
+-    __ LoadTieringStateAndJumpIfNeedsProcessing(
+-        optimization_state, feedback_vector, CodeKind::BASELINE,
+-        &has_optimized_code_or_state);
++    __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++        flags, feedback_vector, CodeKind::BASELINE, &flags_need_processing);
+ 
+     // Load the baseline code into the closure.
+     __ mr(r5, kInterpreterBytecodeArrayRegister);
+diff --git a/src/builtins/riscv/builtins-riscv.cc b/src/builtins/riscv/builtins-riscv.cc
+index cf3659407cf..0571568ebb3 100644
+--- a/src/builtins/riscv/builtins-riscv.cc
++++ b/src/builtins/riscv/builtins-riscv.cc
+@@ -989,11 +989,10 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+   }
+ 
+   // Check for an tiering state.
+-  Label has_optimized_code_or_state;
+-  Register optimization_state = temps.Acquire();
+-  __ LoadTieringStateAndJumpIfNeedsProcessing(
+-      optimization_state, feedback_vector, CodeKind::BASELINE,
+-      &has_optimized_code_or_state);
++  Label flags_need_processing;
++  Register flags = temps.Acquire();
++  __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++      flags, feedback_vector, CodeKind::BASELINE, &flags_need_processing);
+   {
+     UseScratchRegisterScope temps(masm);
+     ResetFeedbackVectorOsrUrgency(masm, feedback_vector, temps.Acquire());
+@@ -1074,13 +1073,12 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+   // TODO(v8:11429): Document this frame setup better.
+   __ Ret();
+ 
+-  __ bind(&has_optimized_code_or_state);
++  __ bind(&flags_need_processing);
+   {
+     ASM_CODE_COMMENT_STRING(masm, "Optimized marker check");
+     // Drop the frame created by the baseline call.
+     __ Pop(ra, fp);
+-    __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(optimization_state,
+-                                                    feedback_vector);
++    __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
+     __ Trap();
+   }
+ 
+@@ -1157,11 +1155,11 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+             Label::Distance::kNear);
+ 
+   // Check the tiering state.
+-  Label has_optimized_code_or_state;
+-  Register optimization_state = a4;
+-  __ LoadTieringStateAndJumpIfNeedsProcessing(
+-      optimization_state, feedback_vector, CodeKind::INTERPRETED_FUNCTION,
+-      &has_optimized_code_or_state);
++  Label flags_need_processing;
++  Register flags = a4;
++  __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++      flags, feedback_vector, CodeKind::INTERPRETED_FUNCTION,
++      &flags_need_processing);
+   {
+     UseScratchRegisterScope temps(masm);
+     ResetFeedbackVectorOsrUrgency(masm, feedback_vector, temps.Acquire());
+@@ -1320,9 +1318,8 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+ 
+   __ Branch(&after_stack_check_interrupt);
+ 
+-  __ bind(&has_optimized_code_or_state);
+-  __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(optimization_state,
+-                                                  feedback_vector);
++  __ bind(&flags_need_processing);
++  __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
+   __ bind(&is_baseline);
+   {
+     // Load the feedback vector from the closure.
+@@ -1342,9 +1339,8 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+               Operand(FEEDBACK_VECTOR_TYPE));
+ 
+     // Check for an tiering state.
+-    __ LoadTieringStateAndJumpIfNeedsProcessing(
+-        optimization_state, feedback_vector, CodeKind::BASELINE,
+-        &has_optimized_code_or_state);
++    __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++        flags, feedback_vector, CodeKind::BASELINE, &flags_need_processing);
+ 
+     // Load the baseline code into the closure.
+     __ Move(a2, kInterpreterBytecodeArrayRegister);
+diff --git a/src/builtins/s390/builtins-s390.cc b/src/builtins/s390/builtins-s390.cc
+index 9cfe09ea762..e5c5e9d0437 100644
+--- a/src/builtins/s390/builtins-s390.cc
++++ b/src/builtins/s390/builtins-s390.cc
+@@ -291,7 +291,7 @@ void OnStackReplacement(MacroAssembler* masm, OsrSourceTier source,
+   // OSR entry tracing.
+   {
+     Label next;
+-    __ Move(r3, ExternalReference::address_of_FLAG_trace_osr());
++    __ Move(r3, ExternalReference::address_of_log_or_trace_osr());
+     __ LoadU8(r3, MemOperand(r3));
+     __ tmll(r3, Operand(0xFF));  // Mask to the LSB.
+     __ beq(&next);
+@@ -299,7 +299,7 @@ void OnStackReplacement(MacroAssembler* masm, OsrSourceTier source,
+     {
+       FrameAndConstantPoolScope scope(masm, StackFrame::INTERNAL);
+       __ Push(r2);  // Preserve the code object.
+-      __ CallRuntime(Runtime::kTraceOptimizedOSREntry, 0);
++      __ CallRuntime(Runtime::kLogOrTraceOptimizedOSREntry, 0);
+       __ Pop(r2);
+     }
+ 
+@@ -1246,12 +1246,11 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+   __ AssertFeedbackVector(feedback_vector, r1);
+ 
+   // Check for an tiering state.
+-  Label has_optimized_code_or_state;
+-  Register optimization_state = r9;
++  Label flags_need_processing;
++  Register flags = r9;
+   {
+-    __ LoadTieringStateAndJumpIfNeedsProcessing(
+-        optimization_state, feedback_vector, CodeKind::BASELINE,
+-        &has_optimized_code_or_state);
++    __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++        flags, feedback_vector, CodeKind::BASELINE, &flags_need_processing);
+   }
+ 
+   {
+@@ -1330,14 +1329,13 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+   __ LoadRoot(kInterpreterAccumulatorRegister, RootIndex::kUndefinedValue);
+   __ Ret();
+ 
+-  __ bind(&has_optimized_code_or_state);
++  __ bind(&flags_need_processing);
+   {
+     ASM_CODE_COMMENT_STRING(masm, "Optimized marker check");
+ 
+     // Drop the frame created by the baseline call.
+     __ Pop(r14, fp);
+-    __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(optimization_state,
+-                                                    feedback_vector);
++    __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
+     __ Trap();
+   }
+ 
+@@ -1435,11 +1433,11 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+   __ CmpS64(r6, Operand(FEEDBACK_VECTOR_TYPE));
+   __ bne(&push_stack_frame);
+ 
+-  Register optimization_state = r6;
+-  Label has_optimized_code_or_state;
+-  __ LoadTieringStateAndJumpIfNeedsProcessing(
+-      optimization_state, feedback_vector, CodeKind::INTERPRETED_FUNCTION,
+-      &has_optimized_code_or_state);
++  Register flags = r6;
++  Label flags_need_processing;
++  __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++      flags, feedback_vector, CodeKind::INTERPRETED_FUNCTION,
++      &flags_need_processing);
+ 
+   {
+     UseScratchRegisterScope temps(masm);
+@@ -1600,9 +1598,8 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+ 
+   __ jmp(&after_stack_check_interrupt);
+ 
+-  __ bind(&has_optimized_code_or_state);
+-  __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(optimization_state,
+-                                                  feedback_vector);
++  __ bind(&flags_need_processing);
++  __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector);
+ 
+   __ bind(&is_baseline);
+   {
+@@ -1623,9 +1620,8 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+     __ b(ne, &install_baseline_code);
+ 
+     // Check for an tiering state.
+-    __ LoadTieringStateAndJumpIfNeedsProcessing(
+-        optimization_state, feedback_vector, CodeKind::BASELINE,
+-        &has_optimized_code_or_state);
++    __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++        flags, feedback_vector, CodeKind::BASELINE, &flags_need_processing);
+ 
+     // Load the baseline code into the closure.
+     __ mov(r4, kInterpreterBytecodeArrayRegister);
+diff --git a/src/builtins/x64/builtins-x64.cc b/src/builtins/x64/builtins-x64.cc
+index 60cda05d585..c1e89191d1a 100644
+--- a/src/builtins/x64/builtins-x64.cc
++++ b/src/builtins/x64/builtins-x64.cc
+@@ -1036,11 +1036,11 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+   __ j(not_equal, &push_stack_frame);
+ 
+   // Check the tiering state.
+-  Label has_optimized_code_or_state;
+-  Register optimization_state = rcx;
+-  __ LoadTieringStateAndJumpIfNeedsProcessing(
+-      optimization_state, feedback_vector, CodeKind::INTERPRETED_FUNCTION,
+-      &has_optimized_code_or_state);
++  Label flags_need_processing;
++  Register flags = rcx;
++  __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++      flags, feedback_vector, CodeKind::INTERPRETED_FUNCTION,
++      &flags_need_processing);
+ 
+   ResetFeedbackVectorOsrUrgency(masm, feedback_vector, kScratchRegister);
+ 
+@@ -1196,9 +1196,9 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+   __ GenerateTailCallToReturnedCode(Runtime::kCompileLazy);
+   __ int3();  // Should not return.
+ 
+-  __ bind(&has_optimized_code_or_state);
+-  __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(optimization_state,
+-                                                  feedback_vector, closure);
++  __ bind(&flags_need_processing);
++  __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(flags, feedback_vector,
++                                                  closure);
+ 
+   __ bind(&is_baseline);
+   {
+@@ -1217,9 +1217,8 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+     __ j(not_equal, &install_baseline_code);
+ 
+     // Check the tiering state.
+-    __ LoadTieringStateAndJumpIfNeedsProcessing(
+-        optimization_state, feedback_vector, CodeKind::BASELINE,
+-        &has_optimized_code_or_state);
++    __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++        flags, feedback_vector, CodeKind::BASELINE, &flags_need_processing);
+ 
+     // Load the baseline code into the closure.
+     __ Move(rcx, kInterpreterBytecodeArrayRegister);
+@@ -1525,13 +1524,12 @@ void Builtins::Generate_InterpreterEnterAtBytecode(MacroAssembler* masm) {
+ // static
+ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+   Register feedback_vector = r8;
+-  Register optimization_state = rcx;
++  Register flags = rcx;
+   Register return_address = r15;
+ 
+ #ifdef DEBUG
+   for (auto reg : BaselineOutOfLinePrologueDescriptor::registers()) {
+-    DCHECK(
+-        !AreAliased(feedback_vector, optimization_state, return_address, reg));
++    DCHECK(!AreAliased(feedback_vector, flags, return_address, reg));
+   }
+ #endif
+ 
+@@ -1548,10 +1546,9 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+   __ AssertFeedbackVector(feedback_vector);
+ 
+   // Check the tiering state.
+-  Label has_optimized_code_or_state;
+-  __ LoadTieringStateAndJumpIfNeedsProcessing(
+-      optimization_state, feedback_vector, CodeKind::BASELINE,
+-      &has_optimized_code_or_state);
++  Label flags_need_processing;
++  __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++      flags, feedback_vector, CodeKind::BASELINE, &flags_need_processing);
+ 
+   ResetFeedbackVectorOsrUrgency(masm, feedback_vector, kScratchRegister);
+ 
+@@ -1622,7 +1619,7 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+   __ LoadRoot(kInterpreterAccumulatorRegister, RootIndex::kUndefinedValue);
+   __ Ret();
+ 
+-  __ bind(&has_optimized_code_or_state);
++  __ bind(&flags_need_processing);
+   {
+     ASM_CODE_COMMENT_STRING(masm, "Optimized marker check");
+     // Drop the return address, rebalancing the return stack buffer by using
+@@ -1631,7 +1628,7 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+     // stack to only contain valid frames.
+     __ Drop(1);
+     __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
+-        optimization_state, feedback_vector, closure, JumpMode::kPushAndReturn);
++        flags, feedback_vector, closure, JumpMode::kPushAndReturn);
+     __ Trap();
+   }
+ 
+@@ -2639,14 +2636,14 @@ void OnStackReplacement(MacroAssembler* masm, OsrSourceTier source,
+     Label next;
+     __ cmpb(
+         __ ExternalReferenceAsOperand(
+-            ExternalReference::address_of_FLAG_trace_osr(), kScratchRegister),
++            ExternalReference::address_of_log_or_trace_osr(), kScratchRegister),
+         Immediate(0));
+     __ j(equal, &next, Label::kNear);
+ 
+     {
+       FrameScope scope(masm, StackFrame::INTERNAL);
+       __ Push(rax);  // Preserve the code object.
+-      __ CallRuntime(Runtime::kTraceOptimizedOSREntry, 0);
++      __ CallRuntime(Runtime::kLogOrTraceOptimizedOSREntry, 0);
+       __ Pop(rax);
+     }
+ 
+diff --git a/src/codegen/arm/macro-assembler-arm.cc b/src/codegen/arm/macro-assembler-arm.cc
+index ef27543742c..f88c04333f4 100644
+--- a/src/codegen/arm/macro-assembler-arm.cc
++++ b/src/codegen/arm/macro-assembler-arm.cc
+@@ -2059,39 +2059,42 @@ void MacroAssembler::GenerateTailCallToReturnedCode(
+   JumpCodeObject(r2);
+ }
+ 
+-// Read off the optimization state in the feedback vector and check if there
++// Read off the flags in the feedback vector and check if there
+ // is optimized code or a tiering state that needs to be processed.
+-void MacroAssembler::LoadTieringStateAndJumpIfNeedsProcessing(
+-    Register optimization_state, Register feedback_vector,
+-    CodeKind current_code_kind, Label* has_optimized_code_or_state) {
++void MacroAssembler::LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++    Register flags, Register feedback_vector, CodeKind current_code_kind,
++    Label* flags_need_processing) {
+   ASM_CODE_COMMENT(this);
+-  DCHECK(!AreAliased(optimization_state, feedback_vector));
++  DCHECK(!AreAliased(flags, feedback_vector));
+   DCHECK(CodeKindCanTierUp(current_code_kind));
+-  ldrh(optimization_state,
+-       FieldMemOperand(feedback_vector, FeedbackVector::kFlagsOffset));
+-  tst(optimization_state,
+-      Operand(
+-          current_code_kind == CodeKind::MAGLEV
+-              ? FeedbackVector::kHasTurbofanCodeOrTieringStateIsAnyRequestMask
+-              : FeedbackVector::
+-                    kHasAnyOptimizedCodeOrTieringStateIsAnyRequestMask));
+-  b(ne, has_optimized_code_or_state);
++  ldrh(flags, FieldMemOperand(feedback_vector, FeedbackVector::kFlagsOffset));
++  uint32_t kFlagsMask = FeedbackVector::kFlagsTieringStateIsAnyRequested |
++                        FeedbackVector::kFlagsMaybeHasTurbofanCode |
++                        FeedbackVector::kFlagsLogNextExecution;
++  if (current_code_kind != CodeKind::MAGLEV) {
++    kFlagsMask |= FeedbackVector::kFlagsMaybeHasMaglevCode;
++  }
++  tst(flags, Operand(kFlagsMask));
++  b(ne, flags_need_processing);
+ }
+ 
+ void MacroAssembler::MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
+-    Register optimization_state, Register feedback_vector) {
++    Register flags, Register feedback_vector) {
+   ASM_CODE_COMMENT(this);
+-  DCHECK(!AreAliased(optimization_state, feedback_vector));
+-  Label maybe_has_optimized_code;
++  DCHECK(!AreAliased(flags, feedback_vector));
++  Label maybe_has_optimized_code, maybe_needs_logging;
+   // Check if optimized code is available.
+-  tst(optimization_state,
+-      Operand(FeedbackVector::kTieringStateIsAnyRequestMask));
+-  b(eq, &maybe_has_optimized_code);
+-
++  tst(flags, Operand(FeedbackVector::kFlagsTieringStateIsAnyRequested));
++  b(eq, &maybe_needs_logging);
+   GenerateTailCallToReturnedCode(Runtime::kCompileOptimized);
+ 
++  bind(&maybe_needs_logging);
++  tst(flags, Operand(FeedbackVector::LogNextExecutionBit::kMask));
++  b(eq, &maybe_has_optimized_code);
++  GenerateTailCallToReturnedCode(Runtime::kFunctionLogNextExecution);
++
+   bind(&maybe_has_optimized_code);
+-  Register optimized_code_entry = optimization_state;
++  Register optimized_code_entry = flags;
+   ldr(optimized_code_entry,
+       FieldMemOperand(feedback_vector,
+                       FeedbackVector::kMaybeOptimizedCodeOffset));
+diff --git a/src/codegen/arm/macro-assembler-arm.h b/src/codegen/arm/macro-assembler-arm.h
+index 30d1e6d1140..099b1551bf8 100644
+--- a/src/codegen/arm/macro-assembler-arm.h
++++ b/src/codegen/arm/macro-assembler-arm.h
+@@ -776,10 +776,10 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   void ReplaceClosureCodeWithOptimizedCode(Register optimized_code,
+                                            Register closure);
+   void GenerateTailCallToReturnedCode(Runtime::FunctionId function_id);
+-  void LoadTieringStateAndJumpIfNeedsProcessing(
+-      Register optimization_state, Register feedback_vector,
+-      CodeKind current_code_kind, Label* has_optimized_code_or_state);
+-  void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(Register optimization_state,
++  void LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++      Register flags, Register feedback_vector, CodeKind current_code_kind,
++      Label* flags_need_processing);
++  void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(Register flags,
+                                                     Register feedback_vector);
+ 
+   // ---------------------------------------------------------------------------
+diff --git a/src/codegen/arm64/macro-assembler-arm64.cc b/src/codegen/arm64/macro-assembler-arm64.cc
+index 0733257e2db..0112f35129c 100644
+--- a/src/codegen/arm64/macro-assembler-arm64.cc
++++ b/src/codegen/arm64/macro-assembler-arm64.cc
+@@ -1422,36 +1422,40 @@ void MacroAssembler::GenerateTailCallToReturnedCode(
+   JumpCodeTObject(x2);
+ }
+ 
+-// Read off the optimization state in the feedback vector and check if there
++// Read off the flags in the feedback vector and check if there
+ // is optimized code or a tiering state that needs to be processed.
+-void MacroAssembler::LoadTieringStateAndJumpIfNeedsProcessing(
+-    Register optimization_state, Register feedback_vector,
+-    CodeKind current_code_kind, Label* has_optimized_code_or_state) {
++void MacroAssembler::LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++    Register flags, Register feedback_vector, CodeKind current_code_kind,
++    Label* flags_need_processing) {
+   ASM_CODE_COMMENT(this);
+-  DCHECK(!AreAliased(optimization_state, feedback_vector));
++  DCHECK(!AreAliased(flags, feedback_vector));
+   DCHECK(CodeKindCanTierUp(current_code_kind));
+-  Ldrh(optimization_state,
+-       FieldMemOperand(feedback_vector, FeedbackVector::kFlagsOffset));
+-  TestAndBranchIfAnySet(
+-      optimization_state,
+-      current_code_kind == CodeKind::MAGLEV
+-          ? FeedbackVector::kHasTurbofanCodeOrTieringStateIsAnyRequestMask
+-          : FeedbackVector::kHasAnyOptimizedCodeOrTieringStateIsAnyRequestMask,
+-      has_optimized_code_or_state);
++  Ldrh(flags, FieldMemOperand(feedback_vector, FeedbackVector::kFlagsOffset));
++  uint32_t kFlagsMask = FeedbackVector::kFlagsTieringStateIsAnyRequested |
++                        FeedbackVector::kFlagsMaybeHasTurbofanCode |
++                        FeedbackVector::kFlagsLogNextExecution;
++  if (current_code_kind != CodeKind::MAGLEV) {
++    kFlagsMask |= FeedbackVector::kFlagsMaybeHasMaglevCode;
++  }
++  TestAndBranchIfAnySet(flags, kFlagsMask, flags_need_processing);
+ }
+ 
+ void MacroAssembler::MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
+-    Register optimization_state, Register feedback_vector) {
++    Register flags, Register feedback_vector) {
+   ASM_CODE_COMMENT(this);
+-  DCHECK(!AreAliased(optimization_state, feedback_vector));
+-  Label maybe_has_optimized_code;
++  DCHECK(!AreAliased(flags, feedback_vector));
++  Label maybe_has_optimized_code, maybe_needs_logging;
+   // Check if optimized code is available.
+-  TestAndBranchIfAllClear(optimization_state,
+-                          FeedbackVector::kTieringStateIsAnyRequestMask,
+-                          &maybe_has_optimized_code);
+-
++  TestAndBranchIfAllClear(flags,
++                          FeedbackVector::kFlagsTieringStateIsAnyRequested,
++                          &maybe_needs_logging);
+   GenerateTailCallToReturnedCode(Runtime::kCompileOptimized);
+ 
++  bind(&maybe_needs_logging);
++  TestAndBranchIfAllClear(flags, FeedbackVector::LogNextExecutionBit::kMask,
++                          &maybe_has_optimized_code);
++  GenerateTailCallToReturnedCode(Runtime::kFunctionLogNextExecution);
++
+   bind(&maybe_has_optimized_code);
+   Register optimized_code_entry = x7;
+   LoadAnyTaggedField(
+diff --git a/src/codegen/arm64/macro-assembler-arm64.h b/src/codegen/arm64/macro-assembler-arm64.h
+index 08c02d22ed0..4c3715b69cf 100644
+--- a/src/codegen/arm64/macro-assembler-arm64.h
++++ b/src/codegen/arm64/macro-assembler-arm64.h
+@@ -1839,10 +1839,10 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   void ReplaceClosureCodeWithOptimizedCode(Register optimized_code,
+                                            Register closure);
+   void GenerateTailCallToReturnedCode(Runtime::FunctionId function_id);
+-  void LoadTieringStateAndJumpIfNeedsProcessing(
+-      Register optimization_state, Register feedback_vector,
+-      CodeKind current_code_kind, Label* has_optimized_code_or_state);
+-  void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(Register optimization_state,
++  void LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++      Register flags, Register feedback_vector, CodeKind current_code_kind,
++      Label* flags_need_processing);
++  void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(Register flags,
+                                                     Register feedback_vector);
+ 
+   // Helpers ------------------------------------------------------------------
+diff --git a/src/codegen/compiler.cc b/src/codegen/compiler.cc
+index 6e603e215b5..8d4c972c3cb 100644
+--- a/src/codegen/compiler.cc
++++ b/src/codegen/compiler.cc
+@@ -353,7 +353,7 @@ void Compiler::LogFunctionCompilation(Isolate* isolate,
+       name = "maglev";
+       break;
+     case CodeKind::TURBOFAN:
+-      name = "optimize";
++      name = "turbofan";
+       break;
+     default:
+       UNREACHABLE();
+@@ -441,10 +441,11 @@ CompilationJob::Status UnoptimizedCompilationJob::FinalizeJob(
+ }
+ 
+ namespace {
+-void RecordUnoptimizedFunctionCompilation(
+-    Isolate* isolate, LogEventListener::CodeTag code_type,
+-    Handle<SharedFunctionInfo> shared, base::TimeDelta time_taken_to_execute,
+-    base::TimeDelta time_taken_to_finalize) {
++void LogUnoptimizedCompilation(Isolate* isolate,
++                               Handle<SharedFunctionInfo> shared,
++                               LogEventListener::CodeTag code_type,
++                               base::TimeDelta time_taken_to_execute,
++                               base::TimeDelta time_taken_to_finalize) {
+   Handle<AbstractCode> abstract_code;
+   if (shared->HasBytecodeArray()) {
+     abstract_code =
+@@ -701,16 +702,6 @@ void InstallUnoptimizedCode(UnoptimizedCompilationInfo* compilation_info,
+   }
+ }
+ 
+-void LogUnoptimizedCompilation(Isolate* isolate,
+-                               Handle<SharedFunctionInfo> shared_info,
+-                               LogEventListener::CodeTag log_tag,
+-                               base::TimeDelta time_taken_to_execute,
+-                               base::TimeDelta time_taken_to_finalize) {
+-  RecordUnoptimizedFunctionCompilation(isolate, log_tag, shared_info,
+-                                       time_taken_to_execute,
+-                                       time_taken_to_finalize);
+-}
+-
+ template <typename IsolateT>
+ void EnsureSharedFunctionInfosArrayOnScript(Handle<Script> script,
+                                             ParseInfo* parse_info,
+@@ -2603,7 +2594,6 @@ bool Compiler::Compile(Isolate* isolate, Handle<JSFunction> function,
+ 
+   // Install code on closure.
+   function->set_code(*code, kReleaseStore);
+-
+   // Install a feedback vector if necessary.
+   if (code->kind() == CodeKind::BASELINE) {
+     JSFunction::EnsureFeedbackVector(isolate, function, is_compiled_scope);
+@@ -2679,7 +2669,6 @@ bool Compiler::CompileBaseline(Isolate* isolate, Handle<JSFunction> function,
+   CodeT baseline_code = shared->baseline_code(kAcquireLoad);
+   DCHECK_EQ(baseline_code.kind(), CodeKind::BASELINE);
+   function->set_code(baseline_code);
+-
+   return true;
+ }
+ 
+@@ -2702,7 +2691,6 @@ bool Compiler::CompileMaglev(Isolate* isolate, Handle<JSFunction> function,
+ 
+   DCHECK_EQ(code->kind(), CodeKind::MAGLEV);
+   function->set_code(*code);
+-
+   return true;
+ #else
+   return false;
+diff --git a/src/codegen/external-reference.cc b/src/codegen/external-reference.cc
+index 57aa7e6ec38..ef1f184c5fb 100644
+--- a/src/codegen/external-reference.cc
++++ b/src/codegen/external-reference.cc
+@@ -581,8 +581,8 @@ ExternalReference::address_of_FLAG_harmony_regexp_unicode_sets() {
+ 
+ // TODO(jgruber): Update the other extrefs pointing at v8_flags. addresses to be
+ // called address_of_FLAG_foo (easier grep-ability).
+-ExternalReference ExternalReference::address_of_FLAG_trace_osr() {
+-  return ExternalReference(&v8_flags.trace_osr);
++ExternalReference ExternalReference::address_of_log_or_trace_osr() {
++  return ExternalReference(&v8_flags.log_or_trace_osr);
+ }
+ 
+ ExternalReference ExternalReference::address_of_builtin_subclassing_flag() {
+diff --git a/src/codegen/external-reference.h b/src/codegen/external-reference.h
+index 5af0a93608b..b6df8547f51 100644
+--- a/src/codegen/external-reference.h
++++ b/src/codegen/external-reference.h
+@@ -96,9 +96,9 @@ class StatsCounter;
+ 
+ #define EXTERNAL_REFERENCE_LIST(V)                                             \
+   V(abort_with_reason, "abort_with_reason")                                    \
++  V(address_of_log_or_trace_osr, "v8_flags.log_or_trace_osr")                  \
+   V(address_of_FLAG_harmony_regexp_unicode_sets,                               \
+     "v8_flags.harmony_regexp_unicdoe_sets")                                    \
+-  V(address_of_FLAG_trace_osr, "v8_flags.trace_osr")                           \
+   V(address_of_builtin_subclassing_flag, "v8_flags.builtin_subclassing")       \
+   V(address_of_double_abs_constant, "double_absolute_constant")                \
+   V(address_of_double_neg_constant, "double_negate_constant")                  \
+diff --git a/src/codegen/ia32/macro-assembler-ia32.cc b/src/codegen/ia32/macro-assembler-ia32.cc
+index be0a5c8f92a..eeb33d2aedc 100644
+--- a/src/codegen/ia32/macro-assembler-ia32.cc
++++ b/src/codegen/ia32/macro-assembler-ia32.cc
+@@ -821,48 +821,51 @@ void MacroAssembler::GenerateTailCallToReturnedCode(
+   JumpCodeObject(ecx);
+ }
+ 
+-// Read off the optimization state in the feedback vector and check if there
++// Read off the flags in the feedback vector and check if there
+ // is optimized code or a tiering state that needs to be processed.
+-// Registers optimization_state and feedback_vector must be aliased.
+-void MacroAssembler::LoadTieringStateAndJumpIfNeedsProcessing(
+-    Register optimization_state, XMMRegister saved_feedback_vector,
+-    CodeKind current_code_kind, Label* has_optimized_code_or_state) {
++// Registers flags and feedback_vector must be aliased.
++void MacroAssembler::LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++    Register flags, XMMRegister saved_feedback_vector,
++    CodeKind current_code_kind, Label* flags_need_processing) {
+   ASM_CODE_COMMENT(this);
+   DCHECK(CodeKindCanTierUp(current_code_kind));
+-  Register feedback_vector = optimization_state;
++  Register feedback_vector = flags;
+ 
+   // Store feedback_vector. We may need it if we need to load the optimize code
+   // slot entry.
+   movd(saved_feedback_vector, feedback_vector);
+-  mov_w(optimization_state,
+-        FieldOperand(feedback_vector, FeedbackVector::kFlagsOffset));
++  mov_w(flags, FieldOperand(feedback_vector, FeedbackVector::kFlagsOffset));
+ 
+   // Check if there is optimized code or a tiering state that needes to be
+   // processed.
+-  test_w(
+-      optimization_state,
+-      Immediate(
+-          current_code_kind == CodeKind::MAGLEV
+-              ? FeedbackVector::kHasTurbofanCodeOrTieringStateIsAnyRequestMask
+-              : FeedbackVector::
+-                    kHasAnyOptimizedCodeOrTieringStateIsAnyRequestMask));
+-  j(not_zero, has_optimized_code_or_state);
++  uint32_t kFlagsMask = FeedbackVector::kFlagsTieringStateIsAnyRequested |
++                        FeedbackVector::kFlagsMaybeHasTurbofanCode |
++                        FeedbackVector::kFlagsLogNextExecution;
++  if (current_code_kind != CodeKind::MAGLEV) {
++    kFlagsMask |= FeedbackVector::kFlagsMaybeHasMaglevCode;
++  }
++  test_w(flags, Immediate(kFlagsMask));
++  j(not_zero, flags_need_processing);
+ }
+ 
+ void MacroAssembler::MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
+-    Register optimization_state, XMMRegister saved_feedback_vector) {
++    Register flags, XMMRegister saved_feedback_vector) {
+   ASM_CODE_COMMENT(this);
+-  Label maybe_has_optimized_code;
++  Label maybe_has_optimized_code, maybe_needs_logging;
+   // Check if optimized code is available.
+-  test(optimization_state,
+-       Immediate(FeedbackVector::kTieringStateIsAnyRequestMask));
+-  j(zero, &maybe_has_optimized_code);
++  test(flags, Immediate(FeedbackVector::kFlagsTieringStateIsAnyRequested));
++  j(zero, &maybe_needs_logging);
+ 
+   GenerateTailCallToReturnedCode(Runtime::kCompileOptimized);
+ 
++  bind(&maybe_needs_logging);
++  test(flags, Immediate(FeedbackVector::LogNextExecutionBit::kMask));
++  j(zero, &maybe_has_optimized_code);
++  GenerateTailCallToReturnedCode(Runtime::kFunctionLogNextExecution);
++
+   bind(&maybe_has_optimized_code);
+-  Register optimized_code_entry = optimization_state;
+-  Register feedback_vector = optimization_state;
++  Register optimized_code_entry = flags;
++  Register feedback_vector = flags;
+   movd(feedback_vector, saved_feedback_vector);  // Restore feedback vector.
+   mov(optimized_code_entry,
+       FieldOperand(feedback_vector, FeedbackVector::kMaybeOptimizedCodeOffset));
+diff --git a/src/codegen/ia32/macro-assembler-ia32.h b/src/codegen/ia32/macro-assembler-ia32.h
+index 15c65aefe50..bc71da2dd0b 100644
+--- a/src/codegen/ia32/macro-assembler-ia32.h
++++ b/src/codegen/ia32/macro-assembler-ia32.h
+@@ -561,11 +561,11 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+                                            Register closure, Register scratch1,
+                                            Register slot_address);
+   void GenerateTailCallToReturnedCode(Runtime::FunctionId function_id);
+-  void LoadTieringStateAndJumpIfNeedsProcessing(
+-      Register optimization_state, XMMRegister saved_feedback_vector,
+-      CodeKind current_code_kind, Label* has_optimized_code_or_state);
++  void LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++      Register flags, XMMRegister saved_feedback_vector,
++      CodeKind current_code_kind, Label* flags_need_processing);
+   void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
+-      Register optimization_state, XMMRegister saved_feedback_vector);
++      Register flags, XMMRegister saved_feedback_vector);
+ 
+   // Abort execution if argument is not a smi, enabled via --debug-code.
+   void AssertSmi(Register object) NOOP_UNLESS_DEBUG_CODE
+diff --git a/src/codegen/loong64/macro-assembler-loong64.cc b/src/codegen/loong64/macro-assembler-loong64.cc
+index a3672cde566..b0d7a396460 100644
+--- a/src/codegen/loong64/macro-assembler-loong64.cc
++++ b/src/codegen/loong64/macro-assembler-loong64.cc
+@@ -4250,44 +4250,44 @@ void MacroAssembler::GenerateTailCallToReturnedCode(
+   Jump(a2);
+ }
+ 
+-// Read off the optimization state in the feedback vector and check if there
++// Read off the flags in the feedback vector and check if there
+ // is optimized code or a tiering state that needs to be processed.
+-void MacroAssembler::LoadTieringStateAndJumpIfNeedsProcessing(
+-    Register optimization_state, Register feedback_vector,
+-    CodeKind current_code_kind, Label* has_optimized_code_or_state) {
++void MacroAssembler::LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++    Register flags, Register feedback_vector, CodeKind current_code_kind,
++    Label* flags_need_processing) {
+   ASM_CODE_COMMENT(this);
+   Register scratch = t2;
+-  DCHECK(!AreAliased(t2, optimization_state, feedback_vector));
++  DCHECK(!AreAliased(t2, flags, feedback_vector));
+   DCHECK(CodeKindCanTierUp(current_code_kind));
+-  Ld_hu(optimization_state,
+-        FieldMemOperand(feedback_vector, FeedbackVector::kFlagsOffset));
+-  And(scratch, optimization_state,
+-      Operand(
+-          current_code_kind == CodeKind::MAGLEV
+-              ? FeedbackVector::kHasTurbofanCodeOrTieringStateIsAnyRequestMask
+-              : FeedbackVector::
+-                    kHasAnyOptimizedCodeOrTieringStateIsAnyRequestMask));
+-  Branch(has_optimized_code_or_state, ne, scratch, Operand(zero_reg));
++  Ld_hu(flags, FieldMemOperand(feedback_vector, FeedbackVector::kFlagsOffset));
++  uint32_t kFlagsMask = FeedbackVector::kFlagsTieringStateIsAnyRequested |
++                        FeedbackVector::kFlagsMaybeHasTurbofanCode |
++                        FeedbackVector::kFlagsLogNextExecution;
++  if (current_code_kind != CodeKind::MAGLEV) {
++    kFlagsMask |= FeedbackVector::kFlagsMaybeHasMaglevCode;
++  }
++  And(scratch, flags, Operand(kFlagsMask));
++  Branch(flags_need_processing, ne, scratch, Operand(zero_reg));
+ }
+ 
+ void MacroAssembler::MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
+-    Register optimization_state, Register feedback_vector) {
++    Register flags, Register feedback_vector) {
+   ASM_CODE_COMMENT(this);
+-  DCHECK(!AreAliased(optimization_state, feedback_vector));
++  DCHECK(!AreAliased(flags, feedback_vector));
+   Label maybe_has_optimized_code;
+   // Check if optimized code marker is available.
+   {
+     UseScratchRegisterScope temps(this);
+     Register scratch = temps.Acquire();
+-    And(scratch, optimization_state,
+-        Operand(FeedbackVector::kTieringStateIsAnyRequestMask));
++    And(scratch, flags,
++        Operand(FeedbackVector::kFlagsTieringStateIsAnyRequested));
+     Branch(&maybe_has_optimized_code, eq, scratch, Operand(zero_reg));
+   }
+ 
+   GenerateTailCallToReturnedCode(Runtime::kCompileOptimized);
+ 
+   bind(&maybe_has_optimized_code);
+-  Register optimized_code_entry = optimization_state;
++  Register optimized_code_entry = flags;
+   Ld_d(optimized_code_entry,
+        FieldMemOperand(feedback_vector,
+                        FeedbackVector::kMaybeOptimizedCodeOffset));
+diff --git a/src/codegen/loong64/macro-assembler-loong64.h b/src/codegen/loong64/macro-assembler-loong64.h
+index 8d8019049d6..ac0d4b36764 100644
+--- a/src/codegen/loong64/macro-assembler-loong64.h
++++ b/src/codegen/loong64/macro-assembler-loong64.h
+@@ -1051,10 +1051,10 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   void ReplaceClosureCodeWithOptimizedCode(Register optimized_code,
+                                            Register closure);
+   void GenerateTailCallToReturnedCode(Runtime::FunctionId function_id);
+-  void LoadTieringStateAndJumpIfNeedsProcessing(
+-      Register optimization_state, Register feedback_vector,
+-      CodeKind current_code_kind, Label* has_optimized_code_or_state);
+-  void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(Register optimization_state,
++  void LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++      Register flags, Register feedback_vector, CodeKind current_code_kind,
++      Label* flags_need_processing);
++  void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(Register flags,
+                                                     Register feedback_vector);
+ 
+   template <typename Field>
+diff --git a/src/codegen/mips64/macro-assembler-mips64.cc b/src/codegen/mips64/macro-assembler-mips64.cc
+index d95566a8a7b..5d162fbed91 100644
+--- a/src/codegen/mips64/macro-assembler-mips64.cc
++++ b/src/codegen/mips64/macro-assembler-mips64.cc
+@@ -6298,40 +6298,40 @@ void MacroAssembler::GenerateTailCallToReturnedCode(
+   Jump(a2);
+ }
+ 
+-void MacroAssembler::LoadTieringStateAndJumpIfNeedsProcessing(
+-    Register optimization_state, Register feedback_vector,
+-    CodeKind current_code_kind, Label* has_optimized_code_or_state) {
++void MacroAssembler::LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++    Register flags, Register feedback_vector, CodeKind current_code_kind,
++    Label* flags_need_processing) {
+   ASM_CODE_COMMENT(this);
+   DCHECK(CodeKindCanTierUp(current_code_kind));
+   Register scratch = t2;
+-  Lhu(optimization_state,
+-      FieldMemOperand(feedback_vector, FeedbackVector::kFlagsOffset));
+-  And(scratch, optimization_state,
+-      Operand(
+-          current_code_kind == CodeKind::MAGLEV
+-              ? FeedbackVector::kHasTurbofanCodeOrTieringStateIsAnyRequestMask
+-              : FeedbackVector::
+-                    kHasAnyOptimizedCodeOrTieringStateIsAnyRequestMask));
+-  Branch(has_optimized_code_or_state, ne, scratch, Operand(zero_reg));
++  Lhu(flags, FieldMemOperand(feedback_vector, FeedbackVector::kFlagsOffset));
++  uint32_t kFlagsMask = FeedbackVector::kFlagsTieringStateIsAnyRequested |
++                        FeedbackVector::kFlagsMaybeHasTurbofanCode |
++                        FeedbackVector::kFlagsLogNextExecution;
++  if (current_code_kind != CodeKind::MAGLEV) {
++    kFlagsMask |= FeedbackVector::kFlagsMaybeHasMaglevCode;
++  }
++  And(scratch, flags, Operand(kFlagsMask));
++  Branch(flags_need_processing, ne, scratch, Operand(zero_reg));
+ }
+ 
+ void MacroAssembler::MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
+-    Register optimization_state, Register feedback_vector) {
++    Register flags, Register feedback_vector) {
+   ASM_CODE_COMMENT(this);
+   Label maybe_has_optimized_code;
+   // Check if optimized code marker is available.
+   {
+     UseScratchRegisterScope temps(this);
+     Register scratch = temps.Acquire();
+-    And(scratch, optimization_state,
+-        Operand(FeedbackVector::kTieringStateIsAnyRequestMask));
++    And(scratch, flags,
++        Operand(FeedbackVector::kFlagsTieringStateIsAnyRequested));
+     Branch(&maybe_has_optimized_code, eq, scratch, Operand(zero_reg));
+   }
+ 
+   GenerateTailCallToReturnedCode(Runtime::kCompileOptimized);
+ 
+   bind(&maybe_has_optimized_code);
+-  Register optimized_code_entry = optimization_state;
++  Register optimized_code_entry = flags;
+   Ld(optimized_code_entry,
+      FieldMemOperand(feedback_vector,
+                      FeedbackVector::kMaybeOptimizedCodeOffset));
+diff --git a/src/codegen/mips64/macro-assembler-mips64.h b/src/codegen/mips64/macro-assembler-mips64.h
+index 5eb890b84f0..b927ac112fd 100644
+--- a/src/codegen/mips64/macro-assembler-mips64.h
++++ b/src/codegen/mips64/macro-assembler-mips64.h
+@@ -1240,10 +1240,10 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+                                            Register closure, Register scratch1,
+                                            Register scratch2);
+   void GenerateTailCallToReturnedCode(Runtime::FunctionId function_id);
+-  void LoadTieringStateAndJumpIfNeedsProcessing(
+-      Register optimization_state, Register feedback_vector,
+-      CodeKind current_code_kind, Label* has_optimized_code_or_state);
+-  void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(Register optimization_state,
++  void LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++      Register flags, Register feedback_vector, CodeKind current_code_kind,
++      Label* flags_need_processing);
++  void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(Register flags,
+                                                     Register feedback_vector);
+ 
+   template <typename Field>
+diff --git a/src/codegen/ppc/macro-assembler-ppc.cc b/src/codegen/ppc/macro-assembler-ppc.cc
+index e54598b3f21..d15b0eed557 100644
+--- a/src/codegen/ppc/macro-assembler-ppc.cc
++++ b/src/codegen/ppc/macro-assembler-ppc.cc
+@@ -2131,44 +2131,40 @@ void MacroAssembler::GenerateTailCallToReturnedCode(
+   JumpCodeObject(r5);
+ }
+ 
+-// Read off the optimization state in the feedback vector and check if there
++// Read off the flags in the feedback vector and check if there
+ // is optimized code or a tiering state that needs to be processed.
+-void MacroAssembler::LoadTieringStateAndJumpIfNeedsProcessing(
+-    Register optimization_state, Register feedback_vector,
+-    CodeKind current_code_kind, Label* has_optimized_code_or_state) {
++void MacroAssembler::LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++    Register flags, Register feedback_vector, CodeKind current_code_kind,
++    Label* flags_need_processing) {
+   ASM_CODE_COMMENT(this);
+-  DCHECK(!AreAliased(optimization_state, feedback_vector));
++  DCHECK(!AreAliased(flags, feedback_vector));
+   DCHECK(CodeKindCanTierUp(current_code_kind));
+-  LoadU16(optimization_state,
++  LoadU16(flags,
+           FieldMemOperand(feedback_vector, FeedbackVector::kFlagsOffset));
+-  CHECK(is_uint16(
+-      current_code_kind == CodeKind::MAGLEV
+-          ? FeedbackVector::kHasTurbofanCodeOrTieringStateIsAnyRequestMask
+-          : FeedbackVector::
+-                kHasAnyOptimizedCodeOrTieringStateIsAnyRequestMask));
+-  mov(r0,
+-      Operand(
+-          current_code_kind == CodeKind::MAGLEV
+-              ? FeedbackVector::kHasTurbofanCodeOrTieringStateIsAnyRequestMask
+-              : FeedbackVector::
+-                    kHasAnyOptimizedCodeOrTieringStateIsAnyRequestMask));
+-  AndU32(r0, optimization_state, r0, SetRC);
+-  bne(has_optimized_code_or_state, cr0);
++  uint32_t kFlagsMask = FeedbackVector::kFlagsTieringStateIsAnyRequested |
++                        FeedbackVector::kFlagsMaybeHasTurbofanCode |
++                        FeedbackVector::kFlagsLogNextExecution;
++  if (current_code_kind != CodeKind::MAGLEV) {
++    kFlagsMask |= FeedbackVector::kFlagsMaybeHasMaglevCode;
++  }
++  CHECK(is_uint16(kFlagsMask));
++  mov(r0, Operand(kFlagsMask));
++  AndU32(r0, flags, r0, SetRC);
++  bne(flags_need_processing, cr0);
+ }
+ 
+ void MacroAssembler::MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
+-    Register optimization_state, Register feedback_vector) {
+-  DCHECK(!AreAliased(optimization_state, feedback_vector));
++    Register flags, Register feedback_vector) {
++  DCHECK(!AreAliased(flags, feedback_vector));
+   Label maybe_has_optimized_code;
+   // Check if optimized code is available
+-  TestBitMask(optimization_state, FeedbackVector::kTieringStateIsAnyRequestMask,
+-              r0);
++  TestBitMask(flags, ((FeedbackVector::kFlagsTieringStateIsAnyRequested, r0);
+   beq(&maybe_has_optimized_code, cr0);
+ 
+   GenerateTailCallToReturnedCode(Runtime::kCompileOptimized);
+ 
+   bind(&maybe_has_optimized_code);
+-  Register optimized_code_entry = optimization_state;
++  Register optimized_code_entry = flags;
+   LoadAnyTaggedField(optimized_code_entry,
+                      FieldMemOperand(feedback_vector,
+                                      FeedbackVector::kMaybeOptimizedCodeOffset),
+diff --git a/src/codegen/ppc/macro-assembler-ppc.h b/src/codegen/ppc/macro-assembler-ppc.h
+index c82f46432d4..d2c4942e972 100644
+--- a/src/codegen/ppc/macro-assembler-ppc.h
++++ b/src/codegen/ppc/macro-assembler-ppc.h
+@@ -1340,10 +1340,10 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+                                            Register closure, Register scratch1,
+                                            Register slot_address);
+   void GenerateTailCallToReturnedCode(Runtime::FunctionId function_id);
+-  void LoadTieringStateAndJumpIfNeedsProcessing(
+-      Register optimization_state, Register feedback_vector,
+-      CodeKind current_code_kind, Label* has_optimized_code_or_state);
+-  void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(Register optimization_state,
++  void LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++      Register flags, Register feedback_vector, CodeKind current_code_kind,
++      Label* flags_need_processing);
++  void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(Register flags,
+                                                     Register feedback_vector);
+ 
+   // ---------------------------------------------------------------------------
+diff --git a/src/codegen/riscv/macro-assembler-riscv.cc b/src/codegen/riscv/macro-assembler-riscv.cc
+index 9c1b758ecc5..b403b8eb9c9 100644
+--- a/src/codegen/riscv/macro-assembler-riscv.cc
++++ b/src/codegen/riscv/macro-assembler-riscv.cc
+@@ -186,31 +186,31 @@ void MacroAssembler::GenerateTailCallToReturnedCode(
+   Jump(a2);
+ }
+ 
+-// Read off the optimization state in the feedback vector and check if there
++// Read off the flags in the feedback vector and check if there
+ // is optimized code or a tiering state that needs to be processed.
+-void MacroAssembler::LoadTieringStateAndJumpIfNeedsProcessing(
+-    Register optimization_state, Register feedback_vector,
+-    CodeKind current_code_kind, Label* has_optimized_code_or_state) {
++void MacroAssembler::LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++    Register flags, Register feedback_vector, CodeKind current_code_kind,
++    Label* flags_need_processing) {
+   ASM_CODE_COMMENT(this);
+-  DCHECK(!AreAliased(optimization_state, feedback_vector));
++  DCHECK(!AreAliased(flags, feedback_vector));
+   DCHECK(CodeKindCanTierUp(current_code_kind));
+   UseScratchRegisterScope temps(this);
+   Register scratch = temps.Acquire();
+-  Lhu(optimization_state,
+-      FieldMemOperand(feedback_vector, FeedbackVector::kFlagsOffset));
+-  And(scratch, optimization_state,
+-      Operand(
+-          current_code_kind == CodeKind::MAGLEV
+-              ? FeedbackVector::kHasTurbofanCodeOrTieringStateIsAnyRequestMask
+-              : FeedbackVector::
+-                    kHasAnyOptimizedCodeOrTieringStateIsAnyRequestMask));
+-  Branch(has_optimized_code_or_state, ne, scratch, Operand(zero_reg));
++  Lhu(flags, FieldMemOperand(feedback_vector, FeedbackVector::kFlagsOffset));
++  uint32_t kFlagsMask = FeedbackVector::kFlagsTieringStateIsAnyRequested |
++                        FeedbackVector::kFlagsMaybeHasTurbofanCode |
++                        FeedbackVector::kFlagsLogNextExecution;
++  if (current_code_kind != CodeKind::MAGLEV) {
++    kFlagsMask |= FeedbackVector::kFlagsMaybeHasMaglevCode;
++  }
++  And(scratch, flags, Operand(kFlagsMask));
++  Branch(flags_need_processing, ne, scratch, Operand(zero_reg));
+ }
+ 
+ void MacroAssembler::MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
+-    Register optimization_state, Register feedback_vector) {
++    Register flags, Register feedback_vector) {
+   ASM_CODE_COMMENT(this);
+-  DCHECK(!AreAliased(optimization_state, feedback_vector));
++  DCHECK(!AreAliased(flags, feedback_vector));
+   UseScratchRegisterScope temps(this);
+   temps.Include(t0, t1);
+   Label maybe_has_optimized_code;
+@@ -218,15 +218,15 @@ void MacroAssembler::MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
+   {
+     UseScratchRegisterScope temps(this);
+     Register scratch = temps.Acquire();
+-    And(scratch, optimization_state,
+-        Operand(FeedbackVector::kTieringStateIsAnyRequestMask));
++    And(scratch, flags,
++        Operand(FeedbackVector::kFlagsTieringStateIsAnyRequested));
+     Branch(&maybe_has_optimized_code, eq, scratch, Operand(zero_reg),
+            Label::Distance::kNear);
+   }
+   GenerateTailCallToReturnedCode(Runtime::kCompileOptimized);
+ 
+   bind(&maybe_has_optimized_code);
+-  Register optimized_code_entry = optimization_state;
++  Register optimized_code_entry = flags;
+   LoadAnyTaggedField(
+       optimized_code_entry,
+       FieldMemOperand(feedback_vector,
+diff --git a/src/codegen/riscv/macro-assembler-riscv.h b/src/codegen/riscv/macro-assembler-riscv.h
+index 9c8cb963bfd..c245e67606a 100644
+--- a/src/codegen/riscv/macro-assembler-riscv.h
++++ b/src/codegen/riscv/macro-assembler-riscv.h
+@@ -1341,10 +1341,10 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+   void ReplaceClosureCodeWithOptimizedCode(Register optimized_code,
+                                            Register closure);
+   void GenerateTailCallToReturnedCode(Runtime::FunctionId function_id);
+-  void LoadTieringStateAndJumpIfNeedsProcessing(
+-      Register optimization_state, Register feedback_vector,
+-      CodeKind current_code_kind, Label* has_optimized_code_or_state);
+-  void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(Register optimization_state,
++  void LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++      Register flags, Register feedback_vector, CodeKind current_code_kind,
++      Label* flags_need_processing);
++  void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(Register flags,
+                                                     Register feedback_vector);
+ 
+   // -------------------------------------------------------------------------
+diff --git a/src/codegen/s390/macro-assembler-s390.cc b/src/codegen/s390/macro-assembler-s390.cc
+index 90c5f758365..53faf2f153b 100644
+--- a/src/codegen/s390/macro-assembler-s390.cc
++++ b/src/codegen/s390/macro-assembler-s390.cc
+@@ -2125,43 +2125,39 @@ void MacroAssembler::GenerateTailCallToReturnedCode(
+   JumpCodeObject(r4);
+ }
+ 
+-// Read off the optimization state in the feedback vector and check if there
++// Read off the flags in the feedback vector and check if there
+ // is optimized code or a tiering state that needs to be processed.
+-void MacroAssembler::LoadTieringStateAndJumpIfNeedsProcessing(
+-    Register optimization_state, Register feedback_vector,
+-    CodeKind current_code_kind, Label* has_optimized_code_or_state) {
++void MacroAssembler::LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++    Register flags, Register feedback_vector, CodeKind current_code_kind,
++    Label* flags_need_processing) {
+   ASM_CODE_COMMENT(this);
+-  DCHECK(!AreAliased(optimization_state, feedback_vector));
++  DCHECK(!AreAliased(flags, feedback_vector));
+   DCHECK(CodeKindCanTierUp(current_code_kind));
+-  LoadU16(optimization_state,
++  LoadU16(flags,
+           FieldMemOperand(feedback_vector, FeedbackVector::kFlagsOffset));
+-  CHECK(is_uint16(
+-      current_code_kind == CodeKind::MAGLEV
+-          ? FeedbackVector::kHasTurbofanCodeOrTieringStateIsAnyRequestMask
+-          : FeedbackVector::
+-                kHasAnyOptimizedCodeOrTieringStateIsAnyRequestMask));
+-  tmll(optimization_state,
+-       Operand(
+-           current_code_kind == CodeKind::MAGLEV
+-               ? FeedbackVector::kHasTurbofanCodeOrTieringStateIsAnyRequestMask
+-               : FeedbackVector::
+-                     kHasAnyOptimizedCodeOrTieringStateIsAnyRequestMask));
+-  b(Condition(7), has_optimized_code_or_state);
++  uint32_t kFlagsMask = FeedbackVector::kFlagsTieringStateIsAnyRequested |
++                        FeedbackVector::kFlagsMaybeHasTurbofanCode |
++                        FeedbackVector::kFlagsLogNextExecution;
++  if (current_code_kind != CodeKind::MAGLEV) {
++    kFlagsMask |= FeedbackVector::kFlagsMaybeHasMaglevCode;
++  }
++  CHECK(is_uint16(kFlagsMask));
++  tmll(flags, Operand(kFlagsMask));
++  b(Condition(7), flags_need_processing);
+ }
+ 
+ void MacroAssembler::MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
+-    Register optimization_state, Register feedback_vector) {
+-  DCHECK(!AreAliased(optimization_state, feedback_vector));
++    Register flags, Register feedback_vector) {
++  DCHECK(!AreAliased(flags, feedback_vector));
+   Label maybe_has_optimized_code;
+   // Check if optimized code is available
+-  TestBitMask(optimization_state, FeedbackVector::kTieringStateIsAnyRequestMask,
+-              r0);
++  TestBitMask(flags, ((FeedbackVector::kFlagsTieringStateIsAnyRequested, r0);
+   beq(&maybe_has_optimized_code);
+ 
+   GenerateTailCallToReturnedCode(Runtime::kCompileOptimized);
+ 
+   bind(&maybe_has_optimized_code);
+-  Register optimized_code_entry = optimization_state;
++  Register optimized_code_entry = flags;
+   LoadAnyTaggedField(
+       optimized_code_entry,
+       FieldMemOperand(feedback_vector,
+diff --git a/src/codegen/s390/macro-assembler-s390.h b/src/codegen/s390/macro-assembler-s390.h
+index b337b7633a3..7d9a6ca0902 100644
+--- a/src/codegen/s390/macro-assembler-s390.h
++++ b/src/codegen/s390/macro-assembler-s390.h
+@@ -1761,10 +1761,10 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+                                            Register closure, Register scratch1,
+                                            Register slot_address);
+   void GenerateTailCallToReturnedCode(Runtime::FunctionId function_id);
+-  void LoadTieringStateAndJumpIfNeedsProcessing(
+-      Register optimization_state, Register feedback_vector,
+-      CodeKind current_code_kind, Label* has_optimized_code_or_state);
+-  void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(Register optimization_state,
++  void LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++      Register flags, Register feedback_vector, CodeKind current_code_kind,
++      Label* flags_need_processing);
++  void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(Register flags,
+                                                     Register feedback_vector);
+ 
+   // ---------------------------------------------------------------------------
+diff --git a/src/codegen/x64/macro-assembler-x64.cc b/src/codegen/x64/macro-assembler-x64.cc
+index b6eba5f1277..8ef7f7be06b 100644
+--- a/src/codegen/x64/macro-assembler-x64.cc
++++ b/src/codegen/x64/macro-assembler-x64.cc
+@@ -890,39 +890,43 @@ void MacroAssembler::ReplaceClosureCodeWithOptimizedCode(
+                    SaveFPRegsMode::kIgnore, SmiCheck::kOmit);
+ }
+ 
+-// Read off the optimization state in the feedback vector and check if there
++// Read off the flags in the feedback vector and check if there
+ // is optimized code or a tiering state that needs to be processed.
+-void MacroAssembler::LoadTieringStateAndJumpIfNeedsProcessing(
+-    Register optimization_state, Register feedback_vector,
+-    CodeKind current_code_kind, Label* has_optimized_code_or_state) {
++void MacroAssembler::LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++    Register flags, Register feedback_vector, CodeKind current_code_kind,
++    Label* flags_need_processing) {
+   ASM_CODE_COMMENT(this);
+   DCHECK(CodeKindCanTierUp(current_code_kind));
+-  movzxwl(optimization_state,
+-          FieldOperand(feedback_vector, FeedbackVector::kFlagsOffset));
+-  testw(optimization_state,
+-        Immediate(
+-            current_code_kind == CodeKind::MAGLEV
+-                ? FeedbackVector::kHasTurbofanCodeOrTieringStateIsAnyRequestMask
+-                : FeedbackVector::
+-                      kHasAnyOptimizedCodeOrTieringStateIsAnyRequestMask));
+-  j(not_zero, has_optimized_code_or_state);
++  movzxwl(flags, FieldOperand(feedback_vector, FeedbackVector::kFlagsOffset));
++  uint32_t kFlagsMask = FeedbackVector::kFlagsTieringStateIsAnyRequested |
++                        FeedbackVector::kFlagsMaybeHasTurbofanCode |
++                        FeedbackVector::kFlagsLogNextExecution;
++  if (current_code_kind != CodeKind::MAGLEV) {
++    kFlagsMask |= FeedbackVector::kFlagsMaybeHasMaglevCode;
++  }
++  testw(flags, Immediate(kFlagsMask));
++  j(not_zero, flags_need_processing);
+ }
+ 
+ void MacroAssembler::MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
+-    Register optimization_state, Register feedback_vector, Register closure,
++    Register flags, Register feedback_vector, Register closure,
+     JumpMode jump_mode) {
+   ASM_CODE_COMMENT(this);
+-  DCHECK(!AreAliased(optimization_state, feedback_vector, closure));
+-  Label maybe_has_optimized_code;
++  DCHECK(!AreAliased(flags, feedback_vector, closure));
++  Label maybe_has_optimized_code, maybe_needs_logging;
+   // Check if optimized code is available.
+-  testl(optimization_state,
+-        Immediate(FeedbackVector::kTieringStateIsAnyRequestMask));
+-  j(zero, &maybe_has_optimized_code);
++  testl(flags, Immediate(FeedbackVector::kFlagsTieringStateIsAnyRequested));
++  j(zero, &maybe_needs_logging);
+ 
+   GenerateTailCallToReturnedCode(Runtime::kCompileOptimized);
+ 
++  bind(&maybe_needs_logging);
++  testl(flags, Immediate(FeedbackVector::LogNextExecutionBit::kMask));
++  j(zero, &maybe_has_optimized_code);
++  GenerateTailCallToReturnedCode(Runtime::kFunctionLogNextExecution);
++
+   bind(&maybe_has_optimized_code);
+-  Register optimized_code_entry = optimization_state;
++  Register optimized_code_entry = flags;
+   LoadAnyTaggedField(
+       optimized_code_entry,
+       FieldOperand(feedback_vector, FeedbackVector::kMaybeOptimizedCodeOffset));
+diff --git a/src/codegen/x64/macro-assembler-x64.h b/src/codegen/x64/macro-assembler-x64.h
+index 7c97692f64b..a213f9e4a8e 100644
+--- a/src/codegen/x64/macro-assembler-x64.h
++++ b/src/codegen/x64/macro-assembler-x64.h
+@@ -837,11 +837,11 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+                                            Register slot_address);
+   void GenerateTailCallToReturnedCode(Runtime::FunctionId function_id,
+                                       JumpMode jump_mode = JumpMode::kJump);
+-  void LoadTieringStateAndJumpIfNeedsProcessing(
+-      Register optimization_state, Register feedback_vector,
+-      CodeKind current_code_kind, Label* has_optimized_code_or_state);
++  void LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++      Register flags, Register feedback_vector, CodeKind current_code_kind,
++      Label* flags_need_processing);
+   void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
+-      Register optimization_state, Register feedback_vector, Register closure,
++      Register flags, Register feedback_vector, Register closure,
+       JumpMode jump_mode = JumpMode::kJump);
+ 
+   // Abort execution if argument is not a CodeT, enabled via --debug-code.
+diff --git a/src/diagnostics/objects-debug.cc b/src/diagnostics/objects-debug.cc
+index 48b47ba4077..3a57608e306 100644
+--- a/src/diagnostics/objects-debug.cc
++++ b/src/diagnostics/objects-debug.cc
+@@ -1909,7 +1909,7 @@ void AllocationSite::AllocationSiteVerify(Isolate* isolate) {
+ 
+ void Script::ScriptVerify(Isolate* isolate) {
+   TorqueGeneratedClassVerifiers::ScriptVerify(*this, isolate);
+-  if V8_UNLIKELY (type() == Script::TYPE_WEB_SNAPSHOT) {
++  if (V8_UNLIKELY(type() == Script::TYPE_WEB_SNAPSHOT)) {
+     CHECK_LE(shared_function_info_count(), shared_function_infos().length());
+   } else {
+     // No overallocating shared_function_infos.
+diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
+index 77930239967..00867f92917 100644
+--- a/src/flags/flag-definitions.h
++++ b/src/flags/flag-definitions.h
+@@ -865,7 +865,13 @@ DEFINE_BOOL(turbo_inline_array_builtins, true,
+ DEFINE_BOOL(use_osr, true, "use on-stack replacement")
+ DEFINE_BOOL(concurrent_osr, true, "enable concurrent OSR")
+ DEFINE_WEAK_IMPLICATION(future, concurrent_osr)
++
+ DEFINE_BOOL(trace_osr, false, "trace on-stack replacement")
++DEFINE_BOOL(log_or_trace_osr, false,
++            "internal helper flag, please use --trace-osr instead.")
++DEFINE_IMPLICATION(trace_osr, log_or_trace_osr)
++DEFINE_IMPLICATION(log_function_events, log_or_trace_osr)
++
+ DEFINE_BOOL(analyze_environment_liveness, true,
+             "analyze liveness of environment slots and zap dead values")
+ DEFINE_BOOL(trace_environment_liveness, false,
+diff --git a/src/heap/factory.cc b/src/heap/factory.cc
+index 6ca94067781..0523fa9dfd6 100644
+--- a/src/heap/factory.cc
++++ b/src/heap/factory.cc
+@@ -521,6 +521,7 @@ Handle<FeedbackVector> Factory::NewFeedbackVector(
+   vector.set_placeholder0(0);
+   vector.reset_osr_state();
+   vector.reset_flags();
++  vector.set_log_next_execution(v8_flags.log_function_events);
+   vector.set_closure_feedback_cell_array(*closure_feedback_cell_array);
+ 
+   // TODO(leszeks): Initialize based on the feedback metadata.
+diff --git a/src/init/v8.cc b/src/init/v8.cc
+index 465e8e560e1..13c2244df23 100644
+--- a/src/init/v8.cc
++++ b/src/init/v8.cc
+@@ -131,7 +131,7 @@ void V8::Initialize() {
+                                       &FLAG_log_source_code,
+                                       &FLAG_log_source_position,
+                                       &FLAG_log_feedback_vector,
+-                                      &FLAG_log_function_events,
++                                      &v8_flags.log_function_events,
+                                       &FLAG_log_internal_timer_events,
+                                       &FLAG_log_deopt,
+                                       &FLAG_log_ic,
+diff --git a/src/logging/log.cc b/src/logging/log.cc
+index e4d277ec84e..99fb71f0587 100644
+--- a/src/logging/log.cc
++++ b/src/logging/log.cc
+@@ -1675,7 +1675,7 @@ void AppendFunctionMessage(LogFile::MessageBuilder& msg, const char* reason,
+ void V8FileLogger::FunctionEvent(const char* reason, int script_id,
+                                  double time_delta, int start_position,
+                                  int end_position, String function_name) {
+-  if (!FLAG_log_function_events) return;
++  if (!v8_flags.log_function_events) return;
+   MSG_BUILDER();
+   AppendFunctionMessage(msg, reason, script_id, time_delta, start_position,
+                         end_position, Time());
+@@ -1688,7 +1688,7 @@ void V8FileLogger::FunctionEvent(const char* reason, int script_id,
+                                  int end_position, const char* function_name,
+                                  size_t function_name_length,
+                                  bool is_one_byte) {
+-  if (!FLAG_log_function_events) return;
++  if (!v8_flags.log_function_events) return;
+   MSG_BUILDER();
+   AppendFunctionMessage(msg, reason, script_id, time_delta, start_position,
+                         end_position, Time());
+@@ -1701,7 +1701,7 @@ void V8FileLogger::FunctionEvent(const char* reason, int script_id,
+ void V8FileLogger::CompilationCacheEvent(const char* action,
+                                          const char* cache_type,
+                                          SharedFunctionInfo sfi) {
+-  if (!FLAG_log_function_events) return;
++  if (!v8_flags.log_function_events) return;
+   MSG_BUILDER();
+   int script_id = -1;
+   if (sfi.script().IsScript()) {
+@@ -1715,7 +1715,7 @@ void V8FileLogger::CompilationCacheEvent(const char* action,
+ }
+ 
+ void V8FileLogger::ScriptEvent(ScriptEventType type, int script_id) {
+-  if (!FLAG_log_function_events) return;
++  if (!v8_flags.log_function_events) return;
+   MSG_BUILDER();
+   msg << "script" << V8FileLogger::kNext;
+   switch (type) {
+@@ -1740,7 +1740,7 @@ void V8FileLogger::ScriptEvent(ScriptEventType type, int script_id) {
+ }
+ 
+ void V8FileLogger::ScriptDetails(Script script) {
+-  if (!FLAG_log_function_events) return;
++  if (!v8_flags.log_function_events) return;
+   {
+     MSG_BUILDER();
+     msg << "script-details" << V8FileLogger::kNext << script.id()
+diff --git a/src/maglev/maglev-code-generator.cc b/src/maglev/maglev-code-generator.cc
+index 17ea8cd6e24..0a3d57b9bbc 100644
+--- a/src/maglev/maglev-code-generator.cc
++++ b/src/maglev/maglev-code-generator.cc
+@@ -650,7 +650,7 @@ class MaglevCodeGeneratingNodeProcessor {
+     {
+       // Scratch registers. Don't clobber regs related to the calling
+       // convention (e.g. kJavaScriptCallArgCountRegister).
+-      Register optimization_state = rcx;
++      Register flags = rcx;
+       Register feedback_vector = r9;
+ 
+       // Load the feedback vector.
+@@ -661,18 +661,16 @@ class MaglevCodeGeneratingNodeProcessor {
+           feedback_vector, FieldOperand(feedback_vector, Cell::kValueOffset));
+       __ AssertFeedbackVector(feedback_vector);
+ 
+-      Label has_optimized_code_or_state, next;
+-      __ LoadTieringStateAndJumpIfNeedsProcessing(
+-          optimization_state, feedback_vector, CodeKind::MAGLEV,
+-          &has_optimized_code_or_state);
++      Label flags_need_processing, next;
++      __ LoadFeedbackVectorFlagsAndJumpIfNeedsProcessing(
++          flags, feedback_vector, CodeKind::MAGLEV, &flags_need_processing);
+       __ jmp(&next);
+ 
+-      __ bind(&has_optimized_code_or_state);
++      __ bind(&flags_need_processing);
+       {
+         ASM_CODE_COMMENT_STRING(masm(), "Optimized marker check");
+         __ MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
+-            optimization_state, feedback_vector, kJSFunctionRegister,
+-            JumpMode::kJump);
++            flags, feedback_vector, kJSFunctionRegister, JumpMode::kJump);
+         __ Trap();
+       }
+ 
+diff --git a/src/objects/elements.cc b/src/objects/elements.cc
+index 278171501cc..16167bc19ff 100644
+--- a/src/objects/elements.cc
++++ b/src/objects/elements.cc
+@@ -3493,11 +3493,11 @@ class TypedElementsAccessor
+     // If this is called via Array.prototype.indexOf (not
+     // TypedArray.prototype.indexOf), it's possible that the TypedArray is
+     // detached / out of bounds here.
+-    if V8_UNLIKELY (typed_array.WasDetached()) return Just<int64_t>(-1);
++    if (V8_UNLIKELY(typed_array.WasDetached())) return Just<int64_t>(-1);
+     bool out_of_bounds = false;
+     size_t typed_array_length =
+         typed_array.GetLengthOrOutOfBounds(out_of_bounds);
+-    if V8_UNLIKELY (out_of_bounds) {
++    if (V8_UNLIKELY(out_of_bounds)) {
+       return Just<int64_t>(-1);
+     }
+ 
+diff --git a/src/objects/feedback-vector-inl.h b/src/objects/feedback-vector-inl.h
+index 33a4d0ffb2d..d63260be7f0 100644
+--- a/src/objects/feedback-vector-inl.h
++++ b/src/objects/feedback-vector-inl.h
+@@ -195,6 +195,14 @@ void FeedbackVector::set_maybe_has_turbofan_code(bool value) {
+   set_flags(MaybeHasTurbofanCodeBit::update(flags(), value));
+ }
+ 
++bool FeedbackVector::log_next_execution() const {
++  return LogNextExecutionBit::decode(flags());
++}
++
++void FeedbackVector::set_log_next_execution(bool value) {
++  set_flags(LogNextExecutionBit::update(flags(), value));
++}
++
+ base::Optional<CodeT> FeedbackVector::GetOptimizedOsrCode(Isolate* isolate,
+                                                           FeedbackSlot slot) {
+   MaybeObject maybe_code = Get(isolate, slot);
+diff --git a/src/objects/feedback-vector.cc b/src/objects/feedback-vector.cc
+index 707c6202ca8..659c21845d2 100644
+--- a/src/objects/feedback-vector.cc
++++ b/src/objects/feedback-vector.cc
+@@ -443,6 +443,7 @@ void FeedbackVector::set_tiering_state(TieringState state) {
+ 
+ void FeedbackVector::reset_flags() {
+   set_flags(TieringStateBits::encode(TieringState::kNone) |
++            LogNextExecutionBit::encode(false) |
+             MaybeHasMaglevCodeBit::encode(false) |
+             MaybeHasTurbofanCodeBit::encode(false) |
+             OsrTieringStateBit::encode(TieringState::kNone) |
+diff --git a/src/objects/feedback-vector.h b/src/objects/feedback-vector.h
+index be0f92ed049..e4f33826c2e 100644
+--- a/src/objects/feedback-vector.h
++++ b/src/objects/feedback-vector.h
+@@ -206,14 +206,17 @@ class FeedbackVector
+                                       HeapObject>::maybe_optimized_code;
+   DECL_RELEASE_ACQUIRE_WEAK_ACCESSORS(maybe_optimized_code)
+ 
+-  static constexpr uint32_t kHasAnyOptimizedCodeMask =
+-      MaybeHasMaglevCodeBit::kMask | MaybeHasTurbofanCodeBit::kMask;
+-  static constexpr uint32_t kTieringStateIsAnyRequestMask =
+-      kNoneOrInProgressMask << TieringStateBits::kShift;
+-  static constexpr uint32_t kHasTurbofanCodeOrTieringStateIsAnyRequestMask =
+-      MaybeHasTurbofanCodeBit::kMask | kTieringStateIsAnyRequestMask;
+-  static constexpr uint32_t kHasAnyOptimizedCodeOrTieringStateIsAnyRequestMask =
+-      kHasAnyOptimizedCodeMask | kTieringStateIsAnyRequestMask;
++  static constexpr uint32_t kFlagsMaybeHasTurbofanCode =
++      FeedbackVector::MaybeHasTurbofanCodeBit::kMask;
++  static constexpr uint32_t kFlagsMaybeHasMaglevCode =
++      FeedbackVector::MaybeHasMaglevCodeBit::kMask;
++  static constexpr uint32_t kFlagsHasAnyOptimizedCode =
++      FeedbackVector::MaybeHasMaglevCodeBit::kMask |
++      FeedbackVector::MaybeHasTurbofanCodeBit::kMask;
++  static constexpr uint32_t kFlagsTieringStateIsAnyRequested =
++      kNoneOrInProgressMask << FeedbackVector::TieringStateBits::kShift;
++  static constexpr uint32_t kFlagsLogNextExecution =
++      FeedbackVector::LogNextExecutionBit::kMask;
+ 
+   inline bool is_empty() const;
+ 
+@@ -253,6 +256,9 @@ class FeedbackVector
+   inline CodeT optimized_code() const;
+   // Whether maybe_optimized_code contains a cached Code object.
+   inline bool has_optimized_code() const;
++
++  inline bool log_next_execution() const;
++  inline void set_log_next_execution(bool value = true);
+   // Similar to above, but represented internally as a bit that can be
+   // efficiently checked by generated code. May lag behind the actual state of
+   // the world, thus 'maybe'.
+@@ -260,6 +266,7 @@ class FeedbackVector
+   inline void set_maybe_has_maglev_code(bool value);
+   inline bool maybe_has_turbofan_code() const;
+   inline void set_maybe_has_turbofan_code(bool value);
++
+   void SetOptimizedCode(CodeT code);
+   void EvictOptimizedCodeMarkedForDeoptimization(SharedFunctionInfo shared,
+                                                  const char* reason);
+diff --git a/src/objects/feedback-vector.tq b/src/objects/feedback-vector.tq
+index a367a70f48f..3305d47552c 100644
+--- a/src/objects/feedback-vector.tq
++++ b/src/objects/feedback-vector.tq
+@@ -6,6 +6,9 @@ type TieringState extends uint16 constexpr 'TieringState';
+ 
+ bitfield struct FeedbackVectorFlags extends uint16 {
+   tiering_state: TieringState: 3 bit;
++  // Set for non-executed functions with --log-function-events in order to
++  // log first-executions of code objects with minimal overhead.
++  log_next_execution: bool: 1 bit;
+   // Whether the maybe_optimized_code field contains a code object. 'maybe',
+   // because they flag may lag behind the actual state of the world (it will be
+   // updated in time).
+@@ -13,7 +16,7 @@ bitfield struct FeedbackVectorFlags extends uint16 {
+   maybe_has_turbofan_code: bool: 1 bit;
+   // Just one bit, since only {kNone,kInProgress} are relevant for OSR.
+   osr_tiering_state: TieringState: 1 bit;
+-  all_your_bits_are_belong_to_jgruber: uint32: 10 bit;
++  all_your_bits_are_belong_to_jgruber: uint32: 9 bit;
+ }
+ 
+ bitfield struct OsrState extends uint8 {
+diff --git a/src/objects/js-array-buffer-inl.h b/src/objects/js-array-buffer-inl.h
+index b8fbf9f89b2..c1a142d1b55 100644
+--- a/src/objects/js-array-buffer-inl.h
++++ b/src/objects/js-array-buffer-inl.h
+@@ -51,7 +51,7 @@ std::shared_ptr<BackingStore> JSArrayBuffer::GetBackingStore() const {
+ }
+ 
+ size_t JSArrayBuffer::GetByteLength() const {
+-  if V8_UNLIKELY (is_shared() && is_resizable()) {
++  if (V8_UNLIKELY(is_shared() && is_resizable())) {
+     // Invariant: byte_length for GSAB is 0 (it needs to be read from the
+     // BackingStore).
+     DCHECK_EQ(0, byte_length());
+diff --git a/src/objects/js-function-inl.h b/src/objects/js-function-inl.h
+index 793628875f1..ba8e015d411 100644
+--- a/src/objects/js-function-inl.h
++++ b/src/objects/js-function-inl.h
+@@ -70,7 +70,14 @@ AbstractCode JSFunction::abstract_code(IsolateT* isolate) {
+ int JSFunction::length() { return shared().length(); }
+ 
+ ACCESSORS_RELAXED(JSFunction, code, CodeT, kCodeOffset)
+-RELEASE_ACQUIRE_ACCESSORS(JSFunction, code, CodeT, kCodeOffset)
++RELEASE_ACQUIRE_GETTER_CHECKED(JSFunction, code, CodeT, kCodeOffset, true)
++void JSFunction::set_code(CodeT value, ReleaseStoreTag, WriteBarrierMode mode) {
++  TaggedField<CodeT, kCodeOffset>::Release_Store(*this, value);
++  CONDITIONAL_WRITE_BARRIER(*this, kCodeOffset, value, mode);
++  if (V8_UNLIKELY(v8_flags.log_function_events && has_feedback_vector())) {
++    feedback_vector().set_log_next_execution(true);
++  }
++}
+ RELEASE_ACQUIRE_ACCESSORS(JSFunction, context, Context, kContextOffset)
+ 
+ #ifdef V8_EXTERNAL_CODE_SPACE
+diff --git a/src/objects/js-function.cc b/src/objects/js-function.cc
+index c3b34a3fdde..9e3b025ca40 100644
+--- a/src/objects/js-function.cc
++++ b/src/objects/js-function.cc
+@@ -582,7 +582,7 @@ void JSFunction::CreateAndAttachFeedbackVector(
+   EnsureClosureFeedbackCellArray(function, false);
+   Handle<ClosureFeedbackCellArray> closure_feedback_cell_array =
+       handle(function->closure_feedback_cell_array(), isolate);
+-  Handle<HeapObject> feedback_vector = FeedbackVector::New(
++  Handle<FeedbackVector> feedback_vector = FeedbackVector::New(
+       isolate, shared, closure_feedback_cell_array, compiled_scope);
+   // EnsureClosureFeedbackCellArray should handle the special case where we need
+   // to allocate a new feedback cell. Please look at comment in that function
+@@ -591,6 +591,9 @@ void JSFunction::CreateAndAttachFeedbackVector(
+          isolate->heap()->many_closures_cell());
+   function->raw_feedback_cell().set_value(*feedback_vector, kReleaseStore);
+   function->SetInterruptBudget(isolate);
++
++  DCHECK_EQ(v8_flags.log_function_events,
++            feedback_vector->log_next_execution());
+ }
+ 
+ // static
+diff --git a/src/objects/object-macros.h b/src/objects/object-macros.h
+index 413ad4e335c..7b9cf484061 100644
+--- a/src/objects/object-macros.h
++++ b/src/objects/object-macros.h
+@@ -270,20 +270,28 @@
+ #define RELAXED_ACCESSORS(holder, name, type, offset) \
+   RELAXED_ACCESSORS_CHECKED(holder, name, type, offset, true)
+ 
+-#define RELEASE_ACQUIRE_ACCESSORS_CHECKED2(holder, name, type, offset,      \
+-                                           get_condition, set_condition)    \
++#define RELEASE_ACQUIRE_GETTER_CHECKED(holder, name, type, offset,          \
++                                       get_condition)                       \
+   DEF_ACQUIRE_GETTER(holder, name, type) {                                  \
+     type value = TaggedField<type, offset>::Acquire_Load(cage_base, *this); \
+     DCHECK(get_condition);                                                  \
+     return value;                                                           \
+-  }                                                                         \
+-  void holder::set_##name(type value, ReleaseStoreTag,                      \
+-                          WriteBarrierMode mode) {                          \
+-    DCHECK(set_condition);                                                  \
+-    TaggedField<type, offset>::Release_Store(*this, value);                 \
+-    CONDITIONAL_WRITE_BARRIER(*this, offset, value, mode);                  \
+   }
+ 
++#define RELEASE_ACQUIRE_SETTER_CHECKED(holder, name, type, offset, \
++                                       set_condition)              \
++  void holder::set_##name(type value, ReleaseStoreTag,             \
++                          WriteBarrierMode mode) {                 \
++    DCHECK(set_condition);                                         \
++    TaggedField<type, offset>::Release_Store(*this, value);        \
++    CONDITIONAL_WRITE_BARRIER(*this, offset, value, mode);         \
++  }
++
++#define RELEASE_ACQUIRE_ACCESSORS_CHECKED2(holder, name, type, offset,      \
++                                           get_condition, set_condition)    \
++  RELEASE_ACQUIRE_GETTER_CHECKED(holder, name, type, offset, get_condition) \
++  RELEASE_ACQUIRE_SETTER_CHECKED(holder, name, type, offset, set_condition)
++
+ #define RELEASE_ACQUIRE_ACCESSORS_CHECKED(holder, name, type, offset,       \
+                                           condition)                        \
+   RELEASE_ACQUIRE_ACCESSORS_CHECKED2(holder, name, type, offset, condition, \
+diff --git a/src/objects/objects.cc b/src/objects/objects.cc
+index 6cccba4967a..75da04a3329 100644
+--- a/src/objects/objects.cc
++++ b/src/objects/objects.cc
+@@ -5122,8 +5122,9 @@ MaybeHandle<SharedFunctionInfo> Script::FindSharedFunctionInfo(
+     Handle<Script> script, IsolateT* isolate,
+     FunctionLiteral* function_literal) {
+   int function_literal_id = function_literal->function_literal_id();
+-  if V8_UNLIKELY (script->type() == Script::TYPE_WEB_SNAPSHOT &&
+-                  function_literal_id >= script->shared_function_info_count()) {
++  if (V8_UNLIKELY(script->type() == Script::TYPE_WEB_SNAPSHOT &&
++                  function_literal_id >=
++                      script->shared_function_info_count())) {
+     return FindWebSnapshotSharedFunctionInfo(script, isolate, function_literal);
+   }
+ 
+diff --git a/src/objects/script-inl.h b/src/objects/script-inl.h
+index 3b7cbcb6d2f..4d1af1104a7 100644
+--- a/src/objects/script-inl.h
++++ b/src/objects/script-inl.h
+@@ -111,7 +111,7 @@ void Script::set_shared_function_infos(WeakFixedArray value,
+ }
+ 
+ int Script::shared_function_info_count() const {
+-  if V8_UNLIKELY (type() == TYPE_WEB_SNAPSHOT) {
++  if (V8_UNLIKELY(type() == TYPE_WEB_SNAPSHOT)) {
+     // +1 because the 0th element in shared_function_infos is reserved for the
+     // top-level SharedFunctionInfo which doesn't exist.
+     return shared_function_info_table().NumberOfElements() + 1;
+diff --git a/src/objects/string-forwarding-table.cc b/src/objects/string-forwarding-table.cc
+index 740fc25532e..0a6462b6135 100644
+--- a/src/objects/string-forwarding-table.cc
++++ b/src/objects/string-forwarding-table.cc
+@@ -136,7 +136,7 @@ void StringForwardingTable::InitializeBlockVector() {
+ StringForwardingTable::BlockVector* StringForwardingTable::EnsureCapacity(
+     uint32_t block_index) {
+   BlockVector* blocks = blocks_.load(std::memory_order_acquire);
+-  if V8_UNLIKELY (block_index >= blocks->size()) {
++  if (V8_UNLIKELY(block_index >= blocks->size())) {
+     base::MutexGuard table_grow_guard(&grow_mutex_);
+     // Reload the vector, as another thread could have grown it.
+     blocks = blocks_.load(std::memory_order_relaxed);
+diff --git a/src/parsing/parser-base.h b/src/parsing/parser-base.h
+index 560a8fc727e..786d502ff86 100644
+--- a/src/parsing/parser-base.h
++++ b/src/parsing/parser-base.h
+@@ -4516,7 +4516,7 @@ ParserBase<Impl>::ParseArrowFunctionLiteral(
+                 : RuntimeCallCounterId::kParseArrowFunctionLiteral,
+             RuntimeCallStats::kThreadSpecific);
+   base::ElapsedTimer timer;
+-  if (V8_UNLIKELY(FLAG_log_function_events)) timer.Start();
++  if (V8_UNLIKELY(v8_flags.log_function_events)) timer.Start();
+ 
+   DCHECK_IMPLIES(!has_error(), peek() == Token::ARROW);
+   if (!impl()->HasCheckedSyntax() && scanner_->HasLineTerminatorBeforeNext()) {
+@@ -4660,7 +4660,7 @@ ParserBase<Impl>::ParseArrowFunctionLiteral(
+   impl()->RecordFunctionLiteralSourceRange(function_literal);
+   impl()->AddFunctionForNameInference(function_literal);
+ 
+-  if (V8_UNLIKELY((FLAG_log_function_events))) {
++  if (V8_UNLIKELY(v8_flags.log_function_events)) {
+     Scope* scope = formal_parameters.scope;
+     double ms = timer.Elapsed().InMillisecondsF();
+     const char* event_name =
+diff --git a/src/parsing/parser.cc b/src/parsing/parser.cc
+index 262175487fb..bb5e65ec524 100644
+--- a/src/parsing/parser.cc
++++ b/src/parsing/parser.cc
+@@ -546,7 +546,7 @@ void Parser::ParseProgram(Isolate* isolate, Handle<Script> script,
+                                      : RuntimeCallCounterId::kParseProgram);
+   TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"), "V8.ParseProgram");
+   base::ElapsedTimer timer;
+-  if (V8_UNLIKELY(FLAG_log_function_events)) timer.Start();
++  if (V8_UNLIKELY(v8_flags.log_function_events)) timer.Start();
+ 
+   // Initialize parser state.
+   DeserializeScopeChain(isolate, info, maybe_outer_scope_info,
+@@ -564,7 +564,7 @@ void Parser::ParseProgram(Isolate* isolate, Handle<Script> script,
+ 
+   HandleSourceURLComments(isolate, script);
+ 
+-  if (V8_UNLIKELY(FLAG_log_function_events) && result != nullptr) {
++  if (V8_UNLIKELY(v8_flags.log_function_events && result != nullptr)) {
+     double ms = timer.Elapsed().InMillisecondsF();
+     const char* event_name = "parse-eval";
+     int start = -1;
+@@ -841,7 +841,7 @@ void Parser::ParseFunction(Isolate* isolate, ParseInfo* info,
+   RCS_SCOPE(runtime_call_stats_, RuntimeCallCounterId::kParseFunction);
+   TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"), "V8.ParseFunction");
+   base::ElapsedTimer timer;
+-  if (V8_UNLIKELY(FLAG_log_function_events)) timer.Start();
++  if (V8_UNLIKELY(v8_flags.log_function_events)) timer.Start();
+ 
+   MaybeHandle<ScopeInfo> maybe_outer_scope_info;
+   if (shared_info->HasOuterScopeInfo()) {
+@@ -889,7 +889,7 @@ void Parser::ParseFunction(Isolate* isolate, ParseInfo* info,
+   }
+ 
+   int function_literal_id = shared_info->function_literal_id();
+-  if V8_UNLIKELY (script->type() == Script::TYPE_WEB_SNAPSHOT) {
++  if (V8_UNLIKELY(script->type() == Script::TYPE_WEB_SNAPSHOT)) {
+     // Function literal IDs for inner functions haven't been allocated when
+     // deserializing. Put the inner function SFIs to the end of the list;
+     // they'll be deduplicated later (if the corresponding SFIs exist already)
+@@ -927,7 +927,7 @@ void Parser::ParseFunction(Isolate* isolate, ParseInfo* info,
+     result->set_function_literal_id(shared_info->function_literal_id());
+   }
+   PostProcessParseResult(isolate, info, result);
+-  if (V8_UNLIKELY(FLAG_log_function_events) && result != nullptr) {
++  if (V8_UNLIKELY(v8_flags.log_function_events && result != nullptr)) {
+     double ms = timer.Elapsed().InMillisecondsF();
+     // We should already be internalized by now, so the debug name will be
+     // available.
+@@ -2695,7 +2695,7 @@ FunctionLiteral* Parser::ParseFunctionLiteral(
+   RCS_SCOPE(runtime_call_stats_, RuntimeCallCounterId::kParseFunctionLiteral,
+             RuntimeCallStats::kThreadSpecific);
+   base::ElapsedTimer timer;
+-  if (V8_UNLIKELY(FLAG_log_function_events)) timer.Start();
++  if (V8_UNLIKELY(v8_flags.log_function_events)) timer.Start();
+ 
+   // Determine whether we can lazy parse the inner function. Lazy compilation
+   // has to be enabled, which is either forced by overall parse flags or via a
+@@ -2770,7 +2770,7 @@ FunctionLiteral* Parser::ParseFunctionLiteral(
+                   arguments_for_wrapped_function);
+   }
+ 
+-  if (V8_UNLIKELY(FLAG_log_function_events)) {
++  if (V8_UNLIKELY(v8_flags.log_function_events)) {
+     double ms = timer.Elapsed().InMillisecondsF();
+     const char* event_name =
+         should_preparse
+diff --git a/src/parsing/preparser.cc b/src/parsing/preparser.cc
+index e3a618fd5d9..4fa9ba277cc 100644
+--- a/src/parsing/preparser.cc
++++ b/src/parsing/preparser.cc
+@@ -278,7 +278,7 @@ PreParser::Expression PreParser::ParseFunctionLiteral(
+             RuntimeCallStats::kThreadSpecific);
+ 
+   base::ElapsedTimer timer;
+-  if (V8_UNLIKELY(FLAG_log_function_events)) timer.Start();
++  if (V8_UNLIKELY(v8_flags.log_function_events)) timer.Start();
+ 
+   DeclarationScope* function_scope = NewFunctionScope(kind);
+   function_scope->SetLanguageMode(language_mode);
+@@ -340,7 +340,7 @@ PreParser::Expression PreParser::ParseFunctionLiteral(
+     }
+   }
+ 
+-  if (V8_UNLIKELY(FLAG_log_function_events)) {
++  if (V8_UNLIKELY(v8_flags.log_function_events)) {
+     double ms = timer.Elapsed().InMillisecondsF();
+     const char* event_name = "preparse-resolution";
+     // We might not always get a function name here. However, it can be easily
+diff --git a/src/runtime/runtime-compiler.cc b/src/runtime/runtime-compiler.cc
+index 83ccdf9a371..d7288130ed3 100644
+--- a/src/runtime/runtime-compiler.cc
++++ b/src/runtime/runtime-compiler.cc
+@@ -19,28 +19,55 @@
+ namespace v8 {
+ namespace internal {
+ 
++namespace {
++void LogExecution(Isolate* isolate, Handle<JSFunction> function) {
++  DCHECK(v8_flags.log_function_events);
++  if (!function->has_feedback_vector()) return;
++  if (!function->feedback_vector().log_next_execution()) return;
++  Handle<SharedFunctionInfo> sfi(function->shared(), isolate);
++  Handle<String> name = SharedFunctionInfo::DebugName(sfi);
++  DisallowGarbageCollection no_gc;
++  auto raw_sfi = *sfi;
++  std::string event_name = "first-execution";
++  CodeKind kind = function->abstract_code(isolate).kind(isolate);
++  // Not adding "-interpreter" for tooling backwards compatiblity.
++  if (kind != CodeKind::INTERPRETED_FUNCTION) {
++    event_name += "-";
++    event_name += CodeKindToString(kind);
++  }
++  LOG(isolate,
++      FunctionEvent(event_name.c_str(), Script::cast(raw_sfi.script()).id(), 0,
++                    raw_sfi.StartPosition(), raw_sfi.EndPosition(), *name));
++  function->feedback_vector().set_log_next_execution(false);
++}
++}  // namespace
++
+ RUNTIME_FUNCTION(Runtime_CompileLazy) {
+   HandleScope scope(isolate);
+   DCHECK_EQ(1, args.length());
+   Handle<JSFunction> function = args.at<JSFunction>(0);
++  StackLimitCheck check(isolate);
++  if (V8_UNLIKELY(
++          check.JsHasOverflowed(kStackSpaceRequiredForCompilation * KB))) {
++    return isolate->StackOverflow();
++  }
+ 
+   Handle<SharedFunctionInfo> sfi(function->shared(), isolate);
+ 
++  DCHECK(!function->is_compiled());
+ #ifdef DEBUG
+-  if (FLAG_trace_lazy && !sfi->is_compiled()) {
++  if (FLAG_trace_lazy && sfi->is_compiled()) {
+     PrintF("[unoptimized: %s]\n", function->DebugNameCStr().get());
+   }
+ #endif
+-
+-  StackLimitCheck check(isolate);
+-  if (check.JsHasOverflowed(kStackSpaceRequiredForCompilation * KB)) {
+-    return isolate->StackOverflow();
+-  }
+   IsCompiledScope is_compiled_scope;
+   if (!Compiler::Compile(isolate, function, Compiler::KEEP_EXCEPTION,
+                          &is_compiled_scope)) {
+     return ReadOnlyRoots(isolate).exception();
+   }
++  if (V8_UNLIKELY(v8_flags.log_function_events)) {
++    LogExecution(isolate, function);
++  }
+   DCHECK(function->is_compiled());
+   return function->code();
+ }
+@@ -56,9 +83,16 @@ RUNTIME_FUNCTION(Runtime_InstallBaselineCode) {
+   DCHECK(!function->has_feedback_vector());
+   JSFunction::CreateAndAttachFeedbackVector(isolate, function,
+                                             &is_compiled_scope);
+-  CodeT baseline_code = sfi->baseline_code(kAcquireLoad);
+-  function->set_code(baseline_code);
+-  return baseline_code;
++  {
++    DisallowGarbageCollection no_gc;
++    CodeT baseline_code = sfi->baseline_code(kAcquireLoad);
++    function->set_code(baseline_code);
++    if V8_LIKELY (!v8_flags.log_function_events) return baseline_code;
++  }
++  DCHECK(v8_flags.log_function_events);
++  LogExecution(isolate, function);
++  // LogExecution might allocate, reload the baseline code
++  return sfi->baseline_code(kAcquireLoad);
+ }
+ 
+ RUNTIME_FUNCTION(Runtime_CompileOptimized) {
+@@ -105,9 +139,21 @@ RUNTIME_FUNCTION(Runtime_CompileOptimized) {
+   Compiler::CompileOptimized(isolate, function, mode, target_kind);
+ 
+   DCHECK(function->is_compiled());
++  if (V8_UNLIKELY(v8_flags.log_function_events)) {
++    LogExecution(isolate, function);
++  }
+   return function->code();
+ }
+ 
++RUNTIME_FUNCTION(Runtime_FunctionLogNextExecution) {
++  HandleScope scope(isolate);
++  DCHECK_EQ(1, args.length());
++  Handle<JSFunction> js_function = args.at<JSFunction>(0);
++  DCHECK(v8_flags.log_function_events);
++  LogExecution(isolate, js_function);
++  return js_function->code();
++}
++
+ RUNTIME_FUNCTION(Runtime_HealOptimizedCodeSlot) {
+   SealHandleScope scope(isolate);
+   DCHECK_EQ(1, args.length());
+@@ -464,7 +510,7 @@ Object CompileOptimizedOSR(Isolate* isolate, Handle<JSFunction> function,
+     // based on number of ticks.
+     function->reset_tiering_state();
+   }
+-
++  // First execution logging happens in LogOrTraceOptimizedOSREntry
+   return *result;
+ }
+ 
+@@ -497,19 +543,23 @@ RUNTIME_FUNCTION(Runtime_CompileOptimizedOSRFromMaglev) {
+   return CompileOptimizedOSR(isolate, function, osr_offset);
+ }
+ 
+-RUNTIME_FUNCTION(Runtime_TraceOptimizedOSREntry) {
++RUNTIME_FUNCTION(Runtime_LogOrTraceOptimizedOSREntry) {
+   HandleScope handle_scope(isolate);
+   DCHECK_EQ(0, args.length());
+-  CHECK(FLAG_trace_osr);
++  CHECK(FLAG_trace_osr || v8_flags.log_function_events);
+ 
+   BytecodeOffset osr_offset = BytecodeOffset::None();
+   Handle<JSFunction> function;
+   GetOsrOffsetAndFunctionForOSR(isolate, &osr_offset, &function);
+ 
+-  PrintF(CodeTracer::Scope{isolate->GetCodeTracer()}.file(),
+-         "[OSR - entry. function: %s, osr offset: %d]\n",
+-         function->DebugNameCStr().get(), osr_offset.ToInt());
+-
++  if (FLAG_trace_osr) {
++    PrintF(CodeTracer::Scope{isolate->GetCodeTracer()}.file(),
++           "[OSR - entry. function: %s, osr offset: %d]\n",
++           function->DebugNameCStr().get(), osr_offset.ToInt());
++  }
++  if (V8_UNLIKELY(v8_flags.log_function_events)) {
++    LogExecution(isolate, function);
++  }
+   return ReadOnlyRoots(isolate).undefined_value();
+ }
+ 
+diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
+index 02a0a820d10..3b68b644c7d 100644
+--- a/src/runtime/runtime.h
++++ b/src/runtime/runtime.h
+@@ -107,12 +107,13 @@ namespace internal {
+ #define FOR_EACH_INTRINSIC_COMPILER(F, I) \
+   F(CompileOptimizedOSR, 0, 1)            \
+   F(CompileOptimizedOSRFromMaglev, 1, 1)  \
+-  F(TraceOptimizedOSREntry, 0, 1)         \
++  F(LogOrTraceOptimizedOSREntry, 0, 1)    \
+   F(CompileLazy, 1, 1)                    \
+   F(CompileBaseline, 1, 1)                \
+   F(CompileOptimized, 1, 1)               \
+   F(InstallBaselineCode, 1, 1)            \
+   F(HealOptimizedCodeSlot, 1, 1)          \
++  F(FunctionLogNextExecution, 1, 1)       \
+   F(InstantiateAsmJs, 4, 1)               \
+   F(NotifyDeoptimized, 0, 1)              \
+   F(ObserveNode, 1, 1)                    \
+diff --git a/src/snapshot/code-serializer.cc b/src/snapshot/code-serializer.cc
+index 4746b3e85f2..95352299f8d 100644
+--- a/src/snapshot/code-serializer.cc
++++ b/src/snapshot/code-serializer.cc
+@@ -369,7 +369,7 @@ void FinalizeDeserialization(Isolate* isolate,
+                             : ReadOnlyRoots(isolate).empty_string(),
+                         isolate);
+ 
+-    if (v8_flags.log_function_events) {
++    if (V8_UNLIKELY(v8_flags.log_function_events)) {
+       LOG(isolate,
+           FunctionEvent("deserialize", script->id(),
+                         timer.Elapsed().InMillisecondsF(),
+diff --git a/test/mjsunit/tools/processor.mjs b/test/mjsunit/tools/processor.mjs
+index 0936ef30f55..5ac8ea087ec 100644
+--- a/test/mjsunit/tools/processor.mjs
++++ b/test/mjsunit/tools/processor.mjs
+@@ -33,6 +33,7 @@ const result = doWork();
+  // log code end
+ 
+ const logString = d8.log.getAndStop();
++assertTrue(logString.length > 0);
+ const processor = new Processor();
+ await processor.processChunk(logString);
+ await processor.finalize();
+diff --git a/test/unittests/logging/log-unittest.cc b/test/unittests/logging/log-unittest.cc
+index a80d97e881e..ff7729edbde 100644
+--- a/test/unittests/logging/log-unittest.cc
++++ b/test/unittests/logging/log-unittest.cc
+@@ -1125,7 +1125,7 @@ TEST_F(LogTest, ConsoleTimeEvents) {
+ class LogFunctionEventsTest : public LogTest {
+  public:
+   static void SetUpTestSuite() {
+-    i::FLAG_log_function_events = true;
++    i::v8_flags.log_function_events = true;
+     LogTest::SetUpTestSuite();
+   }
+ };
+-- 
+2.35.1
+

@@ -1,0 +1,161 @@
+From c84946e1e2c5fabfa8ec04ad87556912e2303850 Mon Sep 17 00:00:00 2001
+From: Jakob Kummerow <jkummerow@chromium.org>
+Date: Fri, 21 Oct 2022 17:23:57 +0200
+Subject: [PATCH] [wasm-gc] Fix WasmLiftoffSetupFrame::Iterate()
+
+We pass the *declared* function index on the stack now, so we must
+convert it to a regular function index before using it to look up
+the function's signature.
+
+Change-Id: Ib98d71a02ba8ca885136c010cf7dbb6ef7f62950
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3971365
+Commit-Queue: Jakob Kummerow <jkummerow@chromium.org>
+Reviewed-by: Manos Koukoutos <manoskouk@chromium.org>
+Auto-Submit: Jakob Kummerow <jkummerow@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#83860}
+---
+ src/execution/arm/frame-constants-arm.h         | 2 +-
+ src/execution/arm64/frame-constants-arm64.h     | 2 +-
+ src/execution/frames.cc                         | 7 ++++---
+ src/execution/frames.h                          | 2 +-
+ src/execution/ia32/frame-constants-ia32.h       | 2 +-
+ src/execution/loong64/frame-constants-loong64.h | 2 +-
+ src/execution/mips64/frame-constants-mips64.h   | 2 +-
+ src/execution/riscv/frame-constants-riscv.h     | 2 +-
+ src/execution/x64/frame-constants-x64.h         | 2 +-
+ 9 files changed, 12 insertions(+), 11 deletions(-)
+
+diff --git a/src/execution/arm/frame-constants-arm.h b/src/execution/arm/frame-constants-arm.h
+index 6517445cd61..2145711b0fc 100644
+--- a/src/execution/arm/frame-constants-arm.h
++++ b/src/execution/arm/frame-constants-arm.h
+@@ -76,7 +76,7 @@ class WasmLiftoffSetupFrameConstants : public TypedFrameConstants {
+ 
+   // SP-relative.
+   static constexpr int kWasmInstanceOffset = 2 * kSystemPointerSize;
+-  static constexpr int kFunctionIndexOffset = 1 * kSystemPointerSize;
++  static constexpr int kDeclaredFunctionIndexOffset = 1 * kSystemPointerSize;
+   static constexpr int kNativeModuleOffset = 0;
+ };
+ 
+diff --git a/src/execution/arm64/frame-constants-arm64.h b/src/execution/arm64/frame-constants-arm64.h
+index 33205950db4..d69a90c1128 100644
+--- a/src/execution/arm64/frame-constants-arm64.h
++++ b/src/execution/arm64/frame-constants-arm64.h
+@@ -93,7 +93,7 @@ class WasmLiftoffSetupFrameConstants : public TypedFrameConstants {
+ 
+   // SP-relative.
+   static constexpr int kWasmInstanceOffset = 2 * kSystemPointerSize;
+-  static constexpr int kFunctionIndexOffset = 1 * kSystemPointerSize;
++  static constexpr int kDeclaredFunctionIndexOffset = 1 * kSystemPointerSize;
+   static constexpr int kNativeModuleOffset = 0;
+ };
+ 
+diff --git a/src/execution/frames.cc b/src/execution/frames.cc
+index f8cbdbb55db..27439c2607d 100644
+--- a/src/execution/frames.cc
++++ b/src/execution/frames.cc
+@@ -2693,9 +2693,9 @@ void StackSwitchFrame::GetStateForJumpBuffer(wasm::JumpBuffer* jmpbuf,
+   DCHECK_NE(*state->pc_address, kNullAddress);
+ }
+ 
+-int WasmLiftoffSetupFrame::GetFunctionIndex() const {
++int WasmLiftoffSetupFrame::GetDeclaredFunctionIndex() const {
+   Object func_index(Memory<Address>(
+-      sp() + WasmLiftoffSetupFrameConstants::kFunctionIndexOffset));
++      sp() + WasmLiftoffSetupFrameConstants::kDeclaredFunctionIndexOffset));
+   return Smi::ToInt(func_index);
+ }
+ 
+@@ -2717,8 +2717,9 @@ void WasmLiftoffSetupFrame::Iterate(RootVisitor* v) const {
+   v->VisitRootPointer(Root::kStackRoots, "wasm instance parameter",
+                       wasm_instance_slot());
+ 
+-  int func_index = GetFunctionIndex();
+   wasm::NativeModule* native_module = GetNativeModule();
++  int func_index = GetDeclaredFunctionIndex() +
++                   native_module->module()->num_imported_functions;
+ 
+   // Scan the spill slots of the parameter registers. Parameters in WebAssembly
+   // get reordered such that first all value parameters get put into registers.
+diff --git a/src/execution/frames.h b/src/execution/frames.h
+index d522e3ef3ce..536b0441007 100644
+--- a/src/execution/frames.h
++++ b/src/execution/frames.h
+@@ -1163,7 +1163,7 @@ class WasmLiftoffSetupFrame : public TypedFrame {
+ 
+   FullObjectSlot wasm_instance_slot() const;
+ 
+-  int GetFunctionIndex() const;
++  int GetDeclaredFunctionIndex() const;
+ 
+   wasm::NativeModule* GetNativeModule() const;
+ 
+diff --git a/src/execution/ia32/frame-constants-ia32.h b/src/execution/ia32/frame-constants-ia32.h
+index a999ff0e063..fec118d6120 100644
+--- a/src/execution/ia32/frame-constants-ia32.h
++++ b/src/execution/ia32/frame-constants-ia32.h
+@@ -50,7 +50,7 @@ class WasmLiftoffSetupFrameConstants : public TypedFrameConstants {
+ 
+   // SP-relative.
+   static constexpr int kWasmInstanceOffset = 2 * kSystemPointerSize;
+-  static constexpr int kFunctionIndexOffset = 1 * kSystemPointerSize;
++  static constexpr int kDeclaredFunctionIndexOffset = 1 * kSystemPointerSize;
+   static constexpr int kNativeModuleOffset = 0;
+ };
+ 
+diff --git a/src/execution/loong64/frame-constants-loong64.h b/src/execution/loong64/frame-constants-loong64.h
+index adec846e1b3..a88758d2561 100644
+--- a/src/execution/loong64/frame-constants-loong64.h
++++ b/src/execution/loong64/frame-constants-loong64.h
+@@ -42,7 +42,7 @@ class WasmLiftoffSetupFrameConstants : public TypedFrameConstants {
+ 
+   // SP-relative.
+   static constexpr int kWasmInstanceOffset = 2 * kSystemPointerSize;
+-  static constexpr int kFunctionIndexOffset = 1 * kSystemPointerSize;
++  static constexpr int kDeclaredFunctionIndexOffset = 1 * kSystemPointerSize;
+   static constexpr int kNativeModuleOffset = 0;
+ };
+ 
+diff --git a/src/execution/mips64/frame-constants-mips64.h b/src/execution/mips64/frame-constants-mips64.h
+index 76f1fe593d5..e65710d5c13 100644
+--- a/src/execution/mips64/frame-constants-mips64.h
++++ b/src/execution/mips64/frame-constants-mips64.h
+@@ -42,7 +42,7 @@ class WasmLiftoffSetupFrameConstants : public TypedFrameConstants {
+ 
+   // SP-relative.
+   static constexpr int kWasmInstanceOffset = 2 * kSystemPointerSize;
+-  static constexpr int kFunctionIndexOffset = 1 * kSystemPointerSize;
++  static constexpr int kDeclaredFunctionIndexOffset = 1 * kSystemPointerSize;
+   static constexpr int kNativeModuleOffset = 0;
+ };
+ 
+diff --git a/src/execution/riscv/frame-constants-riscv.h b/src/execution/riscv/frame-constants-riscv.h
+index 0783327a86d..5873b4e16bd 100644
+--- a/src/execution/riscv/frame-constants-riscv.h
++++ b/src/execution/riscv/frame-constants-riscv.h
+@@ -39,7 +39,7 @@ class WasmLiftoffSetupFrameConstants : public TypedFrameConstants {
+ 
+   // SP-relative.
+   static constexpr int kWasmInstanceOffset = 2 * kSystemPointerSize;
+-  static constexpr int kFunctionIndexOffset = 1 * kSystemPointerSize;
++  static constexpr int kDeclaredFunctionIndexOffset = 1 * kSystemPointerSize;
+   static constexpr int kNativeModuleOffset = 0;
+ };
+ 
+diff --git a/src/execution/x64/frame-constants-x64.h b/src/execution/x64/frame-constants-x64.h
+index 3f20998d543..d1ba413c8a4 100644
+--- a/src/execution/x64/frame-constants-x64.h
++++ b/src/execution/x64/frame-constants-x64.h
+@@ -60,7 +60,7 @@ class WasmLiftoffSetupFrameConstants : public TypedFrameConstants {
+ 
+   // SP-relative.
+   static constexpr int kWasmInstanceOffset = 2 * kSystemPointerSize;
+-  static constexpr int kFunctionIndexOffset = 1 * kSystemPointerSize;
++  static constexpr int kDeclaredFunctionIndexOffset = 1 * kSystemPointerSize;
+   static constexpr int kNativeModuleOffset = 0;
+ };
+ 
+-- 
+2.35.1
+

@@ -1,0 +1,91 @@
+From 7c6578d634b3c173302ff94979b06ba5f7cae538 Mon Sep 17 00:00:00 2001
+From: QiuJi <qiuji@iscas.ac.cn>
+Date: Tue, 8 Jun 2021 17:31:15 +0800
+Subject: [PATCH] [riscv64] Fix build error
+
+Port f68e1be7955428548c600c07e54d2a23dcda4354
+Fix build error for 8ab75a56a24f34d4f582261c99939ffa1446a3b7
+
+Change-Id: I1014b8c036b0b8a8fcad5207fc9692e0668e2cce
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/2945175
+Reviewed-by: Ji Qiu <qiuji@iscas.ac.cn>
+Reviewed-by: Brice Dobry <brice.dobry@futurewei.com>
+Commit-Queue: Brice Dobry <brice.dobry@futurewei.com>
+Cr-Commit-Position: refs/heads/master@{#75050}
+---
+ src/builtins/riscv64/builtins-riscv64.cc        |  2 +-
+ .../riscv64/interface-descriptors-riscv64-inl.h | 17 +++++++++++++++++
+ src/codegen/riscv64/macro-assembler-riscv64.cc  |  2 +-
+ src/codegen/riscv64/macro-assembler-riscv64.h   |  2 +-
+ 4 files changed, 20 insertions(+), 3 deletions(-)
+
+diff --git a/src/builtins/riscv64/builtins-riscv64.cc b/src/builtins/riscv64/builtins-riscv64.cc
+index 2a6e70dde96..d0e0213cb38 100644
+--- a/src/builtins/riscv64/builtins-riscv64.cc
++++ b/src/builtins/riscv64/builtins-riscv64.cc
+@@ -1803,7 +1803,7 @@ void Generate_ContinueToBuiltinHelper(MacroAssembler* masm,
+   __ Add64(sp, sp,
+            Operand(BuiltinContinuationFrameConstants::kFixedFrameSizeFromFp));
+   __ Pop(ra);
+-  __ LoadEntryFromBuiltin(t6);
++  __ LoadEntryFromBuiltinIndex(t6);
+   __ Jump(t6);
+ }
+ }  // namespace
+diff --git a/src/codegen/riscv64/interface-descriptors-riscv64-inl.h b/src/codegen/riscv64/interface-descriptors-riscv64-inl.h
+index b8a61f774c2..6f44462014b 100644
+--- a/src/codegen/riscv64/interface-descriptors-riscv64-inl.h
++++ b/src/codegen/riscv64/interface-descriptors-riscv64-inl.h
+@@ -20,6 +20,23 @@ constexpr auto CallInterfaceDescriptor::DefaultRegisterArray() {
+   return registers;
+ }
+ 
++#if DEBUG
++template <typename DerivedDescriptor>
++void StaticCallInterfaceDescriptor<DerivedDescriptor>::
++    VerifyArgumentRegisterCount(CallInterfaceDescriptorData* data, int argc) {
++  RegList allocatable_regs = data->allocatable_registers();
++  if (argc >= 1) DCHECK(allocatable_regs | a0.bit());
++  if (argc >= 2) DCHECK(allocatable_regs | a1.bit());
++  if (argc >= 3) DCHECK(allocatable_regs | a2.bit());
++  if (argc >= 4) DCHECK(allocatable_regs | a3.bit());
++  if (argc >= 5) DCHECK(allocatable_regs | a4.bit());
++  if (argc >= 6) DCHECK(allocatable_regs | a5.bit());
++  if (argc >= 7) DCHECK(allocatable_regs | a6.bit());
++  if (argc >= 8) DCHECK(allocatable_regs | a7.bit());
++  // Additional arguments are passed on the stack.
++}
++#endif  // DEBUG
++
+ // static
+ constexpr auto WriteBarrierDescriptor::registers() {
+   STATIC_ASSERT(kReturnRegister0 == a0);
+diff --git a/src/codegen/riscv64/macro-assembler-riscv64.cc b/src/codegen/riscv64/macro-assembler-riscv64.cc
+index 9fdbf1c1de4..542b41651c8 100644
+--- a/src/codegen/riscv64/macro-assembler-riscv64.cc
++++ b/src/codegen/riscv64/macro-assembler-riscv64.cc
+@@ -3165,7 +3165,7 @@ void TurboAssembler::TailCallBuiltin(int builtin_index) {
+ 
+ void TurboAssembler::LoadEntryFromBuiltin(Builtin builtin_index,
+                                           Register destination) {
+-  Ld(destination, EntryFromBuiltinIndexAsOperand(builtin_index));
++  Ld(destination, EntryFromBuiltinAsOperand(builtin_index));
+ }
+ 
+ MemOperand TurboAssembler::EntryFromBuiltinAsOperand(Builtin builtin_index) {
+diff --git a/src/codegen/riscv64/macro-assembler-riscv64.h b/src/codegen/riscv64/macro-assembler-riscv64.h
+index 8d9839870b9..2ea35473979 100644
+--- a/src/codegen/riscv64/macro-assembler-riscv64.h
++++ b/src/codegen/riscv64/macro-assembler-riscv64.h
+@@ -231,7 +231,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+ 
+   // Load the builtin given by the Smi in |builtin_index| into the same
+   // register.
+-  void LoadEntryFromBuiltin(Register builtin_index);
++  void LoadEntryFromBuiltinIndex(Register builtin_index);
+   void LoadEntryFromBuiltin(Builtin builtin_index, Register destination);
+   MemOperand EntryFromBuiltinAsOperand(Builtin builtin_index);
+   void CallBuiltinByIndex(Register builtin_index);
+-- 
+2.35.1
+

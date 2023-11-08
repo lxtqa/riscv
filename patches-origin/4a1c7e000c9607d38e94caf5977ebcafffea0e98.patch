@@ -1,0 +1,566 @@
+From 4a1c7e000c9607d38e94caf5977ebcafffea0e98 Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Thu, 6 Jul 2023 12:50:08 +0800
+Subject: [PATCH] [riscv] Make stack switching work on the simulator and with
+ CFI [compiler] Generalize InstructionSelectorT for Turboshaft (part 2)
+
+Port commit 31863bc7c1e239fef6c1650278285cd83b3c5370
+Port commit 6c63351bb854f6a3c16f4608b2c46d79ebe75ec6
+
+Bug: v8:12783
+
+Change-Id: I6e45d9fccbdadff9be7593f83af7657ec0dc9f5a
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4668069
+Auto-Submit: Yahan Lu <yahan@iscas.ac.cn>
+Reviewed-by: Ji Qiu <qiuji@iscas.ac.cn>
+Commit-Queue: Ji Qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#88692}
+---
+ .../riscv/instruction-selector-riscv.h        |  44 ++++--
+ .../riscv/instruction-selector-riscv32.cc     |  44 ++++--
+ .../riscv/instruction-selector-riscv64.cc     | 132 ++++++++++--------
+ src/execution/riscv/simulator-riscv.cc        |  18 ++-
+ src/execution/riscv/simulator-riscv.h         |  23 ++-
+ 5 files changed, 163 insertions(+), 98 deletions(-)
+
+diff --git a/src/compiler/backend/riscv/instruction-selector-riscv.h b/src/compiler/backend/riscv/instruction-selector-riscv.h
+index 5f1ec078508..0adeb5b99c6 100644
+--- a/src/compiler/backend/riscv/instruction-selector-riscv.h
++++ b/src/compiler/backend/riscv/instruction-selector-riscv.h
+@@ -97,7 +97,7 @@ class RiscvOperandGeneratorT final : public OperandGeneratorT<Adapter> {
+ };
+ 
+ template <typename Adapter>
+-void InstructionSelectorT<Adapter>::VisitProtectedStore(Node* node) {
++void InstructionSelectorT<Adapter>::VisitProtectedStore(node_t node) {
+   // TODO(eholk)
+   UNIMPLEMENTED();
+ }
+@@ -108,10 +108,14 @@ void InstructionSelectorT<Adapter>::VisitProtectedLoad(Node* node) {
+   UNIMPLEMENTED();
+ }
+ 
+-template <typename Adapter>
+-void VisitRR(InstructionSelectorT<Adapter>* selector, InstructionCode opcode,
+-             Node* node) {
+-  RiscvOperandGeneratorT<Adapter> g(selector);
++template <typename T>
++void VisitRR(InstructionSelectorT<TurboshaftAdapter>*, InstructionCode, T) {
++  UNIMPLEMENTED();
++}
++
++void VisitRR(InstructionSelectorT<TurbofanAdapter>* selector,
++             InstructionCode opcode, Node* node) {
++  RiscvOperandGeneratorT<TurbofanAdapter> g(selector);
+   selector->Emit(opcode, g.DefineAsRegister(node),
+                  g.UseRegister(node->InputAt(0)));
+ }
+@@ -150,10 +154,14 @@ static void VisitRRIR(InstructionSelectorT<Adapter>* selector,
+                  g.UseRegister(node->InputAt(1)));
+ }
+ 
+-template <typename Adapter>
+-static void VisitRRR(InstructionSelectorT<Adapter>* selector, ArchOpcode opcode,
+-                     Node* node) {
+-  RiscvOperandGeneratorT<Adapter> g(selector);
++template <typename T>
++void VisitRRR(InstructionSelectorT<TurboshaftAdapter>*, InstructionCode, T) {
++  UNIMPLEMENTED();
++}
++
++void VisitRRR(InstructionSelectorT<TurbofanAdapter>* selector,
++              InstructionCode opcode, Node* node) {
++  RiscvOperandGeneratorT<TurbofanAdapter> g(selector);
+   selector->Emit(opcode, g.DefineAsRegister(node),
+                  g.UseRegister(node->InputAt(0)),
+                  g.UseRegister(node->InputAt(1)));
+@@ -737,7 +745,7 @@ void InstructionSelectorT<Adapter>::VisitFloat32Sub(Node* node) {
+ }
+ 
+ template <typename Adapter>
+-void InstructionSelectorT<Adapter>::VisitFloat64Sub(Node* node) {
++void InstructionSelectorT<Adapter>::VisitFloat64Sub(node_t node) {
+   VisitRRR(this, kRiscvSubD, node);
+ }
+ 
+@@ -757,7 +765,7 @@ void InstructionSelectorT<Adapter>::VisitFloat32Div(Node* node) {
+ }
+ 
+ template <typename Adapter>
+-void InstructionSelectorT<Adapter>::VisitFloat64Div(Node* node) {
++void InstructionSelectorT<Adapter>::VisitFloat64Div(node_t node) {
+   VisitRRR(this, kRiscvDivD, node);
+ }
+ 
+@@ -803,7 +811,7 @@ void InstructionSelectorT<Adapter>::VisitTruncateFloat64ToWord32(Node* node) {
+ }
+ 
+ template <typename Adapter>
+-void InstructionSelectorT<Adapter>::VisitRoundFloat64ToInt32(Node* node) {
++void InstructionSelectorT<Adapter>::VisitRoundFloat64ToInt32(node_t node) {
+   VisitRR(this, kRiscvTruncWD, node);
+ }
+ 
+@@ -858,11 +866,17 @@ void InstructionSelectorT<Adapter>::VisitWord32Shr(Node* node) {
+   VisitRRO(this, kRiscvShr32, node);
+ }
+ 
+-template <typename Adapter>
+-void InstructionSelectorT<Adapter>::VisitWord32Sar(Node* node) {
++template <>
++void InstructionSelectorT<TurboshaftAdapter>::VisitWord32Sar(
++    turboshaft::OpIndex) {
++  UNIMPLEMENTED();
++}
++
++template <>
++void InstructionSelectorT<TurbofanAdapter>::VisitWord32Sar(Node* node) {
+   Int32BinopMatcher m(node);
+   if (CanCover(node, m.left().node())) {
+-    RiscvOperandGeneratorT<Adapter> g(this);
++    RiscvOperandGeneratorT<TurbofanAdapter> g(this);
+     if (m.left().IsWord32Shl()) {
+       Int32BinopMatcher mleft(m.left().node());
+       if (m.right().HasResolvedValue() && mleft.right().HasResolvedValue()) {
+diff --git a/src/compiler/backend/riscv/instruction-selector-riscv32.cc b/src/compiler/backend/riscv/instruction-selector-riscv32.cc
+index 986c0791407..4677f763fb8 100644
+--- a/src/compiler/backend/riscv/instruction-selector-riscv32.cc
++++ b/src/compiler/backend/riscv/instruction-selector-riscv32.cc
+@@ -218,9 +218,14 @@ void InstructionSelectorT<Adapter>::VisitStorePair(Node* node) {
+   UNREACHABLE();
+ }
+ 
+-template <typename Adapter>
+-void InstructionSelectorT<Adapter>::VisitStore(Node* node) {
+-  RiscvOperandGeneratorT<Adapter> g(this);
++template <>
++void InstructionSelectorT<TurboshaftAdapter>::VisitStore(turboshaft::OpIndex) {
++  UNREACHABLE();
++}
++
++template <>
++void InstructionSelectorT<TurbofanAdapter>::VisitStore(Node* node) {
++  RiscvOperandGeneratorT<TurbofanAdapter> g(this);
+   Node* base = node->InputAt(0);
+   Node* index = node->InputAt(1);
+   Node* value = node->InputAt(2);
+@@ -302,15 +307,26 @@ void InstructionSelectorT<Adapter>::VisitStore(Node* node) {
+   }
+ }
+ 
+-template <typename Adapter>
+-void InstructionSelectorT<Adapter>::VisitWord32And(Node* node) {
+-  VisitBinop<Adapter, Int32BinopMatcher>(this, node, kRiscvAnd, true,
+-                                         kRiscvAnd);
++template <>
++void InstructionSelectorT<TurboshaftAdapter>::VisitWord32And(
++    turboshaft::OpIndex) {
++  UNIMPLEMENTED();
++}
++
++template <>
++void InstructionSelectorT<TurbofanAdapter>::VisitWord32And(Node* node) {
++  VisitBinop<TurbofanAdapter, Int32BinopMatcher>(this, node, kRiscvAnd, true,
++                                                 kRiscvAnd);
+ }
+ 
+ template <typename Adapter>
+-void InstructionSelectorT<Adapter>::VisitWord32Or(Node* node) {
+-  VisitBinop<Adapter, Int32BinopMatcher>(this, node, kRiscvOr, true, kRiscvOr);
++void InstructionSelectorT<Adapter>::VisitWord32Or(node_t node) {
++  if constexpr (Adapter::IsTurboshaft) {
++    UNIMPLEMENTED();
++  } else {
++    VisitBinop<Adapter, Int32BinopMatcher>(this, node, kRiscvOr, true,
++                                           kRiscvOr);
++  }
+ }
+ 
+ template <typename Adapter>
+@@ -483,7 +499,7 @@ void InstructionSelectorT<Adapter>::VisitRoundUint32ToFloat32(Node* node) {
+ }
+ 
+ template <typename Adapter>
+-void InstructionSelectorT<Adapter>::VisitChangeInt32ToFloat64(Node* node) {
++void InstructionSelectorT<Adapter>::VisitChangeInt32ToFloat64(node_t node) {
+   VisitRR(this, kRiscvCvtDW, node);
+ }
+ 
+@@ -1047,7 +1063,7 @@ void InstructionSelectorT<Adapter>::VisitUint32LessThanOrEqual(node_t node) {
+ }
+ 
+ template <typename Adapter>
+-void InstructionSelectorT<Adapter>::VisitInt32AddWithOverflow(Node* node) {
++void InstructionSelectorT<Adapter>::VisitInt32AddWithOverflow(node_t node) {
+   if constexpr (Adapter::IsTurboshaft) {
+     UNIMPLEMENTED();
+   } else {
+@@ -1077,7 +1093,7 @@ void InstructionSelectorT<Adapter>::VisitInt32SubWithOverflow(Node* node) {
+ }
+ 
+ template <typename Adapter>
+-void InstructionSelectorT<Adapter>::VisitInt32MulWithOverflow(Node* node) {
++void InstructionSelectorT<Adapter>::VisitInt32MulWithOverflow(node_t node) {
+   if constexpr (Adapter::IsTurboshaft) {
+     UNIMPLEMENTED();
+   } else {
+@@ -1121,7 +1137,7 @@ void InstructionSelectorT<Adapter>::VisitWord32AtomicLoad(Node* node) {
+ }
+ 
+ template <typename Adapter>
+-void InstructionSelectorT<Adapter>::VisitWord32AtomicStore(Node* node) {
++void InstructionSelectorT<Adapter>::VisitWord32AtomicStore(node_t node) {
+   if constexpr (Adapter::IsTurboshaft) {
+     UNIMPLEMENTED();
+   } else {
+@@ -1202,7 +1218,7 @@ void InstructionSelectorT<Adapter>::VisitWord32AtomicCompareExchange(
+ 
+ template <typename Adapter>
+ void InstructionSelectorT<Adapter>::VisitWord32AtomicBinaryOperation(
+-    Node* node, ArchOpcode int8_op, ArchOpcode uint8_op, ArchOpcode int16_op,
++    node_t node, ArchOpcode int8_op, ArchOpcode uint8_op, ArchOpcode int16_op,
+     ArchOpcode uint16_op, ArchOpcode word32_op) {
+   if constexpr (Adapter::IsTurboshaft) {
+     UNIMPLEMENTED();
+diff --git a/src/compiler/backend/riscv/instruction-selector-riscv64.cc b/src/compiler/backend/riscv/instruction-selector-riscv64.cc
+index d0c7b599bc7..2f437174f51 100644
+--- a/src/compiler/backend/riscv/instruction-selector-riscv64.cc
++++ b/src/compiler/backend/riscv/instruction-selector-riscv64.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "src/base/bits.h"
++#include "src/base/logging.h"
+ #include "src/codegen/assembler-inl.h"
+ #include "src/codegen/machine-type.h"
+ #include "src/compiler/backend/instruction-selector-impl.h"
+@@ -353,12 +354,14 @@ void InstructionSelectorT<Adapter>::VisitStorePair(Node* node) {
+   UNREACHABLE();
+ }
+ 
+-template <typename Adapter>
+-void InstructionSelectorT<Adapter>::VisitStore(Node* node) {
+-  if constexpr (Adapter::IsTurboshaft) {
+-  UNIMPLEMENTED();
+-  } else {
+-  RiscvOperandGeneratorT<Adapter> g(this);
++template <>
++void InstructionSelectorT<TurboshaftAdapter>::VisitStore(turboshaft::OpIndex) {
++  UNREACHABLE();
++}
++
++template <>
++void InstructionSelectorT<TurbofanAdapter>::VisitStore(Node* node) {
++  RiscvOperandGeneratorT<TurbofanAdapter> g(this);
+   Node* base = node->InputAt(0);
+   Node* index = node->InputAt(1);
+   Node* value = node->InputAt(2);
+@@ -451,17 +454,18 @@ void InstructionSelectorT<Adapter>::VisitStore(Node* node) {
+            g.UseRegisterOrImmediateZero(value), addr_reg, g.TempImmediate(0));
+     }
+   }
+-  }
+ }
+ 
+-template <typename Adapter>
+-void InstructionSelectorT<Adapter>::VisitWord32And(Node* node) {
+-  if constexpr (Adapter::IsTurboshaft) {
++template <>
++void InstructionSelectorT<TurboshaftAdapter>::VisitWord32And(
++    turboshaft::OpIndex) {
+   UNIMPLEMENTED();
+-  } else {
+-  VisitBinop<Adapter, Int32BinopMatcher>(this, node, kRiscvAnd32, true,
+-                                         kRiscvAnd32);
+-  }
++}
++
++template <>
++void InstructionSelectorT<TurbofanAdapter>::VisitWord32And(Node* node) {
++  VisitBinop<TurbofanAdapter, Int32BinopMatcher>(this, node, kRiscvAnd32, true,
++                                                 kRiscvAnd32);
+ }
+ 
+ template <typename Adapter>
+@@ -508,7 +512,7 @@ void InstructionSelectorT<Adapter>::VisitWord64And(Node* node) {
+ }
+ 
+ template <typename Adapter>
+-void InstructionSelectorT<Adapter>::VisitWord32Or(Node* node) {
++void InstructionSelectorT<Adapter>::VisitWord32Or(node_t node) {
+   if constexpr (Adapter::IsTurboshaft) {
+   UNIMPLEMENTED();
+   } else {
+@@ -585,7 +589,7 @@ void InstructionSelectorT<Adapter>::VisitWord64Xor(Node* node) {
+ }
+ 
+ template <typename Adapter>
+-void InstructionSelectorT<Adapter>::VisitWord64Shl(Node* node) {
++void InstructionSelectorT<Adapter>::VisitWord64Shl(node_t node) {
+   if constexpr (Adapter::IsTurboshaft) {
+   UNIMPLEMENTED();
+   } else {
+@@ -639,7 +643,7 @@ void InstructionSelectorT<Adapter>::VisitWord64Shr(Node* node) {
+ }
+ 
+ template <typename Adapter>
+-void InstructionSelectorT<Adapter>::VisitWord64Sar(Node* node) {
++void InstructionSelectorT<Adapter>::VisitWord64Sar(node_t node) {
+   if constexpr (Adapter::IsTurboshaft) {
+   UNIMPLEMENTED();
+   } else {
+@@ -777,9 +781,13 @@ void InstructionSelectorT<Adapter>::VisitInt32Add(Node* node) {
+ }
+ 
+ template <typename Adapter>
+-void InstructionSelectorT<Adapter>::VisitInt64Add(Node* node) {
++void InstructionSelectorT<Adapter>::VisitInt64Add(node_t node) {
++  if constexpr (Adapter::IsTurboshaft) {
++  UNIMPLEMENTED();
++  } else {
+   VisitBinop<Adapter, Int64BinopMatcher>(this, node, kRiscvAdd64, true,
+                                          kRiscvAdd64);
++  }
+ }
+ 
+ template <typename Adapter>
+@@ -989,7 +997,7 @@ void InstructionSelectorT<Adapter>::VisitRoundUint32ToFloat32(Node* node) {
+ }
+ 
+ template <typename Adapter>
+-void InstructionSelectorT<Adapter>::VisitChangeInt32ToFloat64(Node* node) {
++void InstructionSelectorT<Adapter>::VisitChangeInt32ToFloat64(node_t node) {
+   VisitRR(this, kRiscvCvtDW, node);
+ }
+ 
+@@ -1238,40 +1246,44 @@ void EmitSignExtendWord(InstructionSelectorT<Adapter>* selector, Node* node) {
+ }
+ 
+ template <typename Adapter>
+-void InstructionSelectorT<Adapter>::VisitChangeInt32ToInt64(Node* node) {
+-  Node* value = node->InputAt(0);
+-  if ((value->opcode() == IrOpcode::kLoad ||
+-       value->opcode() == IrOpcode::kLoadImmutable) &&
+-      CanCover(node, value)) {
+-    // Generate sign-extending load.
+-    LoadRepresentation load_rep = LoadRepresentationOf(value->op());
+-    InstructionCode opcode = kArchNop;
+-    switch (load_rep.representation()) {
+-      case MachineRepresentation::kBit:  // Fall through.
+-      case MachineRepresentation::kWord8:
+-        opcode = load_rep.IsUnsigned() ? kRiscvLbu : kRiscvLb;
+-        break;
+-      case MachineRepresentation::kWord16:
+-        opcode = load_rep.IsUnsigned() ? kRiscvLhu : kRiscvLh;
+-        break;
+-      case MachineRepresentation::kWord32:
+-      case MachineRepresentation::kWord64:
+-        // Since BitcastElider may remove nodes of
+-        // IrOpcode::kTruncateInt64ToInt32 and directly use the inputs, values
+-        // with kWord64 can also reach this line.
+-        // For RV64, the lw loads a 32 bit value from memory and sign-extend it
+-        // to 64 bits before storing it in rd register
+-      case MachineRepresentation::kTaggedSigned:
+-      case MachineRepresentation::kTagged:
+-        opcode = kRiscvLw;
+-        break;
+-      default:
+-        UNREACHABLE();
+-    }
+-    EmitLoad(this, value, opcode, node);
++void InstructionSelectorT<Adapter>::VisitChangeInt32ToInt64(node_t node) {
++  if constexpr (Adapter::IsTurboshaft) {
++    UNIMPLEMENTED();
+   } else {
+-    EmitSignExtendWord(this, node);
+-    return;
++    Node* value = node->InputAt(0);
++    if ((value->opcode() == IrOpcode::kLoad ||
++         value->opcode() == IrOpcode::kLoadImmutable) &&
++        CanCover(node, value)) {
++      // Generate sign-extending load.
++      LoadRepresentation load_rep = LoadRepresentationOf(value->op());
++      InstructionCode opcode = kArchNop;
++      switch (load_rep.representation()) {
++        case MachineRepresentation::kBit:  // Fall through.
++        case MachineRepresentation::kWord8:
++          opcode = load_rep.IsUnsigned() ? kRiscvLbu : kRiscvLb;
++          break;
++        case MachineRepresentation::kWord16:
++          opcode = load_rep.IsUnsigned() ? kRiscvLhu : kRiscvLh;
++          break;
++        case MachineRepresentation::kWord32:
++        case MachineRepresentation::kWord64:
++          // Since BitcastElider may remove nodes of
++          // IrOpcode::kTruncateInt64ToInt32 and directly use the inputs, values
++          // with kWord64 can also reach this line.
++          // For RV64, the lw loads a 32 bit value from memory and sign-extend
++          // it to 64 bits before storing it in rd register
++        case MachineRepresentation::kTaggedSigned:
++        case MachineRepresentation::kTagged:
++          opcode = kRiscvLw;
++          break;
++        default:
++          UNREACHABLE();
++      }
++      EmitLoad(this, value, opcode, node);
++    } else {
++      EmitSignExtendWord(this, node);
++      return;
++    }
+   }
+ }
+ 
+@@ -2163,7 +2175,7 @@ void InstructionSelectorT<Adapter>::VisitUint32LessThanOrEqual(node_t node) {
+ }
+ 
+ template <typename Adapter>
+-void InstructionSelectorT<Adapter>::VisitInt32AddWithOverflow(Node* node) {
++void InstructionSelectorT<Adapter>::VisitInt32AddWithOverflow(node_t node) {
+   if constexpr (Adapter::IsTurboshaft) {
+   UNIMPLEMENTED();
+   } else {
+@@ -2193,7 +2205,7 @@ void InstructionSelectorT<Adapter>::VisitInt32SubWithOverflow(Node* node) {
+ }
+ 
+ template <typename Adapter>
+-void InstructionSelectorT<Adapter>::VisitInt32MulWithOverflow(Node* node) {
++void InstructionSelectorT<Adapter>::VisitInt32MulWithOverflow(node_t node) {
+   if constexpr (Adapter::IsTurboshaft) {
+   UNIMPLEMENTED();
+   } else {
+@@ -2299,7 +2311,7 @@ void InstructionSelectorT<Adapter>::VisitInt64LessThanOrEqual(Node* node) {
+ }
+ 
+ template <typename Adapter>
+-void InstructionSelectorT<Adapter>::VisitUint64LessThan(Node* node) {
++void InstructionSelectorT<Adapter>::VisitUint64LessThan(node_t node) {
+   if constexpr (Adapter::IsTurboshaft) {
+   UNIMPLEMENTED();
+   } else {
+@@ -2329,7 +2341,7 @@ void InstructionSelectorT<Adapter>::VisitWord32AtomicLoad(Node* node) {
+ }
+ 
+ template <typename Adapter>
+-void InstructionSelectorT<Adapter>::VisitWord32AtomicStore(Node* node) {
++void InstructionSelectorT<Adapter>::VisitWord32AtomicStore(node_t node) {
+   if constexpr (Adapter::IsTurboshaft) {
+   UNIMPLEMENTED();
+   } else {
+@@ -2347,7 +2359,7 @@ void InstructionSelectorT<Adapter>::VisitWord64AtomicLoad(Node* node) {
+ }
+ 
+ template <typename Adapter>
+-void InstructionSelectorT<Adapter>::VisitWord64AtomicStore(Node* node) {
++void InstructionSelectorT<Adapter>::VisitWord64AtomicStore(node_t node) {
+   if constexpr (Adapter::IsTurboshaft) {
+   UNIMPLEMENTED();
+   } else {
+@@ -2452,7 +2464,7 @@ void InstructionSelectorT<Adapter>::VisitWord64AtomicCompareExchange(
+ }
+ template <typename Adapter>
+ void InstructionSelectorT<Adapter>::VisitWord32AtomicBinaryOperation(
+-    Node* node, ArchOpcode int8_op, ArchOpcode uint8_op, ArchOpcode int16_op,
++    node_t node, ArchOpcode int8_op, ArchOpcode uint8_op, ArchOpcode int16_op,
+     ArchOpcode uint16_op, ArchOpcode word32_op) {
+   if constexpr (Adapter::IsTurboshaft) {
+   UNIMPLEMENTED();
+@@ -2498,8 +2510,8 @@ VISIT_ATOMIC_BINOP(Xor)
+ 
+ template <typename Adapter>
+ void InstructionSelectorT<Adapter>::VisitWord64AtomicBinaryOperation(
+-    Node* node, ArchOpcode uint8_op, ArchOpcode uint16_op, ArchOpcode uint32_op,
+-    ArchOpcode uint64_op) {
++    node_t node, ArchOpcode uint8_op, ArchOpcode uint16_op,
++    ArchOpcode uint32_op, ArchOpcode uint64_op) {
+   if constexpr (Adapter::IsTurboshaft) {
+   UNIMPLEMENTED();
+   } else {
+diff --git a/src/execution/riscv/simulator-riscv.cc b/src/execution/riscv/simulator-riscv.cc
+index 900946dc99e..56ee75bfda2 100644
+--- a/src/execution/riscv/simulator-riscv.cc
++++ b/src/execution/riscv/simulator-riscv.cc
+@@ -2375,8 +2375,7 @@ void Simulator::CheckICache(base::CustomMatcherHashMap* i_cache,
+ Simulator::Simulator(Isolate* isolate) : isolate_(isolate), builtins_(isolate) {
+   // Set up simulator support first. Some of this information is needed to
+   // setup the architecture state.
+-  stack_size_ = v8_flags.sim_stack_size * KB;
+-  stack_ = reinterpret_cast<char*>(malloc(stack_size_));
++  stack_ = reinterpret_cast<uint8_t*>(base::Malloc(AllocatedStackSize()));
+   pc_modified_ = false;
+   icount_ = 0;
+   break_count_ = 0;
+@@ -2400,7 +2399,7 @@ Simulator::Simulator(Isolate* isolate) : isolate_(isolate), builtins_(isolate) {
+   // The sp is initialized to point to the bottom (high address) of the
+   // allocated stack area. To be safe in potential stack underflows we leave
+   // some buffer below.
+-  registers_[sp] = reinterpret_cast<sreg_t>(stack_) + stack_size_ - xlen;
++  registers_[sp] = reinterpret_cast<intptr_t>(stack_) + UsableStackSize();
+   // The ra and pc are initialized to a known bad value that will cause an
+   // access violation if the simulator ever tries to execute it.
+   registers_[pc] = bad_ra;
+@@ -3042,9 +3041,16 @@ uintptr_t Simulator::StackLimit(uintptr_t c_limit) const {
+     return reinterpret_cast<uintptr_t>(get_sp());
+   }
+ 
+-  // Otherwise the limit is the JS stack. Leave a safety margin of 4 KiB
+-  // to prevent overrunning the stack when pushing values.
+-  return reinterpret_cast<uintptr_t>(stack_) + 4 * KB;
++  // Otherwise the limit is the JS stack. Leave a safety margin to prevent
++  // overrunning the stack when pushing values.
++  return reinterpret_cast<uintptr_t>(stack_) + kStackProtectionSize;
++}
++
++base::Vector<uint8_t> Simulator::GetCurrentStackView() const {
++  // We do not add an additional safety margin as above in
++  // Simulator::StackLimit, as this is currently only used in wasm::StackMemory,
++  // which adds its own margin.
++  return base::VectorOf(stack_, UsableStackSize());
+ }
+ 
+ // Unsupported instructions use Format to print an error and stop execution.
+diff --git a/src/execution/riscv/simulator-riscv.h b/src/execution/riscv/simulator-riscv.h
+index 9f32b2e6f70..38ea7e41277 100644
+--- a/src/execution/riscv/simulator-riscv.h
++++ b/src/execution/riscv/simulator-riscv.h
+@@ -527,8 +527,12 @@ class Simulator : public SimulatorBase {
+ 
+   Address get_sp() const { return static_cast<Address>(get_register(sp)); }
+ 
+-  // Accessor to the internal simulator stack area.
++  // Accessor to the internal simulator stack area. Adds a safety
++  // margin to prevent overflows (kAdditionalStackMargin).
+   uintptr_t StackLimit(uintptr_t c_limit) const;
++  // Return current stack view, without additional safety margins.
++  // Users, for example wasm::StackMemory, can add their own.
++  base::Vector<uint8_t> GetCurrentStackView() const;
+ 
+   // Executes RISC-V instructions until the PC reaches end_sim_pc.
+   void Execute();
+@@ -1093,8 +1097,21 @@ class Simulator : public SimulatorBase {
+ #endif
+   // Simulator support.
+   // Allocate 1MB for stack.
+-  size_t stack_size_;
+-  char* stack_;
++  uint8_t* stack_;
++  static const size_t kStackProtectionSize = 256 * kSystemPointerSize;
++  // This includes a protection margin at each end of the stack area.
++  static size_t AllocatedStackSize() {
++#if V8_TARGET_ARCH_PPC64
++    size_t stack_size = v8_flags.sim_stack_size * KB;
++#else
++    size_t stack_size = 1 * MB;  // allocate 1MB for stack
++#endif
++    return stack_size + (2 * kStackProtectionSize);
++  }
++  static size_t UsableStackSize() {
++    return AllocatedStackSize() - kStackProtectionSize;
++  }
++
+   bool pc_modified_;
+   int64_t icount_;
+   sreg_t* watch_address_ = nullptr;
+-- 
+2.35.1
+

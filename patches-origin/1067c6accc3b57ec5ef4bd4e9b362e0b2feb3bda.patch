@@ -1,0 +1,1635 @@
+From 1067c6accc3b57ec5ef4bd4e9b362e0b2feb3bda Mon Sep 17 00:00:00 2001
+From: "ishell@chromium.org" <ishell@chromium.org>
+Date: Mon, 8 Aug 2022 13:40:32 +0200
+Subject: [PATCH] [ext-code-space] Add InterpreterEntryTrampolineForProfiling
+ builtin
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+... - a code range size agnostic version of InterpreterEntryTrampoline
+builtin. The new builtin is fully compatible with the default version
+and used as a template for creating interpreter entry trampoline
+Code objects when --interpreted-frames-native-stack is enabled.
+
+This CL introduces a new assembler option "position_independent_code"
+which affects the way builtin calls are generated.
+This mode is enabled only for InterpreterEntryTrampolineForProfiling.
+
+Motivation:
+
+* InterpreterEntryTrampoline uses RelocInfo::CODE_TARGET for calling
+  other builtins which requires the code range to be small enough to
+  allow PC-relative jumps/calls between Code objects. This is the
+  reason why --interpreted-frames-native-stack was not supported on
+  arm and might not work on arm64 because the code range is bigger
+  than the max PC-relative distance for call/jump instructions.
+  The new builtin calls other builtins via builtins entry table which
+  makes the code fully relocatable and usable for any code range size.
+
+* RelocInfo::CODE_TARGET requires a target code to be materialized
+  as a Code object which contradicts the Code-less builtins goal.
+
+* The --interpreted-frames-native-stack is rarely used in the wild but
+  we have to pay the price of deserializing InterpreterEntryTrampoline
+  builtin as a Code object which consumes address space in the code
+  range and thus limits the number of V8 isolates that can be created
+  because of code range exhaustion. Now the pointer compression cage
+  becomes the limiting factor instead of the code range.
+
+* We can remove complicated logic of Factory::CopyCode() and respective
+  support on GC side.
+
+Bug: v8:11880, v8:8713, v8:12592
+Change-Id: Ib72e28c03496c43db42f6fe46622def12e102f31
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3811287
+Reviewed-by: Jakob Linke <jgruber@chromium.org>
+Commit-Queue: Igor Sheludko <ishell@chromium.org>
+Reviewed-by: Dominik Inführ <dinfuehr@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#82263}
+---
+ src/builtins/arm/builtins-arm.cc           | 17 ++++++-
+ src/builtins/arm64/builtins-arm64.cc       | 18 ++++++-
+ src/builtins/builtins-definitions.h        |  1 +
+ src/builtins/builtins-interpreter-gen.cc   | 11 ++++
+ src/builtins/builtins.cc                   | 58 ++++++++++++++++++----
+ src/builtins/builtins.h                    | 27 ++++++++--
+ src/builtins/ia32/builtins-ia32.cc         | 17 ++++++-
+ src/builtins/loong64/builtins-loong64.cc   | 17 ++++++-
+ src/builtins/mips/builtins-mips.cc         | 17 ++++++-
+ src/builtins/mips64/builtins-mips64.cc     | 17 ++++++-
+ src/builtins/ppc/builtins-ppc.cc           | 16 +++++-
+ src/builtins/riscv/builtins-riscv.cc       | 17 ++++++-
+ src/builtins/s390/builtins-s390.cc         | 16 +++++-
+ src/builtins/setup-builtins-internal.cc    |  9 ++++
+ src/builtins/x64/builtins-x64.cc           | 17 ++++++-
+ src/codegen/arm/macro-assembler-arm.cc     | 46 ++++++++++-------
+ src/codegen/arm64/macro-assembler-arm64.cc | 41 +++++++++++----
+ src/codegen/assembler.h                    | 16 ++++++
+ src/codegen/compiler.cc                    |  4 +-
+ src/codegen/ia32/macro-assembler-ia32.cc   | 46 ++++++++++++-----
+ src/codegen/ia32/macro-assembler-ia32.h    |  1 +
+ src/codegen/x64/macro-assembler-x64.cc     | 52 ++++++++++++-------
+ src/diagnostics/disassembler.cc            |  3 +-
+ src/execution/isolate.cc                   | 19 -------
+ src/flags/flag-definitions.h               | 11 ----
+ src/heap/factory.cc                        | 46 -----------------
+ src/heap/factory.h                         |  2 -
+ src/heap/heap.cc                           |  5 --
+ src/heap/heap.h                            |  8 ---
+ src/heap/setup-heap-internal.cc            |  2 -
+ src/roots/roots.h                          |  2 -
+ src/snapshot/code-serializer.cc            | 14 ++----
+ src/snapshot/embedded/embedded-data-inl.h  |  7 +--
+ src/snapshot/embedded/embedded-data.cc     | 35 +++++++++++++
+ src/snapshot/serializer.h                  |  2 -
+ src/snapshot/startup-serializer.cc         | 32 +-----------
+ test/cctest/heap/test-heap.cc              | 41 +--------------
+ test/cctest/test-serialize.cc              |  2 -
+ test/unittests/logging/log-unittest.cc     |  3 --
+ 39 files changed, 438 insertions(+), 277 deletions(-)
+
+diff --git a/src/builtins/arm/builtins-arm.cc b/src/builtins/arm/builtins-arm.cc
+index f9a58ac8194..f338affdd6b 100644
+--- a/src/builtins/arm/builtins-arm.cc
++++ b/src/builtins/arm/builtins-arm.cc
+@@ -1248,7 +1248,8 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+ //
+ // The function builds an interpreter frame. See InterpreterFrameConstants in
+ // frame-constants.h for its layout.
+-void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
++void Builtins::Generate_InterpreterEntryTrampoline(
++    MacroAssembler* masm, InterpreterEntryTrampolineMode mode) {
+   Register closure = r1;
+   Register feedback_vector = r2;
+ 
+@@ -1377,7 +1378,19 @@ void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
+       kJavaScriptCallCodeStartRegister,
+       MemOperand(kInterpreterDispatchTableRegister, r4, LSL, kPointerSizeLog2));
+   __ Call(kJavaScriptCallCodeStartRegister);
+-  masm->isolate()->heap()->SetInterpreterEntryReturnPCOffset(masm->pc_offset());
++
++  __ RecordComment("--- InterpreterEntryReturnPC point ---");
++  if (mode == InterpreterEntryTrampolineMode::kDefault) {
++    masm->isolate()->heap()->SetInterpreterEntryReturnPCOffset(
++        masm->pc_offset());
++  } else {
++    DCHECK_EQ(mode, InterpreterEntryTrampolineMode::kForProfiling);
++    // Both versions must be the same up to this point otherwise the builtins
++    // will not be interchangable.
++    CHECK_EQ(
++        masm->isolate()->heap()->interpreter_entry_return_pc_offset().value(),
++        masm->pc_offset());
++  }
+ 
+   // Any returns to the entry trampoline are either due to the return bytecode
+   // or the interpreter tail calling a builtin and then a dispatch.
+diff --git a/src/builtins/arm64/builtins-arm64.cc b/src/builtins/arm64/builtins-arm64.cc
+index 9633f77e92f..baa62b267ae 100644
+--- a/src/builtins/arm64/builtins-arm64.cc
++++ b/src/builtins/arm64/builtins-arm64.cc
+@@ -1403,7 +1403,8 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+ //
+ // The function builds an interpreter frame. See InterpreterFrameConstants in
+ // frame-constants.h for its layout.
+-void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
++void Builtins::Generate_InterpreterEntryTrampoline(
++    MacroAssembler* masm, InterpreterEntryTrampolineMode mode) {
+   Register closure = x1;
+   Register feedback_vector = x2;
+ 
+@@ -1550,9 +1551,22 @@ void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
+          MemOperand(kInterpreterDispatchTableRegister, x1));
+   __ Call(kJavaScriptCallCodeStartRegister);
+ 
++  __ RecordComment("--- InterpreterEntryReturnPC point ---");
++  if (mode == InterpreterEntryTrampolineMode::kDefault) {
++    masm->isolate()->heap()->SetInterpreterEntryReturnPCOffset(
++        masm->pc_offset());
++  } else {
++    DCHECK_EQ(mode, InterpreterEntryTrampolineMode::kForProfiling);
++    // Both versions must be the same up to this point otherwise the builtins
++    // will not be interchangable.
++    CHECK_EQ(
++        masm->isolate()->heap()->interpreter_entry_return_pc_offset().value(),
++        masm->pc_offset());
++  }
++
+   // Any returns to the entry trampoline are either due to the return bytecode
+   // or the interpreter tail calling a builtin and then a dispatch.
+-  masm->isolate()->heap()->SetInterpreterEntryReturnPCOffset(masm->pc_offset());
++
+   __ JumpTarget();
+ 
+   // Get bytecode array and bytecode offset from the stack frame.
+diff --git a/src/builtins/builtins-definitions.h b/src/builtins/builtins-definitions.h
+index 6d850f445f0..641838adbc6 100644
+--- a/src/builtins/builtins-definitions.h
++++ b/src/builtins/builtins-definitions.h
+@@ -174,6 +174,7 @@ namespace internal {
+   /* InterpreterEntryTrampoline dispatches to the interpreter to run a */      \
+   /* JSFunction in the form of bytecodes */                                    \
+   ASM(InterpreterEntryTrampoline, JSTrampoline)                                \
++  ASM(InterpreterEntryTrampolineForProfiling, JSTrampoline)                    \
+   ASM(InterpreterPushArgsThenCall, InterpreterPushArgsThenCall)                \
+   ASM(InterpreterPushUndefinedAndArgsThenCall, InterpreterPushArgsThenCall)    \
+   ASM(InterpreterPushArgsThenCallWithFinalSpread, InterpreterPushArgsThenCall) \
+diff --git a/src/builtins/builtins-interpreter-gen.cc b/src/builtins/builtins-interpreter-gen.cc
+index d01fbe98f72..c5160416577 100644
+--- a/src/builtins/builtins-interpreter-gen.cc
++++ b/src/builtins/builtins-interpreter-gen.cc
+@@ -9,6 +9,17 @@
+ namespace v8 {
+ namespace internal {
+ 
++void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
++  Generate_InterpreterEntryTrampoline(masm,
++                                      InterpreterEntryTrampolineMode::kDefault);
++}
++
++void Builtins::Generate_InterpreterEntryTrampolineForProfiling(
++    MacroAssembler* masm) {
++  Generate_InterpreterEntryTrampoline(
++      masm, InterpreterEntryTrampolineMode::kForProfiling);
++}
++
+ void Builtins::Generate_InterpreterPushArgsThenCall(MacroAssembler* masm) {
+   return Generate_InterpreterPushArgsThenCallImpl(
+       masm, ConvertReceiverMode::kAny, InterpreterPushArgsMode::kOther);
+diff --git a/src/builtins/builtins.cc b/src/builtins/builtins.cc
+index 14616ea820a..ed875acc2c8 100644
+--- a/src/builtins/builtins.cc
++++ b/src/builtins/builtins.cc
+@@ -301,13 +301,6 @@ bool Builtins::IsBuiltinHandle(Handle<HeapObject> maybe_code,
+   return true;
+ }
+ 
+-// static
+-bool Builtins::IsIsolateIndependentBuiltin(const Code code) {
+-  const Builtin builtin = code.builtin_id();
+-  return Builtins::IsBuiltinId(builtin) &&
+-         Builtins::IsIsolateIndependent(builtin);
+-}
+-
+ // static
+ void Builtins::InitializeIsolateDataTables(Isolate* isolate) {
+   EmbeddedData embedded_data = EmbeddedData::FromBlob(isolate);
+@@ -408,7 +401,7 @@ constexpr int OffHeapTrampolineGenerator::kBufferSize;
+ 
+ // static
+ Handle<Code> Builtins::GenerateOffHeapTrampolineFor(
+-    Isolate* isolate, Address off_heap_entry, int32_t kind_specfic_flags,
++    Isolate* isolate, Address off_heap_entry, int32_t kind_specific_flags,
+     bool generate_jump_to_instruction_stream) {
+   DCHECK_NOT_NULL(isolate->embedded_blob_code());
+   DCHECK_NE(0, isolate->embedded_blob_code_size());
+@@ -421,7 +414,7 @@ Handle<Code> Builtins::GenerateOffHeapTrampolineFor(
+                                              : TrampolineType::kAbort);
+ 
+   return Factory::CodeBuilder(isolate, desc, CodeKind::BUILTIN)
+-      .set_kind_specific_flags(kind_specfic_flags)
++      .set_kind_specific_flags(kind_specific_flags)
+       .set_read_only_data_container(!V8_EXTERNAL_CODE_SPACE_BOOL)
+       .set_self_reference(generator.CodeObject())
+       .set_is_executable(generate_jump_to_instruction_stream)
+@@ -443,6 +436,53 @@ Handle<ByteArray> Builtins::GenerateOffHeapTrampolineRelocInfo(
+   return reloc_info;
+ }
+ 
++// static
++Handle<Code> Builtins::CreateInterpreterEntryTrampolineForProfiling(
++    Isolate* isolate) {
++  DCHECK_NOT_NULL(isolate->embedded_blob_code());
++  DCHECK_NE(0, isolate->embedded_blob_code_size());
++
++  EmbeddedData d = EmbeddedData::FromBlob(isolate);
++  const Builtin builtin = Builtin::kInterpreterEntryTrampolineForProfiling;
++
++  CodeDesc desc;
++  desc.buffer = reinterpret_cast<byte*>(d.InstructionStartOfBuiltin(builtin));
++
++  int instruction_size = d.InstructionSizeOfBuiltin(builtin);
++  desc.buffer_size = instruction_size;
++  desc.instr_size = instruction_size;
++
++  // Ensure the code doesn't require creation of metadata, otherwise respective
++  // fields of CodeDesc should be initialized.
++  DCHECK_EQ(d.SafepointTableSizeOf(builtin), 0);
++  DCHECK_EQ(d.HandlerTableSizeOf(builtin), 0);
++  DCHECK_EQ(d.ConstantPoolSizeOf(builtin), 0);
++  DCHECK_EQ(d.CodeCommentsSizeOf(builtin), 0);
++  DCHECK_EQ(d.UnwindingInfoSizeOf(builtin), 0);
++
++  desc.safepoint_table_offset = instruction_size;
++  desc.handler_table_offset = instruction_size;
++  desc.constant_pool_offset = instruction_size;
++  desc.code_comments_offset = instruction_size;
++
++  CodeDesc::Verify(&desc);
++
++  int kind_specific_flags;
++  {
++    CodeT code = isolate->builtins()->code(builtin);
++    kind_specific_flags =
++        CodeDataContainerFromCodeT(code).kind_specific_flags(kRelaxedLoad);
++  }
++
++  return Factory::CodeBuilder(isolate, desc, CodeKind::BUILTIN)
++      .set_kind_specific_flags(kind_specific_flags)
++      .set_read_only_data_container(false)
++      // Mimic the InterpreterEntryTrampoline.
++      .set_builtin(Builtin::kInterpreterEntryTrampoline)
++      .set_is_executable(true)
++      .Build();
++}
++
+ Builtins::Kind Builtins::KindOf(Builtin builtin) {
+   DCHECK(IsBuiltinId(builtin));
+   return builtin_metadata[ToInt(builtin)].kind;
+diff --git a/src/builtins/builtins.h b/src/builtins/builtins.h
+index b015cb08698..4163ab30f13 100644
+--- a/src/builtins/builtins.h
++++ b/src/builtins/builtins.h
+@@ -180,9 +180,6 @@ class Builtins {
+   // by handle location. Similar to Heap::IsRootHandle.
+   bool IsBuiltinHandle(Handle<HeapObject> maybe_code, Builtin* index) const;
+ 
+-  // True, iff the given code object is a builtin with off-heap embedded code.
+-  static bool IsIsolateIndependentBuiltin(const Code code);
+-
+   // True, iff the given builtin contains no isolate-specific code and can be
+   // embedded into the binary.
+   static constexpr bool kAllBuiltinsAreIsolateIndependent = true;
+@@ -194,6 +191,14 @@ class Builtins {
+     return kAllBuiltinsAreIsolateIndependent;
+   }
+ 
++  // True, iff the given code object is a builtin with off-heap embedded code.
++  template <typename CodeOrCodeT>
++  static bool IsIsolateIndependentBuiltin(CodeOrCodeT code) {
++    Builtin builtin = code.builtin_id();
++    return Builtins::IsBuiltinId(builtin) &&
++           Builtins::IsIsolateIndependent(builtin);
++  }
++
+   static void InitializeIsolateDataTables(Isolate* isolate);
+ 
+   // Emits a CodeCreateEvent for every builtin.
+@@ -234,6 +239,10 @@ class Builtins {
+   // trampoline.
+   static Handle<ByteArray> GenerateOffHeapTrampolineRelocInfo(Isolate* isolate);
+ 
++  // Creates a copy of InterpreterEntryTrampolineForProfiling in the code space.
++  static Handle<Code> CreateInterpreterEntryTrampolineForProfiling(
++      Isolate* isolate);
++
+   // Only builtins with JS linkage should ever need to be called via their
+   // trampoline Code object. The remaining builtins have non-executable Code
+   // objects.
+@@ -284,6 +293,18 @@ class Builtins {
+                                                      CallOrConstructMode mode,
+                                                      Handle<CodeT> code);
+ 
++  enum class InterpreterEntryTrampolineMode {
++    // The version of InterpreterEntryTrampoline used by default.
++    kDefault,
++    // The position independent version of InterpreterEntryTrampoline used as
++    // a template to create copies of the builtin at runtime. The copies are
++    // used to create better profiling information for ticks in bytecode
++    // execution. See FLAG_interpreted_frames_native_stack for details.
++    kForProfiling
++  };
++  static void Generate_InterpreterEntryTrampoline(
++      MacroAssembler* masm, InterpreterEntryTrampolineMode mode);
++
+   static void Generate_InterpreterPushArgsThenCallImpl(
+       MacroAssembler* masm, ConvertReceiverMode receiver_mode,
+       InterpreterPushArgsMode mode);
+diff --git a/src/builtins/ia32/builtins-ia32.cc b/src/builtins/ia32/builtins-ia32.cc
+index 10641c53f5e..6cca345bfaa 100644
+--- a/src/builtins/ia32/builtins-ia32.cc
++++ b/src/builtins/ia32/builtins-ia32.cc
+@@ -1064,7 +1064,8 @@ void ResetFeedbackVectorOsrUrgency(MacroAssembler* masm,
+ //
+ // The function builds an interpreter frame. See InterpreterFrameConstants in
+ // frame-constants.h for its layout.
+-void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
++void Builtins::Generate_InterpreterEntryTrampoline(
++    MacroAssembler* masm, InterpreterEntryTrampolineMode mode) {
+   Register closure = edi;
+ 
+   __ movd(xmm0, eax);  // Spill actual argument count.
+@@ -1214,7 +1215,19 @@ void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
+          Operand(kInterpreterDispatchTableRegister, ecx,
+                  times_system_pointer_size, 0));
+   __ call(kJavaScriptCallCodeStartRegister);
+-  masm->isolate()->heap()->SetInterpreterEntryReturnPCOffset(masm->pc_offset());
++
++  __ RecordComment("--- InterpreterEntryReturnPC point ---");
++  if (mode == InterpreterEntryTrampolineMode::kDefault) {
++    masm->isolate()->heap()->SetInterpreterEntryReturnPCOffset(
++        masm->pc_offset());
++  } else {
++    DCHECK_EQ(mode, InterpreterEntryTrampolineMode::kForProfiling);
++    // Both versions must be the same up to this point otherwise the builtins
++    // will not be interchangable.
++    CHECK_EQ(
++        masm->isolate()->heap()->interpreter_entry_return_pc_offset().value(),
++        masm->pc_offset());
++  }
+ 
+   // Any returns to the entry trampoline are either due to the return bytecode
+   // or the interpreter tail calling a builtin and then a dispatch.
+diff --git a/src/builtins/loong64/builtins-loong64.cc b/src/builtins/loong64/builtins-loong64.cc
+index 8f6b82f3790..a9f79928ab3 100644
+--- a/src/builtins/loong64/builtins-loong64.cc
++++ b/src/builtins/loong64/builtins-loong64.cc
+@@ -1217,7 +1217,8 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+ //
+ // The function builds an interpreter frame.  See InterpreterFrameConstants in
+ // frame-constants.h for its layout.
+-void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
++void Builtins::Generate_InterpreterEntryTrampoline(
++    MacroAssembler* masm, InterpreterEntryTrampolineMode mode) {
+   Register closure = a1;
+   Register feedback_vector = a2;
+ 
+@@ -1350,7 +1351,19 @@ void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
+             kPointerSizeLog2, t7);
+   __ Ld_d(kJavaScriptCallCodeStartRegister, MemOperand(kScratchReg, 0));
+   __ Call(kJavaScriptCallCodeStartRegister);
+-  masm->isolate()->heap()->SetInterpreterEntryReturnPCOffset(masm->pc_offset());
++
++  __ RecordComment("--- InterpreterEntryReturnPC point ---");
++  if (mode == InterpreterEntryTrampolineMode::kDefault) {
++    masm->isolate()->heap()->SetInterpreterEntryReturnPCOffset(
++        masm->pc_offset());
++  } else {
++    DCHECK_EQ(mode, InterpreterEntryTrampolineMode::kForProfiling);
++    // Both versions must be the same up to this point otherwise the builtins
++    // will not be interchangable.
++    CHECK_EQ(
++        masm->isolate()->heap()->interpreter_entry_return_pc_offset().value(),
++        masm->pc_offset());
++  }
+ 
+   // Any returns to the entry trampoline are either due to the return bytecode
+   // or the interpreter tail calling a builtin and then a dispatch.
+diff --git a/src/builtins/mips/builtins-mips.cc b/src/builtins/mips/builtins-mips.cc
+index 136d1ef6e0e..89134c78e44 100644
+--- a/src/builtins/mips/builtins-mips.cc
++++ b/src/builtins/mips/builtins-mips.cc
+@@ -1213,7 +1213,8 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+ //
+ // The function builds an interpreter frame.  See InterpreterFrameConstants in
+ // frame-constants.h for its layout.
+-void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
++void Builtins::Generate_InterpreterEntryTrampoline(
++    MacroAssembler* masm, InterpreterEntryTrampolineMode mode) {
+   Register closure = a1;
+   Register feedback_vector = a2;
+ 
+@@ -1342,7 +1343,19 @@ void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
+   __ Lsa(kScratchReg, kInterpreterDispatchTableRegister, t3, kPointerSizeLog2);
+   __ lw(kJavaScriptCallCodeStartRegister, MemOperand(kScratchReg));
+   __ Call(kJavaScriptCallCodeStartRegister);
+-  masm->isolate()->heap()->SetInterpreterEntryReturnPCOffset(masm->pc_offset());
++
++  __ RecordComment("--- InterpreterEntryReturnPC point ---");
++  if (mode == InterpreterEntryTrampolineMode::kDefault) {
++    masm->isolate()->heap()->SetInterpreterEntryReturnPCOffset(
++        masm->pc_offset());
++  } else {
++    DCHECK_EQ(mode, InterpreterEntryTrampolineMode::kForProfiling);
++    // Both versions must be the same up to this point otherwise the builtins
++    // will not be interchangable.
++    CHECK_EQ(
++        masm->isolate()->heap()->interpreter_entry_return_pc_offset().value(),
++        masm->pc_offset());
++  }
+ 
+   // Any returns to the entry trampoline are either due to the return bytecode
+   // or the interpreter tail calling a builtin and then a dispatch.
+diff --git a/src/builtins/mips64/builtins-mips64.cc b/src/builtins/mips64/builtins-mips64.cc
+index 71d7d719cac..74e07f2a6f0 100644
+--- a/src/builtins/mips64/builtins-mips64.cc
++++ b/src/builtins/mips64/builtins-mips64.cc
+@@ -1220,7 +1220,8 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+ //
+ // The function builds an interpreter frame.  See InterpreterFrameConstants in
+ // frame-constants.h for its layout.
+-void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
++void Builtins::Generate_InterpreterEntryTrampoline(
++    MacroAssembler* masm, InterpreterEntryTrampolineMode mode) {
+   Register closure = a1;
+   Register feedback_vector = a2;
+ 
+@@ -1349,7 +1350,19 @@ void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
+   __ Dlsa(kScratchReg, kInterpreterDispatchTableRegister, a7, kPointerSizeLog2);
+   __ Ld(kJavaScriptCallCodeStartRegister, MemOperand(kScratchReg));
+   __ Call(kJavaScriptCallCodeStartRegister);
+-  masm->isolate()->heap()->SetInterpreterEntryReturnPCOffset(masm->pc_offset());
++
++  __ RecordComment("--- InterpreterEntryReturnPC point ---");
++  if (mode == InterpreterEntryTrampolineMode::kDefault) {
++    masm->isolate()->heap()->SetInterpreterEntryReturnPCOffset(
++        masm->pc_offset());
++  } else {
++    DCHECK_EQ(mode, InterpreterEntryTrampolineMode::kForProfiling);
++    // Both versions must be the same up to this point otherwise the builtins
++    // will not be interchangable.
++    CHECK_EQ(
++        masm->isolate()->heap()->interpreter_entry_return_pc_offset().value(),
++        masm->pc_offset());
++  }
+ 
+   // Any returns to the entry trampoline are either due to the return bytecode
+   // or the interpreter tail calling a builtin and then a dispatch.
+diff --git a/src/builtins/ppc/builtins-ppc.cc b/src/builtins/ppc/builtins-ppc.cc
+index acd20244df1..3b330e77f86 100644
+--- a/src/builtins/ppc/builtins-ppc.cc
++++ b/src/builtins/ppc/builtins-ppc.cc
+@@ -1509,7 +1509,8 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+ //
+ // The function builds an interpreter frame.  See InterpreterFrameConstants in
+ // frame-constants.h for its layout.
+-void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
++void Builtins::Generate_InterpreterEntryTrampoline(
++    MacroAssembler* masm, InterpreterEntryTrampolineMode mode) {
+   Register closure = r4;
+   Register feedback_vector = r5;
+ 
+@@ -1657,7 +1658,18 @@ void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
+              MemOperand(kInterpreterDispatchTableRegister, r6));
+   __ Call(kJavaScriptCallCodeStartRegister);
+ 
+-  masm->isolate()->heap()->SetInterpreterEntryReturnPCOffset(masm->pc_offset());
++  __ RecordComment("--- InterpreterEntryReturnPC point ---");
++  if (mode == InterpreterEntryTrampolineMode::kDefault) {
++    masm->isolate()->heap()->SetInterpreterEntryReturnPCOffset(
++        masm->pc_offset());
++  } else {
++    DCHECK_EQ(mode, InterpreterEntryTrampolineMode::kForProfiling);
++    // Both versions must be the same up to this point otherwise the builtins
++    // will not be interchangable.
++    CHECK_EQ(
++        masm->isolate()->heap()->interpreter_entry_return_pc_offset().value(),
++        masm->pc_offset());
++  }
+ 
+   // Any returns to the entry trampoline are either due to the return bytecode
+   // or the interpreter tail calling a builtin and then a dispatch.
+diff --git a/src/builtins/riscv/builtins-riscv.cc b/src/builtins/riscv/builtins-riscv.cc
+index ff908cc307d..a7ca3059858 100644
+--- a/src/builtins/riscv/builtins-riscv.cc
++++ b/src/builtins/riscv/builtins-riscv.cc
+@@ -1272,7 +1272,8 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+ //
+ // The function builds an interpreter frame.  See InterpreterFrameConstants in
+ // frames-constants.h for its layout.
+-void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
++void Builtins::Generate_InterpreterEntryTrampoline(
++    MacroAssembler* masm, InterpreterEntryTrampolineMode mode) {
+   Register closure = a1;
+   Register feedback_vector = a2;
+   UseScratchRegisterScope temps(masm);
+@@ -1411,7 +1412,19 @@ void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
+                        kSystemPointerSizeLog2);
+   __ LoadWord(kJavaScriptCallCodeStartRegister, MemOperand(kScratchReg));
+   __ Call(kJavaScriptCallCodeStartRegister);
+-  masm->isolate()->heap()->SetInterpreterEntryReturnPCOffset(masm->pc_offset());
++
++  __ RecordComment("--- InterpreterEntryReturnPC point ---");
++  if (mode == InterpreterEntryTrampolineMode::kDefault) {
++    masm->isolate()->heap()->SetInterpreterEntryReturnPCOffset(
++        masm->pc_offset());
++  } else {
++    DCHECK_EQ(mode, InterpreterEntryTrampolineMode::kForProfiling);
++    // Both versions must be the same up to this point otherwise the builtins
++    // will not be interchangable.
++    CHECK_EQ(
++        masm->isolate()->heap()->interpreter_entry_return_pc_offset().value(),
++        masm->pc_offset());
++  }
+ 
+   // Any returns to the entry trampoline are either due to the return bytecode
+   // or the interpreter tail calling a builtin and then a dispatch.
+diff --git a/src/builtins/s390/builtins-s390.cc b/src/builtins/s390/builtins-s390.cc
+index 89e5776f9fb..2acc8975fcd 100644
+--- a/src/builtins/s390/builtins-s390.cc
++++ b/src/builtins/s390/builtins-s390.cc
+@@ -1542,7 +1542,8 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+ //
+ // The function builds an interpreter frame.  See InterpreterFrameConstants in
+ // frame-constants.h for its layout.
+-void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
++void Builtins::Generate_InterpreterEntryTrampoline(
++    MacroAssembler* masm, InterpreterEntryTrampolineMode mode) {
+   Register closure = r3;
+   Register feedback_vector = r4;
+ 
+@@ -1684,7 +1685,18 @@ void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
+              MemOperand(kInterpreterDispatchTableRegister, r5));
+   __ Call(kJavaScriptCallCodeStartRegister);
+ 
+-  masm->isolate()->heap()->SetInterpreterEntryReturnPCOffset(masm->pc_offset());
++  __ RecordComment("--- InterpreterEntryReturnPC point ---");
++  if (mode == InterpreterEntryTrampolineMode::kDefault) {
++    masm->isolate()->heap()->SetInterpreterEntryReturnPCOffset(
++        masm->pc_offset());
++  } else {
++    DCHECK_EQ(mode, InterpreterEntryTrampolineMode::kForProfiling);
++    // Both versions must be the same up to this point otherwise the builtins
++    // will not be interchangable.
++    CHECK_EQ(
++        masm->isolate()->heap()->interpreter_entry_return_pc_offset().value(),
++        masm->pc_offset());
++  }
+ 
+   // Any returns to the entry trampoline are either due to the return bytecode
+   // or the interpreter tail calling a builtin and then a dispatch.
+diff --git a/src/builtins/setup-builtins-internal.cc b/src/builtins/setup-builtins-internal.cc
+index 499e0cb1fea..7469f2c1b6b 100644
+--- a/src/builtins/setup-builtins-internal.cc
++++ b/src/builtins/setup-builtins-internal.cc
+@@ -53,6 +53,15 @@ AssemblerOptions BuiltinAssemblerOptions(Isolate* isolate, Builtin builtin) {
+   options.use_pc_relative_calls_and_jumps = pc_relative_calls_fit_in_code_range;
+   options.collect_win64_unwind_info = true;
+ 
++  if (builtin == Builtin::kInterpreterEntryTrampolineForProfiling) {
++    // InterpreterEntryTrampolineForProfiling must be generated in a position
++    // independent way because it might be necessary to create a copy of the
++    // builtin in the code space if the FLAG_interpreted_frames_native_stack is
++    // enabled.
++    options.short_builtin_calls = false;
++    options.builtin_calls_as_table_load = true;
++  }
++
+   return options;
+ }
+ 
+diff --git a/src/builtins/x64/builtins-x64.cc b/src/builtins/x64/builtins-x64.cc
+index 7b58356d318..740280f1ba7 100644
+--- a/src/builtins/x64/builtins-x64.cc
++++ b/src/builtins/x64/builtins-x64.cc
+@@ -1168,7 +1168,8 @@ void ResetFeedbackVectorOsrUrgency(MacroAssembler* masm,
+ //
+ // The function builds an interpreter frame. See InterpreterFrameConstants in
+ // frame-constants.h for its layout.
+-void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
++void Builtins::Generate_InterpreterEntryTrampoline(
++    MacroAssembler* masm, InterpreterEntryTrampolineMode mode) {
+   Register closure = rdi;
+   Register feedback_vector = rbx;
+ 
+@@ -1304,7 +1305,19 @@ void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
+           Operand(kInterpreterDispatchTableRegister, kScratchRegister,
+                   times_system_pointer_size, 0));
+   __ call(kJavaScriptCallCodeStartRegister);
+-  masm->isolate()->heap()->SetInterpreterEntryReturnPCOffset(masm->pc_offset());
++
++  __ RecordComment("--- InterpreterEntryReturnPC point ---");
++  if (mode == InterpreterEntryTrampolineMode::kDefault) {
++    masm->isolate()->heap()->SetInterpreterEntryReturnPCOffset(
++        masm->pc_offset());
++  } else {
++    DCHECK_EQ(mode, InterpreterEntryTrampolineMode::kForProfiling);
++    // Both versions must be the same up to this point otherwise the builtins
++    // will not be interchangable.
++    CHECK_EQ(
++        masm->isolate()->heap()->interpreter_entry_return_pc_offset().value(),
++        masm->pc_offset());
++  }
+ 
+   // Any returns to the entry trampoline are either due to the return bytecode
+   // or the interpreter tail calling a builtin and then a dispatch.
+diff --git a/src/codegen/arm/macro-assembler-arm.cc b/src/codegen/arm/macro-assembler-arm.cc
+index dbb110e61bd..0ebdbd8e88d 100644
+--- a/src/codegen/arm/macro-assembler-arm.cc
++++ b/src/codegen/arm/macro-assembler-arm.cc
+@@ -150,11 +150,8 @@ void TurboAssembler::Jump(Handle<Code> code, RelocInfo::Mode rmode,
+     // This branch is taken only for specific cctests, where we force isolate
+     // creation at runtime. At this point, Code space isn't restricted to a
+     // size s.t. pc-relative calls may be used.
+-    UseScratchRegisterScope temps(this);
+-    Register scratch = temps.Acquire();
+-    int offset = IsolateData::BuiltinEntrySlotOffset(code->builtin_id());
+-    ldr(scratch, MemOperand(kRootRegister, offset));
+-    Jump(scratch, cond);
++    ldr(ip, EntryFromBuiltinAsOperand(code->builtin_id()));
++    Jump(ip, cond);
+     return;
+   } else if (options().inline_offheap_trampolines && target_is_builtin) {
+     // Inline the trampoline.
+@@ -230,8 +227,11 @@ void TurboAssembler::Call(Handle<Code> code, RelocInfo::Mode rmode,
+   Builtin builtin = Builtin::kNoBuiltinId;
+   bool target_is_builtin =
+       isolate()->builtins()->IsBuiltinHandle(code, &builtin);
+-
+-  if (target_is_builtin && options().use_pc_relative_calls_and_jumps) {
++  if (target_is_builtin && options().builtin_calls_as_table_load) {
++    ldr(ip, EntryFromBuiltinAsOperand(builtin));
++    Call(ip, cond);
++    return;
++  } else if (target_is_builtin && options().use_pc_relative_calls_and_jumps) {
+     int32_t code_target_index = AddCodeTarget(code);
+     bl(code_target_index * kInstrSize, cond, RelocInfo::RELATIVE_CODE_TARGET);
+     return;
+@@ -239,8 +239,7 @@ void TurboAssembler::Call(Handle<Code> code, RelocInfo::Mode rmode,
+     // This branch is taken only for specific cctests, where we force isolate
+     // creation at runtime. At this point, Code space isn't restricted to a
+     // size s.t. pc-relative calls may be used.
+-    int offset = IsolateData::BuiltinEntrySlotOffset(code->builtin_id());
+-    ldr(ip, MemOperand(kRootRegister, offset));
++    ldr(ip, EntryFromBuiltinAsOperand(builtin));
+     Call(ip, cond);
+     return;
+   } else if (target_is_builtin && options().inline_offheap_trampolines) {
+@@ -290,11 +289,15 @@ MemOperand TurboAssembler::EntryFromBuiltinAsOperand(Builtin builtin) {
+ 
+ void TurboAssembler::CallBuiltin(Builtin builtin, Condition cond) {
+   ASM_CODE_COMMENT_STRING(this, CommentForOffHeapTrampoline("call", builtin));
+-  DCHECK(Builtins::IsBuiltinId(builtin));
+   // Use ip directly instead of using UseScratchRegisterScope, as we do not
+   // preserve scratch registers across calls.
+-  mov(ip, Operand(BuiltinEntry(builtin), RelocInfo::OFF_HEAP_TARGET));
+-  Call(ip, cond);
++  if (options().builtin_calls_as_table_load) {
++    LoadEntryFromBuiltin(builtin, ip);
++    Call(ip, cond);
++  } else {
++    mov(ip, Operand(BuiltinEntry(builtin), RelocInfo::OFF_HEAP_TARGET));
++    Call(ip, cond);
++  }
+ }
+ 
+ void TurboAssembler::LoadCodeObjectEntry(Register destination,
+@@ -734,7 +737,8 @@ void TurboAssembler::CallRecordWriteStub(Register object, Register slot_address,
+ #endif
+   } else {
+     Builtin builtin = Builtins::GetRecordWriteStub(fp_mode);
+-    if (options().inline_offheap_trampolines) {
++    if (options().inline_offheap_trampolines ||
++        options().builtin_calls_as_table_load) {
+       CallBuiltin(builtin);
+     } else {
+       Handle<Code> code_target = isolate()->builtins()->code_handle(builtin);
+@@ -2165,14 +2169,20 @@ void TurboAssembler::Abort(AbortReason reason) {
+ 
+   Move(r1, Smi::FromInt(static_cast<int>(reason)));
+ 
+-  // Disable stub call restrictions to always allow calls to abort.
+-  if (!has_frame()) {
++  {
+     // We don't actually want to generate a pile of code for this, so just
+     // claim there is a stack frame, without generating one.
+     FrameScope scope(this, StackFrame::NO_FRAME_TYPE);
+-    Call(BUILTIN_CODE(isolate(), Abort), RelocInfo::CODE_TARGET);
+-  } else {
+-    Call(BUILTIN_CODE(isolate(), Abort), RelocInfo::CODE_TARGET);
++    if (root_array_available()) {
++      // Generate an indirect call via builtins entry table here in order to
++      // ensure that the interpreter_entry_return_pc_offset is the same for
++      // InterpreterEntryTrampoline and InterpreterEntryTrampolineForProfiling
++      // when FLAG_debug_code is enabled.
++      LoadEntryFromBuiltin(Builtin::kAbort, ip);
++      Call(ip);
++    } else {
++      Call(BUILTIN_CODE(isolate(), Abort), RelocInfo::CODE_TARGET);
++    }
+   }
+   // will not return here
+ }
+diff --git a/src/codegen/arm64/macro-assembler-arm64.cc b/src/codegen/arm64/macro-assembler-arm64.cc
+index 25aa9fe553a..1400574aab5 100644
+--- a/src/codegen/arm64/macro-assembler-arm64.cc
++++ b/src/codegen/arm64/macro-assembler-arm64.cc
+@@ -1906,7 +1906,7 @@ void TurboAssembler::Jump(Handle<CodeT> code, RelocInfo::Mode rmode,
+                           Condition cond) {
+   DCHECK(RelocInfo::IsCodeTarget(rmode));
+   DCHECK_IMPLIES(options().isolate_independent_code,
+-                 Builtins::IsIsolateIndependentBuiltin(FromCodeT(*code)));
++                 Builtins::IsIsolateIndependentBuiltin(*code));
+ 
+   if (options().inline_offheap_trampolines) {
+     Builtin builtin = Builtin::kNoBuiltinId;
+@@ -1917,6 +1917,8 @@ void TurboAssembler::Jump(Handle<CodeT> code, RelocInfo::Mode rmode,
+       return;
+     }
+   }
++  DCHECK(RelocInfo::IsCodeTarget(rmode));
++  DCHECK(!options().builtin_calls_as_table_load);
+ 
+   if (CanUseNearCallOrJump(rmode)) {
+     EmbeddedObjectIndex index = AddEmbeddedObject(code);
+@@ -1952,10 +1954,11 @@ void TurboAssembler::Call(Address target, RelocInfo::Mode rmode) {
+ 
+ void TurboAssembler::Call(Handle<CodeT> code, RelocInfo::Mode rmode) {
+   DCHECK_IMPLIES(options().isolate_independent_code,
+-                 Builtins::IsIsolateIndependentBuiltin(FromCodeT(*code)));
++                 Builtins::IsIsolateIndependentBuiltin(*code));
+   BlockPoolsScope scope(this);
+ 
+-  if (options().inline_offheap_trampolines) {
++  if (options().inline_offheap_trampolines ||
++      options().builtin_calls_as_table_load) {
+     Builtin builtin = Builtin::kNoBuiltinId;
+     if (isolate()->builtins()->IsBuiltinHandle(code, &builtin)) {
+       // Inline the trampoline.
+@@ -1965,6 +1968,9 @@ void TurboAssembler::Call(Handle<CodeT> code, RelocInfo::Mode rmode) {
+   }
+ 
+   DCHECK(FromCodeT(*code).IsExecutable());
++  DCHECK(RelocInfo::IsCodeTarget(rmode));
++  DCHECK(!options().builtin_calls_as_table_load);
++
+   if (CanUseNearCallOrJump(rmode)) {
+     EmbeddedObjectIndex index = AddEmbeddedObject(code);
+     DCHECK(is_int32(index));
+@@ -2033,7 +2039,11 @@ void TurboAssembler::CallBuiltin(Builtin builtin) {
+   } else {
+     UseScratchRegisterScope temps(this);
+     Register scratch = temps.AcquireX();
+-    Ldr(scratch, Operand(BuiltinEntry(builtin), RelocInfo::OFF_HEAP_TARGET));
++    if (options().builtin_calls_as_table_load) {
++      LoadEntryFromBuiltin(builtin, scratch);
++    } else {
++      Ldr(scratch, Operand(BuiltinEntry(builtin), RelocInfo::OFF_HEAP_TARGET));
++    }
+     Call(scratch);
+   }
+ }
+@@ -2058,7 +2068,11 @@ void TurboAssembler::TailCallBuiltin(Builtin builtin) {
+     // (i.e. `bti j`) landing pads for the tail-called code.
+     Register temp = x17;
+ 
+-    Ldr(temp, Operand(BuiltinEntry(builtin), RelocInfo::OFF_HEAP_TARGET));
++    if (options().builtin_calls_as_table_load) {
++      LoadEntryFromBuiltin(builtin, temp);
++    } else {
++      Ldr(temp, Operand(BuiltinEntry(builtin), RelocInfo::OFF_HEAP_TARGET));
++    }
+     Jump(temp);
+   }
+ }
+@@ -3405,13 +3419,22 @@ void TurboAssembler::Abort(AbortReason reason) {
+ 
+   Mov(x1, Smi::FromInt(static_cast<int>(reason)));
+ 
+-  if (!has_frame_) {
++  {
+     // We don't actually want to generate a pile of code for this, so just
+     // claim there is a stack frame, without generating one.
+     FrameScope scope(this, StackFrame::NO_FRAME_TYPE);
+-    Call(BUILTIN_CODE(isolate(), Abort), RelocInfo::CODE_TARGET);
+-  } else {
+-    Call(BUILTIN_CODE(isolate(), Abort), RelocInfo::CODE_TARGET);
++    if (root_array_available()) {
++      // Generate an indirect call via builtins entry table here in order to
++      // ensure that the interpreter_entry_return_pc_offset is the same for
++      // InterpreterEntryTrampoline and InterpreterEntryTrampolineForProfiling
++      // when FLAG_debug_code is enabled.
++      UseScratchRegisterScope temps(this);
++      Register scratch = temps.AcquireX();
++      LoadEntryFromBuiltin(Builtin::kAbort, scratch);
++      Call(scratch);
++    } else {
++      Call(BUILTIN_CODE(isolate(), Abort), RelocInfo::CODE_TARGET);
++    }
+   }
+ 
+   TmpList()->set_bits(old_tmp_list);
+diff --git a/src/codegen/assembler.h b/src/codegen/assembler.h
+index 873530daa4d..58717cbb81d 100644
+--- a/src/codegen/assembler.h
++++ b/src/codegen/assembler.h
+@@ -158,6 +158,22 @@ struct V8_EXPORT_PRIVATE AssemblerOptions {
+   // assembler is used on existing code directly (e.g. JumpTableAssembler)
+   // without any buffer to hold reloc information.
+   bool disable_reloc_info_for_patching = false;
++  // Generate calls/jumps to builtins via builtins entry table instead of
++  // using RelocInfo::CODE_TARGET. Currently, it's enabled only for
++  // InterpreterEntryTrampolineForProfiling builtin which is used as a template
++  // for creation of interpreter entry trampoline Code objects when
++  // FLAG_interpreted_frames_native_stack is enabled.
++  // By default builtins use RelocInfo::CODE_TARGET for calling other builtins
++  // but it's not allowed to use the same instruction stream for Code objects
++  // because the builtins are generated in assumption that it's allowed to use
++  // PC-relative instructions for builtin-to-builtins calls/jumps. However,
++  // this is not the case for regular V8 instance because the code range might
++  // be bigger than the maximum PC-relative call/jump distance which means that
++  // the InterpreterEntryTrampoline builtin can't be used as a template.
++  // TODO(ishell): consider combining builtin_calls_as_table_load,
++  // short_builtin_calls, inline_offheap_trampolines and
++  // use_pc_relative_calls_and_jumps flags to an enum.
++  bool builtin_calls_as_table_load = false;
+   // Enables root-relative access to arbitrary untagged addresses (usually
+   // external references). Only valid if code will not survive the process.
+   bool enable_root_relative_access = false;
+diff --git a/src/codegen/compiler.cc b/src/codegen/compiler.cc
+index fa2a93fbc70..8fe06be040b 100644
+--- a/src/codegen/compiler.cc
++++ b/src/codegen/compiler.cc
+@@ -609,8 +609,8 @@ void InstallInterpreterTrampolineCopy(Isolate* isolate,
+   Handle<BytecodeArray> bytecode_array(shared_info->GetBytecodeArray(isolate),
+                                        isolate);
+ 
+-  Handle<Code> code = isolate->factory()->CopyCode(Handle<Code>::cast(
+-      isolate->factory()->interpreter_entry_trampoline_for_profiling()));
++  Handle<Code> code =
++      Builtins::CreateInterpreterEntryTrampolineForProfiling(isolate);
+ 
+   Handle<InterpreterData> interpreter_data =
+       Handle<InterpreterData>::cast(isolate->factory()->NewStruct(
+diff --git a/src/codegen/ia32/macro-assembler-ia32.cc b/src/codegen/ia32/macro-assembler-ia32.cc
+index ab0dc3c61fd..632dc2636a1 100644
+--- a/src/codegen/ia32/macro-assembler-ia32.cc
++++ b/src/codegen/ia32/macro-assembler-ia32.cc
+@@ -489,7 +489,8 @@ void TurboAssembler::CallRecordWriteStub(Register object, Register slot_address,
+ #endif
+   } else {
+     Builtin builtin = Builtins::GetRecordWriteStub(fp_mode);
+-    if (options().inline_offheap_trampolines) {
++    if (options().inline_offheap_trampolines ||
++        options().builtin_calls_as_table_load) {
+       CallBuiltin(builtin);
+     } else {
+       Handle<Code> code_target = isolate()->builtins()->code_handle(builtin);
+@@ -1743,15 +1744,21 @@ void TurboAssembler::Abort(AbortReason reason) {
+ 
+   Move(edx, Smi::FromInt(static_cast<int>(reason)));
+ 
+-  // Disable stub call restrictions to always allow calls to abort.
+-  if (!has_frame()) {
++  {
+     // We don't actually want to generate a pile of code for this, so just
+     // claim there is a stack frame, without generating one.
+     FrameScope scope(this, StackFrame::NO_FRAME_TYPE);
+-    Call(BUILTIN_CODE(isolate(), Abort), RelocInfo::CODE_TARGET);
+-  } else {
+-    Call(BUILTIN_CODE(isolate(), Abort), RelocInfo::CODE_TARGET);
++    if (root_array_available()) {
++      // Generate an indirect call via builtins entry table here in order to
++      // ensure that the interpreter_entry_return_pc_offset is the same for
++      // InterpreterEntryTrampoline and InterpreterEntryTrampolineForProfiling
++      // when FLAG_debug_code is enabled.
++      Call(EntryFromBuiltinAsOperand(Builtin::kAbort));
++    } else {
++      Call(BUILTIN_CODE(isolate(), Abort), RelocInfo::CODE_TARGET);
++    }
+   }
++
+   // will not return here
+   int3();
+ }
+@@ -1842,7 +1849,8 @@ void TurboAssembler::Call(Handle<Code> code_object, RelocInfo::Mode rmode) {
+   ASM_CODE_COMMENT(this);
+   DCHECK_IMPLIES(options().isolate_independent_code,
+                  Builtins::IsIsolateIndependentBuiltin(*code_object));
+-  if (options().inline_offheap_trampolines) {
++  if (options().inline_offheap_trampolines ||
++      options().builtin_calls_as_table_load) {
+     Builtin builtin = Builtin::kNoBuiltinId;
+     if (isolate()->builtins()->IsBuiltinHandle(code_object, &builtin)) {
+       // Inline the trampoline.
+@@ -1878,8 +1886,21 @@ void TurboAssembler::CallBuiltinByIndex(Register builtin_index) {
+ 
+ void TurboAssembler::CallBuiltin(Builtin builtin) {
+   ASM_CODE_COMMENT_STRING(this, CommentForOffHeapTrampoline("call", builtin));
+-  DCHECK(Builtins::IsBuiltinId(builtin));
+-  call(BuiltinEntry(builtin), RelocInfo::OFF_HEAP_TARGET);
++  if (options().builtin_calls_as_table_load) {
++    call(EntryFromBuiltinAsOperand(builtin));
++  } else {
++    call(BuiltinEntry(builtin), RelocInfo::OFF_HEAP_TARGET);
++  }
++}
++
++void TurboAssembler::TailCallBuiltin(Builtin builtin) {
++  ASM_CODE_COMMENT_STRING(this,
++                          CommentForOffHeapTrampoline("tail call", builtin));
++  if (options().builtin_calls_as_table_load) {
++    jmp(EntryFromBuiltinAsOperand(builtin));
++  } else {
++    jmp(BuiltinEntry(builtin), RelocInfo::OFF_HEAP_TARGET);
++  }
+ }
+ 
+ Operand TurboAssembler::EntryFromBuiltinAsOperand(Builtin builtin) {
+@@ -1960,12 +1981,11 @@ void TurboAssembler::Jump(const ExternalReference& reference) {
+ void TurboAssembler::Jump(Handle<Code> code_object, RelocInfo::Mode rmode) {
+   DCHECK_IMPLIES(options().isolate_independent_code,
+                  Builtins::IsIsolateIndependentBuiltin(*code_object));
+-  if (options().inline_offheap_trampolines) {
++  if (options().inline_offheap_trampolines ||
++      options().builtin_calls_as_table_load) {
+     Builtin builtin = Builtin::kNoBuiltinId;
+     if (isolate()->builtins()->IsBuiltinHandle(code_object, &builtin)) {
+-      // Inline the trampoline.
+-      RecordCommentForOffHeapTrampoline(builtin);
+-      jmp(BuiltinEntry(builtin), RelocInfo::OFF_HEAP_TARGET);
++      TailCallBuiltin(builtin);
+       return;
+     }
+   }
+diff --git a/src/codegen/ia32/macro-assembler-ia32.h b/src/codegen/ia32/macro-assembler-ia32.h
+index 8b6ac00e006..8086f01882c 100644
+--- a/src/codegen/ia32/macro-assembler-ia32.h
++++ b/src/codegen/ia32/macro-assembler-ia32.h
+@@ -156,6 +156,7 @@ class V8_EXPORT_PRIVATE TurboAssembler
+   void LoadEntryFromBuiltinIndex(Register builtin_index);
+   void CallBuiltinByIndex(Register builtin_index);
+   void CallBuiltin(Builtin builtin);
++  void TailCallBuiltin(Builtin builtin);
+ 
+   void LoadCodeObjectEntry(Register destination, Register code_object);
+   void CallCodeObject(Register code_object);
+diff --git a/src/codegen/x64/macro-assembler-x64.cc b/src/codegen/x64/macro-assembler-x64.cc
+index b1e90c7d605..af8432f2252 100644
+--- a/src/codegen/x64/macro-assembler-x64.cc
++++ b/src/codegen/x64/macro-assembler-x64.cc
+@@ -518,7 +518,8 @@ void TurboAssembler::CallRecordWriteStub(Register object, Register slot_address,
+ #endif
+   } else {
+     Builtin builtin = Builtins::GetRecordWriteStub(fp_mode);
+-    if (options().inline_offheap_trampolines) {
++    if (options().inline_offheap_trampolines ||
++        options().builtin_calls_as_table_load) {
+       CallBuiltin(builtin);
+     } else {
+       Handle<CodeT> code_target = isolate()->builtins()->code_handle(builtin);
+@@ -717,14 +718,21 @@ void TurboAssembler::Abort(AbortReason reason) {
+ 
+   Move(rdx, Smi::FromInt(static_cast<int>(reason)));
+ 
+-  if (!has_frame()) {
++  {
+     // We don't actually want to generate a pile of code for this, so just
+     // claim there is a stack frame, without generating one.
+     FrameScope scope(this, StackFrame::NO_FRAME_TYPE);
+-    Call(BUILTIN_CODE(isolate(), Abort), RelocInfo::CODE_TARGET);
+-  } else {
+-    Call(BUILTIN_CODE(isolate(), Abort), RelocInfo::CODE_TARGET);
++    if (root_array_available()) {
++      // Generate an indirect call via builtins entry table here in order to
++      // ensure that the interpreter_entry_return_pc_offset is the same for
++      // InterpreterEntryTrampoline and InterpreterEntryTrampolineForProfiling
++      // when FLAG_debug_code is enabled.
++      Call(EntryFromBuiltinAsOperand(Builtin::kAbort));
++    } else {
++      Call(BUILTIN_CODE(isolate(), Abort), RelocInfo::CODE_TARGET);
++    }
+   }
++
+   // Control will not return here.
+   int3();
+ }
+@@ -1908,25 +1916,27 @@ void TurboAssembler::Jump(Address destination, RelocInfo::Mode rmode) {
+ }
+ 
+ void TurboAssembler::Jump(Handle<CodeT> code_object, RelocInfo::Mode rmode) {
+-  DCHECK_IMPLIES(
+-      options().isolate_independent_code,
+-      Builtins::IsIsolateIndependentBuiltin(FromCodeT(*code_object)));
+-  if (options().inline_offheap_trampolines) {
++  DCHECK_IMPLIES(options().isolate_independent_code,
++                 Builtins::IsIsolateIndependentBuiltin(*code_object));
++  if (options().inline_offheap_trampolines ||
++      options().builtin_calls_as_table_load) {
+     Builtin builtin = Builtin::kNoBuiltinId;
+     if (isolate()->builtins()->IsBuiltinHandle(code_object, &builtin)) {
+       TailCallBuiltin(builtin);
+       return;
+     }
+   }
++  DCHECK(RelocInfo::IsCodeTarget(rmode));
++  DCHECK(!options().builtin_calls_as_table_load);
+   jmp(code_object, rmode);
+ }
+ 
+ void TurboAssembler::Jump(Handle<CodeT> code_object, RelocInfo::Mode rmode,
+                           Condition cc) {
+-  DCHECK_IMPLIES(
+-      options().isolate_independent_code,
+-      Builtins::IsIsolateIndependentBuiltin(FromCodeT(*code_object)));
+-  if (options().inline_offheap_trampolines) {
++  DCHECK_IMPLIES(options().isolate_independent_code,
++                 Builtins::IsIsolateIndependentBuiltin(*code_object));
++  if (options().inline_offheap_trampolines ||
++      options().builtin_calls_as_table_load) {
+     Builtin builtin = Builtin::kNoBuiltinId;
+     if (isolate()->builtins()->IsBuiltinHandle(code_object, &builtin)) {
+       Label skip;
+@@ -1936,6 +1946,8 @@ void TurboAssembler::Jump(Handle<CodeT> code_object, RelocInfo::Mode rmode,
+       return;
+     }
+   }
++  DCHECK(RelocInfo::IsCodeTarget(rmode));
++  DCHECK(!options().builtin_calls_as_table_load);
+   j(cc, code_object, rmode);
+ }
+ 
+@@ -1964,11 +1976,10 @@ void TurboAssembler::Call(Address destination, RelocInfo::Mode rmode) {
+ }
+ 
+ void TurboAssembler::Call(Handle<CodeT> code_object, RelocInfo::Mode rmode) {
+-  // TODO(v8:11880): avoid roundtrips between cdc and code.
+-  DCHECK_IMPLIES(
+-      options().isolate_independent_code,
+-      Builtins::IsIsolateIndependentBuiltin(FromCodeT(*code_object)));
+-  if (options().inline_offheap_trampolines) {
++  DCHECK_IMPLIES(options().isolate_independent_code,
++                 Builtins::IsIsolateIndependentBuiltin(*code_object));
++  if (options().inline_offheap_trampolines ||
++      options().builtin_calls_as_table_load) {
+     Builtin builtin = Builtin::kNoBuiltinId;
+     if (isolate()->builtins()->IsBuiltinHandle(code_object, &builtin)) {
+       // Inline the trampoline.
+@@ -1977,6 +1988,7 @@ void TurboAssembler::Call(Handle<CodeT> code_object, RelocInfo::Mode rmode) {
+     }
+   }
+   DCHECK(RelocInfo::IsCodeTarget(rmode));
++  DCHECK(!options().builtin_calls_as_table_load);
+   call(code_object, rmode);
+ }
+ 
+@@ -2010,6 +2022,8 @@ void TurboAssembler::CallBuiltin(Builtin builtin) {
+   ASM_CODE_COMMENT_STRING(this, CommentForOffHeapTrampoline("call", builtin));
+   if (options().short_builtin_calls) {
+     call(BuiltinEntry(builtin), RelocInfo::RUNTIME_ENTRY);
++  } else if (options().builtin_calls_as_table_load) {
++    Call(EntryFromBuiltinAsOperand(builtin));
+   } else {
+     Move(kScratchRegister, BuiltinEntry(builtin), RelocInfo::OFF_HEAP_TARGET);
+     call(kScratchRegister);
+@@ -2021,6 +2035,8 @@ void TurboAssembler::TailCallBuiltin(Builtin builtin) {
+                           CommentForOffHeapTrampoline("tail call", builtin));
+   if (options().short_builtin_calls) {
+     jmp(BuiltinEntry(builtin), RelocInfo::RUNTIME_ENTRY);
++  } else if (options().builtin_calls_as_table_load) {
++    Jump(EntryFromBuiltinAsOperand(builtin));
+   } else {
+     Jump(BuiltinEntry(builtin), RelocInfo::OFF_HEAP_TARGET);
+   }
+diff --git a/src/diagnostics/disassembler.cc b/src/diagnostics/disassembler.cc
+index 5673de7b32b..8882051cb36 100644
+--- a/src/diagnostics/disassembler.cc
++++ b/src/diagnostics/disassembler.cc
+@@ -450,8 +450,7 @@ static int DecodeIt(Isolate* isolate, ExternalReferenceEncoder* ref_encoder,
+   }
+ 
+   // Emit comments following the last instruction (if any).
+-  while (cit.HasCurrent() &&
+-         cit.GetPCOffset() < static_cast<Address>(pc - begin)) {
++  while (cit.HasCurrent()) {
+     out << "                  " << cit.GetComment();
+     DumpBuffer(os, out);
+     cit.Next();
+diff --git a/src/execution/isolate.cc b/src/execution/isolate.cc
+index 159170e7911..a3ae52a7246 100644
+--- a/src/execution/isolate.cc
++++ b/src/execution/isolate.cc
+@@ -4185,19 +4185,6 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
+ 
+     setup_delegate_->SetupBuiltins(this);
+ 
+-#ifndef V8_TARGET_ARCH_ARM
+-    // Store the interpreter entry trampoline on the root list. It is used as a
+-    // template for further copies that may later be created to help profile
+-    // interpreted code.
+-    // We currently cannot do this on arm due to RELATIVE_CODE_TARGETs
+-    // assuming that all possible Code targets may be addressed with an int24
+-    // offset, effectively limiting code space size to 32MB. We can guarantee
+-    // this at mksnapshot-time, but not at runtime.
+-    // See also: https://crbug.com/v8/8713.
+-    heap_.SetInterpreterEntryTrampolineForProfiling(
+-        FromCodeT(builtins()->code(Builtin::kInterpreterEntryTrampoline)));
+-#endif
+-
+     builtins_constants_table_builder_->Finalize();
+     delete builtins_constants_table_builder_;
+     builtins_constants_table_builder_ = nullptr;
+@@ -4275,12 +4262,6 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
+   }
+ #endif  // DEBUG
+ 
+-#ifndef V8_TARGET_ARCH_ARM
+-  // The IET for profiling should always be a full on-heap Code object.
+-  DCHECK(!Code::cast(heap_.interpreter_entry_trampoline_for_profiling())
+-              .is_off_heap_trampoline());
+-#endif  // V8_TARGET_ARCH_ARM
+-
+   if (FLAG_print_builtin_code) builtins()->PrintBuiltinCode();
+   if (FLAG_print_builtin_size) builtins()->PrintBuiltinSize();
+ 
+diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
+index 0ccd4528669..499e1b73385 100644
+--- a/src/flags/flag-definitions.h
++++ b/src/flags/flag-definitions.h
+@@ -583,10 +583,7 @@ DEFINE_NEG_IMPLICATION(jitless, always_sparkplug)
+ DEFINE_NEG_IMPLICATION(jitless, maglev)
+ #endif  // V8_ENABLE_MAGLEV
+ 
+-#ifndef V8_TARGET_ARCH_ARM
+-// Unsupported on arm. See https://crbug.com/v8/8713.
+ DEFINE_NEG_IMPLICATION(jitless, interpreted_frames_native_stack)
+-#endif
+ 
+ DEFINE_BOOL(assert_types, false,
+             "generate runtime type assertions to test the typer")
+@@ -2189,17 +2186,9 @@ DEFINE_BOOL(vtune_prof_annotate_wasm, false,
+ 
+ DEFINE_BOOL(win64_unwinding_info, true, "Enable unwinding info for Windows/x64")
+ 
+-#ifdef V8_TARGET_ARCH_ARM
+-// Unsupported on arm. See https://crbug.com/v8/8713.
+-DEFINE_BOOL_READONLY(
+-    interpreted_frames_native_stack, false,
+-    "Show interpreted frames on the native stack (useful for external "
+-    "profilers).")
+-#else
+ DEFINE_BOOL(interpreted_frames_native_stack, false,
+             "Show interpreted frames on the native stack (useful for external "
+             "profilers).")
+-#endif
+ 
+ DEFINE_BOOL(enable_etw_stack_walking, false,
+             "Enable etw stack walking for windows")
+diff --git a/src/heap/factory.cc b/src/heap/factory.cc
+index 6e3d2977d8e..c0066ed2c83 100644
+--- a/src/heap/factory.cc
++++ b/src/heap/factory.cc
+@@ -2523,52 +2523,6 @@ Handle<Code> Factory::NewOffHeapTrampolineFor(Handle<Code> code,
+   return result;
+ }
+ 
+-Handle<Code> Factory::CopyCode(Handle<Code> code) {
+-  Handle<CodeDataContainer> data_container = NewCodeDataContainer(
+-      code->code_data_container(kAcquireLoad).kind_specific_flags(kRelaxedLoad),
+-      AllocationType::kOld);
+-
+-  Heap* heap = isolate()->heap();
+-  Handle<Code> new_code;
+-  {
+-    int obj_size = code->Size();
+-    CodePageCollectionMemoryModificationScope code_allocation(heap);
+-    HeapObject result =
+-        allocator()->AllocateRawWith<HeapAllocator::kRetryOrFail>(
+-            obj_size, AllocationType::kCode, AllocationOrigin::kRuntime);
+-
+-    // Copy code object.
+-    Address old_addr = code->address();
+-    Address new_addr = result.address();
+-    Heap::CopyBlock(new_addr, old_addr, obj_size);
+-    new_code = handle(Code::cast(result), isolate());
+-
+-    // Set the {CodeDataContainer}, it cannot be shared.
+-    new_code->set_code_data_container(*data_container, kReleaseStore);
+-
+-    new_code->Relocate(new_addr - old_addr);
+-    // Record all references to embedded objects in the new code object.
+-#ifndef V8_DISABLE_WRITE_BARRIERS
+-    WriteBarrierForCode(*new_code);
+-#endif
+-  }
+-  if (V8_EXTERNAL_CODE_SPACE_BOOL) {
+-    data_container->initialize_flags(code->kind(), code->builtin_id(),
+-                                     code->is_turbofanned(),
+-                                     code->is_off_heap_trampoline());
+-    data_container->SetCodeAndEntryPoint(isolate(), *new_code);
+-  }
+-
+-#ifdef VERIFY_HEAP
+-  if (FLAG_verify_heap) new_code->ObjectVerify(isolate());
+-#endif
+-  DCHECK(IsAligned(new_code->address(), kCodeAlignment));
+-  DCHECK_IMPLIES(
+-      !V8_ENABLE_THIRD_PARTY_HEAP_BOOL && !heap->code_region().is_empty(),
+-      heap->code_region().contains(new_code->address()));
+-  return new_code;
+-}
+-
+ Handle<BytecodeArray> Factory::CopyBytecodeArray(Handle<BytecodeArray> source) {
+   int size = BytecodeArray::SizeFor(source->length());
+   BytecodeArray copy = BytecodeArray::cast(AllocateRawWithImmortalMap(
+diff --git a/src/heap/factory.h b/src/heap/factory.h
+index a54e46d079f..3f625da333f 100644
+--- a/src/heap/factory.h
++++ b/src/heap/factory.h
+@@ -742,8 +742,6 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
+   Handle<Code> NewOffHeapTrampolineFor(Handle<Code> code,
+                                        Address off_heap_entry);
+ 
+-  Handle<Code> CopyCode(Handle<Code> code);
+-
+   Handle<BytecodeArray> CopyBytecodeArray(Handle<BytecodeArray>);
+ 
+   // Interface for creating error objects.
+diff --git a/src/heap/heap.cc b/src/heap/heap.cc
+index f5fc84a762a..782e07d0290 100644
+--- a/src/heap/heap.cc
++++ b/src/heap/heap.cc
+@@ -6802,11 +6802,6 @@ void Heap::SetDetachedContexts(WeakArrayList detached_contexts) {
+   set_detached_contexts(detached_contexts);
+ }
+ 
+-void Heap::SetInterpreterEntryTrampolineForProfiling(Code code) {
+-  DCHECK_EQ(Builtin::kInterpreterEntryTrampoline, code.builtin_id());
+-  set_interpreter_entry_trampoline_for_profiling(code);
+-}
+-
+ void Heap::PostFinalizationRegistryCleanupTaskIfNeeded() {
+   // Only one cleanup task is posted at a time.
+   if (!HasDirtyJSFinalizationRegistries() ||
+diff --git a/src/heap/heap.h b/src/heap/heap.h
+index d18589b517e..96774450e3c 100644
+--- a/src/heap/heap.h
++++ b/src/heap/heap.h
+@@ -956,14 +956,6 @@ class Heap {
+   void SetBuiltinsConstantsTable(FixedArray cache);
+   void SetDetachedContexts(WeakArrayList detached_contexts);
+ 
+-  // A full copy of the interpreter entry trampoline, used as a template to
+-  // create copies of the builtin at runtime. The copies are used to create
+-  // better profiling information for ticks in bytecode execution. Note that
+-  // this is always a copy of the full builtin, i.e. not the off-heap
+-  // trampoline.
+-  // See also: FLAG_interpreted_frames_native_stack.
+-  void SetInterpreterEntryTrampolineForProfiling(Code code);
+-
+   void EnqueueDirtyJSFinalizationRegistry(
+       JSFinalizationRegistry finalization_registry,
+       std::function<void(HeapObject object, ObjectSlot slot, Object target)>
+diff --git a/src/heap/setup-heap-internal.cc b/src/heap/setup-heap-internal.cc
+index d61a596b54d..301bcbd2006 100644
+--- a/src/heap/setup-heap-internal.cc
++++ b/src/heap/setup-heap-internal.cc
+@@ -763,8 +763,6 @@ void Heap::CreateInitialObjects() {
+   set_self_reference_marker(*factory->NewSelfReferenceMarker());
+   set_basic_block_counters_marker(*factory->NewBasicBlockCountersMarker());
+ 
+-  set_interpreter_entry_trampoline_for_profiling(roots.undefined_value());
+-
+   {
+     HandleScope handle_scope(isolate());
+ #define SYMBOL_INIT(_, name)                                                \
+diff --git a/src/roots/roots.h b/src/roots/roots.h
+index cd8bfb19199..934b2ce0750 100644
+--- a/src/roots/roots.h
++++ b/src/roots/roots.h
+@@ -325,8 +325,6 @@ class Symbol;
+   V(HeapObject, current_microtask, CurrentMicrotask)                        \
+   /* KeepDuringJob set for JS WeakRefs */                                   \
+   V(HeapObject, weak_refs_keep_during_job, WeakRefsKeepDuringJob)           \
+-  V(HeapObject, interpreter_entry_trampoline_for_profiling,                 \
+-    InterpreterEntryTrampolineForProfiling)                                 \
+   V(Object, pending_optimize_for_test_bytecode,                             \
+     PendingOptimizeForTestBytecode)                                         \
+   V(ArrayList, basic_block_profiling_data, BasicBlockProfilingData)         \
+diff --git a/src/snapshot/code-serializer.cc b/src/snapshot/code-serializer.cc
+index 5a49283ece4..3f380e6a2ff 100644
+--- a/src/snapshot/code-serializer.cc
++++ b/src/snapshot/code-serializer.cc
+@@ -241,12 +241,10 @@ void CodeSerializer::SerializeObjectImpl(Handle<HeapObject> obj) {
+   // bytecode array stored within the InterpreterData, which is the important
+   // information. On deserialization we'll create our code objects again, if
+   // --interpreted-frames-native-stack is on. See v8:9122 for more context
+-#ifndef V8_TARGET_ARCH_ARM
+   if (V8_UNLIKELY(FLAG_interpreted_frames_native_stack) &&
+       obj->IsInterpreterData()) {
+     obj = handle(InterpreterData::cast(*obj).bytecode_array(), isolate());
+   }
+-#endif  // V8_TARGET_ARCH_ARM
+ 
+   // Past this point we should not see any (context-specific) maps anymore.
+   CHECK(!InstanceTypeChecker::IsMap(instance_type));
+@@ -271,7 +269,6 @@ void CodeSerializer::SerializeGeneric(Handle<HeapObject> heap_object) {
+ 
+ namespace {
+ 
+-#ifndef V8_TARGET_ARCH_ARM
+ // NOTE(mmarchini): when FLAG_interpreted_frames_native_stack is on, we want to
+ // create duplicates of InterpreterEntryTrampoline for the deserialized
+ // functions, otherwise we'll call the builtin IET for those functions (which
+@@ -291,8 +288,9 @@ void CreateInterpreterDataForDeserializedCode(Isolate* isolate,
+     if (!is_compiled.is_compiled()) continue;
+     DCHECK(shared_info.HasBytecodeArray());
+     Handle<SharedFunctionInfo> info = handle(shared_info, isolate);
+-    Handle<Code> code = isolate->factory()->CopyCode(Handle<Code>::cast(
+-        isolate->factory()->interpreter_entry_trampoline_for_profiling()));
++
++    Handle<Code> code =
++        Builtins::CreateInterpreterEntryTrampolineForProfiling(isolate);
+ 
+     Handle<InterpreterData> interpreter_data =
+         Handle<InterpreterData>::cast(isolate->factory()->NewStruct(
+@@ -317,7 +315,6 @@ void CreateInterpreterDataForDeserializedCode(Isolate* isolate,
+                             info, name_handle, line_num, column_num));
+   }
+ }
+-#endif  // V8_TARGET_ARCH_ARM
+ 
+ class StressOffThreadDeserializeThread final : public base::Thread {
+  public:
+@@ -358,11 +355,10 @@ void FinalizeDeserialization(Isolate* isolate,
+       isolate->is_profiling() ||
+       isolate->logger()->is_listening_to_code_events();
+ 
+-#ifndef V8_TARGET_ARCH_ARM
+-  if (V8_UNLIKELY(FLAG_interpreted_frames_native_stack))
++  if (V8_UNLIKELY(FLAG_interpreted_frames_native_stack)) {
+     CreateInterpreterDataForDeserializedCode(isolate, result,
+                                              log_code_creation);
+-#endif  // V8_TARGET_ARCH_ARM
++  }
+ 
+   bool needs_source_positions = isolate->NeedsSourcePositionsForProfiling();
+ 
+diff --git a/src/snapshot/embedded/embedded-data-inl.h b/src/snapshot/embedded/embedded-data-inl.h
+index f97884a9a3c..e2ebb85263e 100644
+--- a/src/snapshot/embedded/embedded-data-inl.h
++++ b/src/snapshot/embedded/embedded-data-inl.h
+@@ -74,7 +74,7 @@ uint32_t EmbeddedData::SafepointTableSizeOf(Builtin builtin) const {
+ #else
+   DCHECK_LE(desc.handler_table_offset, desc.code_comments_offset_offset);
+ #endif
+-  return desc.handler_table_offset;
++  return desc.handler_table_offset - desc.metadata_offset;
+ }
+ 
+ Address EmbeddedData::HandlerTableStartOf(Builtin builtin) const {
+@@ -147,8 +147,9 @@ Address EmbeddedData::UnwindingInfoStartOf(Builtin builtin) const {
+ uint32_t EmbeddedData::UnwindingInfoSizeOf(Builtin builtin) const {
+   DCHECK(Builtins::IsBuiltinId(builtin));
+   const struct LayoutDescription& desc = LayoutDescription(builtin);
+-  DCHECK_LE(desc.unwinding_info_offset_offset, desc.metadata_length);
+-  return desc.metadata_length - desc.unwinding_info_offset_offset;
++  uint32_t metadata_end_offset = desc.metadata_offset + desc.metadata_length;
++  DCHECK_LE(desc.unwinding_info_offset_offset, metadata_end_offset);
++  return metadata_end_offset - desc.unwinding_info_offset_offset;
+ }
+ 
+ uint32_t EmbeddedData::StackSlotsOf(Builtin builtin) const {
+diff --git a/src/snapshot/embedded/embedded-data.cc b/src/snapshot/embedded/embedded-data.cc
+index fa96e53c5db..ae7c7603c20 100644
+--- a/src/snapshot/embedded/embedded-data.cc
++++ b/src/snapshot/embedded/embedded-data.cc
+@@ -258,6 +258,20 @@ void FinalizeEmbeddedCodeTargets(Isolate* isolate, EmbeddedData* blob) {
+   }
+ }
+ 
++void EnsureRelocatable(CodeT codet) {
++  Code code = FromCodeT(codet);
++  if (code.relocation_size() == 0) return;
++
++  // On some architectures (arm) the builtin might have a non-empty reloc
++  // info containing a CONST_POOL entry. These entries don't have to be
++  // updated when Code object is relocated, so it's safe to drop the reloc
++  // info alltogether. If it wasn't the case then we'd have to store it
++  // in the metadata.
++  for (RelocIterator it(code); !it.done(); it.next()) {
++    CHECK_EQ(it.rinfo()->rmode(), RelocInfo::CONST_POOL);
++  }
++}
++
+ }  // namespace
+ 
+ // static
+@@ -406,6 +420,27 @@ EmbeddedData EmbeddedData::FromIsolate(Isolate* isolate) {
+     DCHECK_EQ(code_hash, d.EmbeddedBlobCodeHash());
+   }
+ 
++  if (DEBUG_BOOL) {
++    for (Builtin builtin = Builtins::kFirst; builtin <= Builtins::kLast;
++         ++builtin) {
++      Code code = FromCodeT(builtins->code(builtin));
++
++      CHECK_EQ(d.InstructionSizeOfBuiltin(builtin), code.InstructionSize());
++      CHECK_EQ(d.MetadataSizeOfBuiltin(builtin), code.MetadataSize());
++
++      CHECK_EQ(d.SafepointTableSizeOf(builtin), code.safepoint_table_size());
++      CHECK_EQ(d.HandlerTableSizeOf(builtin), code.handler_table_size());
++      CHECK_EQ(d.ConstantPoolSizeOf(builtin), code.constant_pool_size());
++      CHECK_EQ(d.CodeCommentsSizeOf(builtin), code.code_comments_size());
++      CHECK_EQ(d.UnwindingInfoSizeOf(builtin), code.unwinding_info_size());
++      CHECK_EQ(d.StackSlotsOf(builtin), code.stack_slots());
++    }
++  }
++  // Ensure that InterpreterEntryTrampolineForProfiling is relocatable.
++  // See FLAG_interpreted_frames_native_stack for details.
++  EnsureRelocatable(
++      builtins->code(Builtin::kInterpreterEntryTrampolineForProfiling));
++
+   if (FLAG_serialization_statistics) d.PrintStatistics();
+ 
+   return d;
+diff --git a/src/snapshot/serializer.h b/src/snapshot/serializer.h
+index 6d3a3136226..9fdd059e479 100644
+--- a/src/snapshot/serializer.h
++++ b/src/snapshot/serializer.h
+@@ -417,8 +417,6 @@ class Serializer : public SerializerDeserializer {
+ #endif  // DEBUG
+ };
+ 
+-class RelocInfoIterator;
+-
+ class Serializer::ObjectSerializer : public ObjectVisitor {
+  public:
+   ObjectSerializer(Serializer* serializer, Handle<HeapObject> obj,
+diff --git a/src/snapshot/startup-serializer.cc b/src/snapshot/startup-serializer.cc
+index 3583567d10e..51997248440 100644
+--- a/src/snapshot/startup-serializer.cc
++++ b/src/snapshot/startup-serializer.cc
+@@ -93,36 +93,8 @@ bool IsUnexpectedCodeObject(Isolate* isolate, HeapObject obj) {
+   if (!code.is_builtin()) return true;
+   if (code.is_off_heap_trampoline()) return false;
+ 
+-  // An on-heap builtin. We only expect this for the interpreter entry
+-  // trampoline copy stored on the root list and transitively called builtins.
+-  // See Heap::interpreter_entry_trampoline_for_profiling.
+-
+-  switch (code.builtin_id()) {
+-    case Builtin::kAbort:
+-    case Builtin::kCEntry_Return1_DontSaveFPRegs_ArgvOnStack_NoBuiltinExit:
+-    case Builtin::kInterpreterEntryTrampoline:
+-    case Builtin::kRecordWriteSaveFP:
+-    case Builtin::kRecordWriteIgnoreFP:
+-#ifdef V8_IS_TSAN
+-    case Builtin::kTSANRelaxedStore8IgnoreFP:
+-    case Builtin::kTSANRelaxedStore8SaveFP:
+-    case Builtin::kTSANRelaxedStore16IgnoreFP:
+-    case Builtin::kTSANRelaxedStore16SaveFP:
+-    case Builtin::kTSANRelaxedStore32IgnoreFP:
+-    case Builtin::kTSANRelaxedStore32SaveFP:
+-    case Builtin::kTSANRelaxedStore64IgnoreFP:
+-    case Builtin::kTSANRelaxedStore64SaveFP:
+-    case Builtin::kTSANRelaxedLoad32IgnoreFP:
+-    case Builtin::kTSANRelaxedLoad32SaveFP:
+-    case Builtin::kTSANRelaxedLoad64IgnoreFP:
+-    case Builtin::kTSANRelaxedLoad64SaveFP:
+-#endif  // V8_IS_TSAN
+-      return false;
+-    default:
+-      return true;
+-  }
+-
+-  UNREACHABLE();
++  // An on-heap builtin.
++  return true;
+ }
+ 
+ }  // namespace
+diff --git a/test/cctest/heap/test-heap.cc b/test/cctest/heap/test-heap.cc
+index 614167f419d..8bc6135db4b 100644
+--- a/test/cctest/heap/test-heap.cc
++++ b/test/cctest/heap/test-heap.cc
+@@ -197,41 +197,6 @@ void CheckEmbeddedObjectsAreEqual(Isolate* isolate, Handle<Code> lhs,
+   CHECK(lhs_it.done() == rhs_it.done());
+ }
+ 
+-HEAP_TEST(TestNewSpaceRefsInCopiedCode) {
+-  if (FLAG_single_generation) return;
+-  CcTest::InitializeVM();
+-  Isolate* isolate = CcTest::i_isolate();
+-  Factory* factory = isolate->factory();
+-  HandleScope sc(isolate);
+-
+-  Handle<HeapNumber> value = factory->NewHeapNumber(1.000123);
+-  CHECK(Heap::InYoungGeneration(*value));
+-
+-  i::byte buffer[i::Assembler::kDefaultBufferSize];
+-  MacroAssembler masm(isolate, v8::internal::CodeObjectRequired::kYes,
+-                      ExternalAssemblerBuffer(buffer, sizeof(buffer)));
+-  // Add a new-space reference to the code.
+-#if V8_TARGET_ARCH_ARM64
+-  // Arm64 requires stack alignment.
+-  UseScratchRegisterScope temps(&masm);
+-  Register tmp = temps.AcquireX();
+-  masm.Mov(tmp, Operand(value));
+-  masm.Push(tmp, padreg);
+-#else
+-  masm.Push(value);
+-#endif
+-
+-  CodeDesc desc;
+-  masm.GetCode(isolate, &desc);
+-  Handle<Code> code =
+-      Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
+-  Handle<Code> copy = factory->CopyCode(code);
+-
+-  CheckEmbeddedObjectsAreEqual(isolate, code, copy);
+-  CcTest::CollectAllAvailableGarbage();
+-  CheckEmbeddedObjectsAreEqual(isolate, code, copy);
+-}
+-
+ static void CheckFindCodeObject(Isolate* isolate) {
+   // Test FindCodeObject
+ #define __ assm.
+@@ -7526,7 +7491,6 @@ TEST(Regress10900) {
+   CcTest::InitializeVM();
+   Isolate* isolate = CcTest::i_isolate();
+   Heap* heap = isolate->heap();
+-  Factory* factory = isolate->factory();
+   HandleScope handle_scope(isolate);
+   i::byte buffer[i::Assembler::kDefaultBufferSize];
+   MacroAssembler masm(isolate, v8::internal::CodeObjectRequired::kYes,
+@@ -7542,14 +7506,13 @@ TEST(Regress10900) {
+ #endif
+   CodeDesc desc;
+   masm.GetCode(isolate, &desc);
+-  Handle<Code> code =
+-      Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
+   {
+     CodePageCollectionMemoryModificationScopeForTesting code_scope(
+         isolate->heap());
++    Handle<Code> code;
+     for (int i = 0; i < 100; i++) {
+       // Generate multiple code pages.
+-      factory->CopyCode(code);
++      code = Factory::CodeBuilder(isolate, desc, CodeKind::FOR_TESTING).Build();
+     }
+   }
+   // Force garbage collection that compacts code pages and triggers
+diff --git a/test/cctest/test-serialize.cc b/test/cctest/test-serialize.cc
+index 81ab42cbc2a..d1c65f95d31 100644
+--- a/test/cctest/test-serialize.cc
++++ b/test/cctest/test-serialize.cc
+@@ -1764,14 +1764,12 @@ void TestCodeSerializerOnePlusOneImpl(bool verify_builtins_count = true) {
+ TEST(CodeSerializerOnePlusOne) { TestCodeSerializerOnePlusOneImpl(); }
+ 
+ // See bug v8:9122
+-#ifndef V8_TARGET_ARCH_ARM
+ TEST(CodeSerializerOnePlusOneWithInterpretedFramesNativeStack) {
+   FLAG_interpreted_frames_native_stack = true;
+   // We pass false because this test will create IET copies (which are
+   // builtins).
+   TestCodeSerializerOnePlusOneImpl(false);
+ }
+-#endif
+ 
+ TEST(CodeSerializerOnePlusOneWithDebugger) {
+   v8::HandleScope scope(CcTest::isolate());
+diff --git a/test/unittests/logging/log-unittest.cc b/test/unittests/logging/log-unittest.cc
+index 571aa7d6331..4eb38dbd830 100644
+--- a/test/unittests/logging/log-unittest.cc
++++ b/test/unittests/logging/log-unittest.cc
+@@ -551,8 +551,6 @@ TEST_F(LogAllTest, LogAll) {
+   }
+ }
+ 
+-#ifndef V8_TARGET_ARCH_ARM
+-
+ class LogInterpretedFramesNativeStackTest : public LogTest {
+  public:
+   static void SetUpTestSuite() {
+@@ -671,7 +669,6 @@ TEST_F(LogInterpretedFramesNativeStackWithSerializationTest,
+   } while (!has_cache);
+   delete cache;
+ }
+-#endif  // V8_TARGET_ARCH_ARM
+ 
+ class LogExternalLogEventListenerTest : public TestWithIsolate {
+  public:
+-- 
+2.35.1
+

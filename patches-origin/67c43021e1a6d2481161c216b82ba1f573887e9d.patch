@@ -1,0 +1,580 @@
+From 67c43021e1a6d2481161c216b82ba1f573887e9d Mon Sep 17 00:00:00 2001
+From: Igor Sheludko <ishell@chromium.org>
+Date: Mon, 26 Jun 2023 13:50:28 +0200
+Subject: [PATCH] [builtins] Merge non-generic CallApiCallback builtin versions
+
+Since CallFunction builtin already handles side-effect checks by
+deoptimizing optimized functions there's no need to support these
+checks in the CallApiCallback called from optimized code.
+
+Bug: v8:13825
+Change-Id: Ia02f3418f61f1a5bcb9a105fb49f816d5938c26e
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4645529
+Reviewed-by: Darius Mercadier <dmercadier@chromium.org>
+Commit-Queue: Igor Sheludko <ishell@chromium.org>
+Reviewed-by: Victor Gomes <victorgomes@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#88486}
+---
+ src/api/api.cc                                | 25 ++++++-------------
+ src/api/api.h                                 |  4 +--
+ src/builtins/arm/builtins-arm.cc              |  8 +++---
+ src/builtins/arm64/builtins-arm64.cc          |  8 +++---
+ src/builtins/builtins-call-gen.cc             |  8 ++----
+ src/builtins/builtins-definitions.h           |  3 +--
+ src/builtins/ia32/builtins-ia32.cc            |  8 +++---
+ src/builtins/loong64/builtins-loong64.cc      |  8 +++---
+ src/builtins/mips64/builtins-mips64.cc        |  8 +++---
+ src/builtins/ppc/builtins-ppc.cc              |  8 +++---
+ src/builtins/riscv/builtins-riscv.cc          |  8 +++---
+ src/builtins/s390/builtins-s390.cc            |  8 +++---
+ src/builtins/x64/builtins-x64.cc              |  8 +++---
+ src/codegen/external-reference.cc             | 19 +++-----------
+ src/codegen/external-reference.h              |  5 +---
+ src/common/globals.h                          | 13 +++++-----
+ src/compiler/js-call-reducer.cc               | 12 +++------
+ .../js-native-context-specialization.cc       |  6 ++---
+ src/maglev/maglev-graph-builder.cc            | 15 +++--------
+ 19 files changed, 58 insertions(+), 124 deletions(-)
+
+diff --git a/src/api/api.cc b/src/api/api.cc
+index 12bb31523b0..1d11b4b6717 100644
+--- a/src/api/api.cc
++++ b/src/api/api.cc
+@@ -11419,17 +11419,11 @@ inline void InvokeFunctionCallback(
+       }
+       break;
+     }
+-    case CallApiCallbackMode::kWithSideEffects: {
+-      Handle<CallHandlerInfo> has_side_effects;
+-      if (V8_UNLIKELY(i_isolate->should_check_side_effects()) &&
+-          !i_isolate->debug()->PerformSideEffectCheckForCallback(
+-              has_side_effects)) {
+-        // Failed side effect check.
+-        return;
+-      }
+-      break;
+-    }
+-    case CallApiCallbackMode::kNoSideEffects:
++    case CallApiCallbackMode::kOptimized:
++      // CallFunction builtin should deoptimize an optimized function when
++      // side effects checking is enabled, so we don't have to handle side
++      // effects checking in the optimized version of the builtin.
++      DCHECK(!i_isolate->should_check_side_effects());
+       break;
+   }
+ 
+@@ -11448,14 +11442,9 @@ void InvokeFunctionCallbackGeneric(
+   InvokeFunctionCallback(info, CallApiCallbackMode::kGeneric);
+ }
+ 
+-void InvokeFunctionCallbackNoSideEffects(
+-    const v8::FunctionCallbackInfo<v8::Value>& info) {
+-  InvokeFunctionCallback(info, CallApiCallbackMode::kNoSideEffects);
+-}
+-
+-void InvokeFunctionCallbackWithSideEffects(
++void InvokeFunctionCallbackOptimized(
+     const v8::FunctionCallbackInfo<v8::Value>& info) {
+-  InvokeFunctionCallback(info, CallApiCallbackMode::kWithSideEffects);
++  InvokeFunctionCallback(info, CallApiCallbackMode::kOptimized);
+ }
+ 
+ void InvokeFinalizationRegistryCleanupFromTask(
+diff --git a/src/api/api.h b/src/api/api.h
+index 81ad1515033..19bc4f9e50c 100644
+--- a/src/api/api.h
++++ b/src/api/api.h
+@@ -507,9 +507,7 @@ void InvokeAccessorGetterCallback(
+ // IsolateData::api_callback_thunk_argument slot.
+ void InvokeFunctionCallbackGeneric(
+     const v8::FunctionCallbackInfo<v8::Value>& info);
+-void InvokeFunctionCallbackNoSideEffects(
+-    const v8::FunctionCallbackInfo<v8::Value>& info);
+-void InvokeFunctionCallbackWithSideEffects(
++void InvokeFunctionCallbackOptimized(
+     const v8::FunctionCallbackInfo<v8::Value>& info);
+ 
+ void InvokeFinalizationRegistryCleanupFromTask(
+diff --git a/src/builtins/arm/builtins-arm.cc b/src/builtins/arm/builtins-arm.cc
+index 31995fe5b24..fb4e68ff218 100644
+--- a/src/builtins/arm/builtins-arm.cc
++++ b/src/builtins/arm/builtins-arm.cc
+@@ -3310,7 +3310,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+   //  -- r2                  : arguments count (not including the receiver)
+   //  -- r3                  : call handler info
+   //  -- r0                  : holder
+-  // CallApiCallbackMode::kNoSideEffects/kWithSideEffectsSideEffects modes:
++  // CallApiCallbackMode::kOptimized mode:
+   //  -- r1                  : api function address
+   //  -- r2                  : arguments count (not including the receiver)
+   //  -- r3                  : call data
+@@ -3341,8 +3341,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+       holder = CallApiCallbackGenericDescriptor::HolderRegister();
+       break;
+ 
+-    case CallApiCallbackMode::kNoSideEffects:
+-    case CallApiCallbackMode::kWithSideEffects:
++    case CallApiCallbackMode::kOptimized:
+       api_function_address =
+           CallApiCallbackOptimizedDescriptor::ApiFunctionAddressRegister();
+       argc = CallApiCallbackOptimizedDescriptor::ActualArgumentsCountRegister();
+@@ -3399,8 +3398,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+       __ str(scratch2, MemOperand(sp, FCA::kDataIndex * kSystemPointerSize));
+       break;
+ 
+-    case CallApiCallbackMode::kNoSideEffects:
+-    case CallApiCallbackMode::kWithSideEffects:
++    case CallApiCallbackMode::kOptimized:
+       __ str(call_data, MemOperand(sp, FCA::kDataIndex * kSystemPointerSize));
+       break;
+   }
+diff --git a/src/builtins/arm64/builtins-arm64.cc b/src/builtins/arm64/builtins-arm64.cc
+index b4f7db2ddc8..6c4559145cc 100644
+--- a/src/builtins/arm64/builtins-arm64.cc
++++ b/src/builtins/arm64/builtins-arm64.cc
+@@ -5481,7 +5481,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+   //  -- x2                  : arguments count (not including the receiver)
+   //  -- x3                  : call handler info
+   //  -- x0                  : holder
+-  // CallApiCallbackMode::kNoSideEffects/kWithSideEffectsSideEffects modes:
++  // CallApiCallbackMode::kOptimized mode:
+   //  -- x1                  : api function address
+   //  -- x2                  : arguments count (not including the receiver)
+   //  -- x3                  : call data
+@@ -5512,8 +5512,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+       holder = CallApiCallbackGenericDescriptor::HolderRegister();
+       break;
+ 
+-    case CallApiCallbackMode::kNoSideEffects:
+-    case CallApiCallbackMode::kWithSideEffects:
++    case CallApiCallbackMode::kOptimized:
+       api_function_address =
+           CallApiCallbackOptimizedDescriptor::ApiFunctionAddressRegister();
+       argc = CallApiCallbackOptimizedDescriptor::ActualArgumentsCountRegister();
+@@ -5573,8 +5572,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+       __ Str(scratch2, MemOperand(sp, FCA::kDataIndex * kSystemPointerSize));
+       break;
+ 
+-    case CallApiCallbackMode::kNoSideEffects:
+-    case CallApiCallbackMode::kWithSideEffects:
++    case CallApiCallbackMode::kOptimized:
+       __ Str(call_data, MemOperand(sp, FCA::kDataIndex * kSystemPointerSize));
+       break;
+   }
+diff --git a/src/builtins/builtins-call-gen.cc b/src/builtins/builtins-call-gen.cc
+index 185cc8272dc..00715221275 100644
+--- a/src/builtins/builtins-call-gen.cc
++++ b/src/builtins/builtins-call-gen.cc
+@@ -68,12 +68,8 @@ void Builtins::Generate_CallApiCallbackGeneric(MacroAssembler* masm) {
+   Generate_CallApiCallbackImpl(masm, CallApiCallbackMode::kGeneric);
+ }
+ 
+-void Builtins::Generate_CallApiCallbackNoSideEffects(MacroAssembler* masm) {
+-  Generate_CallApiCallbackImpl(masm, CallApiCallbackMode::kNoSideEffects);
+-}
+-
+-void Builtins::Generate_CallApiCallbackWithSideEffects(MacroAssembler* masm) {
+-  Generate_CallApiCallbackImpl(masm, CallApiCallbackMode::kWithSideEffects);
++void Builtins::Generate_CallApiCallbackOptimized(MacroAssembler* masm) {
++  Generate_CallApiCallbackImpl(masm, CallApiCallbackMode::kOptimized);
+ }
+ 
+ // TODO(cbruni): Try reusing code between builtin versions to avoid binary
+diff --git a/src/builtins/builtins-definitions.h b/src/builtins/builtins-definitions.h
+index d580403ea91..a58ffd4b69e 100644
+--- a/src/builtins/builtins-definitions.h
++++ b/src/builtins/builtins-definitions.h
+@@ -233,8 +233,7 @@ namespace internal {
+                                                                                \
+   /* API callback handling */                                                  \
+   ASM(CallApiCallbackGeneric, CallApiCallbackGeneric)                          \
+-  ASM(CallApiCallbackNoSideEffects, CallApiCallbackOptimized)                  \
+-  ASM(CallApiCallbackWithSideEffects, CallApiCallbackOptimized)                \
++  ASM(CallApiCallbackOptimized, CallApiCallbackOptimized)                      \
+   ASM(CallApiGetter, ApiGetter)                                                \
+   TFC(HandleApiCallOrConstruct, JSTrampoline)                                  \
+   CPP(HandleApiConstruct)                                                      \
+diff --git a/src/builtins/ia32/builtins-ia32.cc b/src/builtins/ia32/builtins-ia32.cc
+index c44861de8e8..0b6c20496f3 100644
+--- a/src/builtins/ia32/builtins-ia32.cc
++++ b/src/builtins/ia32/builtins-ia32.cc
+@@ -3569,7 +3569,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+   //  -- ecx                 : arguments count (not including the receiver)
+   //  -- edx                 : call handler info
+   //  -- edi                 : holder
+-  // CallApiCallbackMode::kNoSideEffects/kWithSideEffectsSideEffects modes:
++  // CallApiCallbackMode::kOptimized mode:
+   //  -- eax                 : api function address
+   //  -- ecx                 : arguments count (not including the receiver)
+   //  -- edx                 : call data
+@@ -3598,8 +3598,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+       holder = CallApiCallbackGenericDescriptor::HolderRegister();
+       break;
+ 
+-    case CallApiCallbackMode::kNoSideEffects:
+-    case CallApiCallbackMode::kWithSideEffects:
++    case CallApiCallbackMode::kOptimized:
+       api_function_address =
+           CallApiCallbackOptimizedDescriptor::ApiFunctionAddressRegister();
+       argc = CallApiCallbackOptimizedDescriptor::ActualArgumentsCountRegister();
+@@ -3646,8 +3645,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+       __ push(FieldOperand(callback, CallHandlerInfo::kDataOffset));
+       break;
+ 
+-    case CallApiCallbackMode::kNoSideEffects:
+-    case CallApiCallbackMode::kWithSideEffects:
++    case CallApiCallbackMode::kOptimized:
+       __ Push(call_data);
+       break;
+   }
+diff --git a/src/builtins/loong64/builtins-loong64.cc b/src/builtins/loong64/builtins-loong64.cc
+index f4b5f601d23..acad3e0bf82 100644
+--- a/src/builtins/loong64/builtins-loong64.cc
++++ b/src/builtins/loong64/builtins-loong64.cc
+@@ -3210,7 +3210,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+   //  -- a2                  : arguments count (not including the receiver)
+   //  -- a3                  : call handler info
+   //  -- a0                  : holder
+-  // CallApiCallbackMode::kNoSideEffects/kWithSideEffectsSideEffects modes:
++  // CallApiCallbackMode::kOptimized mode:
+   //  -- a1                  : api function address
+   //  -- a2                  : arguments count
+   //  -- a3                  : call data
+@@ -3242,8 +3242,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+       holder = CallApiCallbackGenericDescriptor::HolderRegister();
+       break;
+ 
+-    case CallApiCallbackMode::kNoSideEffects:
+-    case CallApiCallbackMode::kWithSideEffects:
++    case CallApiCallbackMode::kOptimized:
+       api_function_address =
+           CallApiCallbackOptimizedDescriptor::ApiFunctionAddressRegister();
+       argc = CallApiCallbackOptimizedDescriptor::ActualArgumentsCountRegister();
+@@ -3306,8 +3305,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+       __ St_d(scratch2, MemOperand(sp, FCA::kDataIndex * kSystemPointerSize));
+       break;
+ 
+-    case CallApiCallbackMode::kNoSideEffects:
+-    case CallApiCallbackMode::kWithSideEffects:
++    case CallApiCallbackMode::kOptimized:
+       __ St_d(call_data, MemOperand(sp, FCA::kDataIndex * kSystemPointerSize));
+       break;
+   }
+diff --git a/src/builtins/mips64/builtins-mips64.cc b/src/builtins/mips64/builtins-mips64.cc
+index 0aa0d42bfc2..4e36450d980 100644
+--- a/src/builtins/mips64/builtins-mips64.cc
++++ b/src/builtins/mips64/builtins-mips64.cc
+@@ -3248,7 +3248,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+   //  -- a2                  : arguments count (not including the receiver)
+   //  -- a3                  : call handler info
+   //  -- a0                  : holder
+-  // CallApiCallbackMode::kNoSideEffects/kWithSideEffectsSideEffects modes:
++  // CallApiCallbackMode::kOptimized mode:
+   //  -- a1                  : api function address
+   //  -- a2                  : arguments count
+   //  -- a3                  : call data
+@@ -3280,8 +3280,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+       holder = CallApiCallbackGenericDescriptor::HolderRegister();
+       break;
+ 
+-    case CallApiCallbackMode::kNoSideEffects:
+-    case CallApiCallbackMode::kWithSideEffects:
++    case CallApiCallbackMode::kOptimized:
+       api_function_address =
+           CallApiCallbackOptimizedDescriptor::ApiFunctionAddressRegister();
+       argc = CallApiCallbackOptimizedDescriptor::ActualArgumentsCountRegister();
+@@ -3343,8 +3342,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+       __ Sd(scratch2, MemOperand(sp, FCA::kDataIndex * kSystemPointerSize));
+       break;
+ 
+-    case CallApiCallbackMode::kNoSideEffects:
+-    case CallApiCallbackMode::kWithSideEffects:
++    case CallApiCallbackMode::kOptimized:
+       __ Sd(call_data, MemOperand(sp, FCA::kDataIndex * kSystemPointerSize));
+       break;
+   }
+diff --git a/src/builtins/ppc/builtins-ppc.cc b/src/builtins/ppc/builtins-ppc.cc
+index 8f6d228c3d4..418fcf756b7 100644
+--- a/src/builtins/ppc/builtins-ppc.cc
++++ b/src/builtins/ppc/builtins-ppc.cc
+@@ -3455,7 +3455,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+   //  -- r5                  : arguments count (not including the receiver)
+   //  -- r6                  : call handler info
+   //  -- r3                  : holder
+-  // CallApiCallbackMode::kNoSideEffects/kWithSideEffectsSideEffects modes:
++  // CallApiCallbackMode::kOptimized mode:
+   //  -- r4                  : api function address
+   //  -- r5                  : arguments count (not including the receiver)
+   //  -- r6                  : call data
+@@ -3486,8 +3486,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+       holder = CallApiCallbackGenericDescriptor::HolderRegister();
+       break;
+ 
+-    case CallApiCallbackMode::kNoSideEffects:
+-    case CallApiCallbackMode::kWithSideEffects:
++    case CallApiCallbackMode::kOptimized:
+       api_function_address =
+           CallApiCallbackOptimizedDescriptor::ApiFunctionAddressRegister();
+       argc = CallApiCallbackOptimizedDescriptor::ActualArgumentsCountRegister();
+@@ -3550,8 +3549,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+                   MemOperand(sp, FCA::kDataIndex * kSystemPointerSize));
+       break;
+ 
+-    case CallApiCallbackMode::kNoSideEffects:
+-    case CallApiCallbackMode::kWithSideEffects:
++    case CallApiCallbackMode::kOptimized:
+       __ StoreU64(call_data,
+                   MemOperand(sp, FCA::kDataIndex * kSystemPointerSize));
+       break;
+diff --git a/src/builtins/riscv/builtins-riscv.cc b/src/builtins/riscv/builtins-riscv.cc
+index 81509a57763..9ca70363b11 100644
+--- a/src/builtins/riscv/builtins-riscv.cc
++++ b/src/builtins/riscv/builtins-riscv.cc
+@@ -3299,7 +3299,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+   //  -- a2                  : arguments count (not including the receiver)
+   //  -- a3                  : call handler info
+   //  -- a0                  : holder
+-  // CallApiCallbackMode::kNoSideEffects/kWithSideEffectsSideEffects modes:
++  // CallApiCallbackMode::kOptimized mode:
+   //  -- a1                  : api function address
+   //  -- a2                  : arguments count
+   //  -- a3                  : call data
+@@ -3329,8 +3329,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+       holder = CallApiCallbackGenericDescriptor::HolderRegister();
+       break;
+ 
+-    case CallApiCallbackMode::kNoSideEffects:
+-    case CallApiCallbackMode::kWithSideEffects:
++    case CallApiCallbackMode::kOptimized:
+       api_function_address =
+           CallApiCallbackOptimizedDescriptor::ApiFunctionAddressRegister();
+       argc = CallApiCallbackOptimizedDescriptor::ActualArgumentsCountRegister();
+@@ -3394,8 +3393,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+                    MemOperand(sp, FCA::kDataIndex * kSystemPointerSize));
+       break;
+ 
+-    case CallApiCallbackMode::kNoSideEffects:
+-    case CallApiCallbackMode::kWithSideEffects:
++    case CallApiCallbackMode::kOptimized:
+       __ StoreWord(call_data,
+                    MemOperand(sp, FCA::kDataIndex * kSystemPointerSize));
+       break;
+diff --git a/src/builtins/s390/builtins-s390.cc b/src/builtins/s390/builtins-s390.cc
+index b5be3c258a1..4d82baf0113 100644
+--- a/src/builtins/s390/builtins-s390.cc
++++ b/src/builtins/s390/builtins-s390.cc
+@@ -3431,7 +3431,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+   //  -- r4                  : arguments count (not including the receiver)
+   //  -- r5                  : call handler info
+   //  -- r2                  : holder
+-  // CallApiCallbackMode::kNoSideEffects/kWithSideEffectsSideEffects modes:
++  // CallApiCallbackMode::kOptimized mode:
+   //  -- r4                  : api function address
+   //  -- r4                  : arguments count (not including the receiver)
+   //  -- r5                  : call data
+@@ -3462,8 +3462,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+       holder = CallApiCallbackGenericDescriptor::HolderRegister();
+       break;
+ 
+-    case CallApiCallbackMode::kNoSideEffects:
+-    case CallApiCallbackMode::kWithSideEffects:
++    case CallApiCallbackMode::kOptimized:
+       api_function_address =
+           CallApiCallbackOptimizedDescriptor::ApiFunctionAddressRegister();
+       argc = CallApiCallbackOptimizedDescriptor::ActualArgumentsCountRegister();
+@@ -3525,8 +3524,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+                   MemOperand(sp, FCA::kDataIndex * kSystemPointerSize));
+       break;
+ 
+-    case CallApiCallbackMode::kNoSideEffects:
+-    case CallApiCallbackMode::kWithSideEffects:
++    case CallApiCallbackMode::kOptimized:
+       __ StoreU64(call_data,
+                   MemOperand(sp, FCA::kDataIndex * kSystemPointerSize));
+       break;
+diff --git a/src/builtins/x64/builtins-x64.cc b/src/builtins/x64/builtins-x64.cc
+index 00b91156cea..27e0945ebac 100644
+--- a/src/builtins/x64/builtins-x64.cc
++++ b/src/builtins/x64/builtins-x64.cc
+@@ -4955,7 +4955,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+   //  -- rcx                 : arguments count (not including the receiver)
+   //  -- rbx                 : call handler info
+   //  -- r8                  : holder
+-  // CallApiCallbackMode::kNoSideEffects/kWithSideEffectsSideEffects modes:
++  // CallApiCallbackMode::kOptimized mode:
+   //  -- rdx                 : api function address
+   //  -- rcx                 : arguments count (not including the receiver)
+   //  -- rbx                 : call data
+@@ -4989,8 +4989,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+       holder = CallApiCallbackGenericDescriptor::HolderRegister();
+       break;
+ 
+-    case CallApiCallbackMode::kNoSideEffects:
+-    case CallApiCallbackMode::kWithSideEffects:
++    case CallApiCallbackMode::kOptimized:
+       api_function_address =
+           CallApiCallbackOptimizedDescriptor::ApiFunctionAddressRegister();
+       argc = CallApiCallbackOptimizedDescriptor::ActualArgumentsCountRegister();
+@@ -5037,8 +5036,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+                          scratch2);
+       break;
+ 
+-    case CallApiCallbackMode::kNoSideEffects:
+-    case CallApiCallbackMode::kWithSideEffects:
++    case CallApiCallbackMode::kOptimized:
+       __ Push(call_data);
+       break;
+   }
+diff --git a/src/codegen/external-reference.cc b/src/codegen/external-reference.cc
+index 9c1bcba372b..0bc8abfcc97 100644
+--- a/src/codegen/external-reference.cc
++++ b/src/codegen/external-reference.cc
+@@ -795,17 +795,8 @@ ExternalReference ExternalReference::invoke_function_callback_generic() {
+   return ExternalReference::Create(&thunk_fun, thunk_type);
+ }
+ 
+-ExternalReference
+-ExternalReference::invoke_function_callback_with_side_effects() {
+-  Address thunk_address = FUNCTION_ADDR(&InvokeFunctionCallbackWithSideEffects);
+-  ExternalReference::Type thunk_type = ExternalReference::DIRECT_API_CALL;
+-  ApiFunction thunk_fun(thunk_address);
+-  return ExternalReference::Create(&thunk_fun, thunk_type);
+-}
+-
+-ExternalReference
+-ExternalReference::invoke_function_callback_no_side_effects() {
+-  Address thunk_address = FUNCTION_ADDR(&InvokeFunctionCallbackNoSideEffects);
++ExternalReference ExternalReference::invoke_function_callback_optimized() {
++  Address thunk_address = FUNCTION_ADDR(&InvokeFunctionCallbackOptimized);
+   ExternalReference::Type thunk_type = ExternalReference::DIRECT_API_CALL;
+   ApiFunction thunk_fun(thunk_address);
+   return ExternalReference::Create(&thunk_fun, thunk_type);
+@@ -817,10 +808,8 @@ ExternalReference ExternalReference::invoke_function_callback(
+   switch (mode) {
+     case CallApiCallbackMode::kGeneric:
+       return invoke_function_callback_generic();
+-    case CallApiCallbackMode::kWithSideEffects:
+-      return invoke_function_callback_with_side_effects();
+-    case CallApiCallbackMode::kNoSideEffects:
+-      return invoke_function_callback_no_side_effects();
++    case CallApiCallbackMode::kOptimized:
++      return invoke_function_callback_optimized();
+   }
+ }
+ 
+diff --git a/src/codegen/external-reference.h b/src/codegen/external-reference.h
+index b26dae98c6d..81216fba722 100644
+--- a/src/codegen/external-reference.h
++++ b/src/codegen/external-reference.h
+@@ -172,10 +172,7 @@ class StatsCounter;
+     "JSObject::InvalidatePrototypeChains()")                                   \
+   V(invoke_accessor_getter_callback, "InvokeAccessorGetterCallback")           \
+   V(invoke_function_callback_generic, "InvokeFunctionCallbackGeneric")         \
+-  V(invoke_function_callback_no_side_effects,                                  \
+-    "InvokeFunctionCallbackNoSideEffects")                                     \
+-  V(invoke_function_callback_with_side_effects,                                \
+-    "InvokeFunctionCallbackWithSideEffects")                                   \
++  V(invoke_function_callback_optimized, "InvokeFunctionCallbackOptimized")     \
+   V(jsarray_array_join_concat_to_sequential_string,                            \
+     "jsarray_array_join_concat_to_sequential_string")                          \
+   V(jsreceiver_create_identity_hash, "jsreceiver_create_identity_hash")        \
+diff --git a/src/common/globals.h b/src/common/globals.h
+index ef9904f3fce..59ac173876c 100644
+--- a/src/common/globals.h
++++ b/src/common/globals.h
+@@ -691,13 +691,12 @@ enum class CallApiCallbackMode {
+   // side-effects checking by debugger.
+   kGeneric,
+ 
+-  // The following two are used for generating calls from optimized code when
+-  // the target CallHandlerInfo object is known and thus the expected
+-  // side-effects of the callback. These versions don't get the target
+-  // function because the target function can be reconstructed from the deopt
+-  // info in case exception is thrown.
+-  kNoSideEffects,
+-  kWithSideEffects,
++  // This version is used for generating calls from optimized code. It doesn't
++  // need to support side effects checking because function will be deoptimized
++  // when side effects checking is enabled, and it doesn't get the target
++  // function because it can be reconstructed from the lazy deopt info in case
++  // exception is thrown.
++  kOptimized,
+ };
+ 
+ // This constant is used as an undefined value when passing source positions.
+diff --git a/src/compiler/js-call-reducer.cc b/src/compiler/js-call-reducer.cc
+index 981719327bf..f3dc924abf2 100644
+--- a/src/compiler/js-call-reducer.cc
++++ b/src/compiler/js-call-reducer.cc
+@@ -686,10 +686,8 @@ class FastApiCallReducerAssembler : public JSCallReducerAssembler {
+     // holder, receiver, ... JS arguments, context, new frame state]
+     CallHandlerInfoRef call_handler_info =
+         *function_template_info_.call_code(broker());
+-    Callable call_api_callback = Builtins::CallableFor(
+-        isolate(), call_handler_info.object()->IsSideEffectCallHandlerInfo()
+-                       ? Builtin::kCallApiCallbackWithSideEffects
+-                       : Builtin::kCallApiCallbackNoSideEffects);
++    Callable call_api_callback =
++        Builtins::CallableFor(isolate(), Builtin::kCallApiCallbackOptimized);
+     CallInterfaceDescriptor cid = call_api_callback.descriptor();
+     CallDescriptor* call_descriptor =
+         Linkage::GetStubCallDescriptor(graph()->zone(), cid, arity_ + kReceiver,
+@@ -4011,10 +4009,8 @@ Reduction JSCallReducer::ReduceCallApiFunction(Node* node,
+ 
+   CallHandlerInfoRef call_handler_info =
+       *function_template_info.call_code(broker());
+-  Callable call_api_callback = Builtins::CallableFor(
+-      isolate(), call_handler_info.object()->IsSideEffectCallHandlerInfo()
+-                     ? Builtin::kCallApiCallbackWithSideEffects
+-                     : Builtin::kCallApiCallbackNoSideEffects);
++  Callable call_api_callback =
++      Builtins::CallableFor(isolate(), Builtin::kCallApiCallbackOptimized);
+   CallInterfaceDescriptor cid = call_api_callback.descriptor();
+   auto call_descriptor =
+       Linkage::GetStubCallDescriptor(graph()->zone(), cid, argc + 1 /*
+diff --git a/src/compiler/js-native-context-specialization.cc b/src/compiler/js-native-context-specialization.cc
+index bf26204d513..d3707d19710 100644
+--- a/src/compiler/js-native-context-specialization.cc
++++ b/src/compiler/js-native-context-specialization.cc
+@@ -2768,10 +2768,8 @@ Node* JSNativeContextSpecialization::InlineApiCall(
+   // Only setters have a value.
+   int const argc = value == nullptr ? 0 : 1;
+   // The stub always expects the receiver as the first param on the stack.
+-  Callable call_api_callback = Builtins::CallableFor(
+-      isolate(), call_handler_info.object()->IsSideEffectCallHandlerInfo()
+-                     ? Builtin::kCallApiCallbackWithSideEffects
+-                     : Builtin::kCallApiCallbackNoSideEffects);
++  Callable call_api_callback =
++      Builtins::CallableFor(isolate(), Builtin::kCallApiCallbackOptimized);
+   CallInterfaceDescriptor call_interface_descriptor =
+       call_api_callback.descriptor();
+   auto call_descriptor = Linkage::GetStubCallDescriptor(
+diff --git a/src/maglev/maglev-graph-builder.cc b/src/maglev/maglev-graph-builder.cc
+index 2cc19f4bcc2..440aa53a71d 100644
+--- a/src/maglev/maglev-graph-builder.cc
++++ b/src/maglev/maglev-graph-builder.cc
+@@ -3699,18 +3699,9 @@ ReduceResult MaglevGraphBuilder::TryBuildPropertyGetterCall(
+     ApiFunction function(call_handler_info.callback());
+     ExternalReference reference = ExternalReference::Create(
+         &function, ExternalReference::DIRECT_API_CALL);
+-    if (call_handler_info.object()->IsSideEffectCallHandlerInfo()) {
+-      return BuildCallBuiltin<Builtin::kCallApiCallbackWithSideEffects>(
+-          {GetExternalConstant(reference), GetInt32Constant(0),
+-           GetConstant(call_handler_info.data(broker())), api_holder,
+-           receiver});
+-    } else {
+-      DCHECK(call_handler_info.object()->IsSideEffectFreeCallHandlerInfo());
+-      return BuildCallBuiltin<Builtin::kCallApiCallbackNoSideEffects>(
+-          {GetExternalConstant(reference), GetInt32Constant(0),
+-           GetConstant(call_handler_info.data(broker())), api_holder,
+-           receiver});
+-    }
++    return BuildCallBuiltin<Builtin::kCallApiCallbackOptimized>(
++        {GetExternalConstant(reference), GetInt32Constant(0),
++         GetConstant(call_handler_info.data(broker())), api_holder, receiver});
+   }
+ }
+ 
+-- 
+2.35.1
+

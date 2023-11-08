@@ -1,0 +1,99 @@
+From 3dd195240bea080fb06b24a440c607fb468cb70e Mon Sep 17 00:00:00 2001
+From: Milad Fa <mfarazma@redhat.com>
+Date: Wed, 2 Jun 2021 09:18:47 -0400
+Subject: [PATCH] [sparkplug] Fix Batch compilation on unsupported platforms
+
+Few of the changes added under https://crrev.com/c/2891656
+do not compile if sparkplug is not implement on a platform.
+
+Bug: v8:11790, v8:11421
+Change-Id: Iec40e89ab56a6923b30a5567e4a49e4f1763eece
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/2933656
+Reviewed-by: Patrick Thier <pthier@chromium.org>
+Commit-Queue: Milad Fa <mfarazma@redhat.com>
+Cr-Commit-Position: refs/heads/master@{#74921}
+---
+ src/baseline/baseline-batch-compiler.cc | 31 +++++++++++++++++++++++++
+ src/baseline/baseline.cc                |  5 ++++
+ test/cctest/test-api.cc                 |  2 ++
+ 3 files changed, 38 insertions(+)
+
+diff --git a/src/baseline/baseline-batch-compiler.cc b/src/baseline/baseline-batch-compiler.cc
+index 9c3de349c21..d23d3e8b46a 100644
+--- a/src/baseline/baseline-batch-compiler.cc
++++ b/src/baseline/baseline-batch-compiler.cc
+@@ -4,6 +4,11 @@
+ 
+ #include "src/baseline/baseline-batch-compiler.h"
+ 
++// TODO(v8:11421): Remove #if once baseline compiler is ported to other
++// architectures.
++#if V8_TARGET_ARCH_IA32 || V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64 || \
++    V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_RISCV64
++
+ #include "src/baseline/baseline-compiler.h"
+ #include "src/codegen/compiler.h"
+ #include "src/execution/isolate.h"
+@@ -119,3 +124,29 @@ void BaselineBatchCompiler::ClearBatch() {
+ }  // namespace baseline
+ }  // namespace internal
+ }  // namespace v8
++
++#else
++
++namespace v8 {
++namespace internal {
++namespace baseline {
++
++BaselineBatchCompiler::BaselineBatchCompiler(Isolate* isolate)
++    : isolate_(isolate),
++      compilation_queue_(Handle<WeakFixedArray>::null()),
++      last_index_(0),
++      estimated_instruction_size_(0),
++      enabled_(false) {}
++
++BaselineBatchCompiler::~BaselineBatchCompiler() {
++  if (!compilation_queue_.is_null()) {
++    GlobalHandles::Destroy(compilation_queue_.location());
++    compilation_queue_ = Handle<WeakFixedArray>::null();
++  }
++}
++
++}  // namespace baseline
++}  // namespace internal
++}  // namespace v8
++
++#endif
+diff --git a/src/baseline/baseline.cc b/src/baseline/baseline.cc
+index 39a79206d4f..c0e6ed64509 100644
+--- a/src/baseline/baseline.cc
++++ b/src/baseline/baseline.cc
+@@ -68,6 +68,11 @@ void EmitReturnBaseline(MacroAssembler* masm) {
+ namespace v8 {
+ namespace internal {
+ 
++bool CanCompileWithBaseline(Isolate* isolate,
++                            Handle<SharedFunctionInfo> shared) {
++  return false;
++}
++
+ MaybeHandle<Code> GenerateBaselineCode(Isolate* isolate,
+                                        Handle<SharedFunctionInfo> shared) {
+   UNREACHABLE();
+diff --git a/test/cctest/test-api.cc b/test/cctest/test-api.cc
+index 2764461743f..acdb0f340f6 100644
+--- a/test/cctest/test-api.cc
++++ b/test/cctest/test-api.cc
+@@ -13878,7 +13878,9 @@ UNINITIALIZED_TEST(SetJitCodeEventHandler) {
+   i::FLAG_incremental_marking = false;
+   i::FLAG_stress_concurrent_allocation = false;  // For SimulateFullSpace.
+   // Batch compilation can cause different owning spaces for foo and bar.
++#if ENABLE_SPARKPLUG
+   i::FLAG_baseline_batch_compilation = false;
++#endif
+   if (i::FLAG_never_compact) return;
+   const char* script =
+       "function bar() {"
+-- 
+2.35.1
+

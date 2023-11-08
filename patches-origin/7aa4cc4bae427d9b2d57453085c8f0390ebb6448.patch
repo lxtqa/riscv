@@ -1,0 +1,1407 @@
+From 7aa4cc4bae427d9b2d57453085c8f0390ebb6448 Mon Sep 17 00:00:00 2001
+From: Liu Yu <liuyu@loongson.cn>
+Date: Fri, 19 Nov 2021 09:18:14 +0800
+Subject: [PATCH] Reland "[loong64][mips64][fastcall] Enable float support on
+ loong64 and mips64"
+
+Besides, enable float support on simulator.
+
+Port commit 098f31f49593fce4148717ccaf5f2b05b4ea9ad0
+Port commit a6da8161197577a2221f5880cde4195f4ff92626
+
+As defined in
+https://loongson.github.io/LoongArch-Documentation/LoongArch-ELF-ABI-EN.html#_procedure_calling_convention
+Loongarch calling convention uses GP to pass floating-point
+arguments when no FP is available.
+
+Bug: v8:12614, chromium:1052746
+
+Change-Id: I33d4115674604604b2b7e9178a306efb6000222b
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3448195
+Reviewed-by: Maya Lekova <mslekova@chromium.org>
+Reviewed-by: Thibaud Michaud <thibaudm@chromium.org>
+Reviewed-by: Toon Verwaest <verwaest@chromium.org>
+Commit-Queue: Yu Liu <liuyu@loongson.cn>
+Auto-Submit: Yu Liu <liuyu@loongson.cn>
+Cr-Commit-Position: refs/heads/main@{#80062}
+---
+ .../loong64/macro-assembler-loong64.cc        |  11 +-
+ src/codegen/mips64/macro-assembler-mips64.cc  |   9 +-
+ src/common/globals.h                          |   8 +-
+ .../backend/arm/instruction-selector-arm.cc   |   5 +
+ .../arm64/instruction-selector-arm64.cc       |   5 +
+ .../backend/ia32/instruction-selector-ia32.cc |   5 +
+ .../backend/instruction-selector-impl.h       |   7 +-
+ src/compiler/backend/instruction-selector.cc  |  23 +-
+ src/compiler/backend/instruction-selector.h   |  10 +
+ .../backend/loong64/code-generator-loong64.cc |  12 +-
+ .../loong64/instruction-selector-loong64.cc   |  23 +-
+ .../backend/mips/instruction-selector-mips.cc |   5 +
+ .../backend/mips64/code-generator-mips64.cc   |   7 +-
+ .../mips64/instruction-selector-mips64.cc     |   5 +
+ .../backend/ppc/instruction-selector-ppc.cc   |   5 +
+ .../riscv64/instruction-selector-riscv64.cc   |   5 +
+ .../backend/s390/instruction-selector-s390.cc |   5 +
+ .../backend/x64/instruction-selector-x64.cc   |   5 +
+ src/compiler/c-linkage.cc                     |  64 +++++-
+ src/compiler/globals.h                        |   3 +-
+ src/compiler/linkage.h                        |   8 +
+ src/d8/d8-test.cc                             |   3 +-
+ src/execution/loong64/simulator-loong64.cc    | 198 ++++++++++++++---
+ src/execution/loong64/simulator-loong64.h     |  66 +++++-
+ src/execution/mips64/simulator-mips64.cc      | 199 +++++++++++++++---
+ src/execution/mips64/simulator-mips64.h       |  66 +++++-
+ src/execution/simulator-base.h                |  10 +-
+ .../test-run-calls-to-external-references.cc  |  44 ++++
+ 28 files changed, 713 insertions(+), 103 deletions(-)
+
+diff --git a/src/codegen/loong64/macro-assembler-loong64.cc b/src/codegen/loong64/macro-assembler-loong64.cc
+index 11acc7c4d29..4143fc7fd54 100644
+--- a/src/codegen/loong64/macro-assembler-loong64.cc
++++ b/src/codegen/loong64/macro-assembler-loong64.cc
+@@ -3892,16 +3892,25 @@ void TurboAssembler::Float64MinOutOfLine(FPURegister dst, FPURegister src1,
+ }
+ 
+ static const int kRegisterPassedArguments = 8;
++static const int kFPRegisterPassedArguments = 8;
+ 
+ int TurboAssembler::CalculateStackPassedWords(int num_reg_arguments,
+                                               int num_double_arguments) {
+   int stack_passed_words = 0;
+-  num_reg_arguments += 2 * num_double_arguments;
+ 
+   // Up to eight simple arguments are passed in registers a0..a7.
+   if (num_reg_arguments > kRegisterPassedArguments) {
+     stack_passed_words += num_reg_arguments - kRegisterPassedArguments;
+   }
++  if (num_double_arguments > kFPRegisterPassedArguments) {
++    int num_count = num_double_arguments - kFPRegisterPassedArguments;
++    if (num_reg_arguments >= kRegisterPassedArguments) {
++      stack_passed_words += num_count;
++    } else if (num_count > kRegisterPassedArguments - num_reg_arguments) {
++      stack_passed_words +=
++          num_count - (kRegisterPassedArguments - num_reg_arguments);
++    }
++  }
+   return stack_passed_words;
+ }
+ 
+diff --git a/src/codegen/mips64/macro-assembler-mips64.cc b/src/codegen/mips64/macro-assembler-mips64.cc
+index d9eb08e1d11..23d5dff5ed4 100644
+--- a/src/codegen/mips64/macro-assembler-mips64.cc
++++ b/src/codegen/mips64/macro-assembler-mips64.cc
+@@ -5898,12 +5898,11 @@ static const int kRegisterPassedArguments = 8;
+ int TurboAssembler::CalculateStackPassedWords(int num_reg_arguments,
+                                               int num_double_arguments) {
+   int stack_passed_words = 0;
+-  num_reg_arguments += 2 * num_double_arguments;
++  int num_args = num_reg_arguments + num_double_arguments;
+ 
+-  // O32: Up to four simple arguments are passed in registers a0..a3.
+-  // N64: Up to eight simple arguments are passed in registers a0..a7.
+-  if (num_reg_arguments > kRegisterPassedArguments) {
+-    stack_passed_words += num_reg_arguments - kRegisterPassedArguments;
++  // Up to eight arguments are passed in FPURegisters and GPRegisters.
++  if (num_args > kRegisterPassedArguments) {
++    stack_passed_words = num_args - kRegisterPassedArguments;
+   }
+   stack_passed_words += kCArgSlotCount;
+   return stack_passed_words;
+diff --git a/src/common/globals.h b/src/common/globals.h
+index bc9a6eb1c3c..ab6430891e0 100644
+--- a/src/common/globals.h
++++ b/src/common/globals.h
+@@ -86,12 +86,16 @@ namespace internal {
+ #endif
+ 
+ // Helper macros to enable handling of direct C calls in the simulator.
+-#if defined(USE_SIMULATOR) && defined(V8_TARGET_ARCH_ARM64)
++#if defined(USE_SIMULATOR) &&                                           \
++    (defined(V8_TARGET_ARCH_ARM64) || defined(V8_TARGET_ARCH_MIPS64) || \
++     defined(V8_TARGET_ARCH_LOONG64))
+ #define V8_USE_SIMULATOR_WITH_GENERIC_C_CALLS
+ #define V8_IF_USE_SIMULATOR(V) , V
+ #else
+ #define V8_IF_USE_SIMULATOR(V)
+-#endif  // defined(USE_SIMULATOR) && defined(V8_TARGET_ARCH_ARM64)
++#endif  // defined(USE_SIMULATOR) && \
++        // (defined(V8_TARGET_ARCH_ARM64) || defined(V8_TARGET_ARCH_MIPS64) || \
++        // defined(V8_TARGET_ARCH_LOONG64))
+ 
+ // Minimum stack size in KB required by compilers.
+ constexpr int kStackSpaceRequiredForCompilation = 40;
+diff --git a/src/compiler/backend/arm/instruction-selector-arm.cc b/src/compiler/backend/arm/instruction-selector-arm.cc
+index 4adcc3e9c62..5b265360d0e 100644
+--- a/src/compiler/backend/arm/instruction-selector-arm.cc
++++ b/src/compiler/backend/arm/instruction-selector-arm.cc
+@@ -1715,6 +1715,11 @@ void InstructionSelector::VisitFloat64Ieee754Unop(Node* node,
+       ->MarkAsCall();
+ }
+ 
++void InstructionSelector::EmitMoveParamToFPR(Node* node, int index) {}
++
++void InstructionSelector::EmitMoveFPRToParam(InstructionOperand* op,
++                                             LinkageLocation location) {}
++
+ void InstructionSelector::EmitPrepareArguments(
+     ZoneVector<PushParameter>* arguments, const CallDescriptor* call_descriptor,
+     Node* node) {
+diff --git a/src/compiler/backend/arm64/instruction-selector-arm64.cc b/src/compiler/backend/arm64/instruction-selector-arm64.cc
+index a948fb3d6a3..8633ebfaa62 100644
+--- a/src/compiler/backend/arm64/instruction-selector-arm64.cc
++++ b/src/compiler/backend/arm64/instruction-selector-arm64.cc
+@@ -2072,6 +2072,11 @@ void InstructionSelector::VisitFloat64Ieee754Unop(Node* node,
+       ->MarkAsCall();
+ }
+ 
++void InstructionSelector::EmitMoveParamToFPR(Node* node, int index) {}
++
++void InstructionSelector::EmitMoveFPRToParam(InstructionOperand* op,
++                                             LinkageLocation location) {}
++
+ void InstructionSelector::EmitPrepareArguments(
+     ZoneVector<PushParameter>* arguments, const CallDescriptor* call_descriptor,
+     Node* node) {
+diff --git a/src/compiler/backend/ia32/instruction-selector-ia32.cc b/src/compiler/backend/ia32/instruction-selector-ia32.cc
+index 1efc9f812c8..07e20494452 100644
+--- a/src/compiler/backend/ia32/instruction-selector-ia32.cc
++++ b/src/compiler/backend/ia32/instruction-selector-ia32.cc
+@@ -1434,6 +1434,11 @@ void InstructionSelector::VisitFloat64Ieee754Unop(Node* node,
+       ->MarkAsCall();
+ }
+ 
++void InstructionSelector::EmitMoveParamToFPR(Node* node, int index) {}
++
++void InstructionSelector::EmitMoveFPRToParam(InstructionOperand* op,
++                                             LinkageLocation location) {}
++
+ void InstructionSelector::EmitPrepareArguments(
+     ZoneVector<PushParameter>* arguments, const CallDescriptor* call_descriptor,
+     Node* node) {
+diff --git a/src/compiler/backend/instruction-selector-impl.h b/src/compiler/backend/instruction-selector-impl.h
+index 4b5780b66c7..386f690fed3 100644
+--- a/src/compiler/backend/instruction-selector-impl.h
++++ b/src/compiler/backend/instruction-selector-impl.h
+@@ -288,6 +288,11 @@ class OperandGenerator {
+                               InstructionOperand::kInvalidVirtualRegister);
+   }
+ 
++  InstructionOperand TempRegister(int code) {
++    return UnallocatedOperand(UnallocatedOperand::FIXED_REGISTER, code,
++                              sequence()->NextVirtualRegister());
++  }
++
+   template <typename FPRegType>
+   InstructionOperand TempFpRegister(FPRegType reg) {
+     UnallocatedOperand op =
+@@ -429,7 +434,7 @@ class OperandGenerator {
+ 
+   UnallocatedOperand ToUnallocatedOperand(LinkageLocation location,
+                                           int virtual_register) {
+-    if (location.IsAnyRegister()) {
++    if (location.IsAnyRegister() || location.IsNullRegister()) {
+       // any machine register.
+       return UnallocatedOperand(UnallocatedOperand::MUST_HAVE_REGISTER,
+                                 virtual_register);
+diff --git a/src/compiler/backend/instruction-selector.cc b/src/compiler/backend/instruction-selector.cc
+index 3c96e7f30e5..cee4a4fe34e 100644
+--- a/src/compiler/backend/instruction-selector.cc
++++ b/src/compiler/backend/instruction-selector.cc
+@@ -1150,6 +1150,9 @@ void InstructionSelector::InitializeCallBuffer(Node* call, CallBuffer* buffer,
+       buffer->pushed_nodes[stack_index] = param;
+       pushed_count++;
+     } else {
++      if (location.IsNullRegister()) {
++        EmitMoveFPRToParam(&op, location);
++      };
+       buffer->instruction_args.push_back(op);
+     }
+   }
+@@ -2836,14 +2839,18 @@ void InstructionSelector::VisitFinishRegion(Node* node) { EmitIdentity(node); }
+ void InstructionSelector::VisitParameter(Node* node) {
+   OperandGenerator g(this);
+   int index = ParameterIndexOf(node->op());
+-  InstructionOperand op =
+-      linkage()->ParameterHasSecondaryLocation(index)
+-          ? g.DefineAsDualLocation(
+-                node, linkage()->GetParameterLocation(index),
+-                linkage()->GetParameterSecondaryLocation(index))
+-          : g.DefineAsLocation(node, linkage()->GetParameterLocation(index));
+-
+-  Emit(kArchNop, op);
++
++  if (linkage()->GetParameterLocation(index).IsNullRegister()) {
++    EmitMoveParamToFPR(node, index);
++  } else {
++    InstructionOperand op =
++        linkage()->ParameterHasSecondaryLocation(index)
++            ? g.DefineAsDualLocation(
++                  node, linkage()->GetParameterLocation(index),
++                  linkage()->GetParameterSecondaryLocation(index))
++            : g.DefineAsLocation(node, linkage()->GetParameterLocation(index));
++    Emit(kArchNop, op);
++  }
+ }
+ 
+ namespace {
+diff --git a/src/compiler/backend/instruction-selector.h b/src/compiler/backend/instruction-selector.h
+index c1a12d97ec3..416c4c2034a 100644
+--- a/src/compiler/backend/instruction-selector.h
++++ b/src/compiler/backend/instruction-selector.h
+@@ -640,6 +640,16 @@ class V8_EXPORT_PRIVATE InstructionSelector final {
+   void EmitPrepareResults(ZoneVector<compiler::PushParameter>* results,
+                           const CallDescriptor* call_descriptor, Node* node);
+ 
++  // In LOONG64, calling convention uses free GP param register to pass
++  // floating-point arguments when no FP param register is available. But
++  // gap does not support moving from FPR to GPR, so we add EmitMoveFPRToParam
++  // to complete movement.
++  void EmitMoveFPRToParam(InstructionOperand* op, LinkageLocation location);
++  // Moving floating-point param from GP param register to FPR to participate in
++  // subsequent operations, whether CallCFunction or normal floating-point
++  // operations.
++  void EmitMoveParamToFPR(Node* node, int index);
++
+   bool CanProduceSignalingNaN(Node* node);
+ 
+   void AddOutputToSelectContinuation(OperandGenerator* g, int first_input_index,
+diff --git a/src/compiler/backend/loong64/code-generator-loong64.cc b/src/compiler/backend/loong64/code-generator-loong64.cc
+index 77a00c51b81..eeb1c3b21a5 100644
+--- a/src/compiler/backend/loong64/code-generator-loong64.cc
++++ b/src/compiler/backend/loong64/code-generator-loong64.cc
+@@ -652,8 +652,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+     case kArchPrepareCallCFunction: {
+       UseScratchRegisterScope temps(tasm());
+       Register scratch = temps.Acquire();
+-      int const num_parameters = MiscField::decode(instr->opcode());
+-      __ PrepareCallCFunction(num_parameters, scratch);
++      int const num_gp_parameters = ParamField::decode(instr->opcode());
++      int const num_fp_parameters = FPParamField::decode(instr->opcode());
++      __ PrepareCallCFunction(num_gp_parameters, num_fp_parameters, scratch);
+       // Frame alignment requires using FP-relative frame addressing.
+       frame_access_state()->SetFrameAccessToFP();
+       break;
+@@ -689,7 +690,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       AssemblePrepareTailCall();
+       break;
+     case kArchCallCFunction: {
+-      int const num_parameters = MiscField::decode(instr->opcode());
++      int const num_gp_parameters = ParamField::decode(instr->opcode());
++      int const num_fp_parameters = FPParamField::decode(instr->opcode());
+ #if V8_ENABLE_WEBASSEMBLY
+       Label start_call;
+       bool isWasmCapiFunction =
+@@ -711,10 +713,10 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+ #endif  // V8_ENABLE_WEBASSEMBLY
+       if (instr->InputAt(0)->IsImmediate()) {
+         ExternalReference ref = i.InputExternalReference(0);
+-        __ CallCFunction(ref, num_parameters);
++        __ CallCFunction(ref, num_gp_parameters, num_fp_parameters);
+       } else {
+         Register func = i.InputRegister(0);
+-        __ CallCFunction(func, num_parameters);
++        __ CallCFunction(func, num_gp_parameters, num_fp_parameters);
+       }
+ #if V8_ENABLE_WEBASSEMBLY
+       if (isWasmCapiFunction) {
+diff --git a/src/compiler/backend/loong64/instruction-selector-loong64.cc b/src/compiler/backend/loong64/instruction-selector-loong64.cc
+index 4f03f99acd5..90bd3ff4f70 100644
+--- a/src/compiler/backend/loong64/instruction-selector-loong64.cc
++++ b/src/compiler/backend/loong64/instruction-selector-loong64.cc
+@@ -1664,6 +1664,23 @@ void InstructionSelector::VisitFloat64Ieee754Unop(Node* node,
+       ->MarkAsCall();
+ }
+ 
++void InstructionSelector::EmitMoveParamToFPR(Node* node, int32_t index) {
++  OperandGenerator g(this);
++  int count = linkage()->GetParameterLocation(index).GetLocation();
++  InstructionOperand out_op = g.TempRegister(-count);
++  Emit(kArchNop, out_op);
++  Emit(kLoong64BitcastLD, g.DefineAsRegister(node), out_op);
++}
++
++void InstructionSelector::EmitMoveFPRToParam(InstructionOperand* op,
++                                             LinkageLocation location) {
++  OperandGenerator g(this);
++  int count = location.GetLocation();
++  InstructionOperand new_op = g.TempRegister(-count);
++  Emit(kLoong64BitcastDL, new_op, *op);
++  *op = new_op;
++}
++
+ void InstructionSelector::EmitPrepareArguments(
+     ZoneVector<PushParameter>* arguments, const CallDescriptor* call_descriptor,
+     Node* node) {
+@@ -1671,8 +1688,10 @@ void InstructionSelector::EmitPrepareArguments(
+ 
+   // Prepare for C function call.
+   if (call_descriptor->IsCFunctionCall()) {
+-    Emit(kArchPrepareCallCFunction | MiscField::encode(static_cast<int>(
+-                                         call_descriptor->ParameterCount())),
++    int gp_param_count = static_cast<int>(call_descriptor->GPParameterCount());
++    int fp_param_count = static_cast<int>(call_descriptor->FPParameterCount());
++    Emit(kArchPrepareCallCFunction | ParamField::encode(gp_param_count) |
++             FPParamField::encode(fp_param_count),
+          0, nullptr, 0, nullptr);
+ 
+     // Poke any stack arguments.
+diff --git a/src/compiler/backend/mips/instruction-selector-mips.cc b/src/compiler/backend/mips/instruction-selector-mips.cc
+index 67a28630a3d..7269fd6aed2 100644
+--- a/src/compiler/backend/mips/instruction-selector-mips.cc
++++ b/src/compiler/backend/mips/instruction-selector-mips.cc
+@@ -1324,6 +1324,11 @@ void InstructionSelector::VisitFloat64Ieee754Unop(Node* node,
+       ->MarkAsCall();
+ }
+ 
++void InstructionSelector::EmitMoveParamToFPR(Node* node, int index) {}
++
++void InstructionSelector::EmitMoveFPRToParam(InstructionOperand* op,
++                                             LinkageLocation location) {}
++
+ void InstructionSelector::EmitPrepareArguments(
+     ZoneVector<PushParameter>* arguments, const CallDescriptor* call_descriptor,
+     Node* node) {
+diff --git a/src/compiler/backend/mips64/code-generator-mips64.cc b/src/compiler/backend/mips64/code-generator-mips64.cc
+index 295470491f5..38d1e071f69 100644
+--- a/src/compiler/backend/mips64/code-generator-mips64.cc
++++ b/src/compiler/backend/mips64/code-generator-mips64.cc
+@@ -706,7 +706,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       AssemblePrepareTailCall();
+       break;
+     case kArchCallCFunction: {
+-      int const num_parameters = MiscField::decode(instr->opcode());
++      int const num_gp_parameters = ParamField::decode(instr->opcode());
++      int const num_fp_parameters = FPParamField::decode(instr->opcode());
+ #if V8_ENABLE_WEBASSEMBLY
+       Label start_call;
+       bool isWasmCapiFunction =
+@@ -733,10 +734,10 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+ #endif  // V8_ENABLE_WEBASSEMBLY
+       if (instr->InputAt(0)->IsImmediate()) {
+         ExternalReference ref = i.InputExternalReference(0);
+-        __ CallCFunction(ref, num_parameters);
++        __ CallCFunction(ref, num_gp_parameters, num_fp_parameters);
+       } else {
+         Register func = i.InputRegister(0);
+-        __ CallCFunction(func, num_parameters);
++        __ CallCFunction(func, num_gp_parameters, num_fp_parameters);
+       }
+ #if V8_ENABLE_WEBASSEMBLY
+       if (isWasmCapiFunction) {
+diff --git a/src/compiler/backend/mips64/instruction-selector-mips64.cc b/src/compiler/backend/mips64/instruction-selector-mips64.cc
+index 4f5738ddadd..880d7f724ec 100644
+--- a/src/compiler/backend/mips64/instruction-selector-mips64.cc
++++ b/src/compiler/backend/mips64/instruction-selector-mips64.cc
+@@ -1758,6 +1758,11 @@ void InstructionSelector::VisitFloat64Ieee754Unop(Node* node,
+       ->MarkAsCall();
+ }
+ 
++void InstructionSelector::EmitMoveParamToFPR(Node* node, int index) {}
++
++void InstructionSelector::EmitMoveFPRToParam(InstructionOperand* op,
++                                             LinkageLocation location) {}
++
+ void InstructionSelector::EmitPrepareArguments(
+     ZoneVector<PushParameter>* arguments, const CallDescriptor* call_descriptor,
+     Node* node) {
+diff --git a/src/compiler/backend/ppc/instruction-selector-ppc.cc b/src/compiler/backend/ppc/instruction-selector-ppc.cc
+index 4eee159ea89..1e8bfc6f52c 100644
+--- a/src/compiler/backend/ppc/instruction-selector-ppc.cc
++++ b/src/compiler/backend/ppc/instruction-selector-ppc.cc
+@@ -1885,6 +1885,11 @@ void InstructionSelector::VisitFloat64LessThanOrEqual(Node* node) {
+   VisitFloat64Compare(this, node, &cont);
+ }
+ 
++void InstructionSelector::EmitMoveParamToFPR(Node* node, int index) {}
++
++void InstructionSelector::EmitMoveFPRToParam(InstructionOperand* op,
++                                             LinkageLocation location) {}
++
+ void InstructionSelector::EmitPrepareArguments(
+     ZoneVector<PushParameter>* arguments, const CallDescriptor* call_descriptor,
+     Node* node) {
+diff --git a/src/compiler/backend/riscv64/instruction-selector-riscv64.cc b/src/compiler/backend/riscv64/instruction-selector-riscv64.cc
+index a4547402e94..84f148041ed 100644
+--- a/src/compiler/backend/riscv64/instruction-selector-riscv64.cc
++++ b/src/compiler/backend/riscv64/instruction-selector-riscv64.cc
+@@ -1698,6 +1698,11 @@ void InstructionSelector::VisitFloat64Ieee754Unop(Node* node,
+       ->MarkAsCall();
+ }
+ 
++void InstructionSelector::EmitMoveParamToFPR(Node* node, int index) {}
++
++void InstructionSelector::EmitMoveFPRToParam(InstructionOperand* op,
++                                             LinkageLocation location) {}
++
+ void InstructionSelector::EmitPrepareArguments(
+     ZoneVector<PushParameter>* arguments, const CallDescriptor* call_descriptor,
+     Node* node) {
+diff --git a/src/compiler/backend/s390/instruction-selector-s390.cc b/src/compiler/backend/s390/instruction-selector-s390.cc
+index 3f6b89a7b5f..28ca621d83e 100644
+--- a/src/compiler/backend/s390/instruction-selector-s390.cc
++++ b/src/compiler/backend/s390/instruction-selector-s390.cc
+@@ -2113,6 +2113,11 @@ bool InstructionSelector::ZeroExtendsWord32ToWord64NoPhis(Node* node) {
+   UNIMPLEMENTED();
+ }
+ 
++void InstructionSelector::EmitMoveParamToFPR(Node* node, int index) {}
++
++void InstructionSelector::EmitMoveFPRToParam(InstructionOperand* op,
++                                             LinkageLocation location) {}
++
+ void InstructionSelector::EmitPrepareArguments(
+     ZoneVector<PushParameter>* arguments, const CallDescriptor* call_descriptor,
+     Node* node) {
+diff --git a/src/compiler/backend/x64/instruction-selector-x64.cc b/src/compiler/backend/x64/instruction-selector-x64.cc
+index d40f659e4b7..2f7e20d9ef9 100644
+--- a/src/compiler/backend/x64/instruction-selector-x64.cc
++++ b/src/compiler/backend/x64/instruction-selector-x64.cc
+@@ -1937,6 +1937,11 @@ void InstructionSelector::VisitFloat64Ieee754Unop(Node* node,
+       ->MarkAsCall();
+ }
+ 
++void InstructionSelector::EmitMoveParamToFPR(Node* node, int index) {}
++
++void InstructionSelector::EmitMoveFPRToParam(InstructionOperand* op,
++                                             LinkageLocation location) {}
++
+ void InstructionSelector::EmitPrepareArguments(
+     ZoneVector<PushParameter>* arguments, const CallDescriptor* call_descriptor,
+     Node* node) {
+diff --git a/src/compiler/c-linkage.cc b/src/compiler/c-linkage.cc
+index 951550c4a5b..f51fd0adca9 100644
+--- a/src/compiler/c-linkage.cc
++++ b/src/compiler/c-linkage.cc
+@@ -79,6 +79,8 @@ namespace {
+ // == mips64 =================================================================
+ // ===========================================================================
+ #define PARAM_REGISTERS a0, a1, a2, a3, a4, a5, a6, a7
++#define FP_PARAM_REGISTERS f12, f13, f14, f15, f16, f17, f18, f19
++#define FP_RETURN_REGISTER f0
+ #define CALLEE_SAVE_REGISTERS s0, s1, s2, s3, s4, s5, s6, s7
+ #define CALLEE_SAVE_FP_REGISTERS f20, f22, f24, f26, f28, f30
+ 
+@@ -87,6 +89,8 @@ namespace {
+ // == loong64 ================================================================
+ // ===========================================================================
+ #define PARAM_REGISTERS a0, a1, a2, a3, a4, a5, a6, a7
++#define FP_PARAM_REGISTERS f0, f1, f2, f3, f4, f5, f6, f7
++#define FP_RETURN_REGISTER f0
+ #define CALLEE_SAVE_REGISTERS s0, s1, s2, s3, s4, s5, s6, s7, s8, fp
+ #define CALLEE_SAVE_FP_REGISTERS f24, f25, f26, f27, f28, f29, f30, f31
+ 
+@@ -135,12 +139,15 @@ namespace {
+ #endif
+ }  // namespace
+ 
+-#if defined(V8_TARGET_OS_WIN) && defined(V8_TARGET_ARCH_X64)
++#if (defined(V8_TARGET_OS_WIN) && defined(V8_TARGET_ARCH_X64)) || \
++    defined(V8_TARGET_ARCH_MIPS64)
+ // As defined in
+ // https://docs.microsoft.com/en-us/cpp/build/x64-calling-convention?view=vs-2019#parameter-passing,
+ // Windows calling convention doesn't differentiate between GP and FP params
+ // when counting how many of them should be placed in registers. That's why
+ // we use the same counter {i} for both types here.
++// MIPS is the same, as defined in
++// https://techpubs.jurassic.nl/manuals/0630/developer/Mpro_n32_ABI/sgi_html/ch02.html#id52620.
+ void BuildParameterLocations(const MachineSignature* msig,
+                              size_t kFPParamRegisterCount,
+                              size_t kParamRegisterCount,
+@@ -172,7 +179,57 @@ void BuildParameterLocations(const MachineSignature* msig,
+     }
+   }
+ }
+-#else  // defined(V8_TARGET_OS_WIN) && defined(V8_TARGET_ARCH_X64)
++#elif defined(V8_TARGET_ARCH_LOONG64)
++// As defined in
++// https://loongson.github.io/LoongArch-Documentation/LoongArch-ELF-ABI-EN.html#_procedure_calling_convention
++// Loongarch calling convention uses GP to pass floating-point arguments when no
++// FP is available.
++void BuildParameterLocations(const MachineSignature* msig,
++                             size_t kFPParamRegisterCount,
++                             size_t kParamRegisterCount,
++                             const DoubleRegister* kFPParamRegisters,
++                             const v8::internal::Register* kParamRegisters,
++                             LocationSignature::Builder* out_locations) {
++#ifdef STACK_SHADOW_WORDS
++  int stack_offset = STACK_SHADOW_WORDS;
++#else
++  int stack_offset = 0;
++#endif
++  size_t num_params = 0;
++  size_t num_fp_params = 0;
++  for (size_t i = 0; i < msig->parameter_count(); i++) {
++    MachineType type = msig->GetParam(i);
++    if (IsFloatingPoint(type.representation())) {
++      if (num_fp_params < kFPParamRegisterCount) {
++        out_locations->AddParam(LinkageLocation::ForRegister(
++            kFPParamRegisters[num_fp_params].code(), type));
++        ++num_fp_params;
++      } else if (num_params < kParamRegisterCount) {
++        // ForNullRegister represents a floating-point param that should be put
++        // into the GPR, and reg_code is the the negative of encoding of the
++        // GPR, and the maximum is -4.
++        out_locations->AddParam(LinkageLocation::ForNullRegister(
++            -kParamRegisters[num_params].code(), type));
++        ++num_params;
++      } else {
++        out_locations->AddParam(
++            LinkageLocation::ForCallerFrameSlot(-1 - stack_offset, type));
++        stack_offset++;
++      }
++    } else {
++      if (num_params < kParamRegisterCount) {
++        out_locations->AddParam(LinkageLocation::ForRegister(
++            kParamRegisters[num_params].code(), type));
++        ++num_params;
++      } else {
++        out_locations->AddParam(
++            LinkageLocation::ForCallerFrameSlot(-1 - stack_offset, type));
++        stack_offset++;
++      }
++    }
++  }
++}
++#else
+ // As defined in https://www.agner.org/optimize/calling_conventions.pdf,
+ // Section 7, Linux and Mac place parameters in consecutive registers,
+ // differentiating between GP and FP params. That's why we maintain two
+@@ -213,7 +270,8 @@ void BuildParameterLocations(const MachineSignature* msig,
+     }
+   }
+ }
+-#endif  // defined(V8_TARGET_OS_WIN) && defined(V8_TARGET_ARCH_X64)
++#endif  // (defined(V8_TARGET_OS_WIN) && defined(V8_TARGET_ARCH_X64)) ||
++        // defined(V8_TARGET_ARCH_MIPS64)
+ 
+ // General code uses the above configuration data.
+ CallDescriptor* Linkage::GetSimplifiedCDescriptor(Zone* zone,
+diff --git a/src/compiler/globals.h b/src/compiler/globals.h
+index cdc6c19c47e..801f2f08a05 100644
+--- a/src/compiler/globals.h
++++ b/src/compiler/globals.h
+@@ -93,7 +93,8 @@ const int kMaxFastLiteralProperties = JSObject::kMaxInObjectProperties;
+ // (using FP stack). As support is added to more platforms, please make sure
+ // to list them here in order to enable tests of this functionality.
+ // Make sure to sync the following with src/d8/d8-test.cc.
+-#if defined(V8_TARGET_ARCH_X64) || defined(V8_TARGET_ARCH_ARM64)
++#if defined(V8_TARGET_ARCH_X64) || defined(V8_TARGET_ARCH_ARM64) || \
++    defined(V8_TARGET_ARCH_MIPS64) || defined(V8_TARGET_ARCH_LOONG64)
+ #define V8_ENABLE_FP_PARAMS_IN_C_LINKAGE
+ #endif
+ 
+diff --git a/src/compiler/linkage.h b/src/compiler/linkage.h
+index 0a96cc8b73d..729ac9b4f9f 100644
+--- a/src/compiler/linkage.h
++++ b/src/compiler/linkage.h
+@@ -66,6 +66,11 @@ class LinkageLocation {
+                       a.machine_type_.representation()));
+   }
+ 
++  static LinkageLocation ForNullRegister(
++      int32_t reg, MachineType type = MachineType::None()) {
++    return LinkageLocation(REGISTER, reg, type);
++  }
++
+   static LinkageLocation ForAnyRegister(
+       MachineType type = MachineType::None()) {
+     return LinkageLocation(REGISTER, ANY_REGISTER, type);
+@@ -140,6 +145,9 @@ class LinkageLocation {
+            LocationField::kShift;
+   }
+ 
++  bool IsNullRegister() const {
++    return IsRegister() && GetLocation() < ANY_REGISTER;
++  }
+   NO_INLINE_FOR_ARM64_MSVC bool IsRegister() const {
+     return TypeField::decode(bit_field_) == REGISTER;
+   }
+diff --git a/src/d8/d8-test.cc b/src/d8/d8-test.cc
+index 270d51f7fe2..11cdb92aad9 100644
+--- a/src/d8/d8-test.cc
++++ b/src/d8/d8-test.cc
+@@ -17,7 +17,8 @@
+ // and resetting these counters.
+ 
+ // Make sure to sync the following with src/compiler/globals.h.
+-#if defined(V8_TARGET_ARCH_X64) || defined(V8_TARGET_ARCH_ARM64)
++#if defined(V8_TARGET_ARCH_X64) || defined(V8_TARGET_ARCH_ARM64) || \
++    defined(V8_TARGET_ARCH_MIPS64) || defined(V8_TARGET_ARCH_LOONG64)
+ #define V8_ENABLE_FP_PARAMS_IN_C_LINKAGE
+ #endif
+ 
+diff --git a/src/execution/loong64/simulator-loong64.cc b/src/execution/loong64/simulator-loong64.cc
+index ddcf86435e1..7e3d9302727 100644
+--- a/src/execution/loong64/simulator-loong64.cc
++++ b/src/execution/loong64/simulator-loong64.cc
+@@ -2036,6 +2036,132 @@ using SimulatorRuntimeDirectGetterCall = void (*)(int64_t arg0, int64_t arg1);
+ using SimulatorRuntimeProfilingGetterCall = void (*)(int64_t arg0, int64_t arg1,
+                                                      void* arg2);
+ 
++using MixedRuntimeCall_0 = AnyCType (*)();
++
++#define BRACKETS(ident, N) ident[N]
++
++#define REP_0(expr, FMT)
++#define REP_1(expr, FMT) FMT(expr, 0)
++#define REP_2(expr, FMT) REP_1(expr, FMT), FMT(expr, 1)
++#define REP_3(expr, FMT) REP_2(expr, FMT), FMT(expr, 2)
++#define REP_4(expr, FMT) REP_3(expr, FMT), FMT(expr, 3)
++#define REP_5(expr, FMT) REP_4(expr, FMT), FMT(expr, 4)
++#define REP_6(expr, FMT) REP_5(expr, FMT), FMT(expr, 5)
++#define REP_7(expr, FMT) REP_6(expr, FMT), FMT(expr, 6)
++#define REP_8(expr, FMT) REP_7(expr, FMT), FMT(expr, 7)
++#define REP_9(expr, FMT) REP_8(expr, FMT), FMT(expr, 8)
++#define REP_10(expr, FMT) REP_9(expr, FMT), FMT(expr, 9)
++#define REP_11(expr, FMT) REP_10(expr, FMT), FMT(expr, 10)
++#define REP_12(expr, FMT) REP_11(expr, FMT), FMT(expr, 11)
++#define REP_13(expr, FMT) REP_12(expr, FMT), FMT(expr, 12)
++#define REP_14(expr, FMT) REP_13(expr, FMT), FMT(expr, 13)
++#define REP_15(expr, FMT) REP_14(expr, FMT), FMT(expr, 14)
++#define REP_16(expr, FMT) REP_15(expr, FMT), FMT(expr, 15)
++#define REP_17(expr, FMT) REP_16(expr, FMT), FMT(expr, 16)
++#define REP_18(expr, FMT) REP_17(expr, FMT), FMT(expr, 17)
++#define REP_19(expr, FMT) REP_18(expr, FMT), FMT(expr, 18)
++#define REP_20(expr, FMT) REP_19(expr, FMT), FMT(expr, 19)
++
++#define GEN_MAX_PARAM_COUNT(V) \
++  V(0)                         \
++  V(1)                         \
++  V(2)                         \
++  V(3)                         \
++  V(4)                         \
++  V(5)                         \
++  V(6)                         \
++  V(7)                         \
++  V(8)                         \
++  V(9)                         \
++  V(10)                        \
++  V(11)                        \
++  V(12)                        \
++  V(13)                        \
++  V(14)                        \
++  V(15)                        \
++  V(16)                        \
++  V(17)                        \
++  V(18)                        \
++  V(19)                        \
++  V(20)
++
++#define MIXED_RUNTIME_CALL(N) \
++  using MixedRuntimeCall_##N = AnyCType (*)(REP_##N(AnyCType arg, CONCAT));
++
++GEN_MAX_PARAM_COUNT(MIXED_RUNTIME_CALL)
++#undef MIXED_RUNTIME_CALL
++
++#define CALL_ARGS(N) REP_##N(args, BRACKETS)
++#define CALL_TARGET_VARARG(N)                                   \
++  if (signature.ParameterCount() == N) { /* NOLINT */           \
++    MixedRuntimeCall_##N target =                               \
++        reinterpret_cast<MixedRuntimeCall_##N>(target_address); \
++    result = target(CALL_ARGS(N));                              \
++  } else /* NOLINT */
++
++// Configuration for C calling convention (see c-linkage.cc).
++#define PARAM_REGISTERS a0, a1, a2, a3, a4, a5, a6, a7
++#define RETURN_REGISTER a0
++#define FP_PARAM_REGISTERS f0, f1, f2, f3, f4, f5, f6, f7
++#define FP_RETURN_REGISTER f0
++
++void Simulator::CallAnyCTypeFunction(Address target_address,
++                                     const EncodedCSignature& signature) {
++  const int64_t* stack_pointer = reinterpret_cast<int64_t*>(get_register(sp));
++  const double* double_stack_pointer =
++      reinterpret_cast<double*>(get_register(sp));
++
++  const Register kParamRegisters[] = {PARAM_REGISTERS};
++  const FPURegister kFPParamRegisters[] = {FP_PARAM_REGISTERS};
++
++  int num_gp_params = 0, num_fp_params = 0, num_stack_params = 0;
++
++  CHECK_LE(signature.ParameterCount(), kMaxCParameters);
++  static_assert(sizeof(AnyCType) == 8, "AnyCType is assumed to be 64-bit.");
++  AnyCType args[kMaxCParameters];
++  for (int i = 0; i < signature.ParameterCount(); ++i) {
++    if (signature.IsFloat(i)) {
++      if (num_fp_params < 8) {
++        args[i].double_value =
++            get_fpu_register_double(kFPParamRegisters[num_fp_params++]);
++      } else if (num_gp_params < 8) {
++        args[i].int64_value = get_register(kParamRegisters[num_gp_params++]);
++      } else {
++        args[i].double_value = double_stack_pointer[num_stack_params++];
++      }
++    } else {
++      if (num_gp_params < 8) {
++        args[i].int64_value = get_register(kParamRegisters[num_gp_params++]);
++      } else {
++        args[i].int64_value = stack_pointer[num_stack_params++];
++      }
++    }
++  }
++  AnyCType result;
++  GEN_MAX_PARAM_COUNT(CALL_TARGET_VARARG)
++  /* else */ {
++    UNREACHABLE();
++  }
++  static_assert(20 == kMaxCParameters,
++                "If you've changed kMaxCParameters, please change the "
++                "GEN_MAX_PARAM_COUNT macro.");
++
++#undef CALL_TARGET_VARARG
++#undef CALL_ARGS
++#undef GEN_MAX_PARAM_COUNT
++
++  if (signature.IsReturnFloat()) {
++    set_fpu_register_double(FP_RETURN_REGISTER, result.double_value);
++  } else {
++    set_register(RETURN_REGISTER, result.int64_value);
++  }
++}
++
++#undef PARAM_REGISTERS
++#undef RETURN_REGISTER
++#undef FP_PARAM_REGISTERS
++#undef FP_RETURN_REGISTER
++
+ // Software interrupt instructions are used by the simulator to call into the
+ // C-based V8 runtime. They are also used for debugging with simulator.
+ void Simulator::SoftwareInterrupt() {
+@@ -2046,6 +2172,25 @@ void Simulator::SoftwareInterrupt() {
+   if (instr_.InstructionBits() == rtCallRedirInstr) {
+     Redirection* redirection = Redirection::FromInstruction(instr_.instr());
+ 
++    // This is dodgy but it works because the C entry stubs are never moved.
++    int64_t saved_ra = get_register(ra);
++    intptr_t external =
++        reinterpret_cast<intptr_t>(redirection->external_function());
++
++    Address func_addr =
++        reinterpret_cast<Address>(redirection->external_function());
++    SimulatorData* simulator_data = isolate_->simulator_data();
++    DCHECK_NOT_NULL(simulator_data);
++    const EncodedCSignature& signature =
++        simulator_data->GetSignatureForTarget(func_addr);
++    if (signature.IsValid()) {
++      CHECK_EQ(redirection->type(), ExternalReference::FAST_C_CALL);
++      CallAnyCTypeFunction(external, signature);
++      set_register(ra, saved_ra);
++      set_pc(get_register(ra));
++      return;
++    }
++
+     int64_t* stack_pointer = reinterpret_cast<int64_t*>(get_register(sp));
+ 
+     int64_t arg0 = get_register(a0);
+@@ -2103,13 +2248,6 @@ void Simulator::SoftwareInterrupt() {
+       }
+     }
+ 
+-    // This is dodgy but it works because the C entry stubs are never moved.
+-    // See comment in codegen-arm.cc and bug 1242173.
+-    int64_t saved_ra = get_register(ra);
+-
+-    intptr_t external =
+-        reinterpret_cast<intptr_t>(redirection->external_function());
+-
+     // Based on CpuFeatures::IsSupported(FPU), Loong64 will use either hardware
+     // FPU, or gcc soft-float routines. Hardware FPU is simulated in this
+     // simulator. Soft-float has additional abstraction of ExternalReference,
+@@ -5317,35 +5455,40 @@ void Simulator::CallInternal(Address entry) {
+   set_register(fp, fp_val);
+ }
+ 
+-intptr_t Simulator::CallImpl(Address entry, int argument_count,
+-                             const intptr_t* arguments) {
+-  constexpr int kRegisterPassedArguments = 8;
+-  // Set up arguments.
+-
+-  int reg_arg_count = std::min(kRegisterPassedArguments, argument_count);
+-  if (reg_arg_count > 0) set_register(a0, arguments[0]);
+-  if (reg_arg_count > 1) set_register(a1, arguments[1]);
+-  if (reg_arg_count > 2) set_register(a2, arguments[2]);
+-  if (reg_arg_count > 3) set_register(a3, arguments[3]);
+-  if (reg_arg_count > 4) set_register(a4, arguments[4]);
+-  if (reg_arg_count > 5) set_register(a5, arguments[5]);
+-  if (reg_arg_count > 6) set_register(a6, arguments[6]);
+-  if (reg_arg_count > 7) set_register(a7, arguments[7]);
++void Simulator::CallImpl(Address entry, CallArgument* args) {
++  int index_gp = 0;
++  int index_fp = 0;
++
++  std::vector<int64_t> stack_args(0);
++  for (int i = 0; !args[i].IsEnd(); i++) {
++    CallArgument arg = args[i];
++    if (arg.IsGP() && (index_gp < 8)) {
++      set_register(index_gp + 4, arg.bits());
++      index_gp++;
++    } else if (arg.IsFP() && (index_fp < 8)) {
++      set_fpu_register(index_fp++, arg.bits());
++    } else if (arg.IsFP() && (index_gp < 8)) {
++      set_register(index_gp + 4, arg.bits());
++      index_gp++;
++    } else {
++      DCHECK(arg.IsFP() || arg.IsGP());
++      stack_args.push_back(arg.bits());
++    }
++  }
+ 
+   // Remaining arguments passed on stack.
+   int64_t original_stack = get_register(sp);
+   // Compute position of stack on entry to generated code.
+-  int stack_args_count = argument_count - reg_arg_count;
+-  int stack_args_size = stack_args_count * sizeof(*arguments);
++  int64_t stack_args_size = stack_args.size() * sizeof(stack_args[0]);
+   int64_t entry_stack = original_stack - stack_args_size;
+ 
+   if (base::OS::ActivationFrameAlignment() != 0) {
+     entry_stack &= -base::OS::ActivationFrameAlignment();
+   }
+   // Store remaining arguments on stack, from low to high memory.
+-  intptr_t* stack_argument = reinterpret_cast<intptr_t*>(entry_stack);
+-  memcpy(stack_argument, arguments + reg_arg_count,
+-         stack_args_count * sizeof(*arguments));
++  char* stack_argument = reinterpret_cast<char*>(entry_stack);
++  memcpy(stack_argument, stack_args.data(),
++         stack_args.size() * sizeof(int64_t));
+   set_register(sp, entry_stack);
+ 
+   CallInternal(entry);
+@@ -5353,8 +5496,6 @@ intptr_t Simulator::CallImpl(Address entry, int argument_count,
+   // Pop stack passed arguments.
+   CHECK_EQ(entry_stack, get_register(sp));
+   set_register(sp, original_stack);
+-
+-  return get_register(a0);
+ }
+ 
+ double Simulator::CallFP(Address entry, double d0, double d1) {
+@@ -5554,6 +5695,7 @@ void Simulator::GlobalMonitor::RemoveLinkedAddress(
+ }
+ 
+ #undef SScanF
++#undef BRACKETS
+ 
+ }  // namespace internal
+ }  // namespace v8
+diff --git a/src/execution/loong64/simulator-loong64.h b/src/execution/loong64/simulator-loong64.h
+index b9e97b93b22..072b1f73876 100644
+--- a/src/execution/loong64/simulator-loong64.h
++++ b/src/execution/loong64/simulator-loong64.h
+@@ -265,9 +265,54 @@ class Simulator : public SimulatorBase {
+   // Executes LOONG64 instructions until the PC reaches end_sim_pc.
+   void Execute();
+ 
++  // Only arguments up to 64 bits in size are supported.
++  class CallArgument {
++   public:
++    template <typename T>
++    explicit CallArgument(T argument) {
++      bits_ = 0;
++      DCHECK(sizeof(argument) <= sizeof(bits_));
++      bits_ = ConvertArg(argument);
++      type_ = GP_ARG;
++    }
++
++    explicit CallArgument(double argument) {
++      DCHECK(sizeof(argument) == sizeof(bits_));
++      memcpy(&bits_, &argument, sizeof(argument));
++      type_ = FP_ARG;
++    }
++
++    explicit CallArgument(float argument) {
++      // TODO(all): CallArgument(float) is untested.
++      UNIMPLEMENTED();
++    }
++
++    // This indicates the end of the arguments list, so that CallArgument
++    // objects can be passed into varargs functions.
++    static CallArgument End() { return CallArgument(); }
++
++    int64_t bits() const { return bits_; }
++    bool IsEnd() const { return type_ == NO_ARG; }
++    bool IsGP() const { return type_ == GP_ARG; }
++    bool IsFP() const { return type_ == FP_ARG; }
++
++   private:
++    enum CallArgumentType { GP_ARG, FP_ARG, NO_ARG };
++
++    // All arguments are aligned to at least 64 bits and we don't support
++    // passing bigger arguments, so the payload size can be fixed at 64 bits.
++    int64_t bits_;
++    CallArgumentType type_;
++
++    CallArgument() { type_ = NO_ARG; }
++  };
++
+   template <typename Return, typename... Args>
+   Return Call(Address entry, Args... args) {
+-    return VariadicCall<Return>(this, &Simulator::CallImpl, entry, args...);
++    // Convert all arguments to CallArgument.
++    CallArgument call_args[] = {CallArgument(args)..., CallArgument::End()};
++    CallImpl(entry, call_args);
++    return ReadReturn<Return>();
+   }
+ 
+   // Alternative: call a 2-argument double function.
+@@ -309,8 +354,23 @@ class Simulator : public SimulatorBase {
+     Unpredictable = 0xbadbeaf
+   };
+ 
+-  V8_EXPORT_PRIVATE intptr_t CallImpl(Address entry, int argument_count,
+-                                      const intptr_t* arguments);
++  V8_EXPORT_PRIVATE void CallImpl(Address entry, CallArgument* args);
++
++  void CallAnyCTypeFunction(Address target_address,
++                            const EncodedCSignature& signature);
++
++  // Read floating point return values.
++  template <typename T>
++  typename std::enable_if<std::is_floating_point<T>::value, T>::type
++  ReadReturn() {
++    return static_cast<T>(get_fpu_register_double(f0));
++  }
++  // Read non-float return values.
++  template <typename T>
++  typename std::enable_if<!std::is_floating_point<T>::value, T>::type
++  ReadReturn() {
++    return ConvertReturn<T>(get_register(a0));
++  }
+ 
+   // Unsupported instructions use Format to print an error and stop execution.
+   void Format(Instruction* instr, const char* format);
+diff --git a/src/execution/mips64/simulator-mips64.cc b/src/execution/mips64/simulator-mips64.cc
+index 457be018f20..0f927307b5f 100644
+--- a/src/execution/mips64/simulator-mips64.cc
++++ b/src/execution/mips64/simulator-mips64.cc
+@@ -2229,6 +2229,130 @@ using SimulatorRuntimeDirectGetterCall = void (*)(int64_t arg0, int64_t arg1);
+ using SimulatorRuntimeProfilingGetterCall = void (*)(int64_t arg0, int64_t arg1,
+                                                      void* arg2);
+ 
++using MixedRuntimeCall_0 = AnyCType (*)();
++
++#define BRACKETS(ident, N) ident[N]
++
++#define REP_0(expr, FMT)
++#define REP_1(expr, FMT) FMT(expr, 0)
++#define REP_2(expr, FMT) REP_1(expr, FMT), FMT(expr, 1)
++#define REP_3(expr, FMT) REP_2(expr, FMT), FMT(expr, 2)
++#define REP_4(expr, FMT) REP_3(expr, FMT), FMT(expr, 3)
++#define REP_5(expr, FMT) REP_4(expr, FMT), FMT(expr, 4)
++#define REP_6(expr, FMT) REP_5(expr, FMT), FMT(expr, 5)
++#define REP_7(expr, FMT) REP_6(expr, FMT), FMT(expr, 6)
++#define REP_8(expr, FMT) REP_7(expr, FMT), FMT(expr, 7)
++#define REP_9(expr, FMT) REP_8(expr, FMT), FMT(expr, 8)
++#define REP_10(expr, FMT) REP_9(expr, FMT), FMT(expr, 9)
++#define REP_11(expr, FMT) REP_10(expr, FMT), FMT(expr, 10)
++#define REP_12(expr, FMT) REP_11(expr, FMT), FMT(expr, 11)
++#define REP_13(expr, FMT) REP_12(expr, FMT), FMT(expr, 12)
++#define REP_14(expr, FMT) REP_13(expr, FMT), FMT(expr, 13)
++#define REP_15(expr, FMT) REP_14(expr, FMT), FMT(expr, 14)
++#define REP_16(expr, FMT) REP_15(expr, FMT), FMT(expr, 15)
++#define REP_17(expr, FMT) REP_16(expr, FMT), FMT(expr, 16)
++#define REP_18(expr, FMT) REP_17(expr, FMT), FMT(expr, 17)
++#define REP_19(expr, FMT) REP_18(expr, FMT), FMT(expr, 18)
++#define REP_20(expr, FMT) REP_19(expr, FMT), FMT(expr, 19)
++
++#define GEN_MAX_PARAM_COUNT(V) \
++  V(0)                         \
++  V(1)                         \
++  V(2)                         \
++  V(3)                         \
++  V(4)                         \
++  V(5)                         \
++  V(6)                         \
++  V(7)                         \
++  V(8)                         \
++  V(9)                         \
++  V(10)                        \
++  V(11)                        \
++  V(12)                        \
++  V(13)                        \
++  V(14)                        \
++  V(15)                        \
++  V(16)                        \
++  V(17)                        \
++  V(18)                        \
++  V(19)                        \
++  V(20)
++
++#define MIXED_RUNTIME_CALL(N) \
++  using MixedRuntimeCall_##N = AnyCType (*)(REP_##N(AnyCType arg, CONCAT));
++
++GEN_MAX_PARAM_COUNT(MIXED_RUNTIME_CALL)
++#undef MIXED_RUNTIME_CALL
++
++#define CALL_ARGS(N) REP_##N(args, BRACKETS)
++#define CALL_TARGET_VARARG(N)                                   \
++  if (signature.ParameterCount() == N) { /* NOLINT */           \
++    MixedRuntimeCall_##N target =                               \
++        reinterpret_cast<MixedRuntimeCall_##N>(target_address); \
++    result = target(CALL_ARGS(N));                              \
++  } else /* NOLINT */
++
++#define PARAM_REGISTERS a0, a1, a2, a3, a4, a5, a6, a7
++#define RETURN_REGISTER v0
++#define FP_PARAM_REGISTERS f12, f13, f14, f15, f16, f17, f18, f19
++#define FP_RETURN_REGISTER f0
++
++void Simulator::CallAnyCTypeFunction(Address target_address,
++                                     const EncodedCSignature& signature) {
++  const int64_t* stack_pointer = reinterpret_cast<int64_t*>(get_register(sp));
++  const double* double_stack_pointer =
++      reinterpret_cast<double*>(get_register(sp));
++
++  const Register kParamRegisters[] = {PARAM_REGISTERS};
++  const FPURegister kFPParamRegisters[] = {FP_PARAM_REGISTERS};
++
++  int num_reg_params = 0, num_stack_params = 0;
++
++  CHECK_LE(signature.ParameterCount(), kMaxCParameters);
++  static_assert(sizeof(AnyCType) == 8, "AnyCType is assumed to be 64-bit.");
++  AnyCType args[kMaxCParameters];
++  for (int i = 0; i < signature.ParameterCount(); ++i) {
++    if (num_reg_params < 8) {
++      if (signature.IsFloat(i)) {
++        args[i].double_value =
++            get_fpu_register_double(kFPParamRegisters[num_reg_params++]);
++      } else {
++        args[i].int64_value = get_register(kParamRegisters[num_reg_params++]);
++      }
++    } else {
++      if (signature.IsFloat(i)) {
++        args[i].double_value = double_stack_pointer[num_stack_params++];
++      } else {
++        args[i].int64_value = stack_pointer[num_stack_params++];
++      }
++    }
++  }
++  AnyCType result;
++  GEN_MAX_PARAM_COUNT(CALL_TARGET_VARARG)
++  /* else */ {
++    UNREACHABLE();
++  }
++  static_assert(20 == kMaxCParameters,
++                "If you've changed kMaxCParameters, please change the "
++                "GEN_MAX_PARAM_COUNT macro.");
++  printf("CallAnyCTypeFunction end result \n");
++
++#undef CALL_TARGET_VARARG
++#undef CALL_ARGS
++#undef GEN_MAX_PARAM_COUNT
++
++  if (signature.IsReturnFloat()) {
++    set_fpu_register_double(FP_RETURN_REGISTER, result.double_value);
++  } else {
++    set_register(RETURN_REGISTER, result.int64_value);
++  }
++}
++
++#undef PARAM_REGISTERS
++#undef RETURN_REGISTER
++#undef FP_PARAM_REGISTERS
++#undef FP_RETURN_REGISTER
++
+ // Software interrupt instructions are used by the simulator to call into the
+ // C-based V8 runtime. They are also used for debugging with simulator.
+ void Simulator::SoftwareInterrupt() {
+@@ -2241,6 +2365,26 @@ void Simulator::SoftwareInterrupt() {
+   if (instr_.InstructionBits() == rtCallRedirInstr) {
+     Redirection* redirection = Redirection::FromInstruction(instr_.instr());
+ 
++    // This is dodgy but it works because the C entry stubs are never moved.
++    int64_t saved_ra = get_register(ra);
++
++    intptr_t external =
++        reinterpret_cast<intptr_t>(redirection->external_function());
++
++    Address func_addr =
++        reinterpret_cast<Address>(redirection->external_function());
++    SimulatorData* simulator_data = isolate_->simulator_data();
++    DCHECK_NOT_NULL(simulator_data);
++    const EncodedCSignature& signature =
++        simulator_data->GetSignatureForTarget(func_addr);
++    if (signature.IsValid()) {
++      CHECK_EQ(redirection->type(), ExternalReference::FAST_C_CALL);
++      CallAnyCTypeFunction(external, signature);
++      set_register(ra, saved_ra);
++      set_pc(get_register(ra));
++      return;
++    }
++
+     int64_t* stack_pointer = reinterpret_cast<int64_t*>(get_register(sp));
+ 
+     int64_t arg0 = get_register(a0);
+@@ -2298,13 +2442,6 @@ void Simulator::SoftwareInterrupt() {
+       }
+     }
+ 
+-    // This is dodgy but it works because the C entry stubs are never moved.
+-    // See comment in codegen-arm.cc and bug 1242173.
+-    int64_t saved_ra = get_register(ra);
+-
+-    intptr_t external =
+-        reinterpret_cast<intptr_t>(redirection->external_function());
+-
+     // Based on CpuFeatures::IsSupported(FPU), Mips will use either hardware
+     // FPU, or gcc soft-float routines. Hardware FPU is simulated in this
+     // simulator. Soft-float has additional abstraction of ExternalReference,
+@@ -7467,39 +7604,37 @@ void Simulator::CallInternal(Address entry) {
+   set_register(fp, fp_val);
+ }
+ 
+-intptr_t Simulator::CallImpl(Address entry, int argument_count,
+-                             const intptr_t* arguments) {
+-  constexpr int kRegisterPassedArguments = 8;
+-  // Set up arguments.
+-
+-  // First four arguments passed in registers in both ABI's.
+-  int reg_arg_count = std::min(kRegisterPassedArguments, argument_count);
+-  if (reg_arg_count > 0) set_register(a0, arguments[0]);
+-  if (reg_arg_count > 1) set_register(a1, arguments[1]);
+-  if (reg_arg_count > 2) set_register(a2, arguments[2]);
+-  if (reg_arg_count > 3) set_register(a3, arguments[3]);
+-
+-  // Up to eight arguments passed in registers in N64 ABI.
+-  // TODO(plind): N64 ABI calls these regs a4 - a7. Clarify this.
+-  if (reg_arg_count > 4) set_register(a4, arguments[4]);
+-  if (reg_arg_count > 5) set_register(a5, arguments[5]);
+-  if (reg_arg_count > 6) set_register(a6, arguments[6]);
+-  if (reg_arg_count > 7) set_register(a7, arguments[7]);
++void Simulator::CallImpl(Address entry, CallArgument* args) {
++  std::vector<int64_t> stack_args(0);
++  for (int i = 0; !args[i].IsEnd(); i++) {
++    CallArgument arg = args[i];
++    if (i < 8) {
++      if (arg.IsGP()) {
++        set_register(i + 4, arg.bits());
++      } else {
++        DCHECK(arg.IsFP());
++        set_fpu_register(i + 12, arg.bits());
++      }
++    } else {
++      DCHECK(arg.IsFP() || arg.IsGP());
++      stack_args.push_back(arg.bits());
++    }
++  }
+ 
+   // Remaining arguments passed on stack.
+   int64_t original_stack = get_register(sp);
+   // Compute position of stack on entry to generated code.
+-  int stack_args_count = argument_count - reg_arg_count;
+-  int stack_args_size = stack_args_count * sizeof(*arguments) + kCArgsSlotsSize;
++  int64_t stack_args_size =
++      stack_args.size() * sizeof(stack_args[0]) + kCArgsSlotsSize;
+   int64_t entry_stack = original_stack - stack_args_size;
+ 
+   if (base::OS::ActivationFrameAlignment() != 0) {
+     entry_stack &= -base::OS::ActivationFrameAlignment();
+   }
+   // Store remaining arguments on stack, from low to high memory.
+-  intptr_t* stack_argument = reinterpret_cast<intptr_t*>(entry_stack);
+-  memcpy(stack_argument + kCArgSlotCount, arguments + reg_arg_count,
+-         stack_args_count * sizeof(*arguments));
++  char* stack_argument = reinterpret_cast<char*>(entry_stack);
++  memcpy(stack_argument + kCArgSlotCount, stack_args.data(),
++         stack_args.size() * sizeof(int64_t));
+   set_register(sp, entry_stack);
+ 
+   CallInternal(entry);
+@@ -7507,8 +7642,6 @@ intptr_t Simulator::CallImpl(Address entry, int argument_count,
+   // Pop stack passed arguments.
+   CHECK_EQ(entry_stack, get_register(sp));
+   set_register(sp, original_stack);
+-
+-  return get_register(v0);
+ }
+ 
+ double Simulator::CallFP(Address entry, double d0, double d1) {
+@@ -7721,7 +7854,7 @@ void Simulator::GlobalMonitor::RemoveLinkedAddress(
+ }
+ 
+ #undef SScanF
+-
++#undef BRACKETS
+ }  // namespace internal
+ }  // namespace v8
+ 
+diff --git a/src/execution/mips64/simulator-mips64.h b/src/execution/mips64/simulator-mips64.h
+index 69e80941741..cb8fd153c7c 100644
+--- a/src/execution/mips64/simulator-mips64.h
++++ b/src/execution/mips64/simulator-mips64.h
+@@ -301,9 +301,54 @@ class Simulator : public SimulatorBase {
+   // Executes MIPS instructions until the PC reaches end_sim_pc.
+   void Execute();
+ 
++  // Only arguments up to 64 bits in size are supported.
++  class CallArgument {
++   public:
++    template <typename T>
++    explicit CallArgument(T argument) {
++      bits_ = 0;
++      DCHECK(sizeof(argument) <= sizeof(bits_));
++      bits_ = ConvertArg(argument);
++      type_ = GP_ARG;
++    }
++
++    explicit CallArgument(double argument) {
++      DCHECK(sizeof(argument) == sizeof(bits_));
++      memcpy(&bits_, &argument, sizeof(argument));
++      type_ = FP_ARG;
++    }
++
++    explicit CallArgument(float argument) {
++      // TODO(all): CallArgument(float) is untested.
++      UNIMPLEMENTED();
++    }
++
++    // This indicates the end of the arguments list, so that CallArgument
++    // objects can be passed into varargs functions.
++    static CallArgument End() { return CallArgument(); }
++
++    int64_t bits() const { return bits_; }
++    bool IsEnd() const { return type_ == NO_ARG; }
++    bool IsGP() const { return type_ == GP_ARG; }
++    bool IsFP() const { return type_ == FP_ARG; }
++
++   private:
++    enum CallArgumentType { GP_ARG, FP_ARG, NO_ARG };
++
++    // All arguments are aligned to at least 64 bits and we don't support
++    // passing bigger arguments, so the payload size can be fixed at 64 bits.
++    int64_t bits_;
++    CallArgumentType type_;
++
++    CallArgument() { type_ = NO_ARG; }
++  };
++
+   template <typename Return, typename... Args>
+   Return Call(Address entry, Args... args) {
+-    return VariadicCall<Return>(this, &Simulator::CallImpl, entry, args...);
++    // Convert all arguments to CallArgument.
++    CallArgument call_args[] = {CallArgument(args)..., CallArgument::End()};
++    CallImpl(entry, call_args);
++    return ReadReturn<Return>();
+   }
+ 
+   // Alternative: call a 2-argument double function.
+@@ -345,8 +390,23 @@ class Simulator : public SimulatorBase {
+     Unpredictable = 0xbadbeaf
+   };
+ 
+-  V8_EXPORT_PRIVATE intptr_t CallImpl(Address entry, int argument_count,
+-                                      const intptr_t* arguments);
++  V8_EXPORT_PRIVATE void CallImpl(Address entry, CallArgument* args);
++
++  void CallAnyCTypeFunction(Address target_address,
++                            const EncodedCSignature& signature);
++
++  // Read floating point return values.
++  template <typename T>
++  typename std::enable_if<std::is_floating_point<T>::value, T>::type
++  ReadReturn() {
++    return static_cast<T>(get_fpu_register_double(f0));
++  }
++  // Read non-float return values.
++  template <typename T>
++  typename std::enable_if<!std::is_floating_point<T>::value, T>::type
++  ReadReturn() {
++    return ConvertReturn<T>(get_register(v0));
++  }
+ 
+   // Unsupported instructions use Format to print an error and stop execution.
+   void Format(Instruction* instr, const char* format);
+diff --git a/src/execution/simulator-base.h b/src/execution/simulator-base.h
+index ab8679aca24..fd39ae271c2 100644
+--- a/src/execution/simulator-base.h
++++ b/src/execution/simulator-base.h
+@@ -7,9 +7,10 @@
+ 
+ #include <type_traits>
+ 
+-#ifdef V8_TARGET_ARCH_ARM64
++#if V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_MIPS64 || V8_TARGET_ARCH_LOONG64
+ #include "include/v8-fast-api-calls.h"
+-#endif  // V8_TARGET_ARCH_ARM64
++#endif  // V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_MIPS64 || \
++        // V8_TARGET_ARCH_LOONG64
+ #include "src/base/hashmap.h"
+ #include "src/common/globals.h"
+ #include "src/execution/isolate.h"
+@@ -71,7 +72,7 @@ class SimulatorBase {
+     return Object(ret);
+   }
+ 
+-#ifdef V8_TARGET_ARCH_ARM64
++#if V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_MIPS64 || V8_TARGET_ARCH_LOONG64
+   template <typename T>
+   static typename std::enable_if<std::is_same<T, v8::AnyCType>::value, T>::type
+   ConvertReturn(intptr_t ret) {
+@@ -79,7 +80,8 @@ class SimulatorBase {
+     result.int64_value = static_cast<int64_t>(ret);
+     return result;
+   }
+-#endif  // V8_TARGET_ARCH_ARM64
++#endif  // V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_MIPS64 || \
++        // V8_TARGET_ARCH_LOONG64
+ 
+   // Convert back void return type (i.e. no return).
+   template <typename T>
+diff --git a/test/cctest/compiler/test-run-calls-to-external-references.cc b/test/cctest/compiler/test-run-calls-to-external-references.cc
+index 38a9d056eb5..3d31d8e59ed 100644
+--- a/test/cctest/compiler/test-run-calls-to-external-references.cc
++++ b/test/cctest/compiler/test-run-calls-to-external-references.cc
+@@ -678,6 +678,50 @@ ReturnType func_mixed_double_int(double arg0, double arg1, double arg2,
+ SIGNATURE_TEST(RunCallWithMixedSignatureDoubleInt, MIXED_SIGNATURE_DOUBLE_INT,
+                func_mixed_double_int)
+ 
++#define MIXED_SIGNATURE_DOUBLE_INT_ALT(V)                                     \
++  V(double, 0, 0.5)                                                           \
++  , V(int64_t, 1, 1), V(double, 2, 2.5), V(int64_t, 3, 3), V(double, 4, 4.5), \
++      V(int64_t, 5, 5), V(double, 6, 6.5), V(int64_t, 7, 7),                  \
++      V(double, 8, 8.5), V(int64_t, 9, 9), V(double, 10, 10.5),               \
++      V(int64_t, 11, 11), V(double, 12, 12.5), V(int64_t, 13, 13),            \
++      V(double, 14, 14.5), V(int64_t, 15, 15), V(double, 16, 16.5),           \
++      V(int64_t, 17, 17), V(double, 18, 18.5), V(int64_t, 19, 19)
++
++#ifdef V8_USE_SIMULATOR_WITH_GENERIC_C_CALLS
++Int64OrDoubleUnion func_mixed_double_int_alt(
++    Int64OrDoubleUnion arg0, Int64OrDoubleUnion arg1, Int64OrDoubleUnion arg2,
++    Int64OrDoubleUnion arg3, Int64OrDoubleUnion arg4, Int64OrDoubleUnion arg5,
++    Int64OrDoubleUnion arg6, Int64OrDoubleUnion arg7, Int64OrDoubleUnion arg8,
++    Int64OrDoubleUnion arg9, Int64OrDoubleUnion arg10, Int64OrDoubleUnion arg11,
++    Int64OrDoubleUnion arg12, Int64OrDoubleUnion arg13,
++    Int64OrDoubleUnion arg14, Int64OrDoubleUnion arg15,
++    Int64OrDoubleUnion arg16, Int64OrDoubleUnion arg17,
++    Int64OrDoubleUnion arg18, Int64OrDoubleUnion arg19) {
++#else
++ReturnType func_mixed_double_int_alt(double arg0, int64_t arg1, double arg2,
++                                     int64_t arg3, double arg4, int64_t arg5,
++                                     double arg6, int64_t arg7, double arg8,
++                                     int64_t arg9, double arg10, int64_t arg11,
++                                     double arg12, int64_t arg13, double arg14,
++                                     int64_t arg15, double arg16, int64_t arg17,
++                                     double arg18, int64_t arg19) {
++#endif
++  bool result = true;
++  MIXED_SIGNATURE_DOUBLE_INT_ALT(CHECK_ARG_I);
++  CHECK(result);
++
++#ifdef V8_USE_SIMULATOR_WITH_GENERIC_C_CALLS
++  Int64OrDoubleUnion ret;
++  ret.int64_t_value = 42;
++  return ret;
++#else
++  return 42;
++#endif
++}
++
++SIGNATURE_TEST(RunCallWithMixedSignatureDoubleIntAlt,
++               MIXED_SIGNATURE_DOUBLE_INT_ALT, func_mixed_double_int_alt)
++
+ #define MIXED_SIGNATURE_INT_DOUBLE(V)                                         \
+   V(int64_t, 0, 0), V(int64_t, 1, 1), V(int64_t, 2, 2), V(int64_t, 3, 3),     \
+       V(int64_t, 4, 4), V(int64_t, 5, 5), V(int64_t, 6, 6), V(int64_t, 7, 7), \
+-- 
+2.35.1
+

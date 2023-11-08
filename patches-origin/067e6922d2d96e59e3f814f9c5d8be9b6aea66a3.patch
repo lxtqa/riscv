@@ -1,0 +1,83 @@
+From 067e6922d2d96e59e3f814f9c5d8be9b6aea66a3 Mon Sep 17 00:00:00 2001
+From: yangwenming <yangwenming@bytedance.com>
+Date: Mon, 7 Aug 2023 19:34:16 +0800
+Subject: [PATCH] [riscv] avoid circular references of headers
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+commit de04898a0d79cea8dda7409a07b5c1387b50d557 introduced a new
+file (src/codegen/linkage-location.h) and created circular
+references in RISC-V backend. To avoid such an error, this
+CL removes including wasm-linkage.h in frame-constants-riscv.h
+and use immediate values for {kNumberOfSavedGpParamRegs} &
+{kNumberOfSavedFpParamRegs} instead.
+
+Bug: v8:14035
+Change-Id: Ie5abdd6fcfd96fbfba4ac1978404f8116cfd121c
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4753612
+Auto-Submit: 杨文明 <yangwenming@bytedance.com>
+Reviewed-by: Clemens Backes <clemensb@chromium.org>
+Commit-Queue: Clemens Backes <clemensb@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#89399}
+---
+ src/builtins/riscv/builtins-riscv.cc        |  6 ++++++
+ src/execution/riscv/frame-constants-riscv.h | 11 ++++++-----
+ 2 files changed, 12 insertions(+), 5 deletions(-)
+
+diff --git a/src/builtins/riscv/builtins-riscv.cc b/src/builtins/riscv/builtins-riscv.cc
+index 7ca504b0107..130138bfe75 100644
+--- a/src/builtins/riscv/builtins-riscv.cc
++++ b/src/builtins/riscv/builtins-riscv.cc
+@@ -2822,6 +2822,9 @@ void Builtins::Generate_Construct(MacroAssembler* masm) {
+ // call below. We don't have any callee-saved registers in wasm, so no need to
+ // store anything else.
+ constexpr RegList kSavedGpRegs = ([]() constexpr {
++  static_assert(WasmLiftoffSetupFrameConstants::kNumberOfSavedGpParamRegs ==
++                    arraysize(wasm::kGpParamRegisters) - 1,
++                "frame size mismatch");
+   RegList saved_gp_regs;
+   for (Register gp_param_reg : wasm::kGpParamRegisters) {
+     saved_gp_regs.set(gp_param_reg);
+@@ -2837,6 +2840,9 @@ constexpr RegList kSavedGpRegs = ([]() constexpr {
+ })();
+ 
+ constexpr DoubleRegList kSavedFpRegs = ([]() constexpr {
++  static_assert(WasmLiftoffSetupFrameConstants::kNumberOfSavedFpParamRegs ==
++                    arraysize(wasm::kFpParamRegisters),
++                "frame size mismatch");
+   DoubleRegList saved_fp_regs;
+   for (DoubleRegister fp_param_reg : wasm::kFpParamRegisters) {
+     saved_fp_regs.set(fp_param_reg);
+diff --git a/src/execution/riscv/frame-constants-riscv.h b/src/execution/riscv/frame-constants-riscv.h
+index e73e43629fc..7addd469cf9 100644
+--- a/src/execution/riscv/frame-constants-riscv.h
++++ b/src/execution/riscv/frame-constants-riscv.h
+@@ -9,7 +9,6 @@
+ #include "src/base/macros.h"
+ #include "src/execution/frame-constants.h"
+ #include "src/wasm/baseline/liftoff-assembler-defs.h"
+-#include "src/wasm/wasm-linkage.h"
+ 
+ namespace v8 {
+ namespace internal {
+@@ -24,10 +23,12 @@ class EntryFrameConstants : public AllStatic {
+ class WasmLiftoffSetupFrameConstants : public TypedFrameConstants {
+  public:
+   // Number of gp parameters, without the instance.
+-  static constexpr int kNumberOfSavedGpParamRegs =
+-      arraysize(wasm::kGpParamRegisters) - 1;
+-  static constexpr int kNumberOfSavedFpParamRegs =
+-      arraysize(wasm::kFpParamRegisters);
++  // Note that {kNumberOfSavedGpParamRegs} = arraysize(wasm::kGpParamRegisters)
++  // - 1, {kNumberOfSavedFpParamRegs} = arraysize(wasm::kFpParamRegisters). Here
++  // we use immediate values instead to avoid circular references (introduced by
++  // linkage_location.h, issue: v8:14035) and resultant compilation errors.
++  static constexpr int kNumberOfSavedGpParamRegs = 6;
++  static constexpr int kNumberOfSavedFpParamRegs = 8;
+   static constexpr int kNumberOfSavedAllParamRegs =
+       kNumberOfSavedGpParamRegs + kNumberOfSavedFpParamRegs;
+   static constexpr int kInstanceSpillOffset =
+-- 
+2.35.1
+

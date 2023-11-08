@@ -1,0 +1,182 @@
+From 0bd3033a54e5b42cd35395b495669be3ebf9b6c0 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Dominik=20Inf=C3=BChr?= <dinfuehr@chromium.org>
+Date: Sun, 4 Dec 2022 13:25:52 +0100
+Subject: [PATCH] [heap][wasm] Update flag used in liftoff write barrier
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Update write barrier emitted in Liftoff to also handle pointers into
+the shared heap correctly.
+
+Bug: v8:13267, chromium:1395520
+Change-Id: I4a356f3cc215cbe993e29819026dc2168bf336ca
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4078303
+Reviewed-by: Clemens Backes <clemensb@chromium.org>
+Commit-Queue: Dominik Inführ <dinfuehr@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#84637}
+---
+ src/wasm/baseline/arm/liftoff-assembler-arm.h         | 5 +++--
+ src/wasm/baseline/arm64/liftoff-assembler-arm64.h     | 5 +++--
+ src/wasm/baseline/ia32/liftoff-assembler-ia32.h       | 4 ++--
+ src/wasm/baseline/loong64/liftoff-assembler-loong64.h | 5 +++--
+ src/wasm/baseline/mips64/liftoff-assembler-mips64.h   | 4 ++--
+ src/wasm/baseline/ppc/liftoff-assembler-ppc.h         | 3 ++-
+ src/wasm/baseline/riscv/liftoff-assembler-riscv32.h   | 3 ++-
+ src/wasm/baseline/riscv/liftoff-assembler-riscv64.h   | 3 ++-
+ src/wasm/baseline/s390/liftoff-assembler-s390.h       | 3 ++-
+ src/wasm/baseline/x64/liftoff-assembler-x64.h         | 4 ++--
+ 10 files changed, 23 insertions(+), 16 deletions(-)
+
+diff --git a/src/wasm/baseline/arm/liftoff-assembler-arm.h b/src/wasm/baseline/arm/liftoff-assembler-arm.h
+index 3f0ae37a400..f65516a544a 100644
+--- a/src/wasm/baseline/arm/liftoff-assembler-arm.h
++++ b/src/wasm/baseline/arm/liftoff-assembler-arm.h
+@@ -812,8 +812,9 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+   b(&exit);
+   bind(&write_barrier);
+   JumpIfSmi(src.gp(), &exit);
+-  CheckPageFlag(src.gp(), MemoryChunk::kPointersToHereAreInterestingMask, eq,
+-                &exit);
++  CheckPageFlag(src.gp(),
++                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
++                eq, &exit);
+   CallRecordWriteStubSaveRegisters(
+       dst_addr,
+       actual_offset_reg == no_reg ? Operand(offset_imm)
+diff --git a/src/wasm/baseline/arm64/liftoff-assembler-arm64.h b/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
+index 6dee45991ee..2a988554a67 100644
+--- a/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
++++ b/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
+@@ -529,8 +529,9 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+   if (COMPRESS_POINTERS_BOOL) {
+     DecompressTaggedPointer(src.gp(), src.gp());
+   }
+-  CheckPageFlag(src.gp(), MemoryChunk::kPointersToHereAreInterestingMask, ne,
+-                &exit);
++  CheckPageFlag(src.gp(),
++                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
++                ne, &exit);
+   CallRecordWriteStubSaveRegisters(dst_addr, offset_op, SaveFPRegsMode::kSave,
+                                    StubCallMode::kCallWasmRuntimeStub);
+   bind(&exit);
+diff --git a/src/wasm/baseline/ia32/liftoff-assembler-ia32.h b/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
+index 3fcbf739760..3d7e2a50ff9 100644
+--- a/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
++++ b/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
+@@ -439,8 +439,8 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+   bind(&write_barrier);
+   JumpIfSmi(src.gp(), &exit, Label::kNear);
+   CheckPageFlag(src.gp(), scratch,
+-                MemoryChunk::kPointersToHereAreInterestingMask, zero, &exit,
+-                Label::kNear);
++                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
++                zero, &exit, Label::kNear);
+   lea(scratch, dst_op);
+   CallRecordWriteStubSaveRegisters(dst_addr, scratch, SaveFPRegsMode::kSave,
+                                    StubCallMode::kCallWasmRuntimeStub);
+diff --git a/src/wasm/baseline/loong64/liftoff-assembler-loong64.h b/src/wasm/baseline/loong64/liftoff-assembler-loong64.h
+index 4dc1086fca8..18d2ac981c0 100644
+--- a/src/wasm/baseline/loong64/liftoff-assembler-loong64.h
++++ b/src/wasm/baseline/loong64/liftoff-assembler-loong64.h
+@@ -437,8 +437,9 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+   b(&exit);
+   bind(&write_barrier);
+   JumpIfSmi(src.gp(), &exit);
+-  CheckPageFlag(src.gp(), MemoryChunk::kPointersToHereAreInterestingMask, eq,
+-                &exit);
++  CheckPageFlag(src.gp(),
++                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
++                eq, &exit);
+   CallRecordWriteStubSaveRegisters(dst_addr, offset_op, SaveFPRegsMode::kSave,
+                                    StubCallMode::kCallWasmRuntimeStub);
+   bind(&exit);
+diff --git a/src/wasm/baseline/mips64/liftoff-assembler-mips64.h b/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
+index f3b78299c81..c301e9e2cd0 100644
+--- a/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
++++ b/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
+@@ -543,8 +543,8 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+   bind(&write_barrier);
+   JumpIfSmi(src.gp(), &exit);
+   CheckPageFlag(src.gp(), scratch,
+-                MemoryChunk::kPointersToHereAreInterestingMask, eq,
+-                &exit);
++                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
++                eq, &exit);
+   Daddu(scratch, dst_op.rm(), dst_op.offset());
+   CallRecordWriteStubSaveRegisters(dst_addr, scratch, SaveFPRegsMode::kSave,
+                                    StubCallMode::kCallWasmRuntimeStub);
+diff --git a/src/wasm/baseline/ppc/liftoff-assembler-ppc.h b/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
+index 536fa657657..a1caeaafd5a 100644
+--- a/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
++++ b/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
+@@ -353,7 +353,8 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+   if (COMPRESS_POINTERS_BOOL) {
+     DecompressTaggedPointer(src.gp(), src.gp());
+   }
+-  CheckPageFlag(src.gp(), ip, MemoryChunk::kPointersToHereAreInterestingMask,
++  CheckPageFlag(src.gp(), ip,
++                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
+                 eq, &exit);
+   mov(ip, Operand(offset_imm));
+   add(ip, ip, dst_addr);
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h
+index ed559941d4b..8b8473d6186 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h
+@@ -238,7 +238,8 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+   bind(&write_barrier);
+   JumpIfSmi(src.gp(), &exit);
+   CheckPageFlag(src.gp(), kScratchReg,
+-                MemoryChunk::kPointersToHereAreInterestingMask, eq, &exit);
++                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
++                eq, &exit);
+   AddWord(scratch, dst_op.rm(), dst_op.offset());
+   CallRecordWriteStubSaveRegisters(dst_addr, scratch, SaveFPRegsMode::kSave,
+                                    StubCallMode::kCallWasmRuntimeStub);
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
+index 2168843a721..317885563ea 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
+@@ -208,7 +208,8 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+   bind(&write_barrier);
+   JumpIfSmi(src.gp(), &exit);
+   CheckPageFlag(src.gp(), scratch,
+-                MemoryChunk::kPointersToHereAreInterestingMask, eq, &exit);
++                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
++                eq, &exit);
+   AddWord(scratch, dst_op.rm(), dst_op.offset());
+   CallRecordWriteStubSaveRegisters(dst_addr, scratch, SaveFPRegsMode::kSave,
+                                    StubCallMode::kCallWasmRuntimeStub);
+diff --git a/src/wasm/baseline/s390/liftoff-assembler-s390.h b/src/wasm/baseline/s390/liftoff-assembler-s390.h
+index 1aa8864f5d6..54e01748e91 100644
+--- a/src/wasm/baseline/s390/liftoff-assembler-s390.h
++++ b/src/wasm/baseline/s390/liftoff-assembler-s390.h
+@@ -338,7 +338,8 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+   if (COMPRESS_POINTERS_BOOL) {
+     DecompressTaggedPointer(src.gp(), src.gp());
+   }
+-  CheckPageFlag(src.gp(), r1, MemoryChunk::kPointersToHereAreInterestingMask,
++  CheckPageFlag(src.gp(), r1,
++                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
+                 eq, &exit);
+   lay(r1, dst_op);
+   CallRecordWriteStubSaveRegisters(dst_addr, r1, SaveFPRegsMode::kSave,
+diff --git a/src/wasm/baseline/x64/liftoff-assembler-x64.h b/src/wasm/baseline/x64/liftoff-assembler-x64.h
+index 9236c86114e..850ad87c8de 100644
+--- a/src/wasm/baseline/x64/liftoff-assembler-x64.h
++++ b/src/wasm/baseline/x64/liftoff-assembler-x64.h
+@@ -441,8 +441,8 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+     DecompressTaggedPointer(src.gp(), src.gp());
+   }
+   CheckPageFlag(src.gp(), scratch,
+-                MemoryChunk::kPointersToHereAreInterestingMask, zero, &exit,
+-                Label::kNear);
++                MemoryChunk::kPointersToHereAreInterestingOrInSharedHeapMask,
++                zero, &exit, Label::kNear);
+   leaq(scratch, dst_op);
+ 
+   CallRecordWriteStubSaveRegisters(dst_addr, scratch, SaveFPRegsMode::kSave,
+-- 
+2.35.1
+

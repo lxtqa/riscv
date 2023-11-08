@@ -1,0 +1,62 @@
+From 2a19c77596a9573b7dab1f7be44eb726f78d7427 Mon Sep 17 00:00:00 2001
+From: Leszek Swirski <leszeks@chromium.org>
+Date: Wed, 21 Apr 2021 11:27:11 +0200
+Subject: [PATCH] [sparkplug] Reserve size for bytecode offset table
+
+Based on some test compiles (of three.js and jquery) we can get a decent
+estimate of expected bytecode offset table size for a given bytecode
+size. Reserve this expected size to avoid resize overhead.
+
+Bug: v8:11420
+Change-Id: I8288b01fa796e765a20b11219687fa3d23272416
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/2843354
+Reviewed-by: Patrick Thier <pthier@chromium.org>
+Commit-Queue: Leszek Swirski <leszeks@chromium.org>
+Cr-Commit-Position: refs/heads/master@{#74093}
+---
+ src/baseline/baseline-compiler.cc | 8 ++++++++
+ src/baseline/baseline-compiler.h  | 2 ++
+ 2 files changed, 10 insertions(+)
+
+diff --git a/src/baseline/baseline-compiler.cc b/src/baseline/baseline-compiler.cc
+index 54f9e8c21ef..9ede3255aef 100644
+--- a/src/baseline/baseline-compiler.cc
++++ b/src/baseline/baseline-compiler.cc
+@@ -4,6 +4,7 @@
+ 
+ // TODO(v8:11421): Remove #if once baseline compiler is ported to other
+ // architectures.
++#include "src/base/bits.h"
+ #if V8_TARGET_ARCH_IA32 || V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64 || \
+     V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_RISCV64
+ 
+@@ -258,6 +259,13 @@ BaselineCompiler::BaselineCompiler(
+       zone_(isolate->allocator(), ZONE_NAME),
+       labels_(zone_.NewArray<BaselineLabels*>(bytecode_->length())) {
+   MemsetPointer(labels_, nullptr, bytecode_->length());
++
++  // Empirically determined expected size of the offset table at the 95th %ile,
++  // based on the size of the bytecode, to be:
++  //
++  //   16 + (bytecode size) / 4
++  bytecode_offset_table_builder_.Reserve(
++      base::bits::RoundUpToPowerOfTwo(16 + bytecode_->Size() / 4));
+ }
+ 
+ #define __ basm_.
+diff --git a/src/baseline/baseline-compiler.h b/src/baseline/baseline-compiler.h
+index 458b8a0bb55..f6138cb0f4c 100644
+--- a/src/baseline/baseline-compiler.h
++++ b/src/baseline/baseline-compiler.h
+@@ -42,6 +42,8 @@ class BytecodeOffsetTableBuilder {
+   template <typename LocalIsolate>
+   Handle<ByteArray> ToBytecodeOffsetTable(LocalIsolate* isolate);
+ 
++  void Reserve(size_t size) { bytes_.reserve(size); }
++
+  private:
+   size_t previous_pc_ = 0;
+   std::vector<byte> bytes_;
+-- 
+2.35.1
+

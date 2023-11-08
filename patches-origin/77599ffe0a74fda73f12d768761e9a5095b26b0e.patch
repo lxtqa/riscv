@@ -1,0 +1,46 @@
+From 77599ffe0a74fda73f12d768761e9a5095b26b0e Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Fri, 5 Nov 2021 20:34:22 +0800
+Subject: [PATCH] [riscv64] Add block before LoadAddress
+
+fix node.js DCHECK failed
+issue: https://github.com/riscv-collab/v8/issues/514
+
+Change-Id: I07f40e6aca05be3eb7304a43235185fd40ebc1f2
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3260979
+Reviewed-by: ji qiu <qiuji@iscas.ac.cn>
+Commit-Queue: ji qiu <qiuji@iscas.ac.cn>
+Auto-Submit: Yahan Lu <yahan@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#77750}
+---
+ src/baseline/riscv64/baseline-assembler-riscv64-inl.h | 1 +
+ src/codegen/riscv64/macro-assembler-riscv64.cc        | 1 +
+ 2 files changed, 2 insertions(+)
+
+diff --git a/src/baseline/riscv64/baseline-assembler-riscv64-inl.h b/src/baseline/riscv64/baseline-assembler-riscv64-inl.h
+index 85ada600f18..96420093d16 100644
+--- a/src/baseline/riscv64/baseline-assembler-riscv64-inl.h
++++ b/src/baseline/riscv64/baseline-assembler-riscv64-inl.h
+@@ -437,6 +437,7 @@ void BaselineAssembler::Switch(Register reg, int case_value_base,
+   CHECK(is_int32(imm64 + 0x800));
+   int32_t Hi20 = (((int32_t)imm64 + 0x800) >> 12);
+   int32_t Lo12 = (int32_t)imm64 << 20 >> 20;
++  __ BlockTrampolinePoolFor(2);
+   __ auipc(t6, Hi20);  // Read PC + Hi20 into t6
+   __ addi(t6, t6, Lo12);  // jump PC + Hi20 + Lo12
+ 
+diff --git a/src/codegen/riscv64/macro-assembler-riscv64.cc b/src/codegen/riscv64/macro-assembler-riscv64.cc
+index 7f93187322f..ba04361b0c2 100644
+--- a/src/codegen/riscv64/macro-assembler-riscv64.cc
++++ b/src/codegen/riscv64/macro-assembler-riscv64.cc
+@@ -3543,6 +3543,7 @@ void TurboAssembler::LoadAddress(Register dst, Label* target,
+     CHECK(is_int32(offset + 0x800));
+     int32_t Hi20 = (((int32_t)offset + 0x800) >> 12);
+     int32_t Lo12 = (int32_t)offset << 20 >> 20;
++    BlockTrampolinePoolScope block_trampoline_pool(this);
+     auipc(dst, Hi20);
+     addi(dst, dst, Lo12);
+   } else {
+-- 
+2.35.1
+

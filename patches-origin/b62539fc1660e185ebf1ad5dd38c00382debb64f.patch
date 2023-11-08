@@ -1,0 +1,93 @@
+From b62539fc1660e185ebf1ad5dd38c00382debb64f Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Mon, 28 Jun 2021 10:39:47 +0800
+Subject: [PATCH] [riscv64] Fix builad failed
+
+Change-Id: Id9820ec6f21a08a5437bc847d7199e12f1daedf0
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/2992391
+Auto-Submit: Yahan Lu <yahan@iscas.ac.cn>
+Commit-Queue: Ji Qiu <qiuji@iscas.ac.cn>
+Reviewed-by: Ji Qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/master@{#75402}
+---
+ .../riscv64/baseline-assembler-riscv64-inl.h     |  2 +-
+ src/builtins/riscv64/builtins-riscv64.cc         | 11 +++++------
+ .../baseline/riscv64/liftoff-assembler-riscv64.h | 16 ++++++++++++++++
+ 3 files changed, 22 insertions(+), 7 deletions(-)
+
+diff --git a/src/baseline/riscv64/baseline-assembler-riscv64-inl.h b/src/baseline/riscv64/baseline-assembler-riscv64-inl.h
+index 27970bd6181..2dc76480a52 100644
+--- a/src/baseline/riscv64/baseline-assembler-riscv64-inl.h
++++ b/src/baseline/riscv64/baseline-assembler-riscv64-inl.h
+@@ -535,7 +535,7 @@ void BaselineAssembler::AddToInterruptBudgetAndJumpIfNotExceeded(
+ }
+ 
+ void BaselineAssembler::AddSmi(Register lhs, Smi rhs) {
+-  ASM_CODE_COMMENT(&masm_);
++  ASM_CODE_COMMENT(masm_);
+   if (SmiValuesAre31Bits()) {
+     __ Add32(lhs, lhs, Operand(rhs));
+   } else {
+diff --git a/src/builtins/riscv64/builtins-riscv64.cc b/src/builtins/riscv64/builtins-riscv64.cc
+index d5332611182..a003932f4c5 100644
+--- a/src/builtins/riscv64/builtins-riscv64.cc
++++ b/src/builtins/riscv64/builtins-riscv64.cc
+@@ -1165,23 +1165,22 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+   }
+ 
+   Label call_stack_guard;
++  Register frame_size = descriptor.GetRegisterParameter(
++      BaselineOutOfLinePrologueDescriptor::kStackFrameSize);
+   {
+-    ASM_CODE_COMMENT_STRING(masm, "Stack/interrupt check")
++    ASM_CODE_COMMENT_STRING(masm, "Stack/interrupt check");
+     // Stack check. This folds the checks for both the interrupt stack limit
+     // check and the real stack limit into one by just checking for the
+     // interrupt limit. The interrupt limit is either equal to the real stack
+     // limit or tighter. By ensuring we have space until that limit after
+     // building the frame we can quickly precheck both at once.
+     UseScratchRegisterScope temps(masm);
+-    Register frame_size = temps.Acquire();
+-    __ Ld(frame_size,
+-          FieldMemOperand(bytecodeArray, BytecodeArray::kFrameSizeOffset));
+-    Register sp_minus_frame_size = frame_size;
++    Register sp_minus_frame_size = temps.Acquire();
+     __ Sub64(sp_minus_frame_size, sp, frame_size);
+     Register interrupt_limit = temps.Acquire();
+     __ LoadStackLimit(interrupt_limit,
+                       MacroAssembler::StackLimitKind::kInterruptStackLimit);
+-    __ BranchShort(&call_stack_guard, Uless, sp_minus_frame_size,
++    __ Branch(&call_stack_guard, Uless, sp_minus_frame_size,
+               Operand(interrupt_limit));
+   }
+ 
+diff --git a/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h b/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
+index 7a49f959bf3..6b6fbfaf1bf 100644
+--- a/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
++++ b/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
+@@ -2828,6 +2828,22 @@ void LiftoffAssembler::DeallocateStackSlot(uint32_t size) {
+ 
+ void LiftoffAssembler::MaybeOSR() {}
+ 
++void LiftoffAssembler::emit_set_if_nan(Register dst, FPURegister src,
++                                       ValueKind kind) {
++  UseScratchRegisterScope temps(this);
++  Register scratch = temps.Acquire();
++  li(scratch, 1);
++  if (kind == kF32) {
++    feq_s(scratch, src, src);  // rd <- !isNan(src)
++  } else {
++    DCHECK_EQ(kind, kF64);
++    feq_d(scratch, src, src);  // rd <- !isNan(src)
++  }
++  not_(scratch, scratch);
++  Sd(scratch, MemOperand(dst));
++}
++
++
+ void LiftoffStackSlots::Construct(int param_slots) {
+   DCHECK_LT(0, slots_.size());
+   SortInPushOrder();
+-- 
+2.35.1
+

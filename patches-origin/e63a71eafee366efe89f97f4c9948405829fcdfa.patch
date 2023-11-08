@@ -1,0 +1,675 @@
+From e63a71eafee366efe89f97f4c9948405829fcdfa Mon Sep 17 00:00:00 2001
+From: Dan Elphick <delphick@chromium.org>
+Date: Wed, 9 Jun 2021 16:52:22 +0100
+Subject: [PATCH] [build] Move RuntimeCallStatsTimerScope into its own header
+
+By moving this out of counters.h, counters.h no longer needs to depend
+on isolate.h.
+
+Change-Id: Ic5272e3b3a729c0a438124dc5cdc1835817f3341
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/2949098
+Auto-Submit: Dan Elphick <delphick@chromium.org>
+Reviewed-by: Ross McIlroy <rmcilroy@chromium.org>
+Commit-Queue: Dan Elphick <delphick@chromium.org>
+Cr-Commit-Position: refs/heads/master@{#75055}
+---
+ BUILD.gn                                      |  1 +
+ src/api/api-arguments-inl.h                   |  3 +-
+ src/api/api-natives.cc                        |  1 +
+ src/api/api.cc                                |  1 +
+ src/ast/scopes.cc                             |  2 +-
+ src/baseline/baseline-compiler.cc             |  4 +-
+ src/baseline/baseline.cc                      |  2 +-
+ src/builtins/accessors.cc                     |  2 +-
+ src/builtins/builtins-api.cc                  |  2 +-
+ src/builtins/builtins-utils.h                 |  1 +
+ src/codegen/compiler.cc                       |  2 +
+ src/codegen/external-reference-table.cc       |  1 +
+ .../compiler-dispatcher.cc                    |  2 +
+ .../optimizing-compile-dispatcher.cc          |  1 +
+ src/compiler/pipeline.cc                      |  1 +
+ src/deoptimizer/deoptimizer.cc                |  1 +
+ src/diagnostics/objects-debug.cc              |  2 +-
+ src/execution/arguments.h                     |  2 +-
+ src/execution/execution.cc                    |  2 +-
+ src/execution/isolate.cc                      |  1 +
+ src/execution/messages.cc                     |  2 +-
+ src/heap/heap.cc                              |  1 +
+ src/heap/incremental-marking.cc               |  1 +
+ src/heap/paged-spaces.cc                      |  2 +-
+ src/init/bootstrapper.cc                      |  1 +
+ src/interpreter/interpreter.cc                |  1 +
+ src/logging/counters.h                        | 13 ++-----
+ src/logging/runtime-call-stats-scope.h        | 39 +++++++++++++++++++
+ src/logging/runtime-call-stats.h              |  4 --
+ src/objects/lookup-inl.h                      |  5 ++-
+ src/objects/map.cc                            |  1 +
+ src/objects/objects.cc                        |  1 +
+ src/parsing/parser-base.h                     |  3 +-
+ src/parsing/parser.cc                         |  1 +
+ src/parsing/preparser.cc                      |  5 ++-
+ src/parsing/rewriter.cc                       |  1 +
+ src/parsing/scanner-character-streams.cc      |  2 +-
+ src/snapshot/code-serializer.cc               |  1 +
+ src/snapshot/snapshot.cc                      |  2 +-
+ src/web-snapshot/web-snapshot.cc              |  1 +
+ 40 files changed, 88 insertions(+), 33 deletions(-)
+ create mode 100644 src/logging/runtime-call-stats-scope.h
+
+diff --git a/BUILD.gn b/BUILD.gn
+index a5330c29219..09ac94e8c18 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -2792,6 +2792,7 @@ v8_header_set("v8_internal_headers") {
+     "src/logging/log-utils.h",
+     "src/logging/log.h",
+     "src/logging/metrics.h",
++    "src/logging/runtime-call-stats-scope.h",
+     "src/logging/runtime-call-stats.h",
+     "src/logging/tracing-flags.h",
+     "src/numbers/bignum-dtoa.h",
+diff --git a/src/api/api-arguments-inl.h b/src/api/api-arguments-inl.h
+index 4edd0dad29d..f6825e59222 100644
+--- a/src/api/api-arguments-inl.h
++++ b/src/api/api-arguments-inl.h
+@@ -6,11 +6,10 @@
+ #define V8_API_API_ARGUMENTS_INL_H_
+ 
+ #include "src/api/api-arguments.h"
+-
+ #include "src/api/api-inl.h"
+ #include "src/debug/debug.h"
+ #include "src/execution/vm-state-inl.h"
+-#include "src/logging/counters.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/objects/api-callbacks.h"
+ #include "src/objects/slots-inl.h"
+ #include "src/tracing/trace-event.h"
+diff --git a/src/api/api-natives.cc b/src/api/api-natives.cc
+index 46d54f6f587..dac25204bc3 100644
+--- a/src/api/api-natives.cc
++++ b/src/api/api-natives.cc
+@@ -7,6 +7,7 @@
+ #include "src/api/api-inl.h"
+ #include "src/common/message-template.h"
+ #include "src/execution/isolate-inl.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/objects/api-callbacks.h"
+ #include "src/objects/hash-table-inl.h"
+ #include "src/objects/lookup.h"
+diff --git a/src/api/api.cc b/src/api/api.cc
+index f0c87740616..171705f810c 100644
+--- a/src/api/api.cc
++++ b/src/api/api.cc
+@@ -59,6 +59,7 @@
+ #include "src/json/json-stringifier.h"
+ #include "src/logging/counters.h"
+ #include "src/logging/metrics.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/logging/tracing-flags.h"
+ #include "src/numbers/conversions-inl.h"
+ #include "src/objects/api-callbacks.h"
+diff --git a/src/ast/scopes.cc b/src/ast/scopes.cc
+index 5c0ada09cd5..94782cab303 100644
+--- a/src/ast/scopes.cc
++++ b/src/ast/scopes.cc
+@@ -13,7 +13,7 @@
+ #include "src/common/message-template.h"
+ #include "src/heap/local-factory-inl.h"
+ #include "src/init/bootstrapper.h"
+-#include "src/logging/counters.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/objects/module-inl.h"
+ #include "src/objects/objects-inl.h"
+ #include "src/objects/scope-info.h"
+diff --git a/src/baseline/baseline-compiler.cc b/src/baseline/baseline-compiler.cc
+index d5cb7d35b5d..3503e00bdae 100644
+--- a/src/baseline/baseline-compiler.cc
++++ b/src/baseline/baseline-compiler.cc
+@@ -8,13 +8,12 @@
+ #if V8_TARGET_ARCH_IA32 || V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64 || \
+     V8_TARGET_ARCH_ARM || V8_TARGET_ARCH_RISCV64
+ 
+-#include "src/baseline/baseline-compiler.h"
+-
+ #include <algorithm>
+ #include <type_traits>
+ 
+ #include "src/baseline/baseline-assembler-inl.h"
+ #include "src/baseline/baseline-assembler.h"
++#include "src/baseline/baseline-compiler.h"
+ #include "src/builtins/builtins-constructor.h"
+ #include "src/builtins/builtins-descriptors.h"
+ #include "src/builtins/builtins.h"
+@@ -27,6 +26,7 @@
+ #include "src/execution/frame-constants.h"
+ #include "src/interpreter/bytecode-array-iterator.h"
+ #include "src/interpreter/bytecode-flags.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/objects/code.h"
+ #include "src/objects/heap-object.h"
+ #include "src/objects/instance-type.h"
+diff --git a/src/baseline/baseline.cc b/src/baseline/baseline.cc
+index c0e6ed64509..0cb502d81de 100644
+--- a/src/baseline/baseline.cc
++++ b/src/baseline/baseline.cc
+@@ -15,7 +15,7 @@
+ #include "src/baseline/baseline-compiler.h"
+ #include "src/debug/debug.h"
+ #include "src/heap/factory-inl.h"
+-#include "src/logging/counters.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/objects/script-inl.h"
+ #include "src/objects/shared-function-info-inl.h"
+ 
+diff --git a/src/builtins/accessors.cc b/src/builtins/accessors.cc
+index 0285b33e1f6..007eb269191 100644
+--- a/src/builtins/accessors.cc
++++ b/src/builtins/accessors.cc
+@@ -12,7 +12,7 @@
+ #include "src/execution/isolate-inl.h"
+ #include "src/execution/messages.h"
+ #include "src/heap/factory.h"
+-#include "src/logging/counters.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/objects/api-callbacks.h"
+ #include "src/objects/contexts.h"
+ #include "src/objects/field-index-inl.h"
+diff --git a/src/builtins/builtins-api.cc b/src/builtins/builtins-api.cc
+index b39bfc84a55..8acf5f82209 100644
+--- a/src/builtins/builtins-api.cc
++++ b/src/builtins/builtins-api.cc
+@@ -6,8 +6,8 @@
+ #include "src/api/api-natives.h"
+ #include "src/builtins/builtins-utils-inl.h"
+ #include "src/builtins/builtins.h"
+-#include "src/logging/counters.h"
+ #include "src/logging/log.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/objects/objects-inl.h"
+ #include "src/objects/prototype.h"
+ #include "src/objects/templates.h"
+diff --git a/src/builtins/builtins-utils.h b/src/builtins/builtins-utils.h
+index b9146ab6253..3d813cd5985 100644
+--- a/src/builtins/builtins-utils.h
++++ b/src/builtins/builtins-utils.h
+@@ -10,6 +10,7 @@
+ #include "src/execution/arguments.h"
+ #include "src/execution/isolate.h"
+ #include "src/heap/factory.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ 
+ namespace v8 {
+ namespace internal {
+diff --git a/src/codegen/compiler.cc b/src/codegen/compiler.cc
+index 28fde087ea9..4ddc452a4a0 100644
+--- a/src/codegen/compiler.cc
++++ b/src/codegen/compiler.cc
+@@ -43,7 +43,9 @@
+ #include "src/heap/parked-scope.h"
+ #include "src/init/bootstrapper.h"
+ #include "src/interpreter/interpreter.h"
++#include "src/logging/counters.h"
+ #include "src/logging/log-inl.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/objects/feedback-cell-inl.h"
+ #include "src/objects/js-function-inl.h"
+ #include "src/objects/map.h"
+diff --git a/src/codegen/external-reference-table.cc b/src/codegen/external-reference-table.cc
+index 6c109861a2c..0a22fbdd75c 100644
+--- a/src/codegen/external-reference-table.cc
++++ b/src/codegen/external-reference-table.cc
+@@ -6,6 +6,7 @@
+ 
+ #include "src/builtins/accessors.h"
+ #include "src/codegen/external-reference.h"
++#include "src/execution/isolate.h"
+ #include "src/ic/stub-cache.h"
+ #include "src/logging/counters.h"
+ 
+diff --git a/src/compiler-dispatcher/compiler-dispatcher.cc b/src/compiler-dispatcher/compiler-dispatcher.cc
+index 2af0fd498c3..ab7d5086c1f 100644
+--- a/src/compiler-dispatcher/compiler-dispatcher.cc
++++ b/src/compiler-dispatcher/compiler-dispatcher.cc
+@@ -9,6 +9,8 @@
+ #include "src/codegen/compiler.h"
+ #include "src/flags/flags.h"
+ #include "src/handles/global-handles.h"
++#include "src/logging/counters.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/objects/objects-inl.h"
+ #include "src/parsing/parse-info.h"
+ #include "src/parsing/parser.h"
+diff --git a/src/compiler-dispatcher/optimizing-compile-dispatcher.cc b/src/compiler-dispatcher/optimizing-compile-dispatcher.cc
+index c7727c951b9..ac395aac8ab 100644
+--- a/src/compiler-dispatcher/optimizing-compile-dispatcher.cc
++++ b/src/compiler-dispatcher/optimizing-compile-dispatcher.cc
+@@ -14,6 +14,7 @@
+ #include "src/init/v8.h"
+ #include "src/logging/counters.h"
+ #include "src/logging/log.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/objects/objects-inl.h"
+ #include "src/tasks/cancelable-task.h"
+ #include "src/tracing/trace-event.h"
+diff --git a/src/compiler/pipeline.cc b/src/compiler/pipeline.cc
+index d6691ded007..270af9ac026 100644
+--- a/src/compiler/pipeline.cc
++++ b/src/compiler/pipeline.cc
+@@ -86,6 +86,7 @@
+ #include "src/heap/local-heap.h"
+ #include "src/init/bootstrapper.h"
+ #include "src/logging/counters.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/objects/shared-function-info.h"
+ #include "src/parsing/parse-info.h"
+ #include "src/tracing/trace-event.h"
+diff --git a/src/deoptimizer/deoptimizer.cc b/src/deoptimizer/deoptimizer.cc
+index e48d91b6206..5c75f627fa8 100644
+--- a/src/deoptimizer/deoptimizer.cc
++++ b/src/deoptimizer/deoptimizer.cc
+@@ -17,6 +17,7 @@
+ #include "src/handles/handles-inl.h"
+ #include "src/logging/counters.h"
+ #include "src/logging/log.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/objects/js-function-inl.h"
+ #include "src/objects/oddball.h"
+ #include "src/snapshot/embedded/embedded-data.h"
+diff --git a/src/diagnostics/objects-debug.cc b/src/diagnostics/objects-debug.cc
+index 5b47b31eda0..75c6413ec94 100644
+--- a/src/diagnostics/objects-debug.cc
++++ b/src/diagnostics/objects-debug.cc
+@@ -12,7 +12,7 @@
+ #include "src/heap/read-only-heap.h"
+ #include "src/ic/handler-configuration-inl.h"
+ #include "src/init/bootstrapper.h"
+-#include "src/logging/counters.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/objects/allocation-site-inl.h"
+ #include "src/objects/arguments-inl.h"
+ #include "src/objects/bigint.h"
+diff --git a/src/execution/arguments.h b/src/execution/arguments.h
+index 22ce80bb1e3..9ba80a401f7 100644
+--- a/src/execution/arguments.h
++++ b/src/execution/arguments.h
+@@ -6,7 +6,7 @@
+ #define V8_EXECUTION_ARGUMENTS_H_
+ 
+ #include "src/handles/handles.h"
+-#include "src/logging/counters.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/objects/objects.h"
+ #include "src/objects/slots.h"
+ #include "src/tracing/trace-event.h"
+diff --git a/src/execution/execution.cc b/src/execution/execution.cc
+index 7aff5cbb242..bc360b15cc1 100644
+--- a/src/execution/execution.cc
++++ b/src/execution/execution.cc
+@@ -9,7 +9,7 @@
+ #include "src/execution/frames.h"
+ #include "src/execution/isolate-inl.h"
+ #include "src/execution/vm-state-inl.h"
+-#include "src/logging/counters.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ 
+ #if V8_ENABLE_WEBASSEMBLY
+ #include "src/compiler/wasm-compiler.h"  // Only for static asserts.
+diff --git a/src/execution/isolate.cc b/src/execution/isolate.cc
+index fafad45a852..85c93a9d313 100644
+--- a/src/execution/isolate.cc
++++ b/src/execution/isolate.cc
+@@ -63,6 +63,7 @@
+ #include "src/logging/counters.h"
+ #include "src/logging/log.h"
+ #include "src/logging/metrics.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/numbers/hash-seed-inl.h"
+ #include "src/objects/backing-store.h"
+ #include "src/objects/elements.h"
+diff --git a/src/execution/messages.cc b/src/execution/messages.cc
+index f72ff6b02c3..71770f1ff47 100644
+--- a/src/execution/messages.cc
++++ b/src/execution/messages.cc
+@@ -14,7 +14,7 @@
+ #include "src/execution/frames-inl.h"
+ #include "src/execution/frames.h"
+ #include "src/execution/isolate-inl.h"
+-#include "src/logging/counters.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/objects/foreign-inl.h"
+ #include "src/objects/js-array-inl.h"
+ #include "src/objects/stack-frame-info-inl.h"
+diff --git a/src/heap/heap.cc b/src/heap/heap.cc
+index 89eae59f07d..95cc6193d54 100644
+--- a/src/heap/heap.cc
++++ b/src/heap/heap.cc
+@@ -76,6 +76,7 @@
+ #include "src/init/v8.h"
+ #include "src/interpreter/interpreter.h"
+ #include "src/logging/log.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/numbers/conversions.h"
+ #include "src/objects/data-handler.h"
+ #include "src/objects/feedback-vector.h"
+diff --git a/src/heap/incremental-marking.cc b/src/heap/incremental-marking.cc
+index c44a7f961e9..6dd5dd13d1e 100644
+--- a/src/heap/incremental-marking.cc
++++ b/src/heap/incremental-marking.cc
+@@ -22,6 +22,7 @@
+ #include "src/heap/objects-visiting.h"
+ #include "src/heap/safepoint.h"
+ #include "src/init/v8.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/numbers/conversions.h"
+ #include "src/objects/data-handler-inl.h"
+ #include "src/objects/embedder-data-array-inl.h"
+diff --git a/src/heap/paged-spaces.cc b/src/heap/paged-spaces.cc
+index 6bdff9fa6b3..d578c8de67e 100644
+--- a/src/heap/paged-spaces.cc
++++ b/src/heap/paged-spaces.cc
+@@ -15,7 +15,7 @@
+ #include "src/heap/memory-chunk-inl.h"
+ #include "src/heap/paged-spaces-inl.h"
+ #include "src/heap/read-only-heap.h"
+-#include "src/logging/counters.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/objects/string.h"
+ #include "src/utils/utils.h"
+ 
+diff --git a/src/init/bootstrapper.cc b/src/init/bootstrapper.cc
+index 59d043328d4..849bb1cbfe4 100644
+--- a/src/init/bootstrapper.cc
++++ b/src/init/bootstrapper.cc
+@@ -21,6 +21,7 @@
+ #include "src/extensions/ignition-statistics-extension.h"
+ #include "src/extensions/statistics-extension.h"
+ #include "src/extensions/trigger-failure-extension.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/objects/objects.h"
+ #ifdef ENABLE_VTUNE_TRACEMARK
+ #include "src/extensions/vtunedomain-support-extension.h"
+diff --git a/src/interpreter/interpreter.cc b/src/interpreter/interpreter.cc
+index 8e600ecea6f..8dcc042637f 100644
+--- a/src/interpreter/interpreter.cc
++++ b/src/interpreter/interpreter.cc
+@@ -18,6 +18,7 @@
+ #include "src/init/setup-isolate.h"
+ #include "src/interpreter/bytecode-generator.h"
+ #include "src/interpreter/bytecodes.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/objects/objects-inl.h"
+ #include "src/objects/shared-function-info.h"
+ #include "src/objects/slots.h"
+diff --git a/src/logging/counters.h b/src/logging/counters.h
+index 0de6a8d0e66..740fd2679af 100644
+--- a/src/logging/counters.h
++++ b/src/logging/counters.h
+@@ -13,9 +13,10 @@
+ #include "src/base/platform/elapsed-timer.h"
+ #include "src/base/platform/time.h"
+ #include "src/common/globals.h"
+-#include "src/execution/isolate.h"
+ #include "src/logging/counters-definitions.h"
+ #include "src/logging/runtime-call-stats.h"
++#include "src/objects/code-kind.h"
++#include "src/objects/fixed-array.h"
+ #include "src/objects/objects.h"
+ #include "src/utils/allocation.h"
+ 
+@@ -27,6 +28,7 @@ namespace internal {
+ // manipulated by name.
+ 
+ class Counters;
++class Isolate;
+ 
+ class StatsTable {
+  public:
+@@ -846,15 +848,6 @@ void HistogramTimer::Stop() {
+   TimedHistogram::Stop(&timer_, counters()->isolate());
+ }
+ 
+-#ifdef V8_RUNTIME_CALL_STATS
+-RuntimeCallTimerScope::RuntimeCallTimerScope(Isolate* isolate,
+-                                             RuntimeCallCounterId counter_id) {
+-  if (V8_LIKELY(!TracingFlags::is_runtime_stats_enabled())) return;
+-  stats_ = isolate->counters()->runtime_call_stats();
+-  stats_->Enter(&timer_, counter_id);
+-}
+-#endif  // defined(V8_RUNTIME_CALL_STATS)
+-
+ }  // namespace internal
+ }  // namespace v8
+ 
+diff --git a/src/logging/runtime-call-stats-scope.h b/src/logging/runtime-call-stats-scope.h
+new file mode 100644
+index 00000000000..1be12f06dab
+--- /dev/null
++++ b/src/logging/runtime-call-stats-scope.h
+@@ -0,0 +1,39 @@
++// Copyright 2021 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef V8_LOGGING_RUNTIME_CALL_STATS_SCOPE_H_
++#define V8_LOGGING_RUNTIME_CALL_STATS_SCOPE_H_
++
++#include <memory>
++
++#include "src/execution/isolate.h"
++#include "src/logging/counters.h"
++#include "src/logging/runtime-call-stats.h"
++#include "src/logging/tracing-flags.h"
++
++namespace v8 {
++namespace internal {
++
++#ifdef V8_RUNTIME_CALL_STATS
++
++#define RCS_SCOPE(...) \
++  v8::internal::RuntimeCallTimerScope rcs_timer_scope(__VA_ARGS__)
++
++RuntimeCallTimerScope::RuntimeCallTimerScope(Isolate* isolate,
++                                             RuntimeCallCounterId counter_id) {
++  if (V8_LIKELY(!TracingFlags::is_runtime_stats_enabled())) return;
++  stats_ = isolate->counters()->runtime_call_stats();
++  stats_->Enter(&timer_, counter_id);
++}
++
++#else  // RUNTIME_CALL_STATS
++
++#define RCS_SCOPE(...)
++
++#endif  // defined(V8_RUNTIME_CALL_STATS)
++
++}  // namespace internal
++}  // namespace v8
++
++#endif  // V8_LOGGING_RUNTIME_CALL_STATS_SCOPE_H_
+diff --git a/src/logging/runtime-call-stats.h b/src/logging/runtime-call-stats.h
+index 6f486a2d21b..d7bc2d0318d 100644
+--- a/src/logging/runtime-call-stats.h
++++ b/src/logging/runtime-call-stats.h
+@@ -29,9 +29,6 @@ namespace internal {
+ 
+ #ifdef V8_RUNTIME_CALL_STATS
+ 
+-#define RCS_SCOPE(...) \
+-  v8::internal::RuntimeCallTimerScope rcs_timer_scope(__VA_ARGS__)
+-
+ class RuntimeCallCounter final {
+  public:
+   RuntimeCallCounter() : RuntimeCallCounter(nullptr) {}
+@@ -743,7 +740,6 @@ class V8_NODISCARD RuntimeCallTimerScope {
+ 
+ #else  // RUNTIME_CALL_STATS
+ 
+-#define RCS_SCOPE(...)
+ #define TRACE_HANDLER_STATS(...)
+ #define CHANGE_CURRENT_RUNTIME_COUNTER(...)
+ 
+diff --git a/src/objects/lookup-inl.h b/src/objects/lookup-inl.h
+index 84a16279851..880f92d9d22 100644
+--- a/src/objects/lookup-inl.h
++++ b/src/objects/lookup-inl.h
+@@ -7,9 +7,12 @@
+ 
+ #include "src/objects/lookup.h"
+ 
++// Include other inline headers *after* including lookup.h, such that e.g. the
++// definition of LookupIterator is available (and this comment prevents
++// clang-format from merging that include into the following ones).
+ #include "src/handles/handles-inl.h"
+ #include "src/heap/factory-inl.h"
+-#include "src/logging/counters.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/objects/api-callbacks.h"
+ #include "src/objects/internal-index.h"
+ #include "src/objects/map-inl.h"
+diff --git a/src/objects/map.cc b/src/objects/map.cc
+index a1c10ceb5dd..3eea0deeb29 100644
+--- a/src/objects/map.cc
++++ b/src/objects/map.cc
+@@ -11,6 +11,7 @@
+ #include "src/heap/heap-write-barrier-inl.h"
+ #include "src/init/bootstrapper.h"
+ #include "src/logging/log.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/objects/arguments-inl.h"
+ #include "src/objects/descriptor-array.h"
+ #include "src/objects/elements-kind.h"
+diff --git a/src/objects/objects.cc b/src/objects/objects.cc
+index 7be97650ab0..ab27a4e41b5 100644
+--- a/src/objects/objects.cc
++++ b/src/objects/objects.cc
+@@ -43,6 +43,7 @@
+ #include "src/init/bootstrapper.h"
+ #include "src/logging/counters.h"
+ #include "src/logging/log.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/objects/allocation-site-inl.h"
+ #include "src/objects/allocation-site-scopes.h"
+ #include "src/objects/api-callbacks.h"
+diff --git a/src/parsing/parser-base.h b/src/parsing/parser-base.h
+index 8c41cf7c95b..b16a32532dc 100644
+--- a/src/parsing/parser-base.h
++++ b/src/parsing/parser-base.h
+@@ -6,6 +6,7 @@
+ #define V8_PARSING_PARSER_BASE_H_
+ 
+ #include <stdint.h>
++
+ #include <utility>
+ #include <vector>
+ 
+@@ -18,8 +19,8 @@
+ #include "src/codegen/bailout-reason.h"
+ #include "src/common/globals.h"
+ #include "src/common/message-template.h"
+-#include "src/logging/counters.h"
+ #include "src/logging/log.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/objects/function-kind.h"
+ #include "src/parsing/expression-scope.h"
+ #include "src/parsing/func-name-inferrer.h"
+diff --git a/src/parsing/parser.cc b/src/parsing/parser.cc
+index 8823a82a101..57ea97518f3 100644
+--- a/src/parsing/parser.cc
++++ b/src/parsing/parser.cc
+@@ -20,6 +20,7 @@
+ #include "src/compiler-dispatcher/compiler-dispatcher.h"
+ #include "src/logging/counters.h"
+ #include "src/logging/log.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/numbers/conversions-inl.h"
+ #include "src/objects/scope-info.h"
+ #include "src/parsing/parse-info.h"
+diff --git a/src/parsing/preparser.cc b/src/parsing/preparser.cc
+index 4547e602ee3..ffd34beeaf3 100644
+--- a/src/parsing/preparser.cc
++++ b/src/parsing/preparser.cc
+@@ -2,16 +2,17 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#include "src/parsing/preparser.h"
++
+ #include <cmath>
+ 
+ #include "src/base/logging.h"
+ #include "src/common/globals.h"
+-#include "src/logging/counters.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/numbers/conversions-inl.h"
+ #include "src/numbers/conversions.h"
+ #include "src/parsing/parser-base.h"
+ #include "src/parsing/preparse-data.h"
+-#include "src/parsing/preparser.h"
+ #include "src/strings/unicode.h"
+ #include "src/utils/allocation.h"
+ #include "src/utils/utils.h"
+diff --git a/src/parsing/rewriter.cc b/src/parsing/rewriter.cc
+index 35f82e25ab4..d20fea9d481 100644
+--- a/src/parsing/rewriter.cc
++++ b/src/parsing/rewriter.cc
+@@ -6,6 +6,7 @@
+ 
+ #include "src/ast/ast.h"
+ #include "src/ast/scopes.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/objects/objects-inl.h"
+ #include "src/parsing/parse-info.h"
+ #include "src/parsing/parser.h"
+diff --git a/src/parsing/scanner-character-streams.cc b/src/parsing/scanner-character-streams.cc
+index a5fec69e84c..8b42d9914a4 100644
+--- a/src/parsing/scanner-character-streams.cc
++++ b/src/parsing/scanner-character-streams.cc
+@@ -10,7 +10,7 @@
+ #include "include/v8.h"
+ #include "src/common/globals.h"
+ #include "src/handles/handles.h"
+-#include "src/logging/counters.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/objects/objects-inl.h"
+ #include "src/parsing/scanner.h"
+ #include "src/strings/unicode-inl.h"
+diff --git a/src/snapshot/code-serializer.cc b/src/snapshot/code-serializer.cc
+index 3725b267f57..14ad247ff0c 100644
+--- a/src/snapshot/code-serializer.cc
++++ b/src/snapshot/code-serializer.cc
+@@ -12,6 +12,7 @@
+ #include "src/heap/local-factory-inl.h"
+ #include "src/logging/counters.h"
+ #include "src/logging/log.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/objects/objects-inl.h"
+ #include "src/objects/slots.h"
+ #include "src/objects/visitors.h"
+diff --git a/src/snapshot/snapshot.cc b/src/snapshot/snapshot.cc
+index 3b4db28447b..02750c1b0fb 100644
+--- a/src/snapshot/snapshot.cc
++++ b/src/snapshot/snapshot.cc
+@@ -11,7 +11,7 @@
+ #include "src/execution/isolate-inl.h"
+ #include "src/heap/safepoint.h"
+ #include "src/init/bootstrapper.h"
+-#include "src/logging/counters.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/objects/code-kind.h"
+ #include "src/objects/js-regexp-inl.h"
+ #include "src/snapshot/context-deserializer.h"
+diff --git a/src/web-snapshot/web-snapshot.cc b/src/web-snapshot/web-snapshot.cc
+index bf5bb6b00b4..3b37b290d90 100644
+--- a/src/web-snapshot/web-snapshot.cc
++++ b/src/web-snapshot/web-snapshot.cc
+@@ -10,6 +10,7 @@
+ #include "src/api/api-inl.h"
+ #include "src/base/platform/wrappers.h"
+ #include "src/handles/handles.h"
++#include "src/logging/runtime-call-stats-scope.h"
+ #include "src/objects/contexts.h"
+ #include "src/objects/js-regexp-inl.h"
+ #include "src/objects/script.h"
+-- 
+2.35.1
+

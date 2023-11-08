@@ -1,0 +1,53 @@
+From 10484b45d3df220fb8d4dff828a081302c3f18cd Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Mon, 10 Jul 2023 18:27:21 +0800
+Subject: [PATCH] [riscv][compiler] Adjust slot calculations for return slots.
+
+Port commit 366e5e248ed741b86cef3f63e0c5e8c93294b925
+
+- Uses linkage location information, to keep in sync with how
+  LinkageAllocator and Frame work to assign stack slots.
+
+Bug: v8:9198
+
+Change-Id: Id8c3a9f7f07f63c93df7a1fff0cf2d030aabcd61
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4669396
+Auto-Submit: Yahan Lu <yahan@iscas.ac.cn>
+Reviewed-by: Ji Qiu <qiuji@iscas.ac.cn>
+Commit-Queue: Ji Qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#88784}
+---
+ src/compiler/backend/riscv/instruction-selector-riscv.h | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/src/compiler/backend/riscv/instruction-selector-riscv.h b/src/compiler/backend/riscv/instruction-selector-riscv.h
+index 0adeb5b99c6..8621946c76f 100644
+--- a/src/compiler/backend/riscv/instruction-selector-riscv.h
++++ b/src/compiler/backend/riscv/instruction-selector-riscv.h
+@@ -678,7 +678,6 @@ void InstructionSelectorT<Adapter>::EmitPrepareResults(
+     node_t node) {
+   RiscvOperandGeneratorT<Adapter> g(this);
+ 
+-  int reverse_slot = 1;
+   for (PushParameter output : *results) {
+     if (!output.location.IsCallerFrameSlot()) continue;
+     // Skip any alignment holes in nodes.
+@@ -688,11 +687,14 @@ void InstructionSelectorT<Adapter>::EmitPrepareResults(
+         MarkAsFloat32(output.node);
+       } else if (output.location.GetType() == MachineType::Float64()) {
+         MarkAsFloat64(output.node);
++      } else if (output.location.GetType() == MachineType::Simd128()) {
++        MarkAsSimd128(output.node);
+       }
++      int offset = call_descriptor->GetOffsetToReturns();
++      int reverse_slot = -output.location.GetLocation() - offset;
+       Emit(kRiscvPeek, g.DefineAsRegister(output.node),
+            g.UseImmediate(reverse_slot));
+     }
+-    reverse_slot += output.location.GetSizeInPointers();
+   }
+ }
+ 
+-- 
+2.35.1
+

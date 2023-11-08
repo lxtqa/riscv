@@ -1,0 +1,242 @@
+From 5a939b831fb68e5f11dbf707168bb9dddd9550dd Mon Sep 17 00:00:00 2001
+From: Clemens Backes <clemensb@chromium.org>
+Date: Thu, 3 Feb 2022 12:50:50 +0100
+Subject: [PATCH] [liftoff] Remove redundant method (FillInstanceInto)
+
+On all platform, the method is implemented identical to
+{LoadInstanceFromFrame}. So remove {FillInstanceInto} and keep
+{LoadInstanceFromFrame} which is a better name.
+
+R=thibaudm@chromium.org
+
+Bug: v8:12425
+Change-Id: Ia9e6a3e2478628f8d31ff4faaab8d5250fda7796
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3429203
+Reviewed-by: Thibaud Michaud <thibaudm@chromium.org>
+Commit-Queue: Clemens Backes <clemensb@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#78924}
+---
+ src/wasm/baseline/arm/liftoff-assembler-arm.h         | 4 ----
+ src/wasm/baseline/arm64/liftoff-assembler-arm64.h     | 4 ----
+ src/wasm/baseline/ia32/liftoff-assembler-ia32.h       | 4 ----
+ src/wasm/baseline/liftoff-assembler.cc                | 2 +-
+ src/wasm/baseline/liftoff-assembler.h                 | 1 -
+ src/wasm/baseline/liftoff-compiler.cc                 | 6 +++---
+ src/wasm/baseline/loong64/liftoff-assembler-loong64.h | 4 ----
+ src/wasm/baseline/mips/liftoff-assembler-mips.h       | 4 ----
+ src/wasm/baseline/mips64/liftoff-assembler-mips64.h   | 4 ----
+ src/wasm/baseline/ppc/liftoff-assembler-ppc.h         | 4 ----
+ src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h | 4 ----
+ src/wasm/baseline/s390/liftoff-assembler-s390.h       | 4 ----
+ src/wasm/baseline/x64/liftoff-assembler-x64.h         | 4 ----
+ 13 files changed, 4 insertions(+), 45 deletions(-)
+
+diff --git a/src/wasm/baseline/arm/liftoff-assembler-arm.h b/src/wasm/baseline/arm/liftoff-assembler-arm.h
+index bf4031593e3..123eca2773c 100644
+--- a/src/wasm/baseline/arm/liftoff-assembler-arm.h
++++ b/src/wasm/baseline/arm/liftoff-assembler-arm.h
+@@ -636,10 +636,6 @@ void LiftoffAssembler::SpillInstance(Register instance) {
+ 
+ void LiftoffAssembler::ResetOSRTarget() {}
+ 
+-void LiftoffAssembler::FillInstanceInto(Register dst) {
+-  ldr(dst, liftoff::GetInstanceOperand());
+-}
+-
+ namespace liftoff {
+ #define __ lasm->
+ inline void LoadInternal(LiftoffAssembler* lasm, LiftoffRegister dst,
+diff --git a/src/wasm/baseline/arm64/liftoff-assembler-arm64.h b/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
+index ef5e4a40b10..674ed993011 100644
+--- a/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
++++ b/src/wasm/baseline/arm64/liftoff-assembler-arm64.h
+@@ -468,10 +468,6 @@ void LiftoffAssembler::SpillInstance(Register instance) {
+ 
+ void LiftoffAssembler::ResetOSRTarget() {}
+ 
+-void LiftoffAssembler::FillInstanceInto(Register dst) {
+-  Ldr(dst, liftoff::GetInstanceOperand());
+-}
+-
+ void LiftoffAssembler::LoadTaggedPointer(Register dst, Register src_addr,
+                                          Register offset_reg,
+                                          int32_t offset_imm,
+diff --git a/src/wasm/baseline/ia32/liftoff-assembler-ia32.h b/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
+index cdbf478b374..8ba56602506 100644
+--- a/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
++++ b/src/wasm/baseline/ia32/liftoff-assembler-ia32.h
+@@ -383,10 +383,6 @@ void LiftoffAssembler::SpillInstance(Register instance) {
+ 
+ void LiftoffAssembler::ResetOSRTarget() {}
+ 
+-void LiftoffAssembler::FillInstanceInto(Register dst) {
+-  mov(dst, liftoff::GetInstanceOperand());
+-}
+-
+ void LiftoffAssembler::LoadTaggedPointer(Register dst, Register src_addr,
+                                          Register offset_reg,
+                                          int32_t offset_imm,
+diff --git a/src/wasm/baseline/liftoff-assembler.cc b/src/wasm/baseline/liftoff-assembler.cc
+index dcc6b6db3df..1bc0180d8c3 100644
+--- a/src/wasm/baseline/liftoff-assembler.cc
++++ b/src/wasm/baseline/liftoff-assembler.cc
+@@ -1059,7 +1059,7 @@ void LiftoffAssembler::PrepareCall(const ValueKindSig* sig,
+ 
+   // Reload the instance from the stack.
+   if (!target_instance) {
+-    FillInstanceInto(instance_reg);
++    LoadInstanceFromFrame(instance_reg);
+   }
+ }
+ 
+diff --git a/src/wasm/baseline/liftoff-assembler.h b/src/wasm/baseline/liftoff-assembler.h
+index bf38adfdfe1..d58329f42d9 100644
+--- a/src/wasm/baseline/liftoff-assembler.h
++++ b/src/wasm/baseline/liftoff-assembler.h
+@@ -705,7 +705,6 @@ class LiftoffAssembler : public TurboAssembler {
+                                   Register isolate_root);
+   inline void SpillInstance(Register instance);
+   inline void ResetOSRTarget();
+-  inline void FillInstanceInto(Register dst);
+   inline void LoadTaggedPointer(Register dst, Register src_addr,
+                                 Register offset_reg, int32_t offset_imm,
+                                 LiftoffRegList pinned);
+diff --git a/src/wasm/baseline/liftoff-compiler.cc b/src/wasm/baseline/liftoff-compiler.cc
+index 50263901543..a66c7449aa9 100644
+--- a/src/wasm/baseline/liftoff-compiler.cc
++++ b/src/wasm/baseline/liftoff-compiler.cc
+@@ -4853,7 +4853,7 @@ class LiftoffCompiler {
+     LiftoffRegister dst = pinned.set(PopMemTypeToRegister(pinned));
+ 
+     Register instance = pinned.set(__ GetUnusedRegister(kGpReg, pinned)).gp();
+-    __ FillInstanceInto(instance);
++    __ LoadInstanceFromFrame(instance);
+ 
+     LiftoffRegister segment_index =
+         pinned.set(__ GetUnusedRegister(kGpReg, pinned));
+@@ -4902,7 +4902,7 @@ class LiftoffCompiler {
+     LiftoffRegister src = pinned.set(PopMemTypeToRegister(pinned));
+     LiftoffRegister dst = pinned.set(PopMemTypeToRegister(pinned));
+     Register instance = pinned.set(__ GetUnusedRegister(kGpReg, pinned)).gp();
+-    __ FillInstanceInto(instance);
++    __ LoadInstanceFromFrame(instance);
+     ExternalReference ext_ref = ExternalReference::wasm_memory_copy();
+     auto sig = MakeSig::Returns(kI32).Params(kPointerKind, kPointerKind,
+                                              kPointerKind, kPointerKind);
+@@ -4925,7 +4925,7 @@ class LiftoffCompiler {
+     LiftoffRegister dst = pinned.set(PopMemTypeToRegister(pinned));
+ 
+     Register instance = pinned.set(__ GetUnusedRegister(kGpReg, pinned)).gp();
+-    __ FillInstanceInto(instance);
++    __ LoadInstanceFromFrame(instance);
+     ExternalReference ext_ref = ExternalReference::wasm_memory_fill();
+     auto sig = MakeSig::Returns(kI32).Params(kPointerKind, kPointerKind, kI32,
+                                              kPointerKind);
+diff --git a/src/wasm/baseline/loong64/liftoff-assembler-loong64.h b/src/wasm/baseline/loong64/liftoff-assembler-loong64.h
+index edde494648e..fe7586ae6c1 100644
+--- a/src/wasm/baseline/loong64/liftoff-assembler-loong64.h
++++ b/src/wasm/baseline/loong64/liftoff-assembler-loong64.h
+@@ -364,10 +364,6 @@ void LiftoffAssembler::SpillInstance(Register instance) {
+ 
+ void LiftoffAssembler::ResetOSRTarget() {}
+ 
+-void LiftoffAssembler::FillInstanceInto(Register dst) {
+-  Ld_d(dst, liftoff::GetInstanceOperand());
+-}
+-
+ void LiftoffAssembler::LoadTaggedPointer(Register dst, Register src_addr,
+                                          Register offset_reg,
+                                          int32_t offset_imm,
+diff --git a/src/wasm/baseline/mips/liftoff-assembler-mips.h b/src/wasm/baseline/mips/liftoff-assembler-mips.h
+index 01e75fa3e12..c33378ec131 100644
+--- a/src/wasm/baseline/mips/liftoff-assembler-mips.h
++++ b/src/wasm/baseline/mips/liftoff-assembler-mips.h
+@@ -495,10 +495,6 @@ void LiftoffAssembler::SpillInstance(Register instance) {
+ 
+ void LiftoffAssembler::ResetOSRTarget() {}
+ 
+-void LiftoffAssembler::FillInstanceInto(Register dst) {
+-  lw(dst, liftoff::GetInstanceOperand());
+-}
+-
+ void LiftoffAssembler::LoadTaggedPointer(Register dst, Register src_addr,
+                                          Register offset_reg,
+                                          int32_t offset_imm,
+diff --git a/src/wasm/baseline/mips64/liftoff-assembler-mips64.h b/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
+index f8e18deaca2..cf1b392849b 100644
+--- a/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
++++ b/src/wasm/baseline/mips64/liftoff-assembler-mips64.h
+@@ -480,10 +480,6 @@ void LiftoffAssembler::SpillInstance(Register instance) {
+ 
+ void LiftoffAssembler::ResetOSRTarget() {}
+ 
+-void LiftoffAssembler::FillInstanceInto(Register dst) {
+-  Ld(dst, liftoff::GetInstanceOperand());
+-}
+-
+ void LiftoffAssembler::LoadTaggedPointer(Register dst, Register src_addr,
+                                          Register offset_reg,
+                                          int32_t offset_imm,
+diff --git a/src/wasm/baseline/ppc/liftoff-assembler-ppc.h b/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
+index 792d0c9e35a..bf7769b73ba 100644
+--- a/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
++++ b/src/wasm/baseline/ppc/liftoff-assembler-ppc.h
+@@ -300,10 +300,6 @@ void LiftoffAssembler::SpillInstance(Register instance) {
+ 
+ void LiftoffAssembler::ResetOSRTarget() {}
+ 
+-void LiftoffAssembler::FillInstanceInto(Register dst) {
+-  LoadU64(dst, liftoff::GetInstanceOperand(), r0);
+-}
+-
+ void LiftoffAssembler::LoadTaggedPointer(Register dst, Register src_addr,
+                                          Register offset_reg,
+                                          int32_t offset_imm,
+diff --git a/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h b/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
+index 1d8f3fbaffc..a2a62e79305 100644
+--- a/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
++++ b/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
+@@ -473,10 +473,6 @@ void LiftoffAssembler::SpillInstance(Register instance) {
+ 
+ void LiftoffAssembler::ResetOSRTarget() {}
+ 
+-void LiftoffAssembler::FillInstanceInto(Register dst) {
+-  Ld(dst, liftoff::GetInstanceOperand());
+-}
+-
+ void LiftoffAssembler::LoadTaggedPointer(Register dst, Register src_addr,
+                                          Register offset_reg,
+                                          int32_t offset_imm,
+diff --git a/src/wasm/baseline/s390/liftoff-assembler-s390.h b/src/wasm/baseline/s390/liftoff-assembler-s390.h
+index 2a7ff66857e..6e2d03a16f0 100644
+--- a/src/wasm/baseline/s390/liftoff-assembler-s390.h
++++ b/src/wasm/baseline/s390/liftoff-assembler-s390.h
+@@ -277,10 +277,6 @@ void LiftoffAssembler::SpillInstance(Register instance) {
+ 
+ void LiftoffAssembler::ResetOSRTarget() {}
+ 
+-void LiftoffAssembler::FillInstanceInto(Register dst) {
+-  LoadU64(dst, liftoff::GetInstanceOperand());
+-}
+-
+ void LiftoffAssembler::LoadTaggedPointer(Register dst, Register src_addr,
+                                          Register offset_reg,
+                                          int32_t offset_imm,
+diff --git a/src/wasm/baseline/x64/liftoff-assembler-x64.h b/src/wasm/baseline/x64/liftoff-assembler-x64.h
+index aeb8fd460b0..66167eccfda 100644
+--- a/src/wasm/baseline/x64/liftoff-assembler-x64.h
++++ b/src/wasm/baseline/x64/liftoff-assembler-x64.h
+@@ -373,10 +373,6 @@ void LiftoffAssembler::ResetOSRTarget() {
+   movq(liftoff::GetOSRTargetSlot(), Immediate(0));
+ }
+ 
+-void LiftoffAssembler::FillInstanceInto(Register dst) {
+-  movq(dst, liftoff::GetInstanceOperand());
+-}
+-
+ void LiftoffAssembler::LoadTaggedPointer(Register dst, Register src_addr,
+                                          Register offset_reg,
+                                          int32_t offset_imm,
+-- 
+2.35.1
+

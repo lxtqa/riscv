@@ -1,0 +1,480 @@
+From 73adebc72909656303ef2b2245606f5434fd0f0a Mon Sep 17 00:00:00 2001
+From: Jakob Kummerow <jkummerow@chromium.org>
+Date: Fri, 21 Jul 2023 14:01:24 +0200
+Subject: [PATCH] [turbofan] Fix DCHECK in CodeGenerator::Pop
+
+To satisfy DCHECKs in helper functions (`AssembleMove` -> `ToOperand`
+-> `GetFrameOffset`), the times when we apply the bookkeeping update
+to the SP delta should exactly mirror what CodeGenerator::Push does.
+
+Generated code is not affected by this change.
+
+Fixed: chromium:1465386
+Change-Id: I737908ed52333a5c0dfac33bc1236de99aa80548
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4706003
+Commit-Queue: Jakob Kummerow <jkummerow@chromium.org>
+Auto-Submit: Jakob Kummerow <jkummerow@chromium.org>
+Commit-Queue: Thibaud Michaud <thibaudm@chromium.org>
+Reviewed-by: Thibaud Michaud <thibaudm@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#89101}
+---
+ .../backend/arm/code-generator-arm.cc         | 12 +--
+ .../backend/arm64/code-generator-arm64.cc     | 12 +--
+ .../backend/ia32/code-generator-ia32.cc       | 12 +--
+ .../backend/loong64/code-generator-loong64.cc | 12 +--
+ .../backend/mips64/code-generator-mips64.cc   | 10 ++-
+ .../backend/ppc/code-generator-ppc.cc         | 11 +--
+ .../backend/riscv/code-generator-riscv.cc     | 12 +--
+ .../backend/s390/code-generator-s390.cc       |  9 ++-
+ .../backend/x64/code-generator-x64.cc         | 12 +--
+ src/wasm/module-decoder-impl.h                |  6 +-
+ test/mjsunit/mjsunit.status                   |  1 +
+ .../regress/wasm/regress-crbug-1465386.js     | 81 +++++++++++++++++++
+ 12 files changed, 144 insertions(+), 46 deletions(-)
+ create mode 100644 test/mjsunit/regress/wasm/regress-crbug-1465386.js
+
+diff --git a/src/compiler/backend/arm/code-generator-arm.cc b/src/compiler/backend/arm/code-generator-arm.cc
+index 4dfc7ef1698..2c72ba0b95c 100644
+--- a/src/compiler/backend/arm/code-generator-arm.cc
++++ b/src/compiler/backend/arm/code-generator-arm.cc
+@@ -4131,12 +4131,13 @@ AllocatedOperand CodeGenerator::Push(InstructionOperand* source) {
+ }
+ 
+ void CodeGenerator::Pop(InstructionOperand* dest, MachineRepresentation rep) {
+-  int new_slots = ElementSizeInPointers(rep);
+-  frame_access_state()->IncreaseSPDelta(-new_slots);
++  int dropped_slots = ElementSizeInPointers(rep);
+   ArmOperandConverter g(this, nullptr);
+   if (dest->IsRegister()) {
++    frame_access_state()->IncreaseSPDelta(-dropped_slots);
+     __ pop(g.ToRegister(dest));
+   } else if (dest->IsStackSlot()) {
++    frame_access_state()->IncreaseSPDelta(-dropped_slots);
+     UseScratchRegisterScope temps(masm());
+     Register scratch = temps.Acquire();
+     __ pop(scratch);
+@@ -4145,12 +4146,13 @@ void CodeGenerator::Pop(InstructionOperand* dest, MachineRepresentation rep) {
+     int last_frame_slot_id =
+         frame_access_state_->frame()->GetTotalFrameSlotCount() - 1;
+     int sp_delta = frame_access_state_->sp_delta();
+-    int slot_id = last_frame_slot_id + sp_delta + new_slots;
++    int slot_id = last_frame_slot_id + sp_delta;
+     AllocatedOperand stack_slot(LocationOperand::STACK_SLOT, rep, slot_id);
+     AssembleMove(&stack_slot, dest);
+-    __ add(sp, sp, Operand(new_slots * kSystemPointerSize));
++    frame_access_state()->IncreaseSPDelta(-dropped_slots);
++    __ add(sp, sp, Operand(dropped_slots * kSystemPointerSize));
+   }
+-  temp_slots_ -= new_slots;
++  temp_slots_ -= dropped_slots;
+ }
+ 
+ void CodeGenerator::PopTempStackSlots() {
+diff --git a/src/compiler/backend/arm64/code-generator-arm64.cc b/src/compiler/backend/arm64/code-generator-arm64.cc
+index d762616a755..289e63920b0 100644
+--- a/src/compiler/backend/arm64/code-generator-arm64.cc
++++ b/src/compiler/backend/arm64/code-generator-arm64.cc
+@@ -3518,12 +3518,13 @@ AllocatedOperand CodeGenerator::Push(InstructionOperand* source) {
+ }
+ 
+ void CodeGenerator::Pop(InstructionOperand* dest, MachineRepresentation rep) {
+-  int new_slots = RoundUp<2>(ElementSizeInPointers(rep));
+-  frame_access_state()->IncreaseSPDelta(-new_slots);
++  int dropped_slots = RoundUp<2>(ElementSizeInPointers(rep));
+   Arm64OperandConverter g(this, nullptr);
+   if (dest->IsRegister()) {
++    frame_access_state()->IncreaseSPDelta(-dropped_slots);
+     __ Pop(g.ToRegister(dest), padreg);
+   } else if (dest->IsStackSlot()) {
++    frame_access_state()->IncreaseSPDelta(-dropped_slots);
+     UseScratchRegisterScope temps(masm());
+     Register scratch = temps.AcquireX();
+     __ Pop(scratch, padreg);
+@@ -3532,12 +3533,13 @@ void CodeGenerator::Pop(InstructionOperand* dest, MachineRepresentation rep) {
+     int last_frame_slot_id =
+         frame_access_state_->frame()->GetTotalFrameSlotCount() - 1;
+     int sp_delta = frame_access_state_->sp_delta();
+-    int slot_id = last_frame_slot_id + sp_delta + new_slots;
++    int slot_id = last_frame_slot_id + sp_delta;
+     AllocatedOperand stack_slot(LocationOperand::STACK_SLOT, rep, slot_id);
+     AssembleMove(&stack_slot, dest);
+-    __ Add(sp, sp, Operand(new_slots * kSystemPointerSize));
++    frame_access_state()->IncreaseSPDelta(-dropped_slots);
++    __ Add(sp, sp, Operand(dropped_slots * kSystemPointerSize));
+   }
+-  temp_slots_ -= new_slots;
++  temp_slots_ -= dropped_slots;
+ }
+ 
+ void CodeGenerator::PopTempStackSlots() {
+diff --git a/src/compiler/backend/ia32/code-generator-ia32.cc b/src/compiler/backend/ia32/code-generator-ia32.cc
+index 1e2d78ad2fb..30289b656fe 100644
+--- a/src/compiler/backend/ia32/code-generator-ia32.cc
++++ b/src/compiler/backend/ia32/code-generator-ia32.cc
+@@ -4270,22 +4270,24 @@ AllocatedOperand CodeGenerator::Push(InstructionOperand* source) {
+ 
+ void CodeGenerator::Pop(InstructionOperand* dest, MachineRepresentation rep) {
+   IA32OperandConverter g(this, nullptr);
+-  int new_slots = ElementSizeInPointers(rep);
+-  frame_access_state()->IncreaseSPDelta(-new_slots);
++  int dropped_slots = ElementSizeInPointers(rep);
+   if (dest->IsRegister()) {
++    frame_access_state()->IncreaseSPDelta(-dropped_slots);
+     __ pop(g.ToRegister(dest));
+   } else if (dest->IsStackSlot() || dest->IsFloatStackSlot()) {
++    frame_access_state()->IncreaseSPDelta(-dropped_slots);
+     __ pop(g.ToOperand(dest));
+   } else {
+     int last_frame_slot_id =
+         frame_access_state_->frame()->GetTotalFrameSlotCount() - 1;
+     int sp_delta = frame_access_state_->sp_delta();
+-    int slot_id = last_frame_slot_id + sp_delta + new_slots;
++    int slot_id = last_frame_slot_id + sp_delta;
+     AllocatedOperand stack_slot(LocationOperand::STACK_SLOT, rep, slot_id);
+     AssembleMove(&stack_slot, dest);
+-    __ add(esp, Immediate(new_slots * kSystemPointerSize));
++    frame_access_state()->IncreaseSPDelta(-dropped_slots);
++    __ add(esp, Immediate(dropped_slots * kSystemPointerSize));
+   }
+-  temp_slots_ -= new_slots;
++  temp_slots_ -= dropped_slots;
+ }
+ 
+ void CodeGenerator::PopTempStackSlots() {
+diff --git a/src/compiler/backend/loong64/code-generator-loong64.cc b/src/compiler/backend/loong64/code-generator-loong64.cc
+index c264c067f64..4bbae8cc458 100644
+--- a/src/compiler/backend/loong64/code-generator-loong64.cc
++++ b/src/compiler/backend/loong64/code-generator-loong64.cc
+@@ -2506,11 +2506,12 @@ AllocatedOperand CodeGenerator::Push(InstructionOperand* source) {
+ 
+ void CodeGenerator::Pop(InstructionOperand* dest, MachineRepresentation rep) {
+   Loong64OperandConverter g(this, nullptr);
+-  int new_slots = ElementSizeInPointers(rep);
+-  frame_access_state()->IncreaseSPDelta(-new_slots);
++  int dropped_slots = ElementSizeInPointers(rep);
+   if (dest->IsRegister()) {
++    frame_access_state()->IncreaseSPDelta(-dropped_slots);
+     __ Pop(g.ToRegister(dest));
+   } else if (dest->IsStackSlot()) {
++    frame_access_state()->IncreaseSPDelta(-dropped_slots);
+     UseScratchRegisterScope temps(masm());
+     Register scratch = temps.Acquire();
+     __ Pop(scratch);
+@@ -2519,12 +2520,13 @@ void CodeGenerator::Pop(InstructionOperand* dest, MachineRepresentation rep) {
+     int last_frame_slot_id =
+         frame_access_state_->frame()->GetTotalFrameSlotCount() - 1;
+     int sp_delta = frame_access_state_->sp_delta();
+-    int slot_id = last_frame_slot_id + sp_delta + new_slots;
++    int slot_id = last_frame_slot_id + sp_delta;
+     AllocatedOperand stack_slot(LocationOperand::STACK_SLOT, rep, slot_id);
+     AssembleMove(&stack_slot, dest);
+-    __ Add_d(sp, sp, Operand(new_slots * kSystemPointerSize));
++    frame_access_state()->IncreaseSPDelta(-dropped_slots);
++    __ Add_d(sp, sp, Operand(dropped_slots * kSystemPointerSize));
+   }
+-  temp_slots_ -= new_slots;
++  temp_slots_ -= dropped_slots;
+ }
+ 
+ void CodeGenerator::PopTempStackSlots() {
+diff --git a/src/compiler/backend/mips64/code-generator-mips64.cc b/src/compiler/backend/mips64/code-generator-mips64.cc
+index ca4bc535147..9522f11fc8d 100644
+--- a/src/compiler/backend/mips64/code-generator-mips64.cc
++++ b/src/compiler/backend/mips64/code-generator-mips64.cc
+@@ -4347,11 +4347,12 @@ AllocatedOperand CodeGenerator::Push(InstructionOperand* source) {
+ 
+ void CodeGenerator::Pop(InstructionOperand* dest, MachineRepresentation rep) {
+   MipsOperandConverter g(this, nullptr);
+-  int new_slots = ElementSizeInPointers(rep);
+-  frame_access_state()->IncreaseSPDelta(-new_slots);
++  int dropped_slots = ElementSizeInPointers(rep);
+   if (dest->IsRegister()) {
++    frame_access_state()->IncreaseSPDelta(-dropped_slots);
+     __ Pop(g.ToRegister(dest));
+   } else if (dest->IsStackSlot()) {
++    frame_access_state()->IncreaseSPDelta(-dropped_slots);
+     UseScratchRegisterScope temps(masm());
+     Register scratch = temps.Acquire();
+     __ Pop(scratch);
+@@ -4360,12 +4361,13 @@ void CodeGenerator::Pop(InstructionOperand* dest, MachineRepresentation rep) {
+     int last_frame_slot_id =
+         frame_access_state_->frame()->GetTotalFrameSlotCount() - 1;
+     int sp_delta = frame_access_state_->sp_delta();
+-    int slot_id = last_frame_slot_id + sp_delta + new_slots;
++    int slot_id = last_frame_slot_id + sp_delta;
+     AllocatedOperand stack_slot(LocationOperand::STACK_SLOT, rep, slot_id);
+     AssembleMove(&stack_slot, dest);
++    frame_access_state()->IncreaseSPDelta(-dropped_slots);
+     __ Daddu(sp, sp, Operand(new_slots * kSystemPointerSize));
+   }
+-  temp_slots_ -= new_slots;
++  temp_slots_ -= dropped_slots;
+ }
+ 
+ void CodeGenerator::PopTempStackSlots() {
+diff --git a/src/compiler/backend/ppc/code-generator-ppc.cc b/src/compiler/backend/ppc/code-generator-ppc.cc
+index 5a0a99c019d..a4d4b382b9d 100644
+--- a/src/compiler/backend/ppc/code-generator-ppc.cc
++++ b/src/compiler/backend/ppc/code-generator-ppc.cc
+@@ -3322,10 +3322,10 @@ AllocatedOperand CodeGenerator::Push(InstructionOperand* source) {
+ }
+ 
+ void CodeGenerator::Pop(InstructionOperand* dest, MachineRepresentation rep) {
+-  int new_slots = ElementSizeInPointers(rep);
+-  frame_access_state()->IncreaseSPDelta(-new_slots);
++  int dropped_slots = ElementSizeInPointers(rep);
+   PPCOperandConverter g(this, nullptr);
+   if (dest->IsFloatStackSlot() || dest->IsDoubleStackSlot()) {
++    frame_access_state()->IncreaseSPDelta(-dropped_slots);
+     UseScratchRegisterScope temps(masm());
+     Register scratch = temps.Acquire();
+     __ Pop(scratch);
+@@ -3334,12 +3334,13 @@ void CodeGenerator::Pop(InstructionOperand* dest, MachineRepresentation rep) {
+     int last_frame_slot_id =
+         frame_access_state_->frame()->GetTotalFrameSlotCount() - 1;
+     int sp_delta = frame_access_state_->sp_delta();
+-    int slot_id = last_frame_slot_id + sp_delta + new_slots;
++    int slot_id = last_frame_slot_id + sp_delta;
+     AllocatedOperand stack_slot(LocationOperand::STACK_SLOT, rep, slot_id);
+     AssembleMove(&stack_slot, dest);
+-    __ addi(sp, sp, Operand(new_slots * kSystemPointerSize));
++    frame_access_state()->IncreaseSPDelta(-dropped_slots);
++    __ addi(sp, sp, Operand(dropped_slots * kSystemPointerSize));
+   }
+-  temp_slots_ -= new_slots;
++  temp_slots_ -= dropped_slots;
+ }
+ 
+ void CodeGenerator::PopTempStackSlots() {
+diff --git a/src/compiler/backend/riscv/code-generator-riscv.cc b/src/compiler/backend/riscv/code-generator-riscv.cc
+index 0a04f4850ee..2f90086da94 100644
+--- a/src/compiler/backend/riscv/code-generator-riscv.cc
++++ b/src/compiler/backend/riscv/code-generator-riscv.cc
+@@ -4995,12 +4995,13 @@ AllocatedOperand CodeGenerator::Push(InstructionOperand* source) {
+ }
+ 
+ void CodeGenerator::Pop(InstructionOperand* dest, MachineRepresentation rep) {
+-  int new_slots = ElementSizeInPointers(rep);
+-  frame_access_state()->IncreaseSPDelta(-new_slots);
++  int dropped_slots = ElementSizeInPointers(rep);
+   RiscvOperandConverter g(this, nullptr);
+   if (dest->IsRegister()) {
++    frame_access_state()->IncreaseSPDelta(-dropped_slots);
+     __ Pop(g.ToRegister(dest));
+   } else if (dest->IsStackSlot()) {
++    frame_access_state()->IncreaseSPDelta(-dropped_slots);
+     UseScratchRegisterScope temps(masm());
+     Register scratch = temps.Acquire();
+     __ Pop(scratch);
+@@ -5009,12 +5010,13 @@ void CodeGenerator::Pop(InstructionOperand* dest, MachineRepresentation rep) {
+     int last_frame_slot_id =
+         frame_access_state_->frame()->GetTotalFrameSlotCount() - 1;
+     int sp_delta = frame_access_state_->sp_delta();
+-    int slot_id = last_frame_slot_id + sp_delta + new_slots;
++    int slot_id = last_frame_slot_id + sp_delta;
+     AllocatedOperand stack_slot(LocationOperand::STACK_SLOT, rep, slot_id);
+     AssembleMove(&stack_slot, dest);
+-    __ AddWord(sp, sp, Operand(new_slots * kSystemPointerSize));
++    frame_access_state()->IncreaseSPDelta(-dropped_slots);
++    __ AddWord(sp, sp, Operand(dropped_slots * kSystemPointerSize));
+   }
+-  temp_slots_ -= new_slots;
++  temp_slots_ -= dropped_slots;
+ }
+ 
+ void CodeGenerator::PopTempStackSlots() {
+diff --git a/src/compiler/backend/s390/code-generator-s390.cc b/src/compiler/backend/s390/code-generator-s390.cc
+index ae529a6bbe3..335aff63c7b 100644
+--- a/src/compiler/backend/s390/code-generator-s390.cc
++++ b/src/compiler/backend/s390/code-generator-s390.cc
+@@ -3638,22 +3638,23 @@ AllocatedOperand CodeGenerator::Push(InstructionOperand* source) {
+ }
+ 
+ void CodeGenerator::Pop(InstructionOperand* dest, MachineRepresentation rep) {
+-  int new_slots = ElementSizeInPointers(rep);
+-  frame_access_state()->IncreaseSPDelta(-new_slots);
++  int dropped_slots = ElementSizeInPointers(rep);
+   S390OperandConverter g(this, nullptr);
+   if (dest->IsFloatStackSlot() || dest->IsDoubleStackSlot()) {
++    frame_access_state()->IncreaseSPDelta(-dropped_slots);
+     __ Pop(r1);
+     __ StoreU64(r1, g.ToMemOperand(dest));
+   } else {
+     int last_frame_slot_id =
+         frame_access_state_->frame()->GetTotalFrameSlotCount() - 1;
+     int sp_delta = frame_access_state_->sp_delta();
+-    int slot_id = last_frame_slot_id + sp_delta + new_slots;
++    int slot_id = last_frame_slot_id + sp_delta;
+     AllocatedOperand stack_slot(LocationOperand::STACK_SLOT, rep, slot_id);
+     AssembleMove(&stack_slot, dest);
++    frame_access_state()->IncreaseSPDelta(-dropped_slots);
+     __ lay(sp, MemOperand(sp, new_slots * kSystemPointerSize));
+   }
+-  temp_slots_ -= new_slots;
++  temp_slots_ -= dropped_slots;
+ }
+ 
+ void CodeGenerator::PopTempStackSlots() {
+diff --git a/src/compiler/backend/x64/code-generator-x64.cc b/src/compiler/backend/x64/code-generator-x64.cc
+index 5a1ceb497d5..c26ad5e6bf0 100644
+--- a/src/compiler/backend/x64/code-generator-x64.cc
++++ b/src/compiler/backend/x64/code-generator-x64.cc
+@@ -7091,23 +7091,25 @@ AllocatedOperand CodeGenerator::Push(InstructionOperand* source) {
+ 
+ void CodeGenerator::Pop(InstructionOperand* dest, MachineRepresentation rep) {
+   X64OperandConverter g(this, nullptr);
+-  int new_slots = ElementSizeInPointers(rep);
+-  frame_access_state()->IncreaseSPDelta(-new_slots);
++  int dropped_slots = ElementSizeInPointers(rep);
+   if (dest->IsRegister()) {
++    frame_access_state()->IncreaseSPDelta(-dropped_slots);
+     __ popq(g.ToRegister(dest));
+   } else if (dest->IsStackSlot() || dest->IsFloatStackSlot() ||
+              dest->IsDoubleStackSlot()) {
++    frame_access_state()->IncreaseSPDelta(-dropped_slots);
+     __ popq(g.ToOperand(dest));
+   } else {
+     int last_frame_slot_id =
+         frame_access_state_->frame()->GetTotalFrameSlotCount() - 1;
+     int sp_delta = frame_access_state_->sp_delta();
+-    int slot_id = last_frame_slot_id + sp_delta + new_slots;
++    int slot_id = last_frame_slot_id + sp_delta;
+     AllocatedOperand stack_slot(LocationOperand::STACK_SLOT, rep, slot_id);
+     AssembleMove(&stack_slot, dest);
+-    __ addq(rsp, Immediate(new_slots * kSystemPointerSize));
++    frame_access_state()->IncreaseSPDelta(-dropped_slots);
++    __ addq(rsp, Immediate(dropped_slots * kSystemPointerSize));
+   }
+-  temp_slots_ -= new_slots;
++  temp_slots_ -= dropped_slots;
+ }
+ 
+ void CodeGenerator::PopTempStackSlots() {
+diff --git a/src/wasm/module-decoder-impl.h b/src/wasm/module-decoder-impl.h
+index a888be909a9..97554288b55 100644
+--- a/src/wasm/module-decoder-impl.h
++++ b/src/wasm/module-decoder-impl.h
+@@ -906,10 +906,10 @@ class ModuleDecoderImpl : public Decoder {
+       if (enabled_features_.has_typed_funcref() &&
+           read_u8<Decoder::FullValidationTag>(
+               pc(), "table-with-initializer byte") == 0x40) {
+-        consume_bytes(1, "table-with-initializer byte", tracer_);
++        consume_bytes(1, "with-initializer ", tracer_);
+         has_initializer = true;
+         type_position++;
+-        uint8_t reserved = consume_u8("reserved byte", tracer_);
++        uint8_t reserved = consume_u8("reserved-byte", tracer_);
+         if (reserved != 0) {
+           error(type_position, "Reserved byte must be 0x00");
+           break;
+@@ -2365,7 +2365,7 @@ class ModuleDecoderImpl : public Decoder {
+     }
+ 
+     uint32_t num_elem =
+-        consume_count("number of elements", max_table_init_entries());
++        consume_count(" number of elements", max_table_init_entries());
+ 
+     if (is_active) {
+       return {type,         table_index, std::move(offset),
+diff --git a/test/mjsunit/mjsunit.status b/test/mjsunit/mjsunit.status
+index ac65d9edf26..8b1472538ca 100644
+--- a/test/mjsunit/mjsunit.status
++++ b/test/mjsunit/mjsunit.status
+@@ -1669,6 +1669,7 @@
+   'regress/wasm/regress-crbug-1338980': [SKIP],
+   'regress/wasm/regress-crbug-1355070': [SKIP],
+   'regress/wasm/regress-crbug-1356718': [SKIP],
++  'regress/wasm/regress-crbug-1465386': [SKIP],
+ }],  # no_simd_hardware == True
+ 
+ ##############################################################################
+diff --git a/test/mjsunit/regress/wasm/regress-crbug-1465386.js b/test/mjsunit/regress/wasm/regress-crbug-1465386.js
+new file mode 100644
+index 00000000000..706c3dc33cd
+--- /dev/null
++++ b/test/mjsunit/regress/wasm/regress-crbug-1465386.js
+@@ -0,0 +1,81 @@
++// Copyright 2023 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Flags: --experimental-wasm-gc --no-liftoff
++
++d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
++
++let builder = new WasmModuleBuilder();
++
++let sig1 = builder.addType(makeSig(
++    [
++      kWasmF32, kWasmF32, kWasmF32, kWasmF32, kWasmF32, kWasmF32, kWasmF32,
++      kWasmF32, kWasmF32, kWasmF32, kWasmF32, kWasmF32, kWasmF32, kWasmAnyRef,
++    ],
++    []));
++let sig2 = builder.addType(makeSig(
++    [
++      kWasmF32, kWasmF32, kWasmF32, kWasmF32, kWasmF32, kWasmF32, kWasmS128,
++      kWasmS128, kWasmS128, kWasmS128, kWasmS128, kWasmS128, kWasmS128
++    ],
++    []));
++let sig3 = builder.addType(makeSig([kWasmS128, kWasmS128], []));
++
++let main = builder.addFunction('main', kSig_v_i).exportFunc();
++let func1 = builder.addFunction('func1', sig1);
++let func2 = builder.addFunction('func2', sig2).addBody([]);
++let func3 = builder.addFunction('func3', sig3).addBody([]);
++
++let table = builder.addTable(kWasmFuncRef, 4, 4);
++
++builder.addActiveElementSegment(
++    table.index, wasmI32Const(0),
++    [
++      [kExprRefFunc, main.index], [kExprRefFunc, func1.index],
++      [kExprRefFunc, func2.index], [kExprRefFunc, func3.index]
++    ],
++    kWasmFuncRef);
++
++let main_body = [
++  // Recursion breaker.
++  kExprLocalGet, 0,
++  kExprI32Eqz,
++  kExprBrIf, 0
++];
++// Useless calls, just to create stack values.
++for (let j = 0; j < 2; j++) {
++  for (let i = 0; i < 13; i++) {
++    main_body.push(...wasmF32Const(i));
++  }
++  main_body.push(kExprRefNull, kAnyRefCode);
++  main_body.push(kExprCallFunction, func1.index);
++}
++main_body.push(...[
++  // Recursive call.
++  kExprLocalGet, 0,
++  kExprI32Const, 1,
++  kExprI32Sub,
++  kExprCallFunction, main.index,
++]);
++main.addBody(main_body);
++
++let func1_body = [];
++for (let i = 0; i < 2; i++) {
++  func1_body.push(kExprI32Const, 0, kSimdPrefix, kExprI8x16Splat);
++}
++func1_body.push(kExprI32Const, 3);
++func1_body.push(kExprCallIndirect, sig3, table.index);
++
++for (let i = 0; i < 6; i++) {
++  func1_body.push(...wasmF32Const(i));
++}
++for (let i = 0; i < 7; i++) {
++  func1_body.push(kExprI32Const, 0, kSimdPrefix, kExprI8x16Splat);
++}
++func1_body.push(kExprI32Const, 2);
++func1_body.push(kExprReturnCallIndirect, sig2, table.index);
++func1.addBody(func1_body);
++
++let instance = builder.instantiate();
++instance.exports.main(3);
+-- 
+2.35.1
+

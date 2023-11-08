@@ -1,0 +1,458 @@
+From 49abe45e415471ece7baa4a4b364239ae0f71179 Mon Sep 17 00:00:00 2001
+From: Jakob Linke <jgruber@chromium.org>
+Date: Mon, 5 Sep 2022 14:05:43 +0200
+Subject: [PATCH] [tiering] Fix active tier detection in OnInterruptTick
+
+We've previously used JSFunction::GetActiveTier, which looks at
+JSFunction::code to determine the active tier. However, that may
+diverge from the actually active tier (i.e. the calling frame type),
+e.g. when Turbofan code is available but we haven't yet tiered up
+because we're stuck in a longrunning loop.
+
+With this CL, we determine the caller code_kind by splitting the
+BytecodeBudgetInterrupt runtime function up into _Ignition,
+_Sparkplug, and _Maglev variants s.t. the tier is passed implicitly
+without extra overhead at runtime.
+
+Bug: v8:7700
+Change-Id: I46d19c4676e3debb6d608d9fbc53495feef5cadf
+Fixed: chromium:1358577
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3871196
+Commit-Queue: Jakob Linke <jgruber@chromium.org>
+Reviewed-by: Leszek Swirski <leszeks@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#83020}
+---
+ src/baseline/arm/baseline-assembler-arm-inl.h |   2 +-
+ .../arm64/baseline-assembler-arm64-inl.h      |   2 +-
+ src/baseline/baseline-compiler.cc             |   2 +-
+ .../ia32/baseline-assembler-ia32-inl.h        |   2 +-
+ .../loong64/baseline-assembler-loong64-inl.h  |   2 +-
+ .../mips/baseline-assembler-mips-inl.h        |   2 +-
+ .../mips64/baseline-assembler-mips64-inl.h    |   2 +-
+ src/baseline/ppc/baseline-assembler-ppc-inl.h |   2 +-
+ .../riscv/baseline-assembler-riscv-inl.h      |   2 +-
+ .../s390/baseline-assembler-s390-inl.h        |   2 +-
+ src/baseline/x64/baseline-assembler-x64-inl.h |   2 +-
+ src/execution/tiering-manager.cc              |   6 +-
+ src/execution/tiering-manager.h               |   2 +-
+ src/interpreter/interpreter-assembler.cc      |   4 +-
+ src/maglev/maglev-ir.cc                       |   3 +-
+ src/runtime/runtime-internal.cc               |  37 +++++-
+ src/runtime/runtime.h                         | 119 +++++++++---------
+ 17 files changed, 112 insertions(+), 81 deletions(-)
+
+diff --git a/src/baseline/arm/baseline-assembler-arm-inl.h b/src/baseline/arm/baseline-assembler-arm-inl.h
+index 1907007a047..294c536073f 100644
+--- a/src/baseline/arm/baseline-assembler-arm-inl.h
++++ b/src/baseline/arm/baseline-assembler-arm-inl.h
+@@ -573,7 +573,7 @@ void BaselineAssembler::EmitReturn(MacroAssembler* masm) {
+       __ LoadContext(kContextRegister);
+       __ LoadFunction(kJSFunctionRegister);
+       __ Push(kJSFunctionRegister);
+-      __ CallRuntime(Runtime::kBytecodeBudgetInterrupt, 1);
++      __ CallRuntime(Runtime::kBytecodeBudgetInterrupt_Sparkplug, 1);
+ 
+       __ Pop(kInterpreterAccumulatorRegister, params_size);
+       __ masm()->SmiUntag(params_size);
+diff --git a/src/baseline/arm64/baseline-assembler-arm64-inl.h b/src/baseline/arm64/baseline-assembler-arm64-inl.h
+index 972bdeb5142..be335a41e2e 100644
+--- a/src/baseline/arm64/baseline-assembler-arm64-inl.h
++++ b/src/baseline/arm64/baseline-assembler-arm64-inl.h
+@@ -642,7 +642,7 @@ void BaselineAssembler::EmitReturn(MacroAssembler* masm) {
+     __ LoadContext(kContextRegister);
+     __ LoadFunction(kJSFunctionRegister);
+     __ masm()->PushArgument(kJSFunctionRegister);
+-    __ CallRuntime(Runtime::kBytecodeBudgetInterrupt, 1);
++    __ CallRuntime(Runtime::kBytecodeBudgetInterrupt_Sparkplug, 1);
+ 
+     __ masm()->Pop(kInterpreterAccumulatorRegister, params_size);
+     __ masm()->SmiUntag(params_size);
+diff --git a/src/baseline/baseline-compiler.cc b/src/baseline/baseline-compiler.cc
+index a8391f27fe9..284b3693f67 100644
+--- a/src/baseline/baseline-compiler.cc
++++ b/src/baseline/baseline-compiler.cc
+@@ -606,7 +606,7 @@ void BaselineCompiler::UpdateInterruptBudgetAndJumpToLabel(
+ 
+     if (weight < 0) {
+       SaveAccumulatorScope accumulator_scope(&basm_);
+-      CallRuntime(Runtime::kBytecodeBudgetInterruptWithStackCheck,
++      CallRuntime(Runtime::kBytecodeBudgetInterruptWithStackCheck_Sparkplug,
+                   __ FunctionOperand());
+     }
+   }
+diff --git a/src/baseline/ia32/baseline-assembler-ia32-inl.h b/src/baseline/ia32/baseline-assembler-ia32-inl.h
+index d3019cf6008..5dfd80d52af 100644
+--- a/src/baseline/ia32/baseline-assembler-ia32-inl.h
++++ b/src/baseline/ia32/baseline-assembler-ia32-inl.h
+@@ -537,7 +537,7 @@ void BaselineAssembler::EmitReturn(MacroAssembler* masm) {
+ 
+     __ LoadContext(kContextRegister);
+     __ Push(MemOperand(ebp, InterpreterFrameConstants::kFunctionOffset));
+-    __ CallRuntime(Runtime::kBytecodeBudgetInterrupt, 1);
++    __ CallRuntime(Runtime::kBytecodeBudgetInterrupt_Sparkplug, 1);
+ 
+     __ Pop(kInterpreterAccumulatorRegister, params_size);
+     __ masm()->SmiUntag(params_size);
+diff --git a/src/baseline/loong64/baseline-assembler-loong64-inl.h b/src/baseline/loong64/baseline-assembler-loong64-inl.h
+index de467748752..d33ff34d4b3 100644
+--- a/src/baseline/loong64/baseline-assembler-loong64-inl.h
++++ b/src/baseline/loong64/baseline-assembler-loong64-inl.h
+@@ -535,7 +535,7 @@ void BaselineAssembler::EmitReturn(MacroAssembler* masm) {
+     __ LoadContext(kContextRegister);
+     __ LoadFunction(kJSFunctionRegister);
+     __ masm()->Push(kJSFunctionRegister);
+-    __ CallRuntime(Runtime::kBytecodeBudgetInterrupt, 1);
++    __ CallRuntime(Runtime::kBytecodeBudgetInterrupt_Sparkplug, 1);
+ 
+     __ masm()->Pop(params_size, kInterpreterAccumulatorRegister);
+     __ masm()->SmiUntag(params_size);
+diff --git a/src/baseline/mips/baseline-assembler-mips-inl.h b/src/baseline/mips/baseline-assembler-mips-inl.h
+index ecbaf37a949..98d7ff1654b 100644
+--- a/src/baseline/mips/baseline-assembler-mips-inl.h
++++ b/src/baseline/mips/baseline-assembler-mips-inl.h
+@@ -526,7 +526,7 @@ void BaselineAssembler::EmitReturn(MacroAssembler* masm) {
+     __ LoadContext(kContextRegister);
+     __ LoadFunction(kJSFunctionRegister);
+     __ masm()->Push(kJSFunctionRegister);
+-    __ CallRuntime(Runtime::kBytecodeBudgetInterrupt, 1);
++    __ CallRuntime(Runtime::kBytecodeBudgetInterrupt_Sparkplug, 1);
+ 
+     __ masm()->Pop(params_size, kInterpreterAccumulatorRegister);
+     __ masm()->SmiUntag(params_size);
+diff --git a/src/baseline/mips64/baseline-assembler-mips64-inl.h b/src/baseline/mips64/baseline-assembler-mips64-inl.h
+index 3fa07506e48..b828ea3bdcb 100644
+--- a/src/baseline/mips64/baseline-assembler-mips64-inl.h
++++ b/src/baseline/mips64/baseline-assembler-mips64-inl.h
+@@ -545,7 +545,7 @@ void BaselineAssembler::EmitReturn(MacroAssembler* masm) {
+     __ LoadContext(kContextRegister);
+     __ LoadFunction(kJSFunctionRegister);
+     __ masm()->Push(kJSFunctionRegister);
+-    __ CallRuntime(Runtime::kBytecodeBudgetInterrupt, 1);
++    __ CallRuntime(Runtime::kBytecodeBudgetInterrupt_Sparkplug, 1);
+ 
+     __ masm()->Pop(params_size, kInterpreterAccumulatorRegister);
+     __ masm()->SmiUntag(params_size);
+diff --git a/src/baseline/ppc/baseline-assembler-ppc-inl.h b/src/baseline/ppc/baseline-assembler-ppc-inl.h
+index e8215d3e4cc..d2414084593 100644
+--- a/src/baseline/ppc/baseline-assembler-ppc-inl.h
++++ b/src/baseline/ppc/baseline-assembler-ppc-inl.h
+@@ -713,7 +713,7 @@ void BaselineAssembler::EmitReturn(MacroAssembler* masm) {
+       __ LoadContext(kContextRegister);
+       __ LoadFunction(kJSFunctionRegister);
+       __ Push(kJSFunctionRegister);
+-      __ CallRuntime(Runtime::kBytecodeBudgetInterrupt, 1);
++      __ CallRuntime(Runtime::kBytecodeBudgetInterrupt_Sparkplug, 1);
+ 
+       __ Pop(kInterpreterAccumulatorRegister, params_size);
+       __ masm()->SmiUntag(params_size);
+diff --git a/src/baseline/riscv/baseline-assembler-riscv-inl.h b/src/baseline/riscv/baseline-assembler-riscv-inl.h
+index 1d26c9f2f03..87afe5775d4 100644
+--- a/src/baseline/riscv/baseline-assembler-riscv-inl.h
++++ b/src/baseline/riscv/baseline-assembler-riscv-inl.h
+@@ -567,7 +567,7 @@ void BaselineAssembler::EmitReturn(MacroAssembler* masm) {
+     __ LoadContext(kContextRegister);
+     __ LoadFunction(kJSFunctionRegister);
+     __ masm()->Push(kJSFunctionRegister);
+-    __ CallRuntime(Runtime::kBytecodeBudgetInterrupt, 1);
++    __ CallRuntime(Runtime::kBytecodeBudgetInterrupt_Sparkplug, 1);
+ 
+     __ masm()->Pop(params_size, kInterpreterAccumulatorRegister);
+     __ masm()->SmiUntag(params_size);
+diff --git a/src/baseline/s390/baseline-assembler-s390-inl.h b/src/baseline/s390/baseline-assembler-s390-inl.h
+index e1e258b8046..a7ec8d5ac79 100644
+--- a/src/baseline/s390/baseline-assembler-s390-inl.h
++++ b/src/baseline/s390/baseline-assembler-s390-inl.h
+@@ -711,7 +711,7 @@ void BaselineAssembler::EmitReturn(MacroAssembler* masm) {
+       __ LoadContext(kContextRegister);
+       __ LoadFunction(kJSFunctionRegister);
+       __ Push(kJSFunctionRegister);
+-      __ CallRuntime(Runtime::kBytecodeBudgetInterrupt, 1);
++      __ CallRuntime(Runtime::kBytecodeBudgetInterrupt_Sparkplug, 1);
+ 
+       __ Pop(kInterpreterAccumulatorRegister, params_size);
+       __ masm()->SmiUntag(params_size);
+diff --git a/src/baseline/x64/baseline-assembler-x64-inl.h b/src/baseline/x64/baseline-assembler-x64-inl.h
+index 190e3cba64f..e80b48be8ff 100644
+--- a/src/baseline/x64/baseline-assembler-x64-inl.h
++++ b/src/baseline/x64/baseline-assembler-x64-inl.h
+@@ -600,7 +600,7 @@ void BaselineAssembler::EmitReturn(MacroAssembler* masm) {
+ 
+       __ LoadContext(kContextRegister);
+       __ Push(MemOperand(rbp, InterpreterFrameConstants::kFunctionOffset));
+-      __ CallRuntime(Runtime::kBytecodeBudgetInterrupt, 1);
++      __ CallRuntime(Runtime::kBytecodeBudgetInterrupt_Sparkplug, 1);
+ 
+       __ Pop(kInterpreterAccumulatorRegister, params_size);
+       __ masm()->SmiUntagUnsigned(params_size);
+diff --git a/src/execution/tiering-manager.cc b/src/execution/tiering-manager.cc
+index 7ca72b7b2be..7da8359550b 100644
+--- a/src/execution/tiering-manager.cc
++++ b/src/execution/tiering-manager.cc
+@@ -323,8 +323,6 @@ void TieringManager::MaybeOptimizeFrame(JSFunction function,
+ 
+ OptimizationDecision TieringManager::ShouldOptimize(JSFunction function,
+                                                     CodeKind code_kind) {
+-  DCHECK_EQ(code_kind, function.GetActiveTier().value());
+-
+   if (TiersUpToMaglev(code_kind) &&
+       function.shared().PassesFilter(v8_flags.maglev_filter) &&
+       !function.shared(isolate_).maglev_compilation_failed()) {
+@@ -377,7 +375,8 @@ TieringManager::OnInterruptTickScope::~OnInterruptTickScope() {
+   profiler_->any_ic_changed_ = false;
+ }
+ 
+-void TieringManager::OnInterruptTick(Handle<JSFunction> function) {
++void TieringManager::OnInterruptTick(Handle<JSFunction> function,
++                                     CodeKind code_kind) {
+   IsCompiledScope is_compiled_scope(
+       function->shared().is_compiled_scope(isolate_));
+ 
+@@ -441,7 +440,6 @@ void TieringManager::OnInterruptTick(Handle<JSFunction> function) {
+ 
+   function_obj.feedback_vector().SaturatingIncrementProfilerTicks();
+ 
+-  const CodeKind code_kind = function_obj.GetActiveTier().value();
+   MaybeOptimizeFrame(function_obj, code_kind);
+ }
+ 
+diff --git a/src/execution/tiering-manager.h b/src/execution/tiering-manager.h
+index 1815db93c23..83a39eaee04 100644
+--- a/src/execution/tiering-manager.h
++++ b/src/execution/tiering-manager.h
+@@ -26,7 +26,7 @@ class TieringManager {
+  public:
+   explicit TieringManager(Isolate* isolate) : isolate_(isolate) {}
+ 
+-  void OnInterruptTick(Handle<JSFunction> function);
++  void OnInterruptTick(Handle<JSFunction> function, CodeKind code_kind);
+ 
+   void NotifyICChanged() { any_ic_changed_ = true; }
+ 
+diff --git a/src/interpreter/interpreter-assembler.cc b/src/interpreter/interpreter-assembler.cc
+index 6a0c1c49fb3..6fa5ac1a044 100644
+--- a/src/interpreter/interpreter-assembler.cc
++++ b/src/interpreter/interpreter-assembler.cc
+@@ -1039,8 +1039,8 @@ void InterpreterAssembler::UpdateInterruptBudget(TNode<Int32T> weight,
+     BIND(&interrupt_check);
+     // JumpLoop should do a stack check as part of the interrupt.
+     CallRuntime(bytecode() == Bytecode::kJumpLoop
+-                    ? Runtime::kBytecodeBudgetInterruptWithStackCheck
+-                    : Runtime::kBytecodeBudgetInterrupt,
++                    ? Runtime::kBytecodeBudgetInterruptWithStackCheck_Ignition
++                    : Runtime::kBytecodeBudgetInterrupt_Ignition,
+                 GetContext(), function);
+     Goto(&done);
+ 
+diff --git a/src/maglev/maglev-ir.cc b/src/maglev/maglev-ir.cc
+index e27028dddad..b57cc1a4a7a 100644
+--- a/src/maglev/maglev-ir.cc
++++ b/src/maglev/maglev-ir.cc
+@@ -3242,7 +3242,8 @@ void ReduceInterruptBudget::GenerateCode(MaglevCodeGenState* code_gen_state,
+               code_gen_state, node->register_snapshot());
+           __ Move(kContextRegister, code_gen_state->native_context().object());
+           __ Push(MemOperand(rbp, StandardFrameConstants::kFunctionOffset));
+-          __ CallRuntime(Runtime::kBytecodeBudgetInterruptWithStackCheck, 1);
++          __ CallRuntime(Runtime::kBytecodeBudgetInterruptWithStackCheck_Maglev,
++                         1);
+           save_register_state.DefineSafepointWithLazyDeopt(
+               node->lazy_deopt_info());
+         }
+diff --git a/src/runtime/runtime-internal.cc b/src/runtime/runtime-internal.cc
+index f9b84621e36..a4178ef983b 100644
+--- a/src/runtime/runtime-internal.cc
++++ b/src/runtime/runtime-internal.cc
+@@ -350,7 +350,11 @@ RUNTIME_FUNCTION(Runtime_StackGuardWithGap) {
+   return isolate->stack_guard()->HandleInterrupts();
+ }
+ 
+-RUNTIME_FUNCTION(Runtime_BytecodeBudgetInterruptWithStackCheck) {
++namespace {
++
++Object BytecodeBudgetInterruptWithStackCheck(Isolate* isolate,
++                                             RuntimeArguments& args,
++                                             CodeKind code_kind) {
+   HandleScope scope(isolate);
+   DCHECK_EQ(1, args.length());
+   Handle<JSFunction> function = args.at<JSFunction>(0);
+@@ -372,20 +376,45 @@ RUNTIME_FUNCTION(Runtime_BytecodeBudgetInterruptWithStackCheck) {
+     }
+   }
+ 
+-  isolate->tiering_manager()->OnInterruptTick(function);
++  isolate->tiering_manager()->OnInterruptTick(function, code_kind);
+   return ReadOnlyRoots(isolate).undefined_value();
+ }
+ 
+-RUNTIME_FUNCTION(Runtime_BytecodeBudgetInterrupt) {
++Object BytecodeBudgetInterrupt(Isolate* isolate, RuntimeArguments& args,
++                               CodeKind code_kind) {
+   HandleScope scope(isolate);
+   DCHECK_EQ(1, args.length());
+   Handle<JSFunction> function = args.at<JSFunction>(0);
+   TRACE_EVENT0("v8.execute", "V8.BytecodeBudgetInterrupt");
+ 
+-  isolate->tiering_manager()->OnInterruptTick(function);
++  isolate->tiering_manager()->OnInterruptTick(function, code_kind);
+   return ReadOnlyRoots(isolate).undefined_value();
+ }
+ 
++}  // namespace
++
++RUNTIME_FUNCTION(Runtime_BytecodeBudgetInterruptWithStackCheck_Ignition) {
++  return BytecodeBudgetInterruptWithStackCheck(isolate, args,
++                                               CodeKind::INTERPRETED_FUNCTION);
++}
++
++RUNTIME_FUNCTION(Runtime_BytecodeBudgetInterrupt_Ignition) {
++  return BytecodeBudgetInterrupt(isolate, args, CodeKind::INTERPRETED_FUNCTION);
++}
++
++RUNTIME_FUNCTION(Runtime_BytecodeBudgetInterruptWithStackCheck_Sparkplug) {
++  return BytecodeBudgetInterruptWithStackCheck(isolate, args,
++                                               CodeKind::BASELINE);
++}
++
++RUNTIME_FUNCTION(Runtime_BytecodeBudgetInterrupt_Sparkplug) {
++  return BytecodeBudgetInterrupt(isolate, args, CodeKind::BASELINE);
++}
++
++RUNTIME_FUNCTION(Runtime_BytecodeBudgetInterruptWithStackCheck_Maglev) {
++  return BytecodeBudgetInterruptWithStackCheck(isolate, args, CodeKind::MAGLEV);
++}
++
+ namespace {
+ 
+ #if V8_ENABLE_WEBASSEMBLY
+diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
+index 3b68b644c7d..149df155ffc 100644
+--- a/src/runtime/runtime.h
++++ b/src/runtime/runtime.h
+@@ -207,64 +207,67 @@ namespace internal {
+ #define FOR_EACH_INTRINSIC_INTL(F, I)
+ #endif  // V8_INTL_SUPPORT
+ 
+-#define FOR_EACH_INTRINSIC_INTERNAL(F, I)            \
+-  F(AccessCheck, 1, 1)                               \
+-  F(AllocateByteArray, 1, 1)                         \
+-  F(AllocateInYoungGeneration, 2, 1)                 \
+-  F(AllocateInOldGeneration, 2, 1)                   \
+-  F(AllocateSeqOneByteString, 1, 1)                  \
+-  F(AllocateSeqTwoByteString, 1, 1)                  \
+-  F(AllowDynamicFunction, 1, 1)                      \
+-  I(CreateAsyncFromSyncIterator, 1, 1)               \
+-  F(CreateListFromArrayLike, 1, 1)                   \
+-  F(DoubleToStringWithRadix, 2, 1)                   \
+-  F(FatalProcessOutOfMemoryInAllocateRaw, 0, 1)      \
+-  F(FatalProcessOutOfMemoryInvalidArrayLength, 0, 1) \
+-  F(GetAndResetRuntimeCallStats, -1 /* <= 2 */, 1)   \
+-  F(GetAndResetTurboProfilingData, 0, 1)             \
+-  F(GetTemplateObject, 3, 1)                         \
+-  F(IncrementUseCounter, 1, 1)                       \
+-  F(BytecodeBudgetInterrupt, 1, 1)                   \
+-  F(BytecodeBudgetInterruptWithStackCheck, 1, 1)     \
+-  F(NewError, 2, 1)                                  \
+-  F(NewForeign, 0, 1)                                \
+-  F(NewReferenceError, 2, 1)                         \
+-  F(NewSyntaxError, 2, 1)                            \
+-  F(NewTypeError, -1 /* [1, 4] */, 1)                \
+-  F(OrdinaryHasInstance, 2, 1)                       \
+-  F(PromoteScheduledException, 0, 1)                 \
+-  F(ReportMessageFromMicrotask, 1, 1)                \
+-  F(ReThrow, 1, 1)                                   \
+-  F(ReThrowWithMessage, 2, 1)                        \
+-  F(RunMicrotaskCallback, 2, 1)                      \
+-  F(PerformMicrotaskCheckpoint, 0, 1)                \
+-  F(SharedValueBarrierSlow, 1, 1)                    \
+-  F(StackGuard, 0, 1)                                \
+-  F(StackGuardWithGap, 1, 1)                         \
+-  F(Throw, 1, 1)                                     \
+-  F(ThrowApplyNonFunction, 1, 1)                     \
+-  F(ThrowCalledNonCallable, 1, 1)                    \
+-  F(ThrowConstructedNonConstructable, 1, 1)          \
+-  F(ThrowConstructorReturnedNonObject, 0, 1)         \
+-  F(ThrowInvalidStringLength, 0, 1)                  \
+-  F(ThrowInvalidTypedArrayAlignment, 2, 1)           \
+-  F(ThrowIteratorError, 1, 1)                        \
+-  F(ThrowSpreadArgError, 2, 1)                       \
+-  F(ThrowIteratorResultNotAnObject, 1, 1)            \
+-  F(ThrowNoAccess, 0, 1)                             \
+-  F(ThrowNotConstructor, 1, 1)                       \
+-  F(ThrowPatternAssignmentNonCoercible, 1, 1)        \
+-  F(ThrowRangeError, -1 /* >= 1 */, 1)               \
+-  F(ThrowReferenceError, 1, 1)                       \
+-  F(ThrowAccessedUninitializedVariable, 1, 1)        \
+-  F(ThrowStackOverflow, 0, 1)                        \
+-  F(ThrowSymbolAsyncIteratorInvalid, 0, 1)           \
+-  F(ThrowSymbolIteratorInvalid, 0, 1)                \
+-  F(ThrowThrowMethodMissing, 0, 1)                   \
+-  F(ThrowTypeError, -1 /* >= 1 */, 1)                \
+-  F(ThrowTypeErrorIfStrict, -1 /* >= 1 */, 1)        \
+-  F(TerminateExecution, 0, 1)                        \
+-  F(Typeof, 1, 1)                                    \
++#define FOR_EACH_INTRINSIC_INTERNAL(F, I)                  \
++  F(AccessCheck, 1, 1)                                     \
++  F(AllocateByteArray, 1, 1)                               \
++  F(AllocateInYoungGeneration, 2, 1)                       \
++  F(AllocateInOldGeneration, 2, 1)                         \
++  F(AllocateSeqOneByteString, 1, 1)                        \
++  F(AllocateSeqTwoByteString, 1, 1)                        \
++  F(AllowDynamicFunction, 1, 1)                            \
++  I(CreateAsyncFromSyncIterator, 1, 1)                     \
++  F(CreateListFromArrayLike, 1, 1)                         \
++  F(DoubleToStringWithRadix, 2, 1)                         \
++  F(FatalProcessOutOfMemoryInAllocateRaw, 0, 1)            \
++  F(FatalProcessOutOfMemoryInvalidArrayLength, 0, 1)       \
++  F(GetAndResetRuntimeCallStats, -1 /* <= 2 */, 1)         \
++  F(GetAndResetTurboProfilingData, 0, 1)                   \
++  F(GetTemplateObject, 3, 1)                               \
++  F(IncrementUseCounter, 1, 1)                             \
++  F(BytecodeBudgetInterrupt_Ignition, 1, 1)                \
++  F(BytecodeBudgetInterruptWithStackCheck_Ignition, 1, 1)  \
++  F(BytecodeBudgetInterrupt_Sparkplug, 1, 1)               \
++  F(BytecodeBudgetInterruptWithStackCheck_Sparkplug, 1, 1) \
++  F(BytecodeBudgetInterruptWithStackCheck_Maglev, 1, 1)    \
++  F(NewError, 2, 1)                                        \
++  F(NewForeign, 0, 1)                                      \
++  F(NewReferenceError, 2, 1)                               \
++  F(NewSyntaxError, 2, 1)                                  \
++  F(NewTypeError, -1 /* [1, 4] */, 1)                      \
++  F(OrdinaryHasInstance, 2, 1)                             \
++  F(PromoteScheduledException, 0, 1)                       \
++  F(ReportMessageFromMicrotask, 1, 1)                      \
++  F(ReThrow, 1, 1)                                         \
++  F(ReThrowWithMessage, 2, 1)                              \
++  F(RunMicrotaskCallback, 2, 1)                            \
++  F(PerformMicrotaskCheckpoint, 0, 1)                      \
++  F(SharedValueBarrierSlow, 1, 1)                          \
++  F(StackGuard, 0, 1)                                      \
++  F(StackGuardWithGap, 1, 1)                               \
++  F(Throw, 1, 1)                                           \
++  F(ThrowApplyNonFunction, 1, 1)                           \
++  F(ThrowCalledNonCallable, 1, 1)                          \
++  F(ThrowConstructedNonConstructable, 1, 1)                \
++  F(ThrowConstructorReturnedNonObject, 0, 1)               \
++  F(ThrowInvalidStringLength, 0, 1)                        \
++  F(ThrowInvalidTypedArrayAlignment, 2, 1)                 \
++  F(ThrowIteratorError, 1, 1)                              \
++  F(ThrowSpreadArgError, 2, 1)                             \
++  F(ThrowIteratorResultNotAnObject, 1, 1)                  \
++  F(ThrowNoAccess, 0, 1)                                   \
++  F(ThrowNotConstructor, 1, 1)                             \
++  F(ThrowPatternAssignmentNonCoercible, 1, 1)              \
++  F(ThrowRangeError, -1 /* >= 1 */, 1)                     \
++  F(ThrowReferenceError, 1, 1)                             \
++  F(ThrowAccessedUninitializedVariable, 1, 1)              \
++  F(ThrowStackOverflow, 0, 1)                              \
++  F(ThrowSymbolAsyncIteratorInvalid, 0, 1)                 \
++  F(ThrowSymbolIteratorInvalid, 0, 1)                      \
++  F(ThrowThrowMethodMissing, 0, 1)                         \
++  F(ThrowTypeError, -1 /* >= 1 */, 1)                      \
++  F(ThrowTypeErrorIfStrict, -1 /* >= 1 */, 1)              \
++  F(TerminateExecution, 0, 1)                              \
++  F(Typeof, 1, 1)                                          \
+   F(UnwindAndFindExceptionHandler, 0, 1)
+ 
+ #define FOR_EACH_INTRINSIC_LITERALS(F, I)           \
+-- 
+2.35.1
+

@@ -1,0 +1,92 @@
+From c3703b82a1dc25fcd85ead2780d740d02c4408b7 Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Mon, 20 Mar 2023 11:01:00 +0800
+Subject: [PATCH] [riscv] Enable the vector extension as default on simulator
+ mode
+
+Add build configuration and constants definitions to enable RISC Vector extension build for simulator mode.
+
+Bug:v8:13778
+
+Change-Id: Ifc32af82dee65c720244165286963f2a363bea3a
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4293541
+Commit-Queue: Jakob Kummerow <jkummerow@chromium.org>
+Reviewed-by: Jakob Kummerow <jkummerow@chromium.org>
+Auto-Submit: Yahan Lu <yahan@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#86604}
+---
+ BUILD.gn                                 | 4 +++-
+ src/codegen/riscv/base-constants-riscv.h | 9 +++++++++
+ src/codegen/riscv/extension-riscv-v.cc   | 4 ++++
+ 3 files changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/BUILD.gn b/BUILD.gn
+index 7261557413d..ac155fd467f 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -8,6 +8,7 @@ import("//build/config/coverage/coverage.gni")
+ import("//build/config/dcheck_always_on.gni")
+ import("//build/config/host_byteorder.gni")
+ import("//build/config/mips.gni")
++import("//build/config/riscv.gni")
+ import("//build/config/sanitizers/sanitizers.gni")
+ import("//build_overrides/build.gni")
+ 
+@@ -1260,8 +1261,9 @@ config("toolchain") {
+     if (!is_clang) {
+       cflags += [ "-ffp-contract=off" ]
+     }
+-    if (target_is_simulator) {
++    if (riscv_use_rvv || target_is_simulator) {
+       defines += [ "CAN_USE_RVV_INSTRUCTIONS" ]
++      defines += [ "RVV_VLEN=${riscv_rvv_vlen}" ]
+     }
+   }
+ 
+diff --git a/src/codegen/riscv/base-constants-riscv.h b/src/codegen/riscv/base-constants-riscv.h
+index d4d32142e09..9acbf86f153 100644
+--- a/src/codegen/riscv/base-constants-riscv.h
++++ b/src/codegen/riscv/base-constants-riscv.h
+@@ -313,8 +313,17 @@ const uint32_t kRvcBImm8Mask = (((1 << 5) - 1) << 2) | (((1 << 3) - 1) << 10);
+ 
+ // for RVV extension
+ constexpr int kRvvELEN = 64;
++#ifdef RVV_VLEN
++constexpr int kRvvVLEN = RVV_VLEN;
++// TODO(riscv): support rvv 256/512/1024
++static_assert(
++    kRvvVLEN == 128,
++    "RVV extension only supports 128bit wide VLEN at current RISC-V backend.");
++#else
+ constexpr int kRvvVLEN = 128;
++#endif
+ constexpr int kRvvSLEN = kRvvVLEN;
++
+ const int kRvvFunct6Shift = 26;
+ const int kRvvFunct6Bits = 6;
+ const uint32_t kRvvFunct6Mask =
+diff --git a/src/codegen/riscv/extension-riscv-v.cc b/src/codegen/riscv/extension-riscv-v.cc
+index 06c92d884c5..f43aea40d4c 100644
+--- a/src/codegen/riscv/extension-riscv-v.cc
++++ b/src/codegen/riscv/extension-riscv-v.cc
+@@ -860,6 +860,7 @@ void AssemblerRISCVV::vcpop_m(Register rd, VRegister vs2, MaskType mask) {
+ 
+ LoadStoreLaneParams::LoadStoreLaneParams(MachineRepresentation rep,
+                                          uint8_t laneidx) {
++#ifdef CAN_USE_RVV_INSTRUCTIONS
+   switch (rep) {
+     case MachineRepresentation::kWord8:
+       *this = LoadStoreLaneParams(laneidx, 8, kRvvVLEN / 16);
+@@ -876,6 +877,9 @@ LoadStoreLaneParams::LoadStoreLaneParams(MachineRepresentation rep,
+     default:
+       UNREACHABLE();
+   }
++#else
++  UNREACHABLE();
++#endif
+ }
+ 
+ }  // namespace internal
+-- 
+2.35.1
+

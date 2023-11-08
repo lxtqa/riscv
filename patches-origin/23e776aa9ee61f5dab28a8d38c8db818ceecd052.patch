@@ -1,0 +1,627 @@
+From 23e776aa9ee61f5dab28a8d38c8db818ceecd052 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Olivier=20Fl=C3=BCckiger?= <olivf@chromium.org>
+Date: Wed, 8 Feb 2023 17:26:23 +0100
+Subject: [PATCH] [static-roots] Use static maps instead of instance type in
+ MacroAsm
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+If an instance type corresponds to a unique static map we do not need
+to load the instance type from the map. Instead we can compare the
+compressed map word against the known map.
+
+This CL addresses only the backend. We'll add the same optimization to
+the CodeStubAssembler in a follow up.
+
+Bug: v8:13466
+Change-Id: I3a53299e0475e90eb289a23f09e7374dfc10bad1
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4205918
+Commit-Queue: Olivier Flückiger <olivf@chromium.org>
+Reviewed-by: Victor Gomes <victorgomes@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#85747}
+---
+ src/baseline/arm/baseline-assembler-arm-inl.h |  8 +++++
+ .../arm64/baseline-assembler-arm64-inl.h      | 13 +++++++
+ src/baseline/baseline-assembler.h             |  4 +++
+ src/baseline/baseline-compiler.cc             | 23 +++++-------
+ .../ia32/baseline-assembler-ia32-inl.h        | 10 ++++++
+ .../loong64/baseline-assembler-loong64-inl.h  |  8 +++++
+ .../mips64/baseline-assembler-mips64-inl.h    |  8 +++++
+ src/baseline/ppc/baseline-assembler-ppc-inl.h |  9 +++++
+ .../riscv/baseline-assembler-riscv-inl.h      |  8 +++++
+ .../s390/baseline-assembler-s390-inl.h        |  9 +++++
+ src/baseline/x64/baseline-assembler-x64-inl.h | 16 +++++++++
+ src/builtins/arm64/builtins-arm64.cc          | 21 ++++++-----
+ src/builtins/x64/builtins-x64.cc              | 26 +++++++-------
+ src/codegen/arm64/macro-assembler-arm64.cc    | 36 ++++++++++++++++---
+ src/codegen/arm64/macro-assembler-arm64.h     |  4 +++
+ src/codegen/x64/macro-assembler-x64.cc        | 17 +++++++--
+ src/codegen/x64/macro-assembler-x64.h         |  3 ++
+ 17 files changed, 178 insertions(+), 45 deletions(-)
+
+diff --git a/src/baseline/arm/baseline-assembler-arm-inl.h b/src/baseline/arm/baseline-assembler-arm-inl.h
+index 69353a78d53..b63499c85cc 100644
+--- a/src/baseline/arm/baseline-assembler-arm-inl.h
++++ b/src/baseline/arm/baseline-assembler-arm-inl.h
+@@ -111,6 +111,14 @@ void BaselineAssembler::JumpIf(Condition cc, Register lhs, const Operand& rhs,
+   __ cmp(lhs, Operand(rhs));
+   __ b(cc, target);
+ }
++void BaselineAssembler::JumpIfObjectTypeFast(Condition cc, Register object,
++                                             InstanceType instance_type,
++                                             Label* target,
++                                             Label::Distance distance) {
++  ScratchRegisterScope temps(this);
++  Register scratch = temps.AcquireScratch();
++  JumpIfObjectType(cc, object, instance_type, scratch, target, distance);
++}
+ void BaselineAssembler::JumpIfObjectType(Condition cc, Register object,
+                                          InstanceType instance_type,
+                                          Register map, Label* target,
+diff --git a/src/baseline/arm64/baseline-assembler-arm64-inl.h b/src/baseline/arm64/baseline-assembler-arm64-inl.h
+index 11f78981ad9..093ed299b13 100644
+--- a/src/baseline/arm64/baseline-assembler-arm64-inl.h
++++ b/src/baseline/arm64/baseline-assembler-arm64-inl.h
+@@ -113,6 +113,19 @@ void BaselineAssembler::JumpIf(Condition cc, Register lhs, const Operand& rhs,
+                                Label* target, Label::Distance) {
+   __ CompareAndBranch(lhs, rhs, cc, target);
+ }
++void BaselineAssembler::JumpIfObjectTypeFast(Condition cc, Register object,
++                                             InstanceType instance_type,
++                                             Label* target,
++                                             Label::Distance distance) {
++  ScratchRegisterScope temps(this);
++  Register scratch = temps.AcquireScratch();
++  if (cc == eq || cc == ne) {
++    __ IsObjectType(object, scratch, scratch, instance_type);
++    __ B(cc, target);
++    return;
++  }
++  JumpIfObjectType(cc, object, instance_type, scratch, target, distance);
++}
+ void BaselineAssembler::JumpIfObjectType(Condition cc, Register object,
+                                          InstanceType instance_type,
+                                          Register map, Label* target,
+diff --git a/src/baseline/baseline-assembler.h b/src/baseline/baseline-assembler.h
+index 9b0f612f94d..344eea0e697 100644
+--- a/src/baseline/baseline-assembler.h
++++ b/src/baseline/baseline-assembler.h
+@@ -65,6 +65,10 @@ class BaselineAssembler {
+                                InstanceType instance_type, Register map,
+                                Label* target,
+                                Label::Distance distance = Label::kFar);
++  // Might not load the map into the scratch register.
++  inline void JumpIfObjectTypeFast(Condition cc, Register object,
++                                   InstanceType instance_type, Label* target,
++                                   Label::Distance distance = Label::kFar);
+   inline void JumpIfInstanceType(Condition cc, Register map,
+                                  InstanceType instance_type, Label* target,
+                                  Label::Distance distance = Label::kFar);
+diff --git a/src/baseline/baseline-compiler.cc b/src/baseline/baseline-compiler.cc
+index 9d34c07d43b..eb0f89b9fb4 100644
+--- a/src/baseline/baseline-compiler.cc
++++ b/src/baseline/baseline-compiler.cc
+@@ -561,8 +561,7 @@ void BaselineCompiler::VerifyFrame() {
+       __ Move(scratch, __ FeedbackVectorOperand());
+       Label is_smi, is_ok;
+       __ JumpIfSmi(scratch, &is_smi);
+-      __ JumpIfObjectType(kEqual, scratch, FEEDBACK_VECTOR_TYPE, scratch,
+-                          &is_ok);
++      __ JumpIfObjectTypeFast(kEqual, scratch, FEEDBACK_VECTOR_TYPE, &is_ok);
+       __ Bind(&is_smi);
+       __ masm()->Abort(AbortReason::kExpectedFeedbackVector);
+       __ Bind(&is_ok);
+@@ -1561,9 +1560,8 @@ void BaselineCompiler::VisitTestTypeOf() {
+     case interpreter::TestTypeOfFlags::LiteralFlag::kNumber: {
+       Label is_smi, is_heap_number;
+       __ JumpIfSmi(kInterpreterAccumulatorRegister, &is_smi, Label::kNear);
+-      __ JumpIfObjectType(kEqual, kInterpreterAccumulatorRegister,
+-                          HEAP_NUMBER_TYPE, scratch_scope.AcquireScratch(),
+-                          &is_heap_number, Label::kNear);
++      __ JumpIfObjectTypeFast(kEqual, kInterpreterAccumulatorRegister,
++                              HEAP_NUMBER_TYPE, &is_heap_number, Label::kNear);
+ 
+       __ LoadRoot(kInterpreterAccumulatorRegister, RootIndex::kFalseValue);
+       __ Jump(&done, Label::kNear);
+@@ -1592,9 +1590,8 @@ void BaselineCompiler::VisitTestTypeOf() {
+     case interpreter::TestTypeOfFlags::LiteralFlag::kSymbol: {
+       Label is_smi, bad_instance_type;
+       __ JumpIfSmi(kInterpreterAccumulatorRegister, &is_smi, Label::kNear);
+-      __ JumpIfObjectType(kNotEqual, kInterpreterAccumulatorRegister,
+-                          SYMBOL_TYPE, scratch_scope.AcquireScratch(),
+-                          &bad_instance_type, Label::kNear);
++      __ JumpIfObjectTypeFast(kNotEqual, kInterpreterAccumulatorRegister,
++                              SYMBOL_TYPE, &bad_instance_type, Label::kNear);
+ 
+       __ LoadRoot(kInterpreterAccumulatorRegister, RootIndex::kTrueValue);
+       __ Jump(&done, Label::kNear);
+@@ -1622,9 +1619,8 @@ void BaselineCompiler::VisitTestTypeOf() {
+     case interpreter::TestTypeOfFlags::LiteralFlag::kBigInt: {
+       Label is_smi, bad_instance_type;
+       __ JumpIfSmi(kInterpreterAccumulatorRegister, &is_smi, Label::kNear);
+-      __ JumpIfObjectType(kNotEqual, kInterpreterAccumulatorRegister,
+-                          BIGINT_TYPE, scratch_scope.AcquireScratch(),
+-                          &bad_instance_type, Label::kNear);
++      __ JumpIfObjectTypeFast(kNotEqual, kInterpreterAccumulatorRegister,
++                              BIGINT_TYPE, &bad_instance_type, Label::kNear);
+ 
+       __ LoadRoot(kInterpreterAccumulatorRegister, RootIndex::kTrueValue);
+       __ Jump(&done, Label::kNear);
+@@ -2046,9 +2042,8 @@ void BaselineCompiler::VisitJumpIfJSReceiver() {
+   Label is_smi, dont_jump;
+   __ JumpIfSmi(kInterpreterAccumulatorRegister, &is_smi, Label::kNear);
+ 
+-  __ JumpIfObjectType(kLessThan, kInterpreterAccumulatorRegister,
+-                      FIRST_JS_RECEIVER_TYPE, scratch_scope.AcquireScratch(),
+-                      &dont_jump);
++  __ JumpIfObjectTypeFast(kLessThan, kInterpreterAccumulatorRegister,
++                          FIRST_JS_RECEIVER_TYPE, &dont_jump);
+   UpdateInterruptBudgetAndDoInterpreterJump();
+ 
+   __ Bind(&is_smi);
+diff --git a/src/baseline/ia32/baseline-assembler-ia32-inl.h b/src/baseline/ia32/baseline-assembler-ia32-inl.h
+index ba475f0c5a3..f96f2e00a56 100644
+--- a/src/baseline/ia32/baseline-assembler-ia32-inl.h
++++ b/src/baseline/ia32/baseline-assembler-ia32-inl.h
+@@ -121,6 +121,16 @@ void BaselineAssembler::JumpIf(Condition cc, Register lhs, const Operand& rhs,
+   __ cmp(lhs, rhs);
+   __ j(cc, target, distance);
+ }
++
++void BaselineAssembler::JumpIfObjectTypeFast(Condition cc, Register object,
++                                             InstanceType instance_type,
++                                             Label* target,
++                                             Label::Distance distance) {
++  ScratchRegisterScope temps(this);
++  Register scratch = temps.AcquireScratch();
++  JumpIfObjectType(cc, object, instance_type, scratch, target, distance);
++}
++
+ void BaselineAssembler::JumpIfObjectType(Condition cc, Register object,
+                                          InstanceType instance_type,
+                                          Register map, Label* target,
+diff --git a/src/baseline/loong64/baseline-assembler-loong64-inl.h b/src/baseline/loong64/baseline-assembler-loong64-inl.h
+index c45d94f6ae6..8d4238a563f 100644
+--- a/src/baseline/loong64/baseline-assembler-loong64-inl.h
++++ b/src/baseline/loong64/baseline-assembler-loong64-inl.h
+@@ -104,6 +104,14 @@ void BaselineAssembler::JumpIf(Condition cc, Register lhs, const Operand& rhs,
+                                Label* target, Label::Distance) {
+   __ Branch(target, cc, lhs, Operand(rhs));
+ }
++void BaselineAssembler::JumpIfObjectTypeFast(Condition cc, Register object,
++                                             InstanceType instance_type,
++                                             Label* target,
++                                             Label::Distance distance) {
++  ScratchRegisterScope temps(this);
++  Register scratch = temps.AcquireScratch();
++  JumpIfObjectType(cc, object, instance_type, scratch, target, distance);
++}
+ void BaselineAssembler::JumpIfObjectType(Condition cc, Register object,
+                                          InstanceType instance_type,
+                                          Register map, Label* target,
+diff --git a/src/baseline/mips64/baseline-assembler-mips64-inl.h b/src/baseline/mips64/baseline-assembler-mips64-inl.h
+index 9cfe39d98ae..762ec1745ba 100644
+--- a/src/baseline/mips64/baseline-assembler-mips64-inl.h
++++ b/src/baseline/mips64/baseline-assembler-mips64-inl.h
+@@ -104,6 +104,14 @@ void BaselineAssembler::JumpIf(Condition cc, Register lhs, const Operand& rhs,
+                                Label* target, Label::Distance) {
+   __ Branch(target, cc, lhs, Operand(rhs));
+ }
++void BaselineAssembler::JumpIfObjectTypeFast(Condition cc, Register object,
++                                             InstanceType instance_type,
++                                             Label* target,
++                                             Label::Distance distance) {
++  ScratchRegisterScope temps(this);
++  Register scratch = temps.AcquireScratch();
++  JumpIfObjectType(cc, object, instance_type, scratch, target, distance);
++}
+ void BaselineAssembler::JumpIfObjectType(Condition cc, Register object,
+                                          InstanceType instance_type,
+                                          Register map, Label* target,
+diff --git a/src/baseline/ppc/baseline-assembler-ppc-inl.h b/src/baseline/ppc/baseline-assembler-ppc-inl.h
+index 9f85abfc405..74a3db7ca3b 100644
+--- a/src/baseline/ppc/baseline-assembler-ppc-inl.h
++++ b/src/baseline/ppc/baseline-assembler-ppc-inl.h
+@@ -149,6 +149,15 @@ void BaselineAssembler::JumpIf(Condition cc, Register lhs, const Operand& rhs,
+   __ b(to_condition(cc), target);
+ }
+ 
++void BaselineAssembler::JumpIfObjectTypeFast(Condition cc, Register object,
++                                             InstanceType instance_type,
++                                             Label* target,
++                                             Label::Distance distance) {
++  ScratchRegisterScope temps(this);
++  Register scratch = temps.AcquireScratch();
++  JumpIfObjectType(cc, object, instance_type, scratch, target, distance);
++}
++
+ void BaselineAssembler::JumpIfObjectType(Condition cc, Register object,
+                                          InstanceType instance_type,
+                                          Register map, Label* target,
+diff --git a/src/baseline/riscv/baseline-assembler-riscv-inl.h b/src/baseline/riscv/baseline-assembler-riscv-inl.h
+index e1d83849b73..14b09eec724 100644
+--- a/src/baseline/riscv/baseline-assembler-riscv-inl.h
++++ b/src/baseline/riscv/baseline-assembler-riscv-inl.h
+@@ -103,6 +103,14 @@ void BaselineAssembler::JumpIf(Condition cc, Register lhs, const Operand& rhs,
+                                Label* target, Label::Distance) {
+   __ Branch(target, cc, lhs, Operand(rhs));
+ }
++void BaselineAssembler::JumpIfObjectTypeFast(Condition cc, Register object,
++                                             InstanceType instance_type,
++                                             Label* target,
++                                             Label::Distance distance) {
++  ScratchRegisterScope temps(this);
++  Register scratch = temps.AcquireScratch();
++  JumpIfObjectType(cc, object, instance_type, scratch, target, distance);
++}
+ void BaselineAssembler::JumpIfObjectType(Condition cc, Register object,
+                                          InstanceType instance_type,
+                                          Register map, Label* target,
+diff --git a/src/baseline/s390/baseline-assembler-s390-inl.h b/src/baseline/s390/baseline-assembler-s390-inl.h
+index 778b3a57aeb..920799fbc4d 100644
+--- a/src/baseline/s390/baseline-assembler-s390-inl.h
++++ b/src/baseline/s390/baseline-assembler-s390-inl.h
+@@ -148,6 +148,15 @@ void BaselineAssembler::JumpIf(Condition cc, Register lhs, const Operand& rhs,
+   __ b(to_condition(cc), target);
+ }
+ 
++void BaselineAssembler::JumpIfObjectTypeFast(Condition cc, Register object,
++                                             InstanceType instance_type,
++                                             Label* target,
++                                             Label::Distance distance) {
++  ScratchRegisterScope temps(this);
++  Register scratch = temps.AcquireScratch();
++  JumpIfObjectType(cc, object, instance_type, scratch, target, distance);
++}
++
+ void BaselineAssembler::JumpIfObjectType(Condition cc, Register object,
+                                          InstanceType instance_type,
+                                          Register map, Label* target,
+diff --git a/src/baseline/x64/baseline-assembler-x64-inl.h b/src/baseline/x64/baseline-assembler-x64-inl.h
+index ea17e2f721b..ef436eb94da 100644
+--- a/src/baseline/x64/baseline-assembler-x64-inl.h
++++ b/src/baseline/x64/baseline-assembler-x64-inl.h
+@@ -112,6 +112,22 @@ void BaselineAssembler::JumpIf(Condition cc, Register lhs, const Operand& rhs,
+   __ cmpq(lhs, rhs);
+   __ j(cc, target, distance);
+ }
++
++void BaselineAssembler::JumpIfObjectTypeFast(Condition cc, Register object,
++                                             InstanceType instance_type,
++                                             Label* target,
++                                             Label::Distance distance) {
++  __ AssertNotSmi(object);
++  ScratchRegisterScope temps(this);
++  Register scratch = temps.AcquireScratch();
++  if (cc == Condition::kEqual || cc == Condition::kNotEqual) {
++    __ IsObjectType(object, instance_type, scratch);
++  } else {
++    __ CmpObjectType(object, instance_type, scratch);
++  }
++  __ j(cc, target, distance);
++}
++
+ void BaselineAssembler::JumpIfObjectType(Condition cc, Register object,
+                                          InstanceType instance_type,
+                                          Register map, Label* target,
+diff --git a/src/builtins/arm64/builtins-arm64.cc b/src/builtins/arm64/builtins-arm64.cc
+index 39729eda76b..222ebd43849 100644
+--- a/src/builtins/arm64/builtins-arm64.cc
++++ b/src/builtins/arm64/builtins-arm64.cc
+@@ -531,7 +531,7 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
+     __ LoadTaggedField(
+         x3, FieldMemOperand(x3, SharedFunctionInfo::kFunctionDataOffset));
+     GetSharedFunctionInfoBytecodeOrBaseline(masm, x3, x0, &is_baseline);
+-    __ CompareObjectType(x3, x3, x3, BYTECODE_ARRAY_TYPE);
++    __ IsObjectType(x3, x3, x3, BYTECODE_ARRAY_TYPE);
+     __ Assert(eq, AbortReason::kMissingBytecodeArray);
+     __ bind(&is_baseline);
+   }
+@@ -1281,8 +1281,8 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+   // The bytecode array could have been flushed from the shared function info,
+   // if so, call into CompileLazy.
+   Label compile_lazy;
+-  __ CompareObjectType(kInterpreterBytecodeArrayRegister, x4, x4,
+-                       BYTECODE_ARRAY_TYPE);
++  __ IsObjectType(kInterpreterBytecodeArrayRegister, x4, x4,
++                  BYTECODE_ARRAY_TYPE);
+   __ B(ne, &compile_lazy);
+ 
+   // Load the feedback vector from the closure.
+@@ -1677,8 +1677,8 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+     __ AssertNotSmi(
+         kInterpreterBytecodeArrayRegister,
+         AbortReason::kFunctionDataShouldBeBytecodeArrayOnInterpreterEntry);
+-    __ CompareObjectType(kInterpreterBytecodeArrayRegister, x1, x1,
+-                         BYTECODE_ARRAY_TYPE);
++    __ IsObjectType(kInterpreterBytecodeArrayRegister, x1, x1,
++                    BYTECODE_ARRAY_TYPE);
+     __ Assert(
+         eq, AbortReason::kFunctionDataShouldBeBytecodeArrayOnInterpreterEntry);
+   }
+@@ -1733,9 +1733,8 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+       x1, FieldMemOperand(x1, JSFunction::kSharedFunctionInfoOffset));
+   __ LoadTaggedField(
+       x1, FieldMemOperand(x1, SharedFunctionInfo::kFunctionDataOffset));
+-  __ CompareObjectType(x1, kInterpreterDispatchTableRegister,
+-                       kInterpreterDispatchTableRegister,
+-                       INTERPRETER_DATA_TYPE);
++  __ IsObjectType(x1, kInterpreterDispatchTableRegister,
++                  kInterpreterDispatchTableRegister, INTERPRETER_DATA_TYPE);
+   __ B(ne, &builtin_trampoline);
+ 
+   __ LoadTaggedField(
+@@ -5699,7 +5698,7 @@ void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
+   // always have baseline code.
+   if (!is_osr) {
+     Label start_with_baseline;
+-    __ CompareObjectType(code_obj, x3, x3, CODE_TYPE);
++    __ IsObjectType(code_obj, x3, x3, CODE_TYPE);
+     __ B(eq, &start_with_baseline);
+ 
+     // Start with bytecode as there is no baseline code.
+@@ -5712,7 +5711,7 @@ void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
+     // Start with baseline code.
+     __ bind(&start_with_baseline);
+   } else if (v8_flags.debug_code) {
+-    __ CompareObjectType(code_obj, x3, x3, CODE_TYPE);
++    __ IsObjectType(code_obj, x3, x3, CODE_TYPE);
+     __ Assert(eq, AbortReason::kExpectedBaselineData);
+   }
+ 
+@@ -5731,7 +5730,7 @@ void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
+   Label install_baseline_code;
+   // Check if feedback vector is valid. If not, call prepare for baseline to
+   // allocate it.
+-  __ CompareObjectType(feedback_vector, x3, x3, FEEDBACK_VECTOR_TYPE);
++  __ IsObjectType(feedback_vector, x3, x3, FEEDBACK_VECTOR_TYPE);
+   __ B(ne, &install_baseline_code);
+ 
+   // Save BytecodeOffset from the stack frame.
+diff --git a/src/builtins/x64/builtins-x64.cc b/src/builtins/x64/builtins-x64.cc
+index c350fb426e3..009d1d5ce1c 100644
+--- a/src/builtins/x64/builtins-x64.cc
++++ b/src/builtins/x64/builtins-x64.cc
+@@ -800,12 +800,12 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
+         rcx, FieldOperand(rcx, SharedFunctionInfo::kFunctionDataOffset));
+     GetSharedFunctionInfoBytecodeOrBaseline(masm, rcx, kScratchRegister,
+                                             &is_baseline);
+-    __ CmpObjectType(rcx, BYTECODE_ARRAY_TYPE, rcx);
++    __ IsObjectType(rcx, BYTECODE_ARRAY_TYPE, rcx);
+     __ Assert(equal, AbortReason::kMissingBytecodeArray);
+     __ jmp(&ok);
+ 
+     __ bind(&is_baseline);
+-    __ CmpObjectType(rcx, CODE_TYPE, rcx);
++    __ IsObjectType(rcx, CODE_TYPE, rcx);
+     __ Assert(equal, AbortReason::kMissingBytecodeArray);
+ 
+     __ bind(&ok);
+@@ -1031,8 +1031,8 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+   // The bytecode array could have been flushed from the shared function info,
+   // if so, call into CompileLazy.
+   Label compile_lazy;
+-  __ CmpObjectType(kInterpreterBytecodeArrayRegister, BYTECODE_ARRAY_TYPE,
+-                   kScratchRegister);
++  __ IsObjectType(kInterpreterBytecodeArrayRegister, BYTECODE_ARRAY_TYPE,
++                  kScratchRegister);
+   __ j(not_equal, &compile_lazy);
+ 
+   // Load the feedback vector from the closure.
+@@ -1045,8 +1045,7 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+   Label push_stack_frame;
+   // Check if feedback vector is valid. If valid, check for optimized code
+   // and update invocation count. Otherwise, setup the stack frame.
+-  __ LoadMap(rcx, feedback_vector);
+-  __ CmpInstanceType(rcx, FEEDBACK_VECTOR_TYPE);
++  __ IsObjectType(feedback_vector, FEEDBACK_VECTOR_TYPE, rcx);
+   __ j(not_equal, &push_stack_frame);
+ 
+   // Check the tiering state.
+@@ -1225,8 +1224,7 @@ void Builtins::Generate_InterpreterEntryTrampoline(
+     Label install_baseline_code;
+     // Check if feedback vector is valid. If not, call prepare for baseline to
+     // allocate it.
+-    __ LoadMap(rcx, feedback_vector);
+-    __ CmpInstanceType(rcx, FEEDBACK_VECTOR_TYPE);
++    __ IsObjectType(feedback_vector, FEEDBACK_VECTOR_TYPE, rcx);
+     __ j(not_equal, &install_baseline_code);
+ 
+     // Check the tiering state.
+@@ -1419,7 +1417,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+   __ LoadTaggedField(rbx,
+                      FieldOperand(shared_function_info,
+                                   SharedFunctionInfo::kFunctionDataOffset));
+-  __ CmpObjectType(rbx, INTERPRETER_DATA_TYPE, kScratchRegister);
++  __ IsObjectType(rbx, INTERPRETER_DATA_TYPE, kScratchRegister);
+   __ j(not_equal, &builtin_trampoline, Label::kNear);
+ 
+   __ LoadTaggedField(
+@@ -1452,8 +1450,8 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
+   if (v8_flags.debug_code) {
+     // Check function data field is actually a BytecodeArray object.
+     __ AssertNotSmi(kInterpreterBytecodeArrayRegister);
+-    __ CmpObjectType(kInterpreterBytecodeArrayRegister, BYTECODE_ARRAY_TYPE,
+-                     rbx);
++    __ IsObjectType(kInterpreterBytecodeArrayRegister, BYTECODE_ARRAY_TYPE,
++                    rbx);
+     __ Assert(
+         equal,
+         AbortReason::kFunctionDataShouldBeBytecodeArrayOnInterpreterEntry);
+@@ -5133,7 +5131,7 @@ void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
+   // always have baseline code.
+   if (!is_osr) {
+     Label start_with_baseline;
+-    __ CmpObjectType(code_obj, CODE_TYPE, kScratchRegister);
++    __ IsObjectType(code_obj, CODE_TYPE, kScratchRegister);
+     __ j(equal, &start_with_baseline);
+ 
+     // Start with bytecode as there is no baseline code.
+@@ -5146,7 +5144,7 @@ void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
+     // Start with baseline code.
+     __ bind(&start_with_baseline);
+   } else if (v8_flags.debug_code) {
+-    __ CmpObjectType(code_obj, CODE_TYPE, kScratchRegister);
++    __ IsObjectType(code_obj, CODE_TYPE, kScratchRegister);
+     __ Assert(equal, AbortReason::kExpectedBaselineData);
+   }
+ 
+@@ -5167,7 +5165,7 @@ void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
+   Label install_baseline_code;
+   // Check if feedback vector is valid. If not, call prepare for baseline to
+   // allocate it.
+-  __ CmpObjectType(feedback_vector, FEEDBACK_VECTOR_TYPE, kScratchRegister);
++  __ IsObjectType(feedback_vector, FEEDBACK_VECTOR_TYPE, kScratchRegister);
+   __ j(not_equal, &install_baseline_code);
+ 
+   // Save BytecodeOffset from the stack frame.
+diff --git a/src/codegen/arm64/macro-assembler-arm64.cc b/src/codegen/arm64/macro-assembler-arm64.cc
+index c557edd8669..30fabe7561b 100644
+--- a/src/codegen/arm64/macro-assembler-arm64.cc
++++ b/src/codegen/arm64/macro-assembler-arm64.cc
+@@ -1436,7 +1436,7 @@ void TailCallOptimizedCodeSlot(MacroAssembler* masm,
+ #ifdef V8_ENABLE_DEBUG_CODE
+ void MacroAssembler::AssertFeedbackVector(Register object, Register scratch) {
+   if (v8_flags.debug_code) {
+-    CompareObjectType(object, scratch, scratch, FEEDBACK_VECTOR_TYPE);
++    IsObjectType(object, scratch, scratch, FEEDBACK_VECTOR_TYPE);
+     Assert(eq, AbortReason::kExpectedFeedbackVector);
+   }
+ }
+@@ -1603,7 +1603,7 @@ void MacroAssembler::AssertMap(Register object) {
+   UseScratchRegisterScope temps(this);
+   Register temp = temps.AcquireX();
+ 
+-  CompareObjectType(object, temp, temp, MAP_TYPE);
++  IsObjectType(object, temp, temp, MAP_TYPE);
+   Check(eq, AbortReason::kOperandIsNotAMap);
+ }
+ 
+@@ -1615,7 +1615,7 @@ void MacroAssembler::AssertCode(Register object) {
+   UseScratchRegisterScope temps(this);
+   Register temp = temps.AcquireX();
+ 
+-  CompareObjectType(object, temp, temp, CODE_TYPE);
++  IsObjectType(object, temp, temp, CODE_TYPE);
+   Check(eq, AbortReason::kOperandIsNotACode);
+ }
+ 
+@@ -1668,7 +1668,7 @@ void MacroAssembler::AssertBoundFunction(Register object) {
+   UseScratchRegisterScope temps(this);
+   Register temp = temps.AcquireX();
+ 
+-  CompareObjectType(object, temp, temp, JS_BOUND_FUNCTION_TYPE);
++  IsObjectType(object, temp, temp, JS_BOUND_FUNCTION_TYPE);
+   Check(eq, AbortReason::kOperandIsNotABoundFunction);
+ }
+ 
+@@ -3006,6 +3006,34 @@ void MacroAssembler::JumpIfObjectType(Register object, Register map,
+   B(cond, if_cond_pass);
+ }
+ 
++// Sets equality condition flags.
++void MacroAssembler::IsObjectType(Register object, Register scratch1,
++                                  Register scratch2, InstanceType type) {
++  ASM_CODE_COMMENT(this);
++
++  if (V8_STATIC_ROOTS_BOOL) {
++    if (base::Optional<RootIndex> expected =
++            InstanceTypeChecker::UniqueMapOfInstanceType(type)) {
++      UseScratchRegisterScope temps(this);
++      Tagged_t ptr = ReadOnlyRootPtr(*expected);
++      if (IsImmAddSub(ptr) || scratch1 != scratch2 || temps.CanAcquire()) {
++        // Load without decompression.
++        Ldr(scratch1.W(), FieldMemOperand(object, HeapObject::kMapOffset));
++        if (!IsImmAddSub(ptr) && scratch1 != scratch2) {
++          Operand imm_operand =
++              MoveImmediateForShiftedOp(scratch2, ptr, kAnyShift);
++          CmpTagged(scratch1, imm_operand);
++        } else {
++          CmpTagged(scratch1, Immediate(ptr));
++        }
++        return;
++      }
++    }
++  }
++
++  CompareObjectType(object, scratch1, scratch2, type);
++}
++
+ // Sets condition flags based on comparison, and returns type in type_reg.
+ void MacroAssembler::CompareObjectType(Register object, Register map,
+                                        Register type_reg, InstanceType type) {
+diff --git a/src/codegen/arm64/macro-assembler-arm64.h b/src/codegen/arm64/macro-assembler-arm64.h
+index dfae11fd472..decee85f5df 100644
+--- a/src/codegen/arm64/macro-assembler-arm64.h
++++ b/src/codegen/arm64/macro-assembler-arm64.h
+@@ -1915,6 +1915,10 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
+   // other registers.
+   void CompareObjectType(Register heap_object, Register map, Register type_reg,
+                          InstanceType type);
++  // Variant of the above, which only guarantees to set the correct eq/ne flag.
++  // Neither map, nor type_reg might be set to any particular value.
++  void IsObjectType(Register heap_object, Register scratch1, Register scratch2,
++                    InstanceType type);
+ 
+   // Compare object type for heap object, and branch if equal (or not.)
+   // heap_object contains a non-Smi whose object type should be compared with
+diff --git a/src/codegen/x64/macro-assembler-x64.cc b/src/codegen/x64/macro-assembler-x64.cc
+index b42a24e7dae..a4acc288b56 100644
+--- a/src/codegen/x64/macro-assembler-x64.cc
++++ b/src/codegen/x64/macro-assembler-x64.cc
+@@ -819,7 +819,7 @@ void TailCallOptimizedCodeSlot(MacroAssembler* masm,
+ #ifdef V8_ENABLE_DEBUG_CODE
+ void MacroAssembler::AssertFeedbackVector(Register object) {
+   if (v8_flags.debug_code) {
+-    CmpObjectType(object, FEEDBACK_VECTOR_TYPE, kScratchRegister);
++    IsObjectType(object, FEEDBACK_VECTOR_TYPE, kScratchRegister);
+     Assert(equal, AbortReason::kExpectedFeedbackVector);
+   }
+ }
+@@ -2533,6 +2533,19 @@ void MacroAssembler::IncsspqIfSupported(Register number_of_words,
+   bind(&not_supported);
+ }
+ 
++void MacroAssembler::IsObjectType(Register heap_object, InstanceType type,
++                                  Register map) {
++  if (V8_STATIC_ROOTS_BOOL) {
++    if (base::Optional<RootIndex> expected =
++            InstanceTypeChecker::UniqueMapOfInstanceType(type)) {
++      mov_tagged(map, FieldOperand(heap_object, HeapObject::kMapOffset));
++      cmp_tagged(map, Immediate(ReadOnlyRootPtr(*expected)));
++      return;
++    }
++  }
++  CmpObjectType(heap_object, type, map);
++}
++
+ void MacroAssembler::CmpObjectType(Register heap_object, InstanceType type,
+                                    Register map) {
+   LoadMap(map, heap_object);
+@@ -2670,7 +2683,7 @@ void MacroAssembler::AssertBoundFunction(Register object) {
+   testb(object, Immediate(kSmiTagMask));
+   Check(not_equal, AbortReason::kOperandIsASmiAndNotABoundFunction);
+   Push(object);
+-  CmpObjectType(object, JS_BOUND_FUNCTION_TYPE, object);
++  IsObjectType(object, JS_BOUND_FUNCTION_TYPE, object);
+   Pop(object);
+   Check(equal, AbortReason::kOperandIsNotABoundFunction);
+ }
+diff --git a/src/codegen/x64/macro-assembler-x64.h b/src/codegen/x64/macro-assembler-x64.h
+index 59657e3d7c1..4076e2ae9ad 100644
+--- a/src/codegen/x64/macro-assembler-x64.h
++++ b/src/codegen/x64/macro-assembler-x64.h
+@@ -791,6 +791,9 @@ class V8_EXPORT_PRIVATE MacroAssembler
+   // Incoming register is heap_object and outgoing register is map.
+   // They may be the same register, and may be kScratchRegister.
+   void CmpObjectType(Register heap_object, InstanceType type, Register map);
++  // Variant of the above, which only guarantees to set the correct
++  // equal/not_equal flag. Map might not be loaded.
++  void IsObjectType(Register heap_object, InstanceType type, Register map);
+ 
+   // Compare instance type ranges for a map (low and high inclusive)
+   // Always use unsigned comparisons: below_equal for a positive result.
+-- 
+2.35.1
+

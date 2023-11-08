@@ -1,0 +1,148 @@
+From dce19ff9ed385197df73e68c6a82e7607de3f57c Mon Sep 17 00:00:00 2001
+From: jingpeiyang <jingpeiyang@eswincomputing.com>
+Date: Wed, 19 Apr 2023 10:17:57 +0800
+Subject: [PATCH] [riscv][simulator] Implement vfmv_sf in the simulator
+
+Signed-off-by: jingpeiyang <jingpeiyang@eswincomputing.com>
+Change-Id: Id2aba822fbb34dfc08bd3f61d882336a19be351b
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4413948
+Commit-Queue: Ji Qiu <qiuji@iscas.ac.cn>
+Reviewed-by: Ji Qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#87160}
+---
+ src/diagnostics/riscv/disasm-riscv.cc  |  7 ++++
+ src/execution/riscv/simulator-riscv.cc | 28 +++++++++++++-
+ test/cctest/test-assembler-riscv64.cc  | 52 ++++++++++++++++++++++++++
+ 3 files changed, 85 insertions(+), 2 deletions(-)
+
+diff --git a/src/diagnostics/riscv/disasm-riscv.cc b/src/diagnostics/riscv/disasm-riscv.cc
+index 97cd5505e0e..801d7747135 100644
+--- a/src/diagnostics/riscv/disasm-riscv.cc
++++ b/src/diagnostics/riscv/disasm-riscv.cc
+@@ -2655,6 +2655,13 @@ void Decoder::DecodeRvvFVF(Instruction* instr) {
+     case RO_V_VFADD_VF:
+       Format(instr, "vfadd.vf 'vd, 'vs2, 'fs1'vm");
+       break;
++    case RO_V_VFMV_SF:
++      if (instr->Vs2Value() == 0x0) {
++        Format(instr, "vfmv.s.f   'vd, 'fs1");
++      } else {
++        UNSUPPORTED_RISCV();
++      }
++      break;
+     case RO_V_VFSLIDE1DOWN_VF:
+       Format(instr, "vfslide1down.vf 'vd, 'vs2, 'fs1'vm");
+       break;
+diff --git a/src/execution/riscv/simulator-riscv.cc b/src/execution/riscv/simulator-riscv.cc
+index 4831495dbf9..3d42acd9518 100644
+--- a/src/execution/riscv/simulator-riscv.cc
++++ b/src/execution/riscv/simulator-riscv.cc
+@@ -7346,8 +7346,33 @@ void Simulator::DecodeRvvFVF() {
+       RVV_VI_CHECK_DSS(true);
+       RVV_VI_VFP_VF_LOOP_WIDEN({RVV_VI_VFP_FMA(double, -vs2, fs1, vs3)}, false)
+       break;
++    case RO_V_VFMV_SF: {
++      if (instr_.Vs2Value() == 0x0) {
++        if (rvv_vl() > 0 && rvv_vstart() < rvv_vl()) {
++          switch (rvv_vsew()) {
++            case E8:
++              UNREACHABLE();
++            case E16:
++              UNREACHABLE();
++            case E32:
++              Rvvelt<uint32_t>(rvv_vd_reg(), 0, true) =
++                  (uint32_t)(get_fpu_register_Float32(rs1_reg()).get_bits());
++              break;
++            case E64:
++              Rvvelt<uint64_t>(rvv_vd_reg(), 0, true) =
++                  (uint64_t)(get_fpu_register_Float64(rs1_reg()).get_bits());
++              break;
++            default:
++              UNREACHABLE();
++          }
++        }
++        set_rvv_vstart(0);
++        rvv_trace_vd();
++      } else {
++        UNSUPPORTED_RISCV();
++      }
++    } break;
+     case RO_V_VFSLIDE1DOWN_VF: {
+-      // TODO(jingpeiyang): Need to be sure here.
+       RVV_VI_CHECK_SLIDE(false);
+       RVV_VI_GENERAL_LOOP_BASE
+       switch (rvv_vsew()) {
+@@ -7368,7 +7393,6 @@ void Simulator::DecodeRvvFVF() {
+       rvv_trace_vd();
+     } break;
+     case RO_V_VFSLIDE1UP_VF: {
+-      // TODO(jingpeiyang): Need to be sure here.
+       RVV_VI_CHECK_SLIDE(true);
+       RVV_VI_GENERAL_LOOP_BASE
+       if (i < rvv_vstart()) continue;
+diff --git a/test/cctest/test-assembler-riscv64.cc b/test/cctest/test-assembler-riscv64.cc
+index c9627faa9c5..8267fd27f89 100644
+--- a/test/cctest/test-assembler-riscv64.cc
++++ b/test/cctest/test-assembler-riscv64.cc
+@@ -2110,6 +2110,58 @@ TEST(RVV_VFMV_signaling_NaN) {
+   }
+ }
+ 
++// Tests for Floating-Point scalar move instructions between vector and scalar f
++// register
++#define UTEST_RVV_VF_MV_FORM_WITH_RES(instr_name, reg1, reg2, width, type)   \
++  TEST(RISCV_UTEST_##instr_name##_##width) {                                 \
++    if (!CpuFeatures::IsSupported(RISCV_SIMD)) return;                       \
++    CcTest::InitializeVM();                                                  \
++    constexpr uint32_t n = kRvvVLEN / width;                                 \
++    for (type fval : compiler::ValueHelper::GetVector<type>()) {             \
++      int##width##_t rs1_fval = base::bit_cast<int##width##_t>(fval);        \
++      int##width##_t res[n] = {0};                                           \
++      for (uint32_t i = 0; i < n; i++) res[i] = (rs1_fval + i + 1);          \
++      auto fn = [](MacroAssembler& assm) {                                   \
++        __ VU.set(t0, VSew::E##width, Vlmul::m1);                            \
++        width == 32 ? __ flw(ft0, a0, 0) : __ fld(ft0, a0, 0);               \
++        __ vl(v1, a1, 0, VSew::E##width);                                    \
++        __ instr_name(reg1, reg2);                                           \
++        __ fsd(ft0, a0, 0);                                                  \
++        __ vs(v1, a1, 0, VSew::E##width);                                    \
++      };                                                                     \
++      GenAndRunTest<int64_t, int64_t>((int64_t)&rs1_fval, (int64_t)res, fn); \
++      for (uint32_t i = 0; i < n; i++) {                                     \
++        CHECK_EQ(i == 0 ? rs1_fval : res[i], res[i]);                        \
++      }                                                                      \
++    }                                                                        \
++  }                                                                          \
++  TEST(RISCV_UTEST_##instr_name##_##width##_##sNaN) {                        \
++    if (!CpuFeatures::IsSupported(RISCV_SIMD)) return;                       \
++    CcTest::InitializeVM();                                                  \
++    constexpr uint32_t n = kRvvVLEN / width;                                 \
++    int##width##_t rs1_fval = width == 32 ? 0x7F400000 : 0x7FF4000000000000; \
++    int##width##_t res[n] = {0};                                             \
++    for (uint32_t i = 0; i < n; i++) res[i] = (rs1_fval + i + 1);            \
++    auto fn = [](MacroAssembler& assm) {                                     \
++      __ VU.set(t0, VSew::E##width, Vlmul::m1);                              \
++      width == 32 ? __ flw(ft0, a0, 0) : __ fld(ft0, a0, 0);                 \
++      __ vl(v1, a1, 0, VSew::E##width);                                      \
++      __ instr_name(reg1, reg2);                                             \
++      __ fsd(ft0, a0, 0);                                                    \
++      __ vs(v1, a1, 0, VSew::E##width);                                      \
++    };                                                                       \
++    GenAndRunTest<int64_t, int64_t>((int64_t)&rs1_fval, (int64_t)res, fn);   \
++    for (uint32_t i = 0; i < n; i++) {                                       \
++      CHECK_EQ(i == 0 ? rs1_fval : res[i], res[i]);                          \
++    }                                                                        \
++  }
++
++UTEST_RVV_VF_MV_FORM_WITH_RES(vfmv_fs, ft0, v1, 32, float)
++UTEST_RVV_VF_MV_FORM_WITH_RES(vfmv_fs, ft0, v1, 64, double)
++UTEST_RVV_VF_MV_FORM_WITH_RES(vfmv_sf, v1, ft0, 32, float)
++UTEST_RVV_VF_MV_FORM_WITH_RES(vfmv_sf, v1, ft0, 64, double)
++#undef UTEST_RVV_VF_MV_FORM_WITH_RES
++
+ inline int32_t ToImm5(int32_t v) {
+   int32_t smax = (int32_t)(INT64_MAX >> (64 - 5));
+   int32_t smin = (int32_t)(INT64_MIN >> (64 - 5));
+-- 
+2.35.1
+

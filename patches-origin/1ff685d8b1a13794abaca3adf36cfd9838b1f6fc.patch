@@ -1,0 +1,1424 @@
+From 1ff685d8b1a13794abaca3adf36cfd9838b1f6fc Mon Sep 17 00:00:00 2001
+From: Jakob Gruber <jgruber@chromium.org>
+Date: Mon, 4 Apr 2022 11:42:00 +0200
+Subject: [PATCH] [deoptimizer] Remove soft deopts
+
+.. since they are the same as eager deopts (% an unused counter).
+
+Fixed: v8:12765
+Change-Id: I2be6210e476ead4ac6629a49259f28321e965867
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3565717
+Reviewed-by: Tobias Tebbi <tebbi@chromium.org>
+Reviewed-by: Leszek Swirski <leszeks@chromium.org>
+Commit-Queue: Jakob Linke <jgruber@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#79729}
+---
+ include/v8-internal.h                         |  4 +-
+ src/builtins/arm/builtins-arm.cc              |  4 --
+ src/builtins/arm64/builtins-arm64.cc          |  4 --
+ src/builtins/builtins-definitions.h           |  1 -
+ src/builtins/ia32/builtins-ia32.cc            |  4 --
+ src/builtins/x64/builtins-x64.cc              |  4 --
+ src/codegen/arm/macro-assembler-arm.cc        |  5 +-
+ src/codegen/arm64/macro-assembler-arm64.cc    |  5 +-
+ src/codegen/ia32/macro-assembler-ia32.cc      |  5 +-
+ .../loong64/macro-assembler-loong64.cc        |  5 +-
+ src/codegen/mips/macro-assembler-mips.cc      |  5 +-
+ src/codegen/mips64/macro-assembler-mips64.cc  |  5 +-
+ src/codegen/ppc/macro-assembler-ppc.cc        |  5 +-
+ .../riscv64/macro-assembler-riscv64.cc        |  5 +-
+ src/codegen/s390/macro-assembler-s390.cc      |  5 +-
+ src/codegen/x64/macro-assembler-x64.cc        |  5 +-
+ src/common/globals.h                          | 14 ++--
+ .../backend/arm64/code-generator-arm64.cc     |  3 +-
+ src/compiler/backend/code-generator.cc        |  4 +-
+ src/compiler/backend/code-generator.h         |  2 +-
+ .../backend/ppc/code-generator-ppc.cc         |  2 +-
+ .../backend/riscv64/code-generator-riscv64.cc |  2 +-
+ src/compiler/common-operator.cc               | 72 +++++++++----------
+ src/compiler/js-call-reducer.cc               |  2 +-
+ .../js-native-context-specialization.cc       |  6 +-
+ .../js-native-context-specialization.h        |  2 +-
+ src/compiler/js-type-hint-lowering.cc         | 40 +++++------
+ src/compiler/js-type-hint-lowering.h          |  5 +-
+ src/deoptimizer/arm/deoptimizer-arm.cc        |  3 +-
+ src/deoptimizer/arm64/deoptimizer-arm64.cc    |  2 +-
+ src/deoptimizer/deoptimizer.cc                | 29 ++------
+ src/deoptimizer/deoptimizer.h                 |  2 +-
+ src/deoptimizer/ia32/deoptimizer-ia32.cc      |  2 +-
+ .../loong64/deoptimizer-loong64.cc            |  2 +-
+ src/deoptimizer/mips/deoptimizer-mips.cc      |  2 +-
+ src/deoptimizer/mips64/deoptimizer-mips64.cc  |  2 +-
+ src/deoptimizer/ppc/deoptimizer-ppc.cc        |  2 +-
+ .../riscv64/deoptimizer-riscv64.cc            |  2 +-
+ src/deoptimizer/s390/deoptimizer-s390.cc      |  2 +-
+ src/deoptimizer/x64/deoptimizer-x64.cc        |  3 +-
+ src/logging/counters-definitions.h            |  1 -
+ src/maglev/maglev-code-generator.cc           |  7 +-
+ src/maglev/maglev-graph-builder.cc            |  8 +--
+ src/maglev/maglev-ir.cc                       |  9 ++-
+ src/maglev/maglev-ir.h                        |  8 +--
+ src/objects/code-inl.h                        | 19 +----
+ src/objects/code.h                            | 12 +---
+ src/objects/feedback-vector.cc                |  3 -
+ src/runtime/runtime-compiler.cc               |  4 +-
+ test/cctest/test-assembler-ia32.cc            |  5 +-
+ test/cctest/test-macro-assembler-arm.cc       |  5 +-
+ test/cctest/test-macro-assembler-arm64.cc     |  5 +-
+ test/cctest/test-macro-assembler-loong64.cc   |  5 +-
+ test/cctest/test-macro-assembler-mips.cc      |  5 +-
+ test/cctest/test-macro-assembler-mips64.cc    |  5 +-
+ test/cctest/test-macro-assembler-riscv64.cc   |  5 +-
+ test/cctest/test-macro-assembler-x64.cc       |  5 +-
+ 57 files changed, 153 insertions(+), 236 deletions(-)
+
+diff --git a/include/v8-internal.h b/include/v8-internal.h
+index e6e9cc5f9f5..37c5b336dad 100644
+--- a/include/v8-internal.h
++++ b/include/v8-internal.h
+@@ -365,8 +365,8 @@ class Internals {
+ 
+   static const uint32_t kNumIsolateDataSlots = 4;
+   static const int kStackGuardSize = 7 * kApiSystemPointerSize;
+-  static const int kBuiltinTier0EntryTableSize = 10 * kApiSystemPointerSize;
+-  static const int kBuiltinTier0TableSize = 10 * kApiSystemPointerSize;
++  static const int kBuiltinTier0EntryTableSize = 9 * kApiSystemPointerSize;
++  static const int kBuiltinTier0TableSize = 9 * kApiSystemPointerSize;
+ 
+   // IsolateData layout guarantees.
+   static const int kIsolateCageBaseOffset = 0;
+diff --git a/src/builtins/arm/builtins-arm.cc b/src/builtins/arm/builtins-arm.cc
+index 8e1417e2603..f30321bf620 100644
+--- a/src/builtins/arm/builtins-arm.cc
++++ b/src/builtins/arm/builtins-arm.cc
+@@ -3537,10 +3537,6 @@ void Builtins::Generate_DeoptimizationEntry_Eager(MacroAssembler* masm) {
+   Generate_DeoptimizationEntry(masm, DeoptimizeKind::kEager);
+ }
+ 
+-void Builtins::Generate_DeoptimizationEntry_Soft(MacroAssembler* masm) {
+-  Generate_DeoptimizationEntry(masm, DeoptimizeKind::kSoft);
+-}
+-
+ void Builtins::Generate_DeoptimizationEntry_Lazy(MacroAssembler* masm) {
+   Generate_DeoptimizationEntry(masm, DeoptimizeKind::kLazy);
+ }
+diff --git a/src/builtins/arm64/builtins-arm64.cc b/src/builtins/arm64/builtins-arm64.cc
+index b6d4a10a78a..df7067d03da 100644
+--- a/src/builtins/arm64/builtins-arm64.cc
++++ b/src/builtins/arm64/builtins-arm64.cc
+@@ -4055,10 +4055,6 @@ void Builtins::Generate_DeoptimizationEntry_Eager(MacroAssembler* masm) {
+   Generate_DeoptimizationEntry(masm, DeoptimizeKind::kEager);
+ }
+ 
+-void Builtins::Generate_DeoptimizationEntry_Soft(MacroAssembler* masm) {
+-  Generate_DeoptimizationEntry(masm, DeoptimizeKind::kSoft);
+-}
+-
+ void Builtins::Generate_DeoptimizationEntry_Lazy(MacroAssembler* masm) {
+   Generate_DeoptimizationEntry(masm, DeoptimizeKind::kLazy);
+ }
+diff --git a/src/builtins/builtins-definitions.h b/src/builtins/builtins-definitions.h
+index 2427e5ccb79..6b43659d99d 100644
+--- a/src/builtins/builtins-definitions.h
++++ b/src/builtins/builtins-definitions.h
+@@ -45,7 +45,6 @@ namespace internal {
+ #define BUILTIN_LIST_BASE_TIER0(CPP, TFJ, TFC, TFS, TFH, ASM) \
+   /* Deoptimization entries. */                               \
+   ASM(DeoptimizationEntry_Eager, DeoptimizationEntry)         \
+-  ASM(DeoptimizationEntry_Soft, DeoptimizationEntry)          \
+   ASM(DeoptimizationEntry_Lazy, DeoptimizationEntry)          \
+                                                               \
+   /* GC write barrier. */                                     \
+diff --git a/src/builtins/ia32/builtins-ia32.cc b/src/builtins/ia32/builtins-ia32.cc
+index dad825ccf9d..a0c4f22dc7d 100644
+--- a/src/builtins/ia32/builtins-ia32.cc
++++ b/src/builtins/ia32/builtins-ia32.cc
+@@ -4150,10 +4150,6 @@ void Builtins::Generate_DeoptimizationEntry_Eager(MacroAssembler* masm) {
+   Generate_DeoptimizationEntry(masm, DeoptimizeKind::kEager);
+ }
+ 
+-void Builtins::Generate_DeoptimizationEntry_Soft(MacroAssembler* masm) {
+-  Generate_DeoptimizationEntry(masm, DeoptimizeKind::kSoft);
+-}
+-
+ void Builtins::Generate_DeoptimizationEntry_Lazy(MacroAssembler* masm) {
+   Generate_DeoptimizationEntry(masm, DeoptimizeKind::kLazy);
+ }
+diff --git a/src/builtins/x64/builtins-x64.cc b/src/builtins/x64/builtins-x64.cc
+index 13a06ee25d9..059d2a3e102 100644
+--- a/src/builtins/x64/builtins-x64.cc
++++ b/src/builtins/x64/builtins-x64.cc
+@@ -4973,10 +4973,6 @@ void Builtins::Generate_DeoptimizationEntry_Eager(MacroAssembler* masm) {
+   Generate_DeoptimizationEntry(masm, DeoptimizeKind::kEager);
+ }
+ 
+-void Builtins::Generate_DeoptimizationEntry_Soft(MacroAssembler* masm) {
+-  Generate_DeoptimizationEntry(masm, DeoptimizeKind::kSoft);
+-}
+-
+ void Builtins::Generate_DeoptimizationEntry_Lazy(MacroAssembler* masm) {
+   Generate_DeoptimizationEntry(masm, DeoptimizeKind::kLazy);
+ }
+diff --git a/src/codegen/arm/macro-assembler-arm.cc b/src/codegen/arm/macro-assembler-arm.cc
+index 0c7df90dbfe..bae50a2a5cc 100644
+--- a/src/codegen/arm/macro-assembler-arm.cc
++++ b/src/codegen/arm/macro-assembler-arm.cc
+@@ -2648,9 +2648,8 @@ void TurboAssembler::CallForDeoptimization(Builtin target, int, Label* exit,
+       MemOperand(kRootRegister, IsolateData::BuiltinEntrySlotOffset(target)));
+   Call(ip);
+   DCHECK_EQ(SizeOfCodeGeneratedSince(exit),
+-            (kind == DeoptimizeKind::kLazy)
+-                ? Deoptimizer::kLazyDeoptExitSize
+-                : Deoptimizer::kNonLazyDeoptExitSize);
++            (kind == DeoptimizeKind::kLazy) ? Deoptimizer::kLazyDeoptExitSize
++                                            : Deoptimizer::kEagerDeoptExitSize);
+ 
+   // The above code must not emit constants either.
+   DCHECK(!has_pending_constants());
+diff --git a/src/codegen/arm64/macro-assembler-arm64.cc b/src/codegen/arm64/macro-assembler-arm64.cc
+index 191eb4bd20c..b3354d0383e 100644
+--- a/src/codegen/arm64/macro-assembler-arm64.cc
++++ b/src/codegen/arm64/macro-assembler-arm64.cc
+@@ -2219,9 +2219,8 @@ void TurboAssembler::CallForDeoptimization(
+   BlockPoolsScope scope(this);
+   bl(jump_deoptimization_entry_label);
+   DCHECK_EQ(SizeOfCodeGeneratedSince(exit),
+-            (kind == DeoptimizeKind::kLazy)
+-                ? Deoptimizer::kLazyDeoptExitSize
+-                : Deoptimizer::kNonLazyDeoptExitSize);
++            (kind == DeoptimizeKind::kLazy) ? Deoptimizer::kLazyDeoptExitSize
++                                            : Deoptimizer::kEagerDeoptExitSize);
+ }
+ 
+ void MacroAssembler::LoadStackLimit(Register destination, StackLimitKind kind) {
+diff --git a/src/codegen/ia32/macro-assembler-ia32.cc b/src/codegen/ia32/macro-assembler-ia32.cc
+index 150ffd66083..2755cd3e224 100644
+--- a/src/codegen/ia32/macro-assembler-ia32.cc
++++ b/src/codegen/ia32/macro-assembler-ia32.cc
+@@ -2033,9 +2033,8 @@ void TurboAssembler::CallForDeoptimization(Builtin target, int, Label* exit,
+   ASM_CODE_COMMENT(this);
+   CallBuiltin(target);
+   DCHECK_EQ(SizeOfCodeGeneratedSince(exit),
+-            (kind == DeoptimizeKind::kLazy)
+-                ? Deoptimizer::kLazyDeoptExitSize
+-                : Deoptimizer::kNonLazyDeoptExitSize);
++            (kind == DeoptimizeKind::kLazy) ? Deoptimizer::kLazyDeoptExitSize
++                                            : Deoptimizer::kEagerDeoptExitSize);
+ }
+ 
+ void TurboAssembler::Trap() { int3(); }
+diff --git a/src/codegen/loong64/macro-assembler-loong64.cc b/src/codegen/loong64/macro-assembler-loong64.cc
+index d685aaafdde..11acc7c4d29 100644
+--- a/src/codegen/loong64/macro-assembler-loong64.cc
++++ b/src/codegen/loong64/macro-assembler-loong64.cc
+@@ -4087,9 +4087,8 @@ void TurboAssembler::CallForDeoptimization(Builtin target, int, Label* exit,
+        MemOperand(kRootRegister, IsolateData::BuiltinEntrySlotOffset(target)));
+   Call(t7);
+   DCHECK_EQ(SizeOfCodeGeneratedSince(exit),
+-            (kind == DeoptimizeKind::kLazy)
+-                ? Deoptimizer::kLazyDeoptExitSize
+-                : Deoptimizer::kNonLazyDeoptExitSize);
++            (kind == DeoptimizeKind::kLazy) ? Deoptimizer::kLazyDeoptExitSize
++                                            : Deoptimizer::kEagerDeoptExitSize);
+ }
+ 
+ void TurboAssembler::LoadCodeObjectEntry(Register destination,
+diff --git a/src/codegen/mips/macro-assembler-mips.cc b/src/codegen/mips/macro-assembler-mips.cc
+index 338c0debf64..b911fb9bfb1 100644
+--- a/src/codegen/mips/macro-assembler-mips.cc
++++ b/src/codegen/mips/macro-assembler-mips.cc
+@@ -5571,9 +5571,8 @@ void TurboAssembler::CallForDeoptimization(Builtin target, int, Label* exit,
+      MemOperand(kRootRegister, IsolateData::BuiltinEntrySlotOffset(target)));
+   Call(t9);
+   DCHECK_EQ(SizeOfCodeGeneratedSince(exit),
+-            (kind == DeoptimizeKind::kLazy)
+-                ? Deoptimizer::kLazyDeoptExitSize
+-                : Deoptimizer::kNonLazyDeoptExitSize);
++            (kind == DeoptimizeKind::kLazy) ? Deoptimizer::kLazyDeoptExitSize
++                                            : Deoptimizer::kEagerDeoptExitSize);
+ }
+ 
+ void TurboAssembler::LoadCodeObjectEntry(Register destination,
+diff --git a/src/codegen/mips64/macro-assembler-mips64.cc b/src/codegen/mips64/macro-assembler-mips64.cc
+index 46be9ee7874..d9eb08e1d11 100644
+--- a/src/codegen/mips64/macro-assembler-mips64.cc
++++ b/src/codegen/mips64/macro-assembler-mips64.cc
+@@ -6114,9 +6114,8 @@ void TurboAssembler::CallForDeoptimization(Builtin target, int, Label* exit,
+      MemOperand(kRootRegister, IsolateData::BuiltinEntrySlotOffset(target)));
+   Call(t9);
+   DCHECK_EQ(SizeOfCodeGeneratedSince(exit),
+-            (kind == DeoptimizeKind::kLazy)
+-                ? Deoptimizer::kLazyDeoptExitSize
+-                : Deoptimizer::kNonLazyDeoptExitSize);
++            (kind == DeoptimizeKind::kLazy) ? Deoptimizer::kLazyDeoptExitSize
++                                            : Deoptimizer::kEagerDeoptExitSize);
+ }
+ 
+ void TurboAssembler::LoadCodeObjectEntry(Register destination,
+diff --git a/src/codegen/ppc/macro-assembler-ppc.cc b/src/codegen/ppc/macro-assembler-ppc.cc
+index 6c3daca9693..4b93851638d 100644
+--- a/src/codegen/ppc/macro-assembler-ppc.cc
++++ b/src/codegen/ppc/macro-assembler-ppc.cc
+@@ -3727,9 +3727,8 @@ void TurboAssembler::CallForDeoptimization(Builtin target, int, Label* exit,
+                          IsolateData::BuiltinEntrySlotOffset(target)));
+   Call(ip);
+   DCHECK_EQ(SizeOfCodeGeneratedSince(exit),
+-            (kind == DeoptimizeKind::kLazy)
+-                ? Deoptimizer::kLazyDeoptExitSize
+-                : Deoptimizer::kNonLazyDeoptExitSize);
++            (kind == DeoptimizeKind::kLazy) ? Deoptimizer::kLazyDeoptExitSize
++                                            : Deoptimizer::kEagerDeoptExitSize);
+ }
+ 
+ void TurboAssembler::ZeroExtByte(Register dst, Register src) {
+diff --git a/src/codegen/riscv64/macro-assembler-riscv64.cc b/src/codegen/riscv64/macro-assembler-riscv64.cc
+index 52bba9f21cc..33816db57fb 100644
+--- a/src/codegen/riscv64/macro-assembler-riscv64.cc
++++ b/src/codegen/riscv64/macro-assembler-riscv64.cc
+@@ -4987,9 +4987,8 @@ void TurboAssembler::CallForDeoptimization(Builtin target, int, Label* exit,
+      MemOperand(kRootRegister, IsolateData::BuiltinEntrySlotOffset(target)));
+   Call(t6);
+   DCHECK_EQ(SizeOfCodeGeneratedSince(exit),
+-            (kind == DeoptimizeKind::kLazy)
+-                ? Deoptimizer::kLazyDeoptExitSize
+-                : Deoptimizer::kNonLazyDeoptExitSize);
++            (kind == DeoptimizeKind::kLazy) ? Deoptimizer::kLazyDeoptExitSize
++                                            : Deoptimizer::kEagerDeoptExitSize);
+ }
+ 
+ void TurboAssembler::LoadCodeObjectEntry(Register destination,
+diff --git a/src/codegen/s390/macro-assembler-s390.cc b/src/codegen/s390/macro-assembler-s390.cc
+index 1037eff0cd0..18b22f81c82 100644
+--- a/src/codegen/s390/macro-assembler-s390.cc
++++ b/src/codegen/s390/macro-assembler-s390.cc
+@@ -4826,9 +4826,8 @@ void TurboAssembler::CallForDeoptimization(Builtin target, int, Label* exit,
+                          IsolateData::BuiltinEntrySlotOffset(target)));
+   Call(ip);
+   DCHECK_EQ(SizeOfCodeGeneratedSince(exit),
+-            (kind == DeoptimizeKind::kLazy)
+-                ? Deoptimizer::kLazyDeoptExitSize
+-                : Deoptimizer::kNonLazyDeoptExitSize);
++            (kind == DeoptimizeKind::kLazy) ? Deoptimizer::kLazyDeoptExitSize
++                                            : Deoptimizer::kEagerDeoptExitSize);
+ }
+ 
+ void TurboAssembler::Trap() { stop(); }
+diff --git a/src/codegen/x64/macro-assembler-x64.cc b/src/codegen/x64/macro-assembler-x64.cc
+index 079a81952b5..eaf60850609 100644
+--- a/src/codegen/x64/macro-assembler-x64.cc
++++ b/src/codegen/x64/macro-assembler-x64.cc
+@@ -3125,9 +3125,8 @@ void TurboAssembler::CallForDeoptimization(Builtin target, int, Label* exit,
+   // performance tuning which emits a different instruction sequence.
+   call(EntryFromBuiltinAsOperand(target));
+   DCHECK_EQ(SizeOfCodeGeneratedSince(exit),
+-            (kind == DeoptimizeKind::kLazy)
+-                ? Deoptimizer::kLazyDeoptExitSize
+-                : Deoptimizer::kNonLazyDeoptExitSize);
++            (kind == DeoptimizeKind::kLazy) ? Deoptimizer::kLazyDeoptExitSize
++                                            : Deoptimizer::kEagerDeoptExitSize);
+ }
+ 
+ void TurboAssembler::Trap() { int3(); }
+diff --git a/src/common/globals.h b/src/common/globals.h
+index a891a207192..e8e74af78c3 100644
+--- a/src/common/globals.h
++++ b/src/common/globals.h
+@@ -518,11 +518,8 @@ constexpr int kNoDeoptimizationId = -1;
+ // - Lazy: the code has been marked as dependent on some assumption which
+ //   is checked elsewhere and can trigger deoptimization the next time the
+ //   code is executed.
+-// - Soft: similar to lazy deoptimization, but does not contribute to the
+-//   total deopt count which can lead to disabling optimization for a function.
+ enum class DeoptimizeKind : uint8_t {
+   kEager,
+-  kSoft,
+   kLazy,
+ };
+ constexpr DeoptimizeKind kFirstDeoptimizeKind = DeoptimizeKind::kEager;
+@@ -532,16 +529,17 @@ constexpr int kDeoptimizeKindCount = static_cast<int>(kLastDeoptimizeKind) + 1;
+ inline size_t hash_value(DeoptimizeKind kind) {
+   return static_cast<size_t>(kind);
+ }
+-inline std::ostream& operator<<(std::ostream& os, DeoptimizeKind kind) {
++constexpr const char* ToString(DeoptimizeKind kind) {
+   switch (kind) {
+     case DeoptimizeKind::kEager:
+-      return os << "Eager";
+-    case DeoptimizeKind::kSoft:
+-      return os << "Soft";
++      return "Eager";
+     case DeoptimizeKind::kLazy:
+-      return os << "Lazy";
++      return "Lazy";
+   }
+ }
++inline std::ostream& operator<<(std::ostream& os, DeoptimizeKind kind) {
++  return os << ToString(kind);
++}
+ 
+ // Indicates whether the lookup is related to sloppy-mode block-scoped
+ // function hoisting, and is a synthetic assignment for that.
+diff --git a/src/compiler/backend/arm64/code-generator-arm64.cc b/src/compiler/backend/arm64/code-generator-arm64.cc
+index 2a825b404f7..289fa08633e 100644
+--- a/src/compiler/backend/arm64/code-generator-arm64.cc
++++ b/src/compiler/backend/arm64/code-generator-arm64.cc
+@@ -3308,8 +3308,7 @@ void CodeGenerator::PrepareForDeoptimizationExits(
+   __ ForceConstantPoolEmissionWithoutJump();
+   // We are conservative here, reserving sufficient space for the largest deopt
+   // kind.
+-  DCHECK_GE(Deoptimizer::kLazyDeoptExitSize,
+-            Deoptimizer::kNonLazyDeoptExitSize);
++  DCHECK_GE(Deoptimizer::kLazyDeoptExitSize, Deoptimizer::kEagerDeoptExitSize);
+   __ CheckVeneerPool(
+       false, false,
+       static_cast<int>(exits->size()) * Deoptimizer::kLazyDeoptExitSize);
+diff --git a/src/compiler/backend/code-generator.cc b/src/compiler/backend/code-generator.cc
+index 02972e1ea88..ec0dce6ae22 100644
+--- a/src/compiler/backend/code-generator.cc
++++ b/src/compiler/backend/code-generator.cc
+@@ -171,7 +171,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleDeoptimizerCall(
+     ++lazy_deopt_count_;
+     tasm()->BindExceptionHandler(exit->label());
+   } else {
+-    ++non_lazy_deopt_count_;
++    ++eager_deopt_count_;
+     tasm()->bind(exit->label());
+   }
+   Builtin target = Deoptimizer::GetDeoptimizationEntry(deopt_kind);
+@@ -898,7 +898,7 @@ Handle<DeoptimizationData> CodeGenerator::GenerateDeoptimizationData() {
+   data->SetOptimizationId(Smi::FromInt(info->optimization_id()));
+ 
+   data->SetDeoptExitStart(Smi::FromInt(deopt_exit_start_offset_));
+-  data->SetNonLazyDeoptCount(Smi::FromInt(non_lazy_deopt_count_));
++  data->SetEagerDeoptCount(Smi::FromInt(eager_deopt_count_));
+   data->SetLazyDeoptCount(Smi::FromInt(lazy_deopt_count_));
+ 
+   if (info->has_shared_info()) {
+diff --git a/src/compiler/backend/code-generator.h b/src/compiler/backend/code-generator.h
+index 4bceba30252..a18a2808b4e 100644
+--- a/src/compiler/backend/code-generator.h
++++ b/src/compiler/backend/code-generator.h
+@@ -421,7 +421,7 @@ class V8_EXPORT_PRIVATE CodeGenerator final : public GapResolver::Assembler {
+   ZoneVector<HandlerInfo> handlers_;
+   int next_deoptimization_id_ = 0;
+   int deopt_exit_start_offset_ = 0;
+-  int non_lazy_deopt_count_ = 0;
++  int eager_deopt_count_ = 0;
+   int lazy_deopt_count_ = 0;
+   ZoneDeque<DeoptimizationExit*> deoptimization_exits_;
+   ZoneDeque<DeoptimizationLiteral> deoptimization_literals_;
+diff --git a/src/compiler/backend/ppc/code-generator-ppc.cc b/src/compiler/backend/ppc/code-generator-ppc.cc
+index ab596f2bf9f..4cce840a4f7 100644
+--- a/src/compiler/backend/ppc/code-generator-ppc.cc
++++ b/src/compiler/backend/ppc/code-generator-ppc.cc
+@@ -4250,7 +4250,7 @@ void CodeGenerator::PrepareForDeoptimizationExits(
+   for (DeoptimizationExit* exit : deoptimization_exits_) {
+     total_size += (exit->kind() == DeoptimizeKind::kLazy)
+                       ? Deoptimizer::kLazyDeoptExitSize
+-                      : Deoptimizer::kNonLazyDeoptExitSize;
++                      : Deoptimizer::kEagerDeoptExitSize;
+   }
+ 
+   __ CheckTrampolinePoolQuick(total_size);
+diff --git a/src/compiler/backend/riscv64/code-generator-riscv64.cc b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+index 8248c5756d8..69d1abb5aea 100644
+--- a/src/compiler/backend/riscv64/code-generator-riscv64.cc
++++ b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+@@ -4075,7 +4075,7 @@ void CodeGenerator::PrepareForDeoptimizationExits(
+   for (DeoptimizationExit* exit : deoptimization_exits_) {
+     total_size += (exit->kind() == DeoptimizeKind::kLazy)
+                       ? Deoptimizer::kLazyDeoptExitSize
+-                      : Deoptimizer::kNonLazyDeoptExitSize;
++                      : Deoptimizer::kEagerDeoptExitSize;
+   }
+ 
+   __ CheckTrampolinePoolQuick(total_size);
+diff --git a/src/compiler/common-operator.cc b/src/compiler/common-operator.cc
+index b45c9399147..612db063b12 100644
+--- a/src/compiler/common-operator.cc
++++ b/src/compiler/common-operator.cc
+@@ -510,28 +510,28 @@ const SLVerifierHintParameters& SLVerifierHintParametersOf(const Operator* op) {
+   V(7)                       \
+   V(8)
+ 
+-#define CACHED_DEOPTIMIZE_LIST(V)                        \
+-  V(Eager, MinusZero)                                    \
+-  V(Eager, WrongMap)                                     \
+-  V(Soft, InsufficientTypeFeedbackForGenericKeyedAccess) \
+-  V(Soft, InsufficientTypeFeedbackForGenericNamedAccess)
++#define CACHED_DEOPTIMIZE_LIST(V)                  \
++  V(MinusZero)                                     \
++  V(WrongMap)                                      \
++  V(InsufficientTypeFeedbackForGenericKeyedAccess) \
++  V(InsufficientTypeFeedbackForGenericNamedAccess)
+ 
+ #define CACHED_DEOPTIMIZE_IF_LIST(V) \
+-  V(Eager, DivisionByZero)           \
+-  V(Eager, Hole)                     \
+-  V(Eager, MinusZero)                \
+-  V(Eager, Overflow)                 \
+-  V(Eager, Smi)
++  V(DivisionByZero)                  \
++  V(Hole)                            \
++  V(MinusZero)                       \
++  V(Overflow)                        \
++  V(Smi)
+ 
+ #define CACHED_DEOPTIMIZE_UNLESS_LIST(V) \
+-  V(Eager, LostPrecision)                \
+-  V(Eager, LostPrecisionOrNaN)           \
+-  V(Eager, NotAHeapNumber)               \
+-  V(Eager, NotANumberOrOddball)          \
+-  V(Eager, NotASmi)                      \
+-  V(Eager, OutOfBounds)                  \
+-  V(Eager, WrongInstanceType)            \
+-  V(Eager, WrongMap)
++  V(LostPrecision)                       \
++  V(LostPrecisionOrNaN)                  \
++  V(NotAHeapNumber)                      \
++  V(NotANumberOrOddball)                 \
++  V(NotASmi)                             \
++  V(OutOfBounds)                         \
++  V(WrongInstanceType)                   \
++  V(WrongMap)
+ 
+ #define CACHED_TRAP_IF_LIST(V) \
+   V(TrapDivUnrepresentable)    \
+@@ -723,9 +723,9 @@ struct CommonOperatorGlobalCache final {
+               1, 1, 1, 0, 0, 1,                          // counts
+               DeoptimizeParameters(kKind, kReason, FeedbackSource())) {}
+   };
+-#define CACHED_DEOPTIMIZE(Kind, Reason)                                    \
+-  DeoptimizeOperator<DeoptimizeKind::k##Kind, DeoptimizeReason::k##Reason> \
+-      kDeoptimize##Kind##Reason##Operator;
++#define CACHED_DEOPTIMIZE(Reason)                                         \
++  DeoptimizeOperator<DeoptimizeKind::kEager, DeoptimizeReason::k##Reason> \
++      kDeoptimizeEager##Reason##Operator;
+   CACHED_DEOPTIMIZE_LIST(CACHED_DEOPTIMIZE)
+ #undef CACHED_DEOPTIMIZE
+ 
+@@ -739,9 +739,9 @@ struct CommonOperatorGlobalCache final {
+               2, 1, 1, 0, 1, 1,                          // counts
+               DeoptimizeParameters(kKind, kReason, FeedbackSource())) {}
+   };
+-#define CACHED_DEOPTIMIZE_IF(Kind, Reason)                                   \
+-  DeoptimizeIfOperator<DeoptimizeKind::k##Kind, DeoptimizeReason::k##Reason> \
+-      kDeoptimizeIf##Kind##Reason##Operator;
++#define CACHED_DEOPTIMIZE_IF(Reason)                                        \
++  DeoptimizeIfOperator<DeoptimizeKind::kEager, DeoptimizeReason::k##Reason> \
++      kDeoptimizeIfEager##Reason##Operator;
+   CACHED_DEOPTIMIZE_IF_LIST(CACHED_DEOPTIMIZE_IF)
+ #undef CACHED_DEOPTIMIZE_IF
+ 
+@@ -756,10 +756,10 @@ struct CommonOperatorGlobalCache final {
+               2, 1, 1, 0, 1, 1,                          // counts
+               DeoptimizeParameters(kKind, kReason, FeedbackSource())) {}
+   };
+-#define CACHED_DEOPTIMIZE_UNLESS(Kind, Reason)          \
+-  DeoptimizeUnlessOperator<DeoptimizeKind::k##Kind,     \
++#define CACHED_DEOPTIMIZE_UNLESS(Reason)                \
++  DeoptimizeUnlessOperator<DeoptimizeKind::kEager,      \
+                            DeoptimizeReason::k##Reason> \
+-      kDeoptimizeUnless##Kind##Reason##Operator;
++      kDeoptimizeUnlessEager##Reason##Operator;
+   CACHED_DEOPTIMIZE_UNLESS_LIST(CACHED_DEOPTIMIZE_UNLESS)
+ #undef CACHED_DEOPTIMIZE_UNLESS
+ 
+@@ -946,10 +946,10 @@ const Operator* CommonOperatorBuilder::Branch(BranchHint hint) {
+ const Operator* CommonOperatorBuilder::Deoptimize(
+     DeoptimizeKind kind, DeoptimizeReason reason,
+     FeedbackSource const& feedback) {
+-#define CACHED_DEOPTIMIZE(Kind, Reason)                               \
+-  if (kind == DeoptimizeKind::k##Kind &&                              \
++#define CACHED_DEOPTIMIZE(Reason)                                     \
++  if (kind == DeoptimizeKind::kEager &&                               \
+       reason == DeoptimizeReason::k##Reason && !feedback.IsValid()) { \
+-    return &cache_.kDeoptimize##Kind##Reason##Operator;               \
++    return &cache_.kDeoptimizeEager##Reason##Operator;                \
+   }
+   CACHED_DEOPTIMIZE_LIST(CACHED_DEOPTIMIZE)
+ #undef CACHED_DEOPTIMIZE
+@@ -966,10 +966,10 @@ const Operator* CommonOperatorBuilder::Deoptimize(
+ const Operator* CommonOperatorBuilder::DeoptimizeIf(
+     DeoptimizeKind kind, DeoptimizeReason reason,
+     FeedbackSource const& feedback) {
+-#define CACHED_DEOPTIMIZE_IF(Kind, Reason)                            \
+-  if (kind == DeoptimizeKind::k##Kind &&                              \
++#define CACHED_DEOPTIMIZE_IF(Reason)                                  \
++  if (kind == DeoptimizeKind::kEager &&                               \
+       reason == DeoptimizeReason::k##Reason && !feedback.IsValid()) { \
+-    return &cache_.kDeoptimizeIf##Kind##Reason##Operator;             \
++    return &cache_.kDeoptimizeIfEager##Reason##Operator;              \
+   }
+   CACHED_DEOPTIMIZE_IF_LIST(CACHED_DEOPTIMIZE_IF)
+ #undef CACHED_DEOPTIMIZE_IF
+@@ -986,10 +986,10 @@ const Operator* CommonOperatorBuilder::DeoptimizeIf(
+ const Operator* CommonOperatorBuilder::DeoptimizeUnless(
+     DeoptimizeKind kind, DeoptimizeReason reason,
+     FeedbackSource const& feedback) {
+-#define CACHED_DEOPTIMIZE_UNLESS(Kind, Reason)                        \
+-  if (kind == DeoptimizeKind::k##Kind &&                              \
++#define CACHED_DEOPTIMIZE_UNLESS(Reason)                              \
++  if (kind == DeoptimizeKind::kEager &&                               \
+       reason == DeoptimizeReason::k##Reason && !feedback.IsValid()) { \
+-    return &cache_.kDeoptimizeUnless##Kind##Reason##Operator;         \
++    return &cache_.kDeoptimizeUnlessEager##Reason##Operator;          \
+   }
+   CACHED_DEOPTIMIZE_UNLESS_LIST(CACHED_DEOPTIMIZE_UNLESS)
+ #undef CACHED_DEOPTIMIZE_UNLESS
+diff --git a/src/compiler/js-call-reducer.cc b/src/compiler/js-call-reducer.cc
+index 44c089ef5b1..1ea41a7b4c2 100644
+--- a/src/compiler/js-call-reducer.cc
++++ b/src/compiler/js-call-reducer.cc
+@@ -5480,7 +5480,7 @@ Reduction JSCallReducer::ReduceForInsufficientFeedback(
+   Node* frame_state =
+       NodeProperties::FindFrameStateBefore(node, jsgraph()->Dead());
+   Node* deoptimize = graph()->NewNode(
+-      common()->Deoptimize(DeoptimizeKind::kSoft, reason, FeedbackSource()),
++      common()->Deoptimize(DeoptimizeKind::kEager, reason, FeedbackSource()),
+       frame_state, effect, control);
+   // TODO(bmeurer): This should be on the AdvancedReducer somehow.
+   NodeProperties::MergeControlToEnd(graph(), common(), deoptimize);
+diff --git a/src/compiler/js-native-context-specialization.cc b/src/compiler/js-native-context-specialization.cc
+index 6071d3a2e7a..cb12096dba9 100644
+--- a/src/compiler/js-native-context-specialization.cc
++++ b/src/compiler/js-native-context-specialization.cc
+@@ -1958,7 +1958,7 @@ Reduction JSNativeContextSpecialization::ReducePropertyAccess(
+       broker()->GetFeedbackForPropertyAccess(source, access_mode, static_name);
+   switch (feedback.kind()) {
+     case ProcessedFeedback::kInsufficient:
+-      return ReduceSoftDeoptimize(
++      return ReduceEagerDeoptimize(
+           node,
+           DeoptimizeReason::kInsufficientTypeFeedbackForGenericNamedAccess);
+     case ProcessedFeedback::kNamedAccess:
+@@ -1974,7 +1974,7 @@ Reduction JSNativeContextSpecialization::ReducePropertyAccess(
+   }
+ }
+ 
+-Reduction JSNativeContextSpecialization::ReduceSoftDeoptimize(
++Reduction JSNativeContextSpecialization::ReduceEagerDeoptimize(
+     Node* node, DeoptimizeReason reason) {
+   if (!(flags() & kBailoutOnUninitialized)) return NoChange();
+ 
+@@ -1983,7 +1983,7 @@ Reduction JSNativeContextSpecialization::ReduceSoftDeoptimize(
+   Node* frame_state =
+       NodeProperties::FindFrameStateBefore(node, jsgraph()->Dead());
+   Node* deoptimize = graph()->NewNode(
+-      common()->Deoptimize(DeoptimizeKind::kSoft, reason, FeedbackSource()),
++      common()->Deoptimize(DeoptimizeKind::kEager, reason, FeedbackSource()),
+       frame_state, effect, control);
+   // TODO(bmeurer): This should be on the AdvancedReducer somehow.
+   NodeProperties::MergeControlToEnd(graph(), common(), deoptimize);
+diff --git a/src/compiler/js-native-context-specialization.h b/src/compiler/js-native-context-specialization.h
+index b2caa810df0..c0301ec83fc 100644
+--- a/src/compiler/js-native-context-specialization.h
++++ b/src/compiler/js-native-context-specialization.h
+@@ -118,7 +118,7 @@ class V8_EXPORT_PRIVATE JSNativeContextSpecialization final
+   Reduction ReduceElementAccessOnString(Node* node, Node* index, Node* value,
+                                         KeyedAccessMode const& keyed_mode);
+ 
+-  Reduction ReduceSoftDeoptimize(Node* node, DeoptimizeReason reason);
++  Reduction ReduceEagerDeoptimize(Node* node, DeoptimizeReason reason);
+   Reduction ReduceJSToString(Node* node);
+ 
+   Reduction ReduceJSLoadPropertyWithEnumeratedKey(Node* node);
+diff --git a/src/compiler/js-type-hint-lowering.cc b/src/compiler/js-type-hint-lowering.cc
+index 7b63b0279d4..11798cfc725 100644
+--- a/src/compiler/js-type-hint-lowering.cc
++++ b/src/compiler/js-type-hint-lowering.cc
+@@ -277,7 +277,7 @@ CompareOperationHint JSTypeHintLowering::GetCompareOperationHint(
+ JSTypeHintLowering::LoweringResult JSTypeHintLowering::ReduceUnaryOperation(
+     const Operator* op, Node* operand, Node* effect, Node* control,
+     FeedbackSlot slot) const {
+-  if (Node* node = TryBuildSoftDeopt(
++  if (Node* node = BuildDeoptIfFeedbackIsInsufficient(
+           slot, effect, control,
+           DeoptimizeReason::kInsufficientTypeFeedbackForUnaryOperation)) {
+     return LoweringResult::Exit(node);
+@@ -349,7 +349,7 @@ JSTypeHintLowering::LoweringResult JSTypeHintLowering::ReduceBinaryOperation(
+     FeedbackSlot slot) const {
+   switch (op->opcode()) {
+     case IrOpcode::kJSStrictEqual: {
+-      if (Node* node = TryBuildSoftDeopt(
++      if (Node* node = BuildDeoptIfFeedbackIsInsufficient(
+               slot, effect, control,
+               DeoptimizeReason::kInsufficientTypeFeedbackForCompareOperation)) {
+         return LoweringResult::Exit(node);
+@@ -363,7 +363,7 @@ JSTypeHintLowering::LoweringResult JSTypeHintLowering::ReduceBinaryOperation(
+     case IrOpcode::kJSGreaterThan:
+     case IrOpcode::kJSLessThanOrEqual:
+     case IrOpcode::kJSGreaterThanOrEqual: {
+-      if (Node* node = TryBuildSoftDeopt(
++      if (Node* node = BuildDeoptIfFeedbackIsInsufficient(
+               slot, effect, control,
+               DeoptimizeReason::kInsufficientTypeFeedbackForCompareOperation)) {
+         return LoweringResult::Exit(node);
+@@ -375,7 +375,7 @@ JSTypeHintLowering::LoweringResult JSTypeHintLowering::ReduceBinaryOperation(
+       break;
+     }
+     case IrOpcode::kJSInstanceOf: {
+-      if (Node* node = TryBuildSoftDeopt(
++      if (Node* node = BuildDeoptIfFeedbackIsInsufficient(
+               slot, effect, control,
+               DeoptimizeReason::kInsufficientTypeFeedbackForCompareOperation)) {
+         return LoweringResult::Exit(node);
+@@ -396,7 +396,7 @@ JSTypeHintLowering::LoweringResult JSTypeHintLowering::ReduceBinaryOperation(
+     case IrOpcode::kJSDivide:
+     case IrOpcode::kJSModulus:
+     case IrOpcode::kJSExponentiate: {
+-      if (Node* node = TryBuildSoftDeopt(
++      if (Node* node = BuildDeoptIfFeedbackIsInsufficient(
+               slot, effect, control,
+               DeoptimizeReason::kInsufficientTypeFeedbackForBinaryOperation)) {
+         return LoweringResult::Exit(node);
+@@ -424,7 +424,7 @@ JSTypeHintLowering::LoweringResult JSTypeHintLowering::ReduceBinaryOperation(
+ JSTypeHintLowering::LoweringResult JSTypeHintLowering::ReduceForInNextOperation(
+     Node* receiver, Node* cache_array, Node* cache_type, Node* index,
+     Node* effect, Node* control, FeedbackSlot slot) const {
+-  if (Node* node = TryBuildSoftDeopt(
++  if (Node* node = BuildDeoptIfFeedbackIsInsufficient(
+           slot, effect, control,
+           DeoptimizeReason::kInsufficientTypeFeedbackForForIn)) {
+     return LoweringResult::Exit(node);
+@@ -436,7 +436,7 @@ JSTypeHintLowering::LoweringResult
+ JSTypeHintLowering::ReduceForInPrepareOperation(Node* enumerator, Node* effect,
+                                                 Node* control,
+                                                 FeedbackSlot slot) const {
+-  if (Node* node = TryBuildSoftDeopt(
++  if (Node* node = BuildDeoptIfFeedbackIsInsufficient(
+           slot, effect, control,
+           DeoptimizeReason::kInsufficientTypeFeedbackForForIn)) {
+     return LoweringResult::Exit(node);
+@@ -463,7 +463,7 @@ JSTypeHintLowering::LoweringResult JSTypeHintLowering::ReduceCallOperation(
+     Node* control, FeedbackSlot slot) const {
+   DCHECK(op->opcode() == IrOpcode::kJSCall ||
+          op->opcode() == IrOpcode::kJSCallWithSpread);
+-  if (Node* node = TryBuildSoftDeopt(
++  if (Node* node = BuildDeoptIfFeedbackIsInsufficient(
+           slot, effect, control,
+           DeoptimizeReason::kInsufficientTypeFeedbackForCall)) {
+     return LoweringResult::Exit(node);
+@@ -476,7 +476,7 @@ JSTypeHintLowering::LoweringResult JSTypeHintLowering::ReduceConstructOperation(
+     Node* control, FeedbackSlot slot) const {
+   DCHECK(op->opcode() == IrOpcode::kJSConstruct ||
+          op->opcode() == IrOpcode::kJSConstructWithSpread);
+-  if (Node* node = TryBuildSoftDeopt(
++  if (Node* node = BuildDeoptIfFeedbackIsInsufficient(
+           slot, effect, control,
+           DeoptimizeReason::kInsufficientTypeFeedbackForConstruct)) {
+     return LoweringResult::Exit(node);
+@@ -491,14 +491,12 @@ JSTypeHintLowering::ReduceGetIteratorOperation(const Operator* op,
+                                                FeedbackSlot load_slot,
+                                                FeedbackSlot call_slot) const {
+   DCHECK_EQ(IrOpcode::kJSGetIterator, op->opcode());
+-  // Insert soft deopt if the load feedback is invalid.
+-  if (Node* node = TryBuildSoftDeopt(
++  if (Node* node = BuildDeoptIfFeedbackIsInsufficient(
+           load_slot, effect, control,
+           DeoptimizeReason::kInsufficientTypeFeedbackForGenericNamedAccess)) {
+     return LoweringResult::Exit(node);
+   }
+-  // Insert soft deopt if the call feedback is invalid.
+-  if (Node* node = TryBuildSoftDeopt(
++  if (Node* node = BuildDeoptIfFeedbackIsInsufficient(
+           call_slot, effect, control,
+           DeoptimizeReason::kInsufficientTypeFeedbackForCall)) {
+     return LoweringResult::Exit(node);
+@@ -510,7 +508,7 @@ JSTypeHintLowering::LoweringResult JSTypeHintLowering::ReduceLoadNamedOperation(
+     const Operator* op, Node* effect, Node* control, FeedbackSlot slot) const {
+   DCHECK(op->opcode() == IrOpcode::kJSLoadNamed ||
+          op->opcode() == IrOpcode::kJSLoadNamedFromSuper);
+-  if (Node* node = TryBuildSoftDeopt(
++  if (Node* node = BuildDeoptIfFeedbackIsInsufficient(
+           slot, effect, control,
+           DeoptimizeReason::kInsufficientTypeFeedbackForGenericNamedAccess)) {
+     return LoweringResult::Exit(node);
+@@ -522,7 +520,7 @@ JSTypeHintLowering::LoweringResult JSTypeHintLowering::ReduceLoadKeyedOperation(
+     const Operator* op, Node* obj, Node* key, Node* effect, Node* control,
+     FeedbackSlot slot) const {
+   DCHECK_EQ(IrOpcode::kJSLoadProperty, op->opcode());
+-  if (Node* node = TryBuildSoftDeopt(
++  if (Node* node = BuildDeoptIfFeedbackIsInsufficient(
+           slot, effect, control,
+           DeoptimizeReason::kInsufficientTypeFeedbackForGenericKeyedAccess)) {
+     return LoweringResult::Exit(node);
+@@ -537,7 +535,7 @@ JSTypeHintLowering::ReduceStoreNamedOperation(const Operator* op, Node* obj,
+                                               FeedbackSlot slot) const {
+   DCHECK(op->opcode() == IrOpcode::kJSSetNamedProperty ||
+          op->opcode() == IrOpcode::kJSDefineNamedOwnProperty);
+-  if (Node* node = TryBuildSoftDeopt(
++  if (Node* node = BuildDeoptIfFeedbackIsInsufficient(
+           slot, effect, control,
+           DeoptimizeReason::kInsufficientTypeFeedbackForGenericNamedAccess)) {
+     return LoweringResult::Exit(node);
+@@ -554,7 +552,7 @@ JSTypeHintLowering::ReduceStoreKeyedOperation(const Operator* op, Node* obj,
+          op->opcode() == IrOpcode::kJSStoreInArrayLiteral ||
+          op->opcode() == IrOpcode::kJSDefineKeyedOwnPropertyInLiteral ||
+          op->opcode() == IrOpcode::kJSDefineKeyedOwnProperty);
+-  if (Node* node = TryBuildSoftDeopt(
++  if (Node* node = BuildDeoptIfFeedbackIsInsufficient(
+           slot, effect, control,
+           DeoptimizeReason::kInsufficientTypeFeedbackForGenericKeyedAccess)) {
+     return LoweringResult::Exit(node);
+@@ -562,16 +560,16 @@ JSTypeHintLowering::ReduceStoreKeyedOperation(const Operator* op, Node* obj,
+   return LoweringResult::NoChange();
+ }
+ 
+-Node* JSTypeHintLowering::TryBuildSoftDeopt(FeedbackSlot slot, Node* effect,
+-                                            Node* control,
+-                                            DeoptimizeReason reason) const {
++Node* JSTypeHintLowering::BuildDeoptIfFeedbackIsInsufficient(
++    FeedbackSlot slot, Node* effect, Node* control,
++    DeoptimizeReason reason) const {
+   if (!(flags() & kBailoutOnUninitialized)) return nullptr;
+ 
+   FeedbackSource source(feedback_vector(), slot);
+   if (!broker()->FeedbackIsInsufficient(source)) return nullptr;
+ 
+   Node* deoptimize = jsgraph()->graph()->NewNode(
+-      jsgraph()->common()->Deoptimize(DeoptimizeKind::kSoft, reason,
++      jsgraph()->common()->Deoptimize(DeoptimizeKind::kEager, reason,
+                                       FeedbackSource()),
+       jsgraph()->Dead(), effect, control);
+   Node* frame_state =
+diff --git a/src/compiler/js-type-hint-lowering.h b/src/compiler/js-type-hint-lowering.h
+index c89acd12ffe..258acc66572 100644
+--- a/src/compiler/js-type-hint-lowering.h
++++ b/src/compiler/js-type-hint-lowering.h
+@@ -165,8 +165,9 @@ class JSTypeHintLowering {
+ 
+   BinaryOperationHint GetBinaryOperationHint(FeedbackSlot slot) const;
+   CompareOperationHint GetCompareOperationHint(FeedbackSlot slot) const;
+-  Node* TryBuildSoftDeopt(FeedbackSlot slot, Node* effect, Node* control,
+-                          DeoptimizeReason reson) const;
++  Node* BuildDeoptIfFeedbackIsInsufficient(FeedbackSlot slot, Node* effect,
++                                           Node* control,
++                                           DeoptimizeReason reson) const;
+ 
+   JSHeapBroker* broker() const { return broker_; }
+   JSGraph* jsgraph() const { return jsgraph_; }
+diff --git a/src/deoptimizer/arm/deoptimizer-arm.cc b/src/deoptimizer/arm/deoptimizer-arm.cc
+index b068c20abf1..de83ef1275e 100644
+--- a/src/deoptimizer/arm/deoptimizer-arm.cc
++++ b/src/deoptimizer/arm/deoptimizer-arm.cc
+@@ -16,10 +16,9 @@ namespace internal {
+                 0x1000)
+ ASSERT_OFFSET(Builtin::kDeoptimizationEntry_Eager);
+ ASSERT_OFFSET(Builtin::kDeoptimizationEntry_Lazy);
+-ASSERT_OFFSET(Builtin::kDeoptimizationEntry_Soft);
+ #undef ASSERT_OFFSET
+ 
+-const int Deoptimizer::kNonLazyDeoptExitSize = 2 * kInstrSize;
++const int Deoptimizer::kEagerDeoptExitSize = 2 * kInstrSize;
+ const int Deoptimizer::kLazyDeoptExitSize = 2 * kInstrSize;
+ 
+ Float32 RegisterValues::GetFloatRegister(unsigned n) const {
+diff --git a/src/deoptimizer/arm64/deoptimizer-arm64.cc b/src/deoptimizer/arm64/deoptimizer-arm64.cc
+index f1c2ef4cd06..06d5f035e62 100644
+--- a/src/deoptimizer/arm64/deoptimizer-arm64.cc
++++ b/src/deoptimizer/arm64/deoptimizer-arm64.cc
+@@ -9,7 +9,7 @@
+ namespace v8 {
+ namespace internal {
+ 
+-const int Deoptimizer::kNonLazyDeoptExitSize = kInstrSize;
++const int Deoptimizer::kEagerDeoptExitSize = kInstrSize;
+ #ifdef V8_ENABLE_CONTROL_FLOW_INTEGRITY
+ const int Deoptimizer::kLazyDeoptExitSize = 2 * kInstrSize;
+ #else
+diff --git a/src/deoptimizer/deoptimizer.cc b/src/deoptimizer/deoptimizer.cc
+index df4beb539fe..f9f2089351d 100644
+--- a/src/deoptimizer/deoptimizer.cc
++++ b/src/deoptimizer/deoptimizer.cc
+@@ -442,9 +442,6 @@ void Deoptimizer::DeoptimizeFunction(JSFunction function, Code code) {
+     // be different from the code on the function - evict it if necessary.
+     function.feedback_vector().EvictOptimizedCodeMarkedForDeoptimization(
+         function.shared(), "unlinking code marked for deopt");
+-    if (!code.deopt_already_counted()) {
+-      code.set_deopt_already_counted(true);
+-    }
+     DeoptimizeMarkedCodeForContext(function.native_context());
+     // TODO(mythria): Ideally EvictMarkCode should compact the cache without
+     // having to explicitly call this. We don't do this currently because
+@@ -464,8 +461,6 @@ const char* Deoptimizer::MessageFor(DeoptimizeKind kind) {
+   switch (kind) {
+     case DeoptimizeKind::kEager:
+       return "deopt-eager";
+-    case DeoptimizeKind::kSoft:
+-      return "deopt-soft";
+     case DeoptimizeKind::kLazy:
+       return "deopt-lazy";
+   }
+@@ -509,11 +504,6 @@ Deoptimizer::Deoptimizer(Isolate* isolate, JSFunction function,
+   disallow_garbage_collection_ = new DisallowGarbageCollection();
+ #endif  // DEBUG
+   CHECK(CodeKindCanDeoptimize(compiled_code_.kind()));
+-  if (!compiled_code_.deopt_already_counted() &&
+-      deopt_kind_ == DeoptimizeKind::kSoft) {
+-    isolate->counters()->soft_deopts_executed()->Increment();
+-  }
+-  compiled_code_.set_deopt_already_counted(true);
+   {
+     HandleScope scope(isolate_);
+     PROFILE(isolate_, CodeDeoptEvent(handle(compiled_code_, isolate_), kind,
+@@ -526,15 +516,15 @@ Deoptimizer::Deoptimizer(Isolate* isolate, JSFunction function,
+ 
+   DCHECK_EQ(deopt_exit_index_, kFixedExitSizeMarker);
+   // Calculate the deopt exit index from return address.
+-  DCHECK_GT(kNonLazyDeoptExitSize, 0);
++  DCHECK_GT(kEagerDeoptExitSize, 0);
+   DCHECK_GT(kLazyDeoptExitSize, 0);
+   DeoptimizationData deopt_data =
+       DeoptimizationData::cast(compiled_code_.deoptimization_data());
+   Address deopt_start = compiled_code_.raw_instruction_start() +
+                         deopt_data.DeoptExitStart().value();
+-  int non_lazy_deopt_count = deopt_data.NonLazyDeoptCount().value();
++  int eager_deopt_count = deopt_data.EagerDeoptCount().value();
+   Address lazy_deopt_start =
+-      deopt_start + non_lazy_deopt_count * kNonLazyDeoptExitSize;
++      deopt_start + eager_deopt_count * kEagerDeoptExitSize;
+   // The deoptimization exits are sorted so that lazy deopt exits appear after
+   // eager deopts.
+   static_assert(static_cast<int>(DeoptimizeKind::kLazy) ==
+@@ -545,14 +535,14 @@ Deoptimizer::Deoptimizer(Isolate* isolate, JSFunction function,
+   // non-lazy deopt, so we use <=, similarly for the last non-lazy deopt and
+   // the first deopt with resume entry.
+   if (from_ <= lazy_deopt_start) {
+-    int offset = static_cast<int>(from_ - kNonLazyDeoptExitSize - deopt_start);
+-    DCHECK_EQ(0, offset % kNonLazyDeoptExitSize);
+-    deopt_exit_index_ = offset / kNonLazyDeoptExitSize;
++    int offset = static_cast<int>(from_ - kEagerDeoptExitSize - deopt_start);
++    DCHECK_EQ(0, offset % kEagerDeoptExitSize);
++    deopt_exit_index_ = offset / kEagerDeoptExitSize;
+   } else {
+     int offset =
+         static_cast<int>(from_ - kLazyDeoptExitSize - lazy_deopt_start);
+     DCHECK_EQ(0, offset % kLazyDeoptExitSize);
+-    deopt_exit_index_ = non_lazy_deopt_count + (offset / kLazyDeoptExitSize);
++    deopt_exit_index_ = eager_deopt_count + (offset / kLazyDeoptExitSize);
+   }
+ }
+ 
+@@ -596,8 +586,6 @@ Builtin Deoptimizer::GetDeoptimizationEntry(DeoptimizeKind kind) {
+   switch (kind) {
+     case DeoptimizeKind::kEager:
+       return Builtin::kDeoptimizationEntry_Eager;
+-    case DeoptimizeKind::kSoft:
+-      return Builtin::kDeoptimizationEntry_Soft;
+     case DeoptimizeKind::kLazy:
+       return Builtin::kDeoptimizationEntry_Lazy;
+   }
+@@ -612,9 +600,6 @@ bool Deoptimizer::IsDeoptimizationEntry(Isolate* isolate, Address addr,
+     case Builtin::kDeoptimizationEntry_Eager:
+       *type_out = DeoptimizeKind::kEager;
+       return true;
+-    case Builtin::kDeoptimizationEntry_Soft:
+-      *type_out = DeoptimizeKind::kSoft;
+-      return true;
+     case Builtin::kDeoptimizationEntry_Lazy:
+       *type_out = DeoptimizeKind::kLazy;
+       return true;
+diff --git a/src/deoptimizer/deoptimizer.h b/src/deoptimizer/deoptimizer.h
+index 5e724557862..47c05b491e9 100644
+--- a/src/deoptimizer/deoptimizer.h
++++ b/src/deoptimizer/deoptimizer.h
+@@ -122,7 +122,7 @@ class Deoptimizer : public Malloced {
+   static constexpr unsigned kFixedExitSizeMarker = kMaxUInt32;
+ 
+   // Size of deoptimization exit sequence.
+-  V8_EXPORT_PRIVATE static const int kNonLazyDeoptExitSize;
++  V8_EXPORT_PRIVATE static const int kEagerDeoptExitSize;
+   V8_EXPORT_PRIVATE static const int kLazyDeoptExitSize;
+ 
+   // Tracing.
+diff --git a/src/deoptimizer/ia32/deoptimizer-ia32.cc b/src/deoptimizer/ia32/deoptimizer-ia32.cc
+index be76e75aaf9..7507ba279fa 100644
+--- a/src/deoptimizer/ia32/deoptimizer-ia32.cc
++++ b/src/deoptimizer/ia32/deoptimizer-ia32.cc
+@@ -9,7 +9,7 @@
+ namespace v8 {
+ namespace internal {
+ 
+-const int Deoptimizer::kNonLazyDeoptExitSize = 5;
++const int Deoptimizer::kEagerDeoptExitSize = 5;
+ const int Deoptimizer::kLazyDeoptExitSize = 5;
+ 
+ Float32 RegisterValues::GetFloatRegister(unsigned n) const {
+diff --git a/src/deoptimizer/loong64/deoptimizer-loong64.cc b/src/deoptimizer/loong64/deoptimizer-loong64.cc
+index 5692e16969c..f513e3fbab2 100644
+--- a/src/deoptimizer/loong64/deoptimizer-loong64.cc
++++ b/src/deoptimizer/loong64/deoptimizer-loong64.cc
+@@ -7,7 +7,7 @@
+ namespace v8 {
+ namespace internal {
+ 
+-const int Deoptimizer::kNonLazyDeoptExitSize = 2 * kInstrSize;
++const int Deoptimizer::kEagerDeoptExitSize = 2 * kInstrSize;
+ const int Deoptimizer::kLazyDeoptExitSize = 2 * kInstrSize;
+ 
+ Float32 RegisterValues::GetFloatRegister(unsigned n) const {
+diff --git a/src/deoptimizer/mips/deoptimizer-mips.cc b/src/deoptimizer/mips/deoptimizer-mips.cc
+index 8fd85965192..62a7f457881 100644
+--- a/src/deoptimizer/mips/deoptimizer-mips.cc
++++ b/src/deoptimizer/mips/deoptimizer-mips.cc
+@@ -7,7 +7,7 @@
+ namespace v8 {
+ namespace internal {
+ 
+-const int Deoptimizer::kNonLazyDeoptExitSize = 3 * kInstrSize;
++const int Deoptimizer::kEagerDeoptExitSize = 3 * kInstrSize;
+ const int Deoptimizer::kLazyDeoptExitSize = 3 * kInstrSize;
+ 
+ Float32 RegisterValues::GetFloatRegister(unsigned n) const {
+diff --git a/src/deoptimizer/mips64/deoptimizer-mips64.cc b/src/deoptimizer/mips64/deoptimizer-mips64.cc
+index 8fd85965192..62a7f457881 100644
+--- a/src/deoptimizer/mips64/deoptimizer-mips64.cc
++++ b/src/deoptimizer/mips64/deoptimizer-mips64.cc
+@@ -7,7 +7,7 @@
+ namespace v8 {
+ namespace internal {
+ 
+-const int Deoptimizer::kNonLazyDeoptExitSize = 3 * kInstrSize;
++const int Deoptimizer::kEagerDeoptExitSize = 3 * kInstrSize;
+ const int Deoptimizer::kLazyDeoptExitSize = 3 * kInstrSize;
+ 
+ Float32 RegisterValues::GetFloatRegister(unsigned n) const {
+diff --git a/src/deoptimizer/ppc/deoptimizer-ppc.cc b/src/deoptimizer/ppc/deoptimizer-ppc.cc
+index 6eb22a1f917..cb1e5b614a1 100644
+--- a/src/deoptimizer/ppc/deoptimizer-ppc.cc
++++ b/src/deoptimizer/ppc/deoptimizer-ppc.cc
+@@ -19,7 +19,7 @@ ASSERT_OFFSET(Builtin::kDeoptimizationEntry_Lazy);
+ ASSERT_OFFSET(Builtin::kDeoptimizationEntry_Soft);
+ #undef ASSERT_OFFSET
+ 
+-const int Deoptimizer::kNonLazyDeoptExitSize = 3 * kInstrSize;
++const int Deoptimizer::kEagerDeoptExitSize = 3 * kInstrSize;
+ const int Deoptimizer::kLazyDeoptExitSize = 3 * kInstrSize;
+ 
+ Float32 RegisterValues::GetFloatRegister(unsigned n) const {
+diff --git a/src/deoptimizer/riscv64/deoptimizer-riscv64.cc b/src/deoptimizer/riscv64/deoptimizer-riscv64.cc
+index 5692e16969c..f513e3fbab2 100644
+--- a/src/deoptimizer/riscv64/deoptimizer-riscv64.cc
++++ b/src/deoptimizer/riscv64/deoptimizer-riscv64.cc
+@@ -7,7 +7,7 @@
+ namespace v8 {
+ namespace internal {
+ 
+-const int Deoptimizer::kNonLazyDeoptExitSize = 2 * kInstrSize;
++const int Deoptimizer::kEagerDeoptExitSize = 2 * kInstrSize;
+ const int Deoptimizer::kLazyDeoptExitSize = 2 * kInstrSize;
+ 
+ Float32 RegisterValues::GetFloatRegister(unsigned n) const {
+diff --git a/src/deoptimizer/s390/deoptimizer-s390.cc b/src/deoptimizer/s390/deoptimizer-s390.cc
+index 31a5f8409a2..48dcf6771a6 100644
+--- a/src/deoptimizer/s390/deoptimizer-s390.cc
++++ b/src/deoptimizer/s390/deoptimizer-s390.cc
+@@ -19,7 +19,7 @@ ASSERT_OFFSET(Builtin::kDeoptimizationEntry_Lazy);
+ ASSERT_OFFSET(Builtin::kDeoptimizationEntry_Soft);
+ #undef ASSERT_OFFSET
+ 
+-const int Deoptimizer::kNonLazyDeoptExitSize = 6 + 2;
++const int Deoptimizer::kEagerDeoptExitSize = 6 + 2;
+ const int Deoptimizer::kLazyDeoptExitSize = 6 + 2;
+ 
+ Float32 RegisterValues::GetFloatRegister(unsigned n) const {
+diff --git a/src/deoptimizer/x64/deoptimizer-x64.cc b/src/deoptimizer/x64/deoptimizer-x64.cc
+index b755930af59..29c56e61ac6 100644
+--- a/src/deoptimizer/x64/deoptimizer-x64.cc
++++ b/src/deoptimizer/x64/deoptimizer-x64.cc
+@@ -18,10 +18,9 @@ namespace internal {
+                 0x7F)
+ ASSERT_OFFSET(Builtin::kDeoptimizationEntry_Eager);
+ ASSERT_OFFSET(Builtin::kDeoptimizationEntry_Lazy);
+-ASSERT_OFFSET(Builtin::kDeoptimizationEntry_Soft);
+ #undef ASSERT_OFFSET
+ 
+-const int Deoptimizer::kNonLazyDeoptExitSize = 4;
++const int Deoptimizer::kEagerDeoptExitSize = 4;
+ const int Deoptimizer::kLazyDeoptExitSize = 4;
+ 
+ Float32 RegisterValues::GetFloatRegister(unsigned n) const {
+diff --git a/src/logging/counters-definitions.h b/src/logging/counters-definitions.h
+index e9b71d56df0..1134459a257 100644
+--- a/src/logging/counters-definitions.h
++++ b/src/logging/counters-definitions.h
+@@ -333,7 +333,6 @@ namespace internal {
+   SC(sub_string_runtime, V8.SubStringRuntime)                                  \
+   SC(regexp_entry_runtime, V8.RegExpEntryRuntime)                              \
+   SC(stack_interrupts, V8.StackInterrupts)                                     \
+-  SC(soft_deopts_executed, V8.SoftDeoptsExecuted)                              \
+   SC(new_space_bytes_available, V8.MemoryNewSpaceBytesAvailable)               \
+   SC(new_space_bytes_committed, V8.MemoryNewSpaceBytesCommitted)               \
+   SC(new_space_bytes_used, V8.MemoryNewSpaceBytesUsed)                         \
+diff --git a/src/maglev/maglev-code-generator.cc b/src/maglev/maglev-code-generator.cc
+index 3a1b4b23649..33e380c5e31 100644
+--- a/src/maglev/maglev-code-generator.cc
++++ b/src/maglev/maglev-code-generator.cc
+@@ -365,7 +365,6 @@ class MaglevCodeGeneratorImpl final {
+       EmitEagerDeopt(deopt_info);
+ 
+       __ bind(&deopt_info->deopt_entry_label);
+-      // TODO(leszeks): Add soft deopt entry.
+       __ CallForDeoptimization(Builtin::kDeoptimizationEntry_Eager, 0,
+                                &deopt_info->deopt_entry_label,
+                                DeoptimizeKind::kEager, nullptr, nullptr);
+@@ -537,11 +536,11 @@ class MaglevCodeGeneratorImpl final {
+   }
+ 
+   Handle<DeoptimizationData> GenerateDeoptimizationData() {
+-    int non_lazy_deopt_count =
++    int eager_deopt_count =
+         static_cast<int>(code_gen_state_.eager_deopts().size());
+     int lazy_deopt_count =
+         static_cast<int>(code_gen_state_.lazy_deopts().size());
+-    int deopt_count = lazy_deopt_count + non_lazy_deopt_count;
++    int deopt_count = lazy_deopt_count + eager_deopt_count;
+     if (deopt_count == 0) {
+       return DeoptimizationData::Empty(isolate());
+     }
+@@ -558,7 +557,7 @@ class MaglevCodeGeneratorImpl final {
+ 
+     DCHECK_NE(deopt_exit_start_offset_, -1);
+     data->SetDeoptExitStart(Smi::FromInt(deopt_exit_start_offset_));
+-    data->SetNonLazyDeoptCount(Smi::FromInt(non_lazy_deopt_count));
++    data->SetEagerDeoptCount(Smi::FromInt(eager_deopt_count));
+     data->SetLazyDeoptCount(Smi::FromInt(lazy_deopt_count));
+ 
+     data->SetSharedFunctionInfo(
+diff --git a/src/maglev/maglev-graph-builder.cc b/src/maglev/maglev-graph-builder.cc
+index e14a466387a..f1fcfd17f8f 100644
+--- a/src/maglev/maglev-graph-builder.cc
++++ b/src/maglev/maglev-graph-builder.cc
+@@ -219,7 +219,7 @@ void MaglevGraphBuilder::BuildPropertyCellAccess(
+   compiler::ObjectRef property_cell_value = property_cell.value();
+   if (property_cell_value.IsTheHole()) {
+     // The property cell is no longer valid.
+-    AddNewNode<SoftDeopt>({});
++    AddNewNode<EagerDeopt>({});
+     return;
+   }
+ 
+@@ -271,7 +271,7 @@ void MaglevGraphBuilder::VisitLdaGlobal() {
+           feedback(), GetSlotOperand(kSlotOperandIndex)));
+ 
+   if (access_feedback.IsInsufficient()) {
+-    AddNewNode<SoftDeopt>({});
++    AddNewNode<EagerDeopt>({});
+     return;
+   }
+ 
+@@ -304,7 +304,7 @@ void MaglevGraphBuilder::VisitGetNamedProperty() {
+   FeedbackNexus nexus = feedback_nexus(2);
+ 
+   if (nexus.ic_state() == InlineCacheState::UNINITIALIZED) {
+-    AddNewNode<SoftDeopt>({});
++    AddNewNode<EagerDeopt>({});
+     return;
+   } else if (nexus.ic_state() == InlineCacheState::MONOMORPHIC) {
+     std::vector<MapAndHandler> maps_and_handlers;
+@@ -340,7 +340,7 @@ void MaglevGraphBuilder::VisitSetNamedProperty() {
+   FeedbackNexus nexus = feedback_nexus(2);
+ 
+   if (nexus.ic_state() == InlineCacheState::UNINITIALIZED) {
+-    AddNewNode<SoftDeopt>({});
++    AddNewNode<EagerDeopt>({});
+     return;
+   } else if (nexus.ic_state() == InlineCacheState::MONOMORPHIC) {
+     std::vector<MapAndHandler> maps_and_handlers;
+diff --git a/src/maglev/maglev-ir.cc b/src/maglev/maglev-ir.cc
+index b4df72fa1e7..de749bcbfe5 100644
+--- a/src/maglev/maglev-ir.cc
++++ b/src/maglev/maglev-ir.cc
+@@ -371,11 +371,10 @@ void SmiConstant::PrintParams(std::ostream& os,
+   os << "(" << value() << ")";
+ }
+ 
+-void SoftDeopt::AllocateVreg(MaglevVregAllocationState* vreg_state,
+-                             const ProcessingState& state) {}
+-void SoftDeopt::GenerateCode(MaglevCodeGenState* code_gen_state,
+-                             const ProcessingState& state) {
+-  // TODO(leszeks): Make this a soft deopt.
++void EagerDeopt::AllocateVreg(MaglevVregAllocationState* vreg_state,
++                              const ProcessingState& state) {}
++void EagerDeopt::GenerateCode(MaglevCodeGenState* code_gen_state,
++                              const ProcessingState& state) {
+   EmitEagerDeoptIf(always, code_gen_state, this);
+ }
+ 
+diff --git a/src/maglev/maglev-ir.h b/src/maglev/maglev-ir.h
+index 8941d950957..707b1292b53 100644
+--- a/src/maglev/maglev-ir.h
++++ b/src/maglev/maglev-ir.h
+@@ -81,7 +81,7 @@ class CompactInterpreterFrameState;
+ #define NODE_LIST(V) \
+   V(CheckMaps)       \
+   V(GapMove)         \
+-  V(SoftDeopt)       \
++  V(EagerDeopt)      \
+   V(StoreField)      \
+   VALUE_NODE_LIST(V)
+ 
+@@ -984,11 +984,11 @@ class RootConstant : public FixedInputValueNodeT<0, RootConstant> {
+   const RootIndex index_;
+ };
+ 
+-class SoftDeopt : public FixedInputNodeT<0, SoftDeopt> {
+-  using Base = FixedInputNodeT<0, SoftDeopt>;
++class EagerDeopt : public FixedInputNodeT<0, EagerDeopt> {
++  using Base = FixedInputNodeT<0, EagerDeopt>;
+ 
+  public:
+-  explicit SoftDeopt(uint32_t bitfield) : Base(bitfield) {}
++  explicit EagerDeopt(uint32_t bitfield) : Base(bitfield) {}
+ 
+   static constexpr OpProperties kProperties = OpProperties::EagerDeopt();
+ 
+diff --git a/src/objects/code-inl.h b/src/objects/code-inl.h
+index 6365eb6f0da..c7c78a9c38d 100644
+--- a/src/objects/code-inl.h
++++ b/src/objects/code-inl.h
+@@ -752,25 +752,10 @@ void Code::set_embedded_objects_cleared(bool flag) {
+   container.set_kind_specific_flags(updated, kRelaxedStore);
+ }
+ 
+-bool Code::deopt_already_counted() const {
+-  DCHECK(CodeKindCanDeoptimize(kind()));
+-  int32_t flags =
+-      code_data_container(kAcquireLoad).kind_specific_flags(kRelaxedLoad);
+-  return DeoptAlreadyCountedField::decode(flags);
+-}
+-
+-void Code::set_deopt_already_counted(bool flag) {
+-  DCHECK(CodeKindCanDeoptimize(kind()));
+-  DCHECK_IMPLIES(flag, AllowDeoptimization::IsAllowed(GetIsolate()));
+-  CodeDataContainer container = code_data_container(kAcquireLoad);
+-  int32_t previous = container.kind_specific_flags(kRelaxedLoad);
+-  int32_t updated = DeoptAlreadyCountedField::update(previous, flag);
+-  container.set_kind_specific_flags(updated, kRelaxedStore);
+-}
+-
+ bool Code::is_optimized_code() const {
+   return CodeKindIsOptimizedJSFunction(kind());
+ }
++
+ bool Code::is_wasm_code() const { return kind() == CodeKind::WASM_FUNCTION; }
+ 
+ int Code::constant_pool_offset() const {
+@@ -1246,7 +1231,7 @@ DEFINE_DEOPT_ELEMENT_ACCESSORS(OsrPcOffset, Smi)
+ DEFINE_DEOPT_ELEMENT_ACCESSORS(OptimizationId, Smi)
+ DEFINE_DEOPT_ELEMENT_ACCESSORS(InliningPositions, PodArray<InliningPosition>)
+ DEFINE_DEOPT_ELEMENT_ACCESSORS(DeoptExitStart, Smi)
+-DEFINE_DEOPT_ELEMENT_ACCESSORS(NonLazyDeoptCount, Smi)
++DEFINE_DEOPT_ELEMENT_ACCESSORS(EagerDeoptCount, Smi)
+ DEFINE_DEOPT_ELEMENT_ACCESSORS(LazyDeoptCount, Smi)
+ 
+ DEFINE_DEOPT_ENTRY_ACCESSORS(BytecodeOffsetRaw, Smi)
+diff --git a/src/objects/code.h b/src/objects/code.h
+index f6340b8bb38..292b69cd940 100644
+--- a/src/objects/code.h
++++ b/src/objects/code.h
+@@ -479,11 +479,6 @@ class Code : public HeapObject {
+   inline bool embedded_objects_cleared() const;
+   inline void set_embedded_objects_cleared(bool flag);
+ 
+-  // [deopt_already_counted]: If CodeKindCanDeoptimize(kind), tells whether
+-  // the code was already deoptimized.
+-  inline bool deopt_already_counted() const;
+-  inline void set_deopt_already_counted(bool flag);
+-
+   // [is_promise_rejection]: For kind BUILTIN tells whether the
+   // exception thrown by the code will lead to promise rejection or
+   // uncaught if both this and is_exception_caught is set.
+@@ -702,12 +697,11 @@ class Code : public HeapObject {
+ #define CODE_KIND_SPECIFIC_FLAGS_BIT_FIELDS(V, _) \
+   V(MarkedForDeoptimizationField, bool, 1, _)     \
+   V(EmbeddedObjectsClearedField, bool, 1, _)      \
+-  V(DeoptAlreadyCountedField, bool, 1, _)         \
+   V(CanHaveWeakObjectsField, bool, 1, _)          \
+   V(IsPromiseRejectionField, bool, 1, _)
+   DEFINE_BIT_FIELDS(CODE_KIND_SPECIFIC_FLAGS_BIT_FIELDS)
+ #undef CODE_KIND_SPECIFIC_FLAGS_BIT_FIELDS
+-  STATIC_ASSERT(CODE_KIND_SPECIFIC_FLAGS_BIT_FIELDS_Ranges::kBitsCount == 5);
++  STATIC_ASSERT(CODE_KIND_SPECIFIC_FLAGS_BIT_FIELDS_Ranges::kBitsCount == 4);
+   STATIC_ASSERT(CODE_KIND_SPECIFIC_FLAGS_BIT_FIELDS_Ranges::kBitsCount <=
+                 FIELD_SIZE(CodeDataContainer::kKindSpecificFlagsOffset) *
+                     kBitsPerByte);
+@@ -1076,7 +1070,7 @@ class DeoptimizationData : public FixedArray {
+   static const int kSharedFunctionInfoIndex = 6;
+   static const int kInliningPositionsIndex = 7;
+   static const int kDeoptExitStartIndex = 8;
+-  static const int kNonLazyDeoptCountIndex = 9;
++  static const int kEagerDeoptCountIndex = 9;
+   static const int kLazyDeoptCountIndex = 10;
+   static const int kFirstDeoptEntryIndex = 11;
+ 
+@@ -1105,7 +1099,7 @@ class DeoptimizationData : public FixedArray {
+   DECL_ELEMENT_ACCESSORS(SharedFunctionInfo, Object)
+   DECL_ELEMENT_ACCESSORS(InliningPositions, PodArray<InliningPosition>)
+   DECL_ELEMENT_ACCESSORS(DeoptExitStart, Smi)
+-  DECL_ELEMENT_ACCESSORS(NonLazyDeoptCount, Smi)
++  DECL_ELEMENT_ACCESSORS(EagerDeoptCount, Smi)
+   DECL_ELEMENT_ACCESSORS(LazyDeoptCount, Smi)
+ 
+ #undef DECL_ELEMENT_ACCESSORS
+diff --git a/src/objects/feedback-vector.cc b/src/objects/feedback-vector.cc
+index ee2d4b6dfd3..a473c9c0fb3 100644
+--- a/src/objects/feedback-vector.cc
++++ b/src/objects/feedback-vector.cc
+@@ -441,9 +441,6 @@ void FeedbackVector::EvictOptimizedCodeMarkedForDeoptimization(
+   Code code = FromCodeT(CodeT::cast(slot->GetHeapObject()));
+   if (code.marked_for_deoptimization()) {
+     Deoptimizer::TraceEvictFromOptimizedCodeCache(shared, reason);
+-    if (!code.deopt_already_counted()) {
+-      code.set_deopt_already_counted(true);
+-    }
+     ClearOptimizedCode();
+   }
+ }
+diff --git a/src/runtime/runtime-compiler.cc b/src/runtime/runtime-compiler.cc
+index ee61eabb552..a8b6cdcad66 100644
+--- a/src/runtime/runtime-compiler.cc
++++ b/src/runtime/runtime-compiler.cc
+@@ -200,8 +200,8 @@ RUNTIME_FUNCTION(Runtime_NotifyDeoptimized) {
+   JavaScriptFrame* top_frame = top_it.frame();
+   isolate->set_context(Context::cast(top_frame->context()));
+ 
+-  // Invalidate the underlying optimized code on eager and soft deopts.
+-  if (type == DeoptimizeKind::kEager || type == DeoptimizeKind::kSoft) {
++  // Invalidate the underlying optimized code on eager deopts.
++  if (type == DeoptimizeKind::kEager) {
+     Deoptimizer::DeoptimizeFunction(*function, *optimized_code);
+   }
+ 
+diff --git a/test/cctest/test-assembler-ia32.cc b/test/cctest/test-assembler-ia32.cc
+index a2f92cd70f1..131a52a396c 100644
+--- a/test/cctest/test-assembler-ia32.cc
++++ b/test/cctest/test-assembler-ia32.cc
+@@ -1537,9 +1537,8 @@ TEST(DeoptExitSizeIsFixed) {
+     masm.CallForDeoptimization(target, 42, &before_exit, kind, &before_exit,
+                                nullptr);
+     CHECK_EQ(masm.SizeOfCodeGeneratedSince(&before_exit),
+-             kind == DeoptimizeKind::kLazy
+-                 ? Deoptimizer::kLazyDeoptExitSize
+-                 : Deoptimizer::kNonLazyDeoptExitSize);
++             kind == DeoptimizeKind::kLazy ? Deoptimizer::kLazyDeoptExitSize
++                                           : Deoptimizer::kEagerDeoptExitSize);
+   }
+ }
+ 
+diff --git a/test/cctest/test-macro-assembler-arm.cc b/test/cctest/test-macro-assembler-arm.cc
+index 13ff854ebb4..23b5b2d4e85 100644
+--- a/test/cctest/test-macro-assembler-arm.cc
++++ b/test/cctest/test-macro-assembler-arm.cc
+@@ -326,9 +326,8 @@ TEST(DeoptExitSizeIsFixed) {
+     masm.CallForDeoptimization(target, 42, &before_exit, kind, &before_exit,
+                                nullptr);
+     CHECK_EQ(masm.SizeOfCodeGeneratedSince(&before_exit),
+-             kind == DeoptimizeKind::kLazy
+-                 ? Deoptimizer::kLazyDeoptExitSize
+-                 : Deoptimizer::kNonLazyDeoptExitSize);
++             kind == DeoptimizeKind::kLazy ? Deoptimizer::kLazyDeoptExitSize
++                                           : Deoptimizer::kEagerDeoptExitSize);
+   }
+ }
+ 
+diff --git a/test/cctest/test-macro-assembler-arm64.cc b/test/cctest/test-macro-assembler-arm64.cc
+index deda2f1fe47..eec16c0529d 100644
+--- a/test/cctest/test-macro-assembler-arm64.cc
++++ b/test/cctest/test-macro-assembler-arm64.cc
+@@ -115,9 +115,8 @@ TEST(DeoptExitSizeIsFixed) {
+     masm.CallForDeoptimization(target, 42, &before_exit, kind, &before_exit,
+                                &before_exit);
+     CHECK_EQ(masm.SizeOfCodeGeneratedSince(&before_exit),
+-             kind == DeoptimizeKind::kLazy
+-                 ? Deoptimizer::kLazyDeoptExitSize
+-                 : Deoptimizer::kNonLazyDeoptExitSize);
++             kind == DeoptimizeKind::kLazy ? Deoptimizer::kLazyDeoptExitSize
++                                           : Deoptimizer::kEagerDeoptExitSize);
+   }
+ }
+ 
+diff --git a/test/cctest/test-macro-assembler-loong64.cc b/test/cctest/test-macro-assembler-loong64.cc
+index b3ef4a73f16..eac64947e97 100644
+--- a/test/cctest/test-macro-assembler-loong64.cc
++++ b/test/cctest/test-macro-assembler-loong64.cc
+@@ -2893,9 +2893,8 @@ TEST(DeoptExitSizeIsFixed) {
+     masm.CallForDeoptimization(target, 42, &before_exit, kind, &before_exit,
+                                nullptr);
+     CHECK_EQ(masm.SizeOfCodeGeneratedSince(&before_exit),
+-             kind == DeoptimizeKind::kLazy
+-                 ? Deoptimizer::kLazyDeoptExitSize
+-                 : Deoptimizer::kNonLazyDeoptExitSize);
++             kind == DeoptimizeKind::kLazy ? Deoptimizer::kLazyDeoptExitSize
++                                           : Deoptimizer::kEagerDeoptExitSize);
+   }
+ }
+ 
+diff --git a/test/cctest/test-macro-assembler-mips.cc b/test/cctest/test-macro-assembler-mips.cc
+index 6e8de0ac44d..c4926af159c 100644
+--- a/test/cctest/test-macro-assembler-mips.cc
++++ b/test/cctest/test-macro-assembler-mips.cc
+@@ -1351,9 +1351,8 @@ TEST(DeoptExitSizeIsFixed) {
+     masm.CallForDeoptimization(target, 42, &before_exit, kind, &before_exit,
+                                nullptr);
+     CHECK_EQ(masm.SizeOfCodeGeneratedSince(&before_exit),
+-             kind == DeoptimizeKind::kLazy
+-                 ? Deoptimizer::kLazyDeoptExitSize
+-                 : Deoptimizer::kNonLazyDeoptExitSize);
++             kind == DeoptimizeKind::kLazy ? Deoptimizer::kLazyDeoptExitSize
++                                           : Deoptimizer::kEagerDeoptExitSize);
+   }
+ }
+ 
+diff --git a/test/cctest/test-macro-assembler-mips64.cc b/test/cctest/test-macro-assembler-mips64.cc
+index 63f08ad8034..2d87fb77502 100644
+--- a/test/cctest/test-macro-assembler-mips64.cc
++++ b/test/cctest/test-macro-assembler-mips64.cc
+@@ -1704,9 +1704,8 @@ TEST(DeoptExitSizeIsFixed) {
+     masm.CallForDeoptimization(target, 42, &before_exit, kind, &before_exit,
+                                nullptr);
+     CHECK_EQ(masm.SizeOfCodeGeneratedSince(&before_exit),
+-             kind == DeoptimizeKind::kLazy
+-                 ? Deoptimizer::kLazyDeoptExitSize
+-                 : Deoptimizer::kNonLazyDeoptExitSize);
++             kind == DeoptimizeKind::kLazy ? Deoptimizer::kLazyDeoptExitSize
++                                           : Deoptimizer::kEagerDeoptExitSize);
+   }
+ }
+ 
+diff --git a/test/cctest/test-macro-assembler-riscv64.cc b/test/cctest/test-macro-assembler-riscv64.cc
+index 362c70a217e..0bf9b5b363d 100644
+--- a/test/cctest/test-macro-assembler-riscv64.cc
++++ b/test/cctest/test-macro-assembler-riscv64.cc
+@@ -1539,9 +1539,8 @@ TEST(DeoptExitSizeIsFixed) {
+     masm.CallForDeoptimization(target, 42, &before_exit, kind, &before_exit,
+                                &before_exit);
+     CHECK_EQ(masm.SizeOfCodeGeneratedSince(&before_exit),
+-             kind == DeoptimizeKind::kLazy
+-                 ? Deoptimizer::kLazyDeoptExitSize
+-                 : Deoptimizer::kNonLazyDeoptExitSize);
++             kind == DeoptimizeKind::kLazy ? Deoptimizer::kLazyDeoptExitSize
++                                           : Deoptimizer::kEagerDeoptExitSize);
+   }
+ }
+ 
+diff --git a/test/cctest/test-macro-assembler-x64.cc b/test/cctest/test-macro-assembler-x64.cc
+index a5e0c975cbf..1bc04263e8d 100644
+--- a/test/cctest/test-macro-assembler-x64.cc
++++ b/test/cctest/test-macro-assembler-x64.cc
+@@ -1065,9 +1065,8 @@ TEST(DeoptExitSizeIsFixed) {
+     masm.CallForDeoptimization(target, 42, &before_exit, kind, &before_exit,
+                                nullptr);
+     CHECK_EQ(masm.SizeOfCodeGeneratedSince(&before_exit),
+-             kind == DeoptimizeKind::kLazy
+-                 ? Deoptimizer::kLazyDeoptExitSize
+-                 : Deoptimizer::kNonLazyDeoptExitSize);
++             kind == DeoptimizeKind::kLazy ? Deoptimizer::kLazyDeoptExitSize
++                                           : Deoptimizer::kEagerDeoptExitSize);
+   }
+ }
+ 
+-- 
+2.35.1
+

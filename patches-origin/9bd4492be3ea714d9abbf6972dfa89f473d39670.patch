@@ -1,0 +1,85 @@
+From 9bd4492be3ea714d9abbf6972dfa89f473d39670 Mon Sep 17 00:00:00 2001
+From: QiuJi <qiuji@iscas.ac.cn>
+Date: Wed, 28 Apr 2021 21:14:49 +0800
+Subject: [PATCH] [riscv64] Fix IsConstantPoolAt and typo
+
+Also remove the out of date comment after constant pool enabled.
+
+Change-Id: I80ded0242406097dfdb35e1356ed8fa7e43b2f00
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/2839546
+Reviewed-by: Brice Dobry <brice.dobry@futurewei.com>
+Commit-Queue: Brice Dobry <brice.dobry@futurewei.com>
+Cr-Commit-Position: refs/heads/master@{#74409}
+---
+ src/codegen/riscv64/assembler-riscv64.cc  | 26 +++++++++++------------
+ src/diagnostics/riscv64/disasm-riscv64.cc |  1 -
+ 2 files changed, 13 insertions(+), 14 deletions(-)
+
+diff --git a/src/codegen/riscv64/assembler-riscv64.cc b/src/codegen/riscv64/assembler-riscv64.cc
+index e905f00b05b..e6d6107c3e9 100644
+--- a/src/codegen/riscv64/assembler-riscv64.cc
++++ b/src/codegen/riscv64/assembler-riscv64.cc
+@@ -2970,17 +2970,17 @@ bool UseScratchRegisterScope::hasAvailable() const { return *available_ != 0; }
+ bool Assembler::IsConstantPoolAt(Instruction* instr) {
+   // The constant pool marker is made of two instructions. These instructions
+   // will never be emitted by the JIT, so checking for the first one is enough:
+-  // 0: ld x0, t3, #offset
++  // 0: ld x0, x0, #offset
+   Instr instr_value = *reinterpret_cast<Instr*>(instr);
+-
+-  bool result = IsLd(instr_value) && (instr->RdValue() == kRegCode_zero_reg);
+-  // It is still worth asserting the marker is complete.
+-  // 4: j 0
++  bool result = IsLd(instr_value) && (instr->Rs1Value() == kRegCode_zero_reg) &&
++                (instr->RdValue() == kRegCode_zero_reg);
+ #ifdef DEBUG
+-  Instruction* instr_fllowing = instr + kInstrSize;
+-  DCHECK(!result || (IsJal(*reinterpret_cast<Instr*>(instr_fllowing)) &&
+-                     instr_fllowing->Imm20JValue() == 0 &&
+-                     instr_fllowing->RdValue() == kRegCode_zero_reg));
++  // It is still worth asserting the marker is complete.
++  // 1: j 0x0
++  Instruction* instr_following = instr + kInstrSize;
++  DCHECK(!result || (IsJal(*reinterpret_cast<Instr*>(instr_following)) &&
++                     instr_following->Imm20JValue() == 0 &&
++                     instr_following->RdValue() == kRegCode_zero_reg));
+ #endif
+   return result;
+ }
+@@ -3021,9 +3021,9 @@ void ConstantPool::EmitPrologue(Alignment require_alignment) {
+ 
+ int ConstantPool::PrologueSize(Jump require_jump) const {
+   // Prologue is:
+-  //   j   over  ;; if require_jump
+-  //   ld x0, t3, #pool_size
+-  //   j xzr
++  //   j over  ;; if require_jump
++  //   ld x0, x0, #pool_size
++  //   j 0x0
+   int prologue_size = require_jump == Jump::kRequired ? kInstrSize : 0;
+   prologue_size += 2 * kInstrSize;
+   return prologue_size;
+@@ -3034,7 +3034,7 @@ void ConstantPool::SetLoadOffsetToConstPoolEntry(int load_offset,
+                                                  const ConstantPoolKey& key) {
+   Instr instr_auipc = assm_->instr_at(load_offset);
+   Instr instr_ld = assm_->instr_at(load_offset + 4);
+-  // Instruction to patch must be 'ld t3, t3, offset' with offset == kInstrSize.
++  // Instruction to patch must be 'ld rd, offset(rd)' with 'offset == 0'.
+   DCHECK(assm_->IsAuipc(instr_auipc));
+   DCHECK(assm_->IsLd(instr_ld));
+   DCHECK_EQ(assm_->LdOffset(instr_ld), 0);
+diff --git a/src/diagnostics/riscv64/disasm-riscv64.cc b/src/diagnostics/riscv64/disasm-riscv64.cc
+index 2e80ed87f7a..5cbd4b4857f 100644
+--- a/src/diagnostics/riscv64/disasm-riscv64.cc
++++ b/src/diagnostics/riscv64/disasm-riscv64.cc
+@@ -1857,7 +1857,6 @@ int Disassembler::InstructionDecode(v8::internal::Vector<char> buffer,
+   return d.InstructionDecode(instruction);
+ }
+ 
+-// The RISC-V assembler does not currently use constant pools.
+ int Disassembler::ConstantPoolSizeAt(byte* instruction) {
+   return v8::internal::Assembler::ConstantPoolSizeAt(
+       reinterpret_cast<v8::internal::Instruction*>(instruction));
+-- 
+2.35.1
+

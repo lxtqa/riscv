@@ -1,0 +1,993 @@
+From a64bb799878bc6952a5c6b1dfa7fdc2641d57b4f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Marja=20H=C3=B6ltt=C3=A4?= <marja@chromium.org>
+Date: Thu, 28 Apr 2022 09:16:55 +0200
+Subject: [PATCH] [rab/gsab] Atomics.*: Support RAB / GSAB
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Bug: v8:11111
+Change-Id: I3c350dd98b3da995b52c8366876d66b87fc47c28
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3605611
+Commit-Queue: Marja Hölttä <marja@chromium.org>
+Reviewed-by: Shu-yu Guo <syg@chromium.org>
+Reviewed-by: Jakob Kummerow <jkummerow@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#80244}
+---
+ src/builtins/builtins-array-gen.cc            |   2 +-
+ .../builtins-sharedarraybuffer-gen.cc         | 106 ++---
+ src/codegen/code-stub-assembler.cc            |  18 +-
+ src/codegen/code-stub-assembler.h             |   5 +-
+ src/runtime/runtime-atomics.cc                |  28 +-
+ ...array-growablesharedarraybuffer-atomics.js |  27 +-
+ test/mjsunit/typedarray-helpers.js            |  56 +++
+ ...typedarray-resizablearraybuffer-atomics.js | 370 ++++++++++++++++++
+ 8 files changed, 548 insertions(+), 64 deletions(-)
+ create mode 100644 test/mjsunit/typedarray-resizablearraybuffer-atomics.js
+
+diff --git a/src/builtins/builtins-array-gen.cc b/src/builtins/builtins-array-gen.cc
+index 914f032acdb..52cde978351 100644
+--- a/src/builtins/builtins-array-gen.cc
++++ b/src/builtins/builtins-array-gen.cc
+@@ -216,7 +216,7 @@ void ArrayBuiltinsAssembler::VisitAllTypedArrayElements(
+         Label process(this);
+         if (can_shrink) {
+           // If `index` is out of bounds, Get returns undefined.
+-          CheckJSTypedArrayIndex(index, typed_array, &detached);
++          CheckJSTypedArrayIndex(typed_array, index, &detached);
+         } else {
+           GotoIf(IsDetachedBuffer(array_buffer), &detached);
+         }
+diff --git a/src/builtins/builtins-sharedarraybuffer-gen.cc b/src/builtins/builtins-sharedarraybuffer-gen.cc
+index 37530e7abad..2afd01c17e9 100644
+--- a/src/builtins/builtins-sharedarraybuffer-gen.cc
++++ b/src/builtins/builtins-sharedarraybuffer-gen.cc
+@@ -24,10 +24,11 @@ class SharedArrayBufferBuiltinsAssembler : public CodeStubAssembler {
+   using AssemblerFunction64 = TNode<Type> (CodeAssembler::*)(
+       TNode<RawPtrT> base, TNode<UintPtrT> offset, TNode<UintPtrT> value,
+       TNode<UintPtrT> value_high);
+-  TNode<JSArrayBuffer> ValidateIntegerTypedArray(
+-      TNode<Object> maybe_array, TNode<Context> context,
+-      TNode<Int32T>* out_elements_kind, TNode<RawPtrT>* out_backing_store,
+-      Label* detached);
++  void ValidateIntegerTypedArray(TNode<Object> maybe_array,
++                                 TNode<Context> context,
++                                 TNode<Int32T>* out_elements_kind,
++                                 TNode<RawPtrT>* out_backing_store,
++                                 Label* detached);
+ 
+   TNode<UintPtrT> ValidateAtomicAccess(TNode<JSTypedArray> array,
+                                        TNode<Object> index,
+@@ -50,8 +51,7 @@ class SharedArrayBufferBuiltinsAssembler : public CodeStubAssembler {
+ };
+ 
+ // https://tc39.es/ecma262/#sec-validateintegertypedarray
+-TNode<JSArrayBuffer>
+-SharedArrayBufferBuiltinsAssembler::ValidateIntegerTypedArray(
++void SharedArrayBufferBuiltinsAssembler::ValidateIntegerTypedArray(
+     TNode<Object> maybe_array, TNode<Context> context,
+     TNode<Int32T>* out_elements_kind, TNode<RawPtrT>* out_backing_store,
+     Label* detached) {
+@@ -79,7 +79,8 @@ SharedArrayBufferBuiltinsAssembler::ValidateIntegerTypedArray(
+   STATIC_ASSERT(UINT8_ELEMENTS < FLOAT32_ELEMENTS);
+   STATIC_ASSERT(UINT16_ELEMENTS < FLOAT32_ELEMENTS);
+   STATIC_ASSERT(UINT32_ELEMENTS < FLOAT32_ELEMENTS);
+-  TNode<Int32T> elements_kind = LoadMapElementsKind(map);
++  TNode<Int32T> elements_kind =
++      GetNonRabGsabElementsKind(LoadMapElementsKind(map));
+   GotoIf(Int32LessThan(elements_kind, Int32Constant(FLOAT32_ELEMENTS)),
+          &not_float_or_clamped);
+   STATIC_ASSERT(BIGINT64_ELEMENTS > UINT8_CLAMPED_ELEMENTS);
+@@ -99,8 +100,6 @@ SharedArrayBufferBuiltinsAssembler::ValidateIntegerTypedArray(
+   TNode<RawPtrT> backing_store = LoadJSArrayBufferBackingStorePtr(array_buffer);
+   TNode<UintPtrT> byte_offset = LoadJSArrayBufferViewByteOffset(array);
+   *out_backing_store = RawPtrAdd(backing_store, Signed(byte_offset));
+-
+-  return array_buffer;
+ }
+ 
+ // https://tc39.github.io/ecma262/#sec-validateatomicaccess
+@@ -108,12 +107,12 @@ SharedArrayBufferBuiltinsAssembler::ValidateIntegerTypedArray(
+ TNode<UintPtrT> SharedArrayBufferBuiltinsAssembler::ValidateAtomicAccess(
+     TNode<JSTypedArray> array, TNode<Object> index, TNode<Context> context) {
+   Label done(this), range_error(this);
+-  // TODO(v8:11111): Support RAB / GSAB.
+ 
+   // 1. Assert: typedArray is an Object that has a [[ViewedArrayBuffer]]
+   // internal slot.
+-  // 2. Let length be typedArray.[[ArrayLength]].
+-  TNode<UintPtrT> array_length = LoadJSTypedArrayLength(array);
++  // 2. Let length be IntegerIndexedObjectLength(typedArray);
++  TNode<UintPtrT> array_length =
++      LoadJSTypedArrayLengthAndCheckDetached(array, &range_error);
+ 
+   // 3. Let accessIndex be ? ToIndex(requestIndex).
+   TNode<UintPtrT> index_uintptr = ToIndex(context, index, &range_error);
+@@ -132,16 +131,28 @@ TNode<UintPtrT> SharedArrayBufferBuiltinsAssembler::ValidateAtomicAccess(
+ 
+ void SharedArrayBufferBuiltinsAssembler::DebugCheckAtomicIndex(
+     TNode<JSTypedArray> array, TNode<UintPtrT> index) {
++#if DEBUG
+   // In Debug mode, we re-validate the index as a sanity check because ToInteger
+   // above calls out to JavaScript. Atomics work on ArrayBuffers, which may be
+   // detached, and detachment state must be checked and throw before this
+-  // check. The length cannot change.
++  // check. Moreover, resizable ArrayBuffers can be shrunk.
+   //
+   // This function must always be called after ValidateIntegerTypedArray, which
+   // will ensure that LoadJSArrayBufferViewBuffer will not be null.
++  Label detached_or_out_of_bounds(this), end(this);
+   CSA_DCHECK(this, Word32BinaryNot(
+                        IsDetachedBuffer(LoadJSArrayBufferViewBuffer(array))));
+-  CSA_DCHECK(this, UintPtrLessThan(index, LoadJSTypedArrayLength(array)));
++
++  CSA_DCHECK(this,
++             UintPtrLessThan(index, LoadJSTypedArrayLengthAndCheckDetached(
++                                        array, &detached_or_out_of_bounds)));
++  Goto(&end);
++
++  BIND(&detached_or_out_of_bounds);
++  Unreachable();
++
++  BIND(&end);
++#endif
+ }
+ 
+ TNode<BigInt> SharedArrayBufferBuiltinsAssembler::BigIntFromSigned64(
+@@ -177,12 +188,12 @@ TF_BUILTIN(AtomicsLoad, SharedArrayBufferBuiltinsAssembler) {
+   GotoIf(IsJSSharedStruct(maybe_array_or_shared_struct), &shared_struct);
+ 
+   // 1. Let buffer be ? ValidateIntegerTypedArray(typedArray).
+-  Label detached(this);
++  Label detached_or_out_of_bounds(this);
+   TNode<Int32T> elements_kind;
+   TNode<RawPtrT> backing_store;
+-  TNode<JSArrayBuffer> array_buffer =
+-      ValidateIntegerTypedArray(maybe_array_or_shared_struct, context,
+-                                &elements_kind, &backing_store, &detached);
++  ValidateIntegerTypedArray(maybe_array_or_shared_struct, context,
++                            &elements_kind, &backing_store,
++                            &detached_or_out_of_bounds);
+   TNode<JSTypedArray> array = CAST(maybe_array_or_shared_struct);
+ 
+   // 2. Let i be ? ValidateAtomicAccess(typedArray, index).
+@@ -194,7 +205,7 @@ TF_BUILTIN(AtomicsLoad, SharedArrayBufferBuiltinsAssembler) {
+   // ValidateIntegerTypedArray because the call to ValidateAtomicAccess on the
+   // preceding line can have arbitrary side effects, which could cause the
+   // buffer to become detached.
+-  GotoIf(IsDetachedBuffer(array_buffer), &detached);
++  CheckJSTypedArrayIndex(array, index_word, &detached_or_out_of_bounds);
+ 
+   // Steps 5-10.
+   //
+@@ -255,7 +266,7 @@ TF_BUILTIN(AtomicsLoad, SharedArrayBufferBuiltinsAssembler) {
+   BIND(&other);
+   Unreachable();
+ 
+-  BIND(&detached);
++  BIND(&detached_or_out_of_bounds);
+   {
+     ThrowTypeError(context, MessageTemplate::kDetachedOperation,
+                    "Atomics.load");
+@@ -280,12 +291,12 @@ TF_BUILTIN(AtomicsStore, SharedArrayBufferBuiltinsAssembler) {
+   GotoIf(IsJSSharedStruct(maybe_array_or_shared_struct), &shared_struct);
+ 
+   // 1. Let buffer be ? ValidateIntegerTypedArray(typedArray).
+-  Label detached(this);
++  Label detached_or_out_of_bounds(this);
+   TNode<Int32T> elements_kind;
+   TNode<RawPtrT> backing_store;
+-  TNode<JSArrayBuffer> array_buffer =
+-      ValidateIntegerTypedArray(maybe_array_or_shared_struct, context,
+-                                &elements_kind, &backing_store, &detached);
++  ValidateIntegerTypedArray(maybe_array_or_shared_struct, context,
++                            &elements_kind, &backing_store,
++                            &detached_or_out_of_bounds);
+   TNode<JSTypedArray> array = CAST(maybe_array_or_shared_struct);
+ 
+   // 2. Let i be ? ValidateAtomicAccess(typedArray, index).
+@@ -309,7 +320,7 @@ TF_BUILTIN(AtomicsStore, SharedArrayBufferBuiltinsAssembler) {
+   // ValidateIntegerTypedArray because the call to ToBigInt or ToInteger on the
+   // preceding lines can have arbitrary side effects, which could cause the
+   // buffer to become detached.
+-  GotoIf(IsDetachedBuffer(array_buffer), &detached);
++  CheckJSTypedArrayIndex(array, index_word, &detached_or_out_of_bounds);
+ 
+   TNode<Word32T> value_word32 = TruncateTaggedToWord32(context, value_integer);
+ 
+@@ -352,7 +363,7 @@ TF_BUILTIN(AtomicsStore, SharedArrayBufferBuiltinsAssembler) {
+   TNode<BigInt> value_bigint = ToBigInt(context, value);
+ 
+   // 6. If IsDetachedBuffer(buffer) is true, throw a TypeError exception.
+-  GotoIf(IsDetachedBuffer(array_buffer), &detached);
++  CheckJSTypedArrayIndex(array, index_word, &detached_or_out_of_bounds);
+ 
+   DebugCheckAtomicIndex(array, index_word);
+ 
+@@ -369,7 +380,7 @@ TF_BUILTIN(AtomicsStore, SharedArrayBufferBuiltinsAssembler) {
+   BIND(&other);
+   Unreachable();
+ 
+-  BIND(&detached);
++  BIND(&detached_or_out_of_bounds);
+   {
+     ThrowTypeError(context, MessageTemplate::kDetachedOperation,
+                    "Atomics.store");
+@@ -398,12 +409,12 @@ TF_BUILTIN(AtomicsExchange, SharedArrayBufferBuiltinsAssembler) {
+   // https://tc39.es/ecma262/#sec-atomicreadmodifywrite
+ 
+   // 1. Let buffer be ? ValidateIntegerTypedArray(typedArray).
+-  Label detached(this);
++  Label detached_or_out_of_bounds(this);
+   TNode<Int32T> elements_kind;
+   TNode<RawPtrT> backing_store;
+-  TNode<JSArrayBuffer> array_buffer =
+-      ValidateIntegerTypedArray(maybe_array_or_shared_struct, context,
+-                                &elements_kind, &backing_store, &detached);
++  ValidateIntegerTypedArray(maybe_array_or_shared_struct, context,
++                            &elements_kind, &backing_store,
++                            &detached_or_out_of_bounds);
+   TNode<JSTypedArray> array = CAST(maybe_array_or_shared_struct);
+ 
+   // 2. Let i be ? ValidateAtomicAccess(typedArray, index).
+@@ -411,7 +422,6 @@ TF_BUILTIN(AtomicsExchange, SharedArrayBufferBuiltinsAssembler) {
+       ValidateAtomicAccess(array, index_or_field_name, context);
+ 
+ #if V8_TARGET_ARCH_MIPS || V8_TARGET_ARCH_MIPS64 || V8_TARGET_ARCH_RISCV64
+-  USE(array_buffer);
+   TNode<Number> index_number = ChangeUintPtrToTagged(index_word);
+   Return(CallRuntime(Runtime::kAtomicsExchange, context, array, index_number,
+                      value));
+@@ -434,7 +444,7 @@ TF_BUILTIN(AtomicsExchange, SharedArrayBufferBuiltinsAssembler) {
+   // ValidateIntegerTypedArray because the call to ToBigInt or ToInteger on the
+   // preceding lines can have arbitrary side effects, which could cause the
+   // buffer to become detached.
+-  GotoIf(IsDetachedBuffer(array_buffer), &detached);
++  CheckJSTypedArrayIndex(array, index_word, &detached_or_out_of_bounds);
+ 
+   DebugCheckAtomicIndex(array, index_word);
+ 
+@@ -486,7 +496,7 @@ TF_BUILTIN(AtomicsExchange, SharedArrayBufferBuiltinsAssembler) {
+   TNode<BigInt> value_bigint = ToBigInt(context, value);
+ 
+   // 6. If IsDetachedBuffer(buffer) is true, throw a TypeError exception.
+-  GotoIf(IsDetachedBuffer(array_buffer), &detached);
++  CheckJSTypedArrayIndex(array, index_word, &detached_or_out_of_bounds);
+ 
+   DebugCheckAtomicIndex(array, index_word);
+ 
+@@ -514,7 +524,7 @@ TF_BUILTIN(AtomicsExchange, SharedArrayBufferBuiltinsAssembler) {
+ #endif  // V8_TARGET_ARCH_MIPS || V8_TARGET_ARCH_MIPS64 ||
+         // V8_TARGET_ARCH_RISCV64
+ 
+-  BIND(&detached);
++  BIND(&detached_or_out_of_bounds);
+   {
+     ThrowTypeError(context, MessageTemplate::kDetachedOperation,
+                    "Atomics.exchange");
+@@ -537,11 +547,11 @@ TF_BUILTIN(AtomicsCompareExchange, SharedArrayBufferBuiltinsAssembler) {
+   auto context = Parameter<Context>(Descriptor::kContext);
+ 
+   // 1. Let buffer be ? ValidateIntegerTypedArray(typedArray).
+-  Label detached(this);
++  Label detached_or_out_of_bounds(this);
+   TNode<Int32T> elements_kind;
+   TNode<RawPtrT> backing_store;
+-  TNode<JSArrayBuffer> array_buffer = ValidateIntegerTypedArray(
+-      maybe_array, context, &elements_kind, &backing_store, &detached);
++  ValidateIntegerTypedArray(maybe_array, context, &elements_kind,
++                            &backing_store, &detached_or_out_of_bounds);
+   TNode<JSTypedArray> array = CAST(maybe_array);
+ 
+   // 2. Let i be ? ValidateAtomicAccess(typedArray, index).
+@@ -577,7 +587,7 @@ TF_BUILTIN(AtomicsCompareExchange, SharedArrayBufferBuiltinsAssembler) {
+   // ValidateIntegerTypedArray because the call to ToBigInt or ToInteger on the
+   // preceding lines can have arbitrary side effects, which could cause the
+   // buffer to become detached.
+-  GotoIf(IsDetachedBuffer(array_buffer), &detached);
++  CheckJSTypedArrayIndex(array, index_word, &detached_or_out_of_bounds);
+ 
+   DebugCheckAtomicIndex(array, index_word);
+ 
+@@ -637,7 +647,7 @@ TF_BUILTIN(AtomicsCompareExchange, SharedArrayBufferBuiltinsAssembler) {
+   TNode<BigInt> new_value_bigint = ToBigInt(context, new_value);
+ 
+   // 6. If IsDetachedBuffer(buffer) is true, throw a TypeError exception.
+-  GotoIf(IsDetachedBuffer(array_buffer), &detached);
++  CheckJSTypedArrayIndex(array, index_word, &detached_or_out_of_bounds);
+ 
+   DebugCheckAtomicIndex(array, index_word);
+ 
+@@ -673,7 +683,7 @@ TF_BUILTIN(AtomicsCompareExchange, SharedArrayBufferBuiltinsAssembler) {
+         // || V8_TARGET_ARCH_PPC || V8_TARGET_ARCH_S390 || V8_TARGET_ARCH_S390X
+         // || V8_TARGET_ARCH_RISCV64
+ 
+-  BIND(&detached);
++  BIND(&detached_or_out_of_bounds);
+   {
+     ThrowTypeError(context, MessageTemplate::kDetachedOperation,
+                    "Atomics.store");
+@@ -712,11 +722,11 @@ void SharedArrayBufferBuiltinsAssembler::AtomicBinopBuiltinCommon(
+     AssemblerFunction64<AtomicUint64> function_uint_64,
+     Runtime::FunctionId runtime_function, const char* method_name) {
+   // 1. Let buffer be ? ValidateIntegerTypedArray(typedArray).
+-  Label detached(this);
++  Label detached_or_out_of_bounds(this);
+   TNode<Int32T> elements_kind;
+   TNode<RawPtrT> backing_store;
+-  TNode<JSArrayBuffer> array_buffer = ValidateIntegerTypedArray(
+-      maybe_array, context, &elements_kind, &backing_store, &detached);
++  ValidateIntegerTypedArray(maybe_array, context, &elements_kind,
++                            &backing_store, &detached_or_out_of_bounds);
+   TNode<JSTypedArray> array = CAST(maybe_array);
+ 
+   // 2. Let i be ? ValidateAtomicAccess(typedArray, index).
+@@ -745,8 +755,8 @@ void SharedArrayBufferBuiltinsAssembler::AtomicBinopBuiltinCommon(
+   // 7. NOTE: The above check is not redundant with the check in
+   // ValidateIntegerTypedArray because the call to ToBigInt or ToInteger on the
+   // preceding lines can have arbitrary side effects, which could cause the
+-  // buffer to become detached.
+-  GotoIf(IsDetachedBuffer(array_buffer), &detached);
++  // buffer to become detached or resized.
++  CheckJSTypedArrayIndex(array, index_word, &detached_or_out_of_bounds);
+ 
+   DebugCheckAtomicIndex(array, index_word);
+ 
+@@ -792,7 +802,7 @@ void SharedArrayBufferBuiltinsAssembler::AtomicBinopBuiltinCommon(
+   TNode<BigInt> value_bigint = ToBigInt(context, value);
+ 
+   // 6. If IsDetachedBuffer(buffer) is true, throw a TypeError exception.
+-  GotoIf(IsDetachedBuffer(array_buffer), &detached);
++  CheckJSTypedArrayIndex(array, index_word, &detached_or_out_of_bounds);
+ 
+   DebugCheckAtomicIndex(array, index_word);
+ 
+@@ -819,7 +829,7 @@ void SharedArrayBufferBuiltinsAssembler::AtomicBinopBuiltinCommon(
+         // || V8_TARGET_ARCH_PPC || V8_TARGET_ARCH_S390 || V8_TARGET_ARCH_S390X
+         // || V8_TARGET_ARCH_RISCV64
+ 
+-  BIND(&detached);
++  BIND(&detached_or_out_of_bounds);
+   ThrowTypeError(context, MessageTemplate::kDetachedOperation, method_name);
+ }
+ 
+diff --git a/src/codegen/code-stub-assembler.cc b/src/codegen/code-stub-assembler.cc
+index 0549a9e7cf5..063620ffd84 100644
+--- a/src/codegen/code-stub-assembler.cc
++++ b/src/codegen/code-stub-assembler.cc
+@@ -14311,7 +14311,7 @@ TNode<BoolT> CodeStubAssembler::IsJSArrayBufferViewDetachedOrOutOfBoundsBoolean(
+ }
+ 
+ void CodeStubAssembler::CheckJSTypedArrayIndex(
+-    TNode<UintPtrT> index, TNode<JSTypedArray> typed_array,
++    TNode<JSTypedArray> typed_array, TNode<UintPtrT> index,
+     Label* detached_or_out_of_bounds) {
+   TNode<UintPtrT> len = LoadJSTypedArrayLengthAndCheckDetached(
+       typed_array, detached_or_out_of_bounds);
+@@ -14597,6 +14597,22 @@ TNode<BoolT> CodeStubAssembler::IsElementsKindLessThanOrEqual(
+   return Int32LessThanOrEqual(target_kind, Int32Constant(reference_kind));
+ }
+ 
++TNode<Int32T> CodeStubAssembler::GetNonRabGsabElementsKind(
++    TNode<Int32T> elements_kind) {
++  Label is_rab_gsab(this), end(this);
++  TVARIABLE(Int32T, result);
++  result = elements_kind;
++  Branch(Int32GreaterThanOrEqual(elements_kind,
++                                 Int32Constant(RAB_GSAB_UINT8_ELEMENTS)),
++         &is_rab_gsab, &end);
++  BIND(&is_rab_gsab);
++  result = Int32Sub(elements_kind,
++                    Int32Constant(RAB_GSAB_UINT8_ELEMENTS - UINT8_ELEMENTS));
++  Goto(&end);
++  BIND(&end);
++  return result.value();
++}
++
+ TNode<BoolT> CodeStubAssembler::IsDebugActive() {
+   TNode<Uint8T> is_debug_active = Load<Uint8T>(
+       ExternalConstant(ExternalReference::debug_is_active_address(isolate())));
+diff --git a/src/codegen/code-stub-assembler.h b/src/codegen/code-stub-assembler.h
+index f87c56042e5..123795af961 100644
+--- a/src/codegen/code-stub-assembler.h
++++ b/src/codegen/code-stub-assembler.h
+@@ -2754,6 +2754,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
+                                      ElementsKind higher_reference_kind) {
+     return IsInRange(target_kind, lower_reference_kind, higher_reference_kind);
+   }
++  TNode<Int32T> GetNonRabGsabElementsKind(TNode<Int32T> elements_kind);
+ 
+   // String helpers.
+   // Load a character from a String (might flatten a ConsString).
+@@ -3728,8 +3729,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
+   TNode<BoolT> IsJSArrayBufferViewDetachedOrOutOfBoundsBoolean(
+       TNode<JSArrayBufferView> array_buffer_view);
+ 
+-  void CheckJSTypedArrayIndex(TNode<UintPtrT> index,
+-                              TNode<JSTypedArray> typed_array,
++  void CheckJSTypedArrayIndex(TNode<JSTypedArray> typed_array,
++                              TNode<UintPtrT> index,
+                               Label* detached_or_out_of_bounds);
+ 
+   TNode<IntPtrT> RabGsabElementsKindToElementByteSize(
+diff --git a/src/runtime/runtime-atomics.cc b/src/runtime/runtime-atomics.cc
+index e372c2a1c91..6bc09394fda 100644
+--- a/src/runtime/runtime-atomics.cc
++++ b/src/runtime/runtime-atomics.cc
+@@ -379,9 +379,12 @@ struct Xor {
+   V(Uint32, uint32, UINT32, uint32_t) \
+   V(Int32, int32, INT32, int32_t)
+ 
+-#define THROW_ERROR_RETURN_FAILURE_ON_DETACHED(isolate, sta, method_name)      \
++#define THROW_ERROR_RETURN_FAILURE_ON_DETACHED_OR_OUT_OF_BOUNDS(               \
++    isolate, sta, index, method_name)                                          \
+   do {                                                                         \
+-    if (V8_UNLIKELY(sta->WasDetached())) {                                     \
++    bool out_of_bounds = false;                                                \
++    auto length = sta->GetLengthOrOutOfBounds(out_of_bounds);                  \
++    if (V8_UNLIKELY(sta->WasDetached() || out_of_bounds || index >= length)) { \
+       THROW_NEW_ERROR_RETURN_FAILURE(                                          \
+           isolate, NewTypeError(MessageTemplate::kDetachedOperation,           \
+                                 isolate->factory()->NewStringFromAsciiChecked( \
+@@ -409,7 +412,8 @@ Object GetModifySetValueInBuffer(RuntimeArguments args, Isolate* isolate,
+     ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, bigint,
+                                        BigInt::FromObject(isolate, value_obj));
+ 
+-    THROW_ERROR_RETURN_FAILURE_ON_DETACHED(isolate, sta, method_name);
++    THROW_ERROR_RETURN_FAILURE_ON_DETACHED_OR_OUT_OF_BOUNDS(isolate, sta, index,
++                                                            method_name);
+ 
+     CHECK_LT(index, sta->length());
+     if (sta->type() == kExternalBigInt64Array) {
+@@ -423,7 +427,8 @@ Object GetModifySetValueInBuffer(RuntimeArguments args, Isolate* isolate,
+   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, value,
+                                      Object::ToInteger(isolate, value_obj));
+ 
+-  THROW_ERROR_RETURN_FAILURE_ON_DETACHED(isolate, sta, method_name);
++  THROW_ERROR_RETURN_FAILURE_ON_DETACHED_OR_OUT_OF_BOUNDS(isolate, sta, index,
++                                                          method_name);
+ 
+   CHECK_LT(index, sta->length());
+ 
+@@ -453,7 +458,7 @@ RUNTIME_FUNCTION(Runtime_AtomicsLoad64) {
+ 
+   DCHECK(sta->type() == kExternalBigInt64Array ||
+          sta->type() == kExternalBigUint64Array);
+-  DCHECK(!sta->WasDetached());
++  DCHECK(!sta->IsDetachedOrOutOfBounds());
+   CHECK_LT(index, sta->length());
+   if (sta->type() == kExternalBigInt64Array) {
+     return Load<int64_t>::Do(isolate, source, index);
+@@ -476,11 +481,12 @@ RUNTIME_FUNCTION(Runtime_AtomicsStore64) {
+   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, bigint,
+                                      BigInt::FromObject(isolate, value_obj));
+ 
+-  THROW_ERROR_RETURN_FAILURE_ON_DETACHED(isolate, sta, "Atomics.store");
++  THROW_ERROR_RETURN_FAILURE_ON_DETACHED_OR_OUT_OF_BOUNDS(isolate, sta, index,
++                                                          "Atomics.store");
+ 
+   DCHECK(sta->type() == kExternalBigInt64Array ||
+          sta->type() == kExternalBigUint64Array);
+-  CHECK_LT(index, sta->length());
++  CHECK_LT(index, sta->GetLength());
+   if (sta->type() == kExternalBigInt64Array) {
+     Store<int64_t>::Do(isolate, source, index, bigint);
+     return *bigint;
+@@ -514,8 +520,8 @@ RUNTIME_FUNCTION(Runtime_AtomicsCompareExchange) {
+     ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
+         isolate, new_bigint, BigInt::FromObject(isolate, new_value_obj));
+ 
+-    THROW_ERROR_RETURN_FAILURE_ON_DETACHED(isolate, sta,
+-                                           "Atomics.compareExchange");
++    THROW_ERROR_RETURN_FAILURE_ON_DETACHED_OR_OUT_OF_BOUNDS(
++        isolate, sta, index, "Atomics.compareExchange");
+ 
+     CHECK_LT(index, sta->length());
+     if (sta->type() == kExternalBigInt64Array) {
+@@ -534,8 +540,8 @@ RUNTIME_FUNCTION(Runtime_AtomicsCompareExchange) {
+   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(isolate, new_value,
+                                      Object::ToInteger(isolate, new_value_obj));
+ 
+-  THROW_ERROR_RETURN_FAILURE_ON_DETACHED(isolate, sta,
+-                                         "Atomics.compareExchange");
++  THROW_ERROR_RETURN_FAILURE_ON_DETACHED_OR_OUT_OF_BOUNDS(
++      isolate, sta, index, "Atomics.compareExchange");
+ 
+   switch (sta->type()) {
+ #define TYPED_ARRAY_CASE(Type, typeName, TYPE, ctype)                  \
+diff --git a/test/mjsunit/typedarray-growablesharedarraybuffer-atomics.js b/test/mjsunit/typedarray-growablesharedarraybuffer-atomics.js
+index c8144e1a0cf..8b3856ffa0b 100644
+--- a/test/mjsunit/typedarray-growablesharedarraybuffer-atomics.js
++++ b/test/mjsunit/typedarray-growablesharedarraybuffer-atomics.js
+@@ -1,4 +1,4 @@
+-// Copyright 2021 the V8 project authors. All rights reserved.
++// Copyright 2022 the V8 project authors. All rights reserved.
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
+@@ -141,3 +141,28 @@ d8.file.execute('test/mjsunit/typedarray-helpers.js');
+                      TypeError);
+       });
+ })();
++
++(function TestAtomics() {
++  for (let ctor of intCtors) {
++    const gsab = CreateGrowableSharedArrayBuffer(4 * ctor.BYTES_PER_ELEMENT,
++                                                 8 * ctor.BYTES_PER_ELEMENT);
++    const lengthTracking = new ctor(gsab, 0);
++    TestAtomicsOperations(lengthTracking, 0);
++
++    AssertAtomicsOperationsThrow(lengthTracking, 4, RangeError);
++    gsab.grow(6 * ctor.BYTES_PER_ELEMENT);
++    TestAtomicsOperations(lengthTracking, 4);
++  }
++})();
++
++(function AtomicsFailWithNonIntegerArray() {
++  const gsab = CreateGrowableSharedArrayBuffer(400, 800);
++
++  const ui8ca = new Uint8ClampedArray(gsab);
++  const f32a = new Float32Array(gsab);
++  const f64a = new Float64Array(gsab);
++  const mf32a = new MyFloat32Array(gsab);
++
++  [ui8ca, f32a, f64a, mf32a].forEach((ta) => {
++      AssertAtomicsOperationsThrow(ta, 0, TypeError); });
++})();
+diff --git a/test/mjsunit/typedarray-helpers.js b/test/mjsunit/typedarray-helpers.js
+index 43fb88634ba..08269d64336 100644
+--- a/test/mjsunit/typedarray-helpers.js
++++ b/test/mjsunit/typedarray-helpers.js
+@@ -11,6 +11,7 @@ const ctors = [
+   Int8Array,
+   Uint16Array,
+   Int16Array,
++  Uint32Array,
+   Int32Array,
+   Float32Array,
+   Float64Array,
+@@ -28,6 +29,19 @@ const floatCtors = [
+   MyFloat32Array
+ ];
+ 
++const intCtors = [
++  Uint8Array,
++  Int8Array,
++  Uint16Array,
++  Int16Array,
++  Uint32Array,
++  Int32Array,
++  BigUint64Array,
++  BigInt64Array,
++  MyUint8Array,
++  MyBigInt64Array,
++];
++
+ // Each element of the following array is [getter, setter, size, isBigInt].
+ const dataViewAccessorsAndSizes = [[DataView.prototype.getUint8,
+                                     DataView.prototype.setUint8, 1, false],
+@@ -252,3 +266,45 @@ function ObjectDefinePropertiesHelper(ta, index, value) {
+   }
+   Object.defineProperties(ta, values);
+ }
++
++function TestAtomicsOperations(ta, index) {
++  const one = IsBigIntTypedArray(ta) ? 1n : 1;
++  const two = IsBigIntTypedArray(ta) ? 2n : 2;
++  const three = IsBigIntTypedArray(ta) ? 3n : 3;
++
++  Atomics.store(ta, index, one);
++  assertEquals(one, Atomics.load(ta, index));
++  assertEquals(one, Atomics.exchange(ta, index, two));
++  assertEquals(two, Atomics.load(ta, index));
++  assertEquals(two, Atomics.compareExchange(ta, index, two, three));
++  assertEquals(three, Atomics.load(ta, index));
++
++  assertEquals(three, Atomics.sub(ta, index, two));  // 3 - 2 = 1
++  assertEquals(one, Atomics.load(ta, index));
++
++  assertEquals(one, Atomics.add(ta, index, one));  // 1 + 1 = 2
++  assertEquals(two, Atomics.load(ta, index));
++
++  assertEquals(two, Atomics.or(ta, index, one));  // 2 | 1 = 3
++  assertEquals(three, Atomics.load(ta, index));
++
++  assertEquals(three, Atomics.xor(ta, index, one));  // 3 ^ 1 = 2
++  assertEquals(two, Atomics.load(ta, index));
++
++  assertEquals(two, Atomics.and(ta, index, three));  // 2 & 3 = 2
++  assertEquals(two, Atomics.load(ta, index));
++}
++
++function AssertAtomicsOperationsThrow(ta, index, error) {
++  const one = IsBigIntTypedArray(ta) ? 1n : 1;
++  assertThrows(() => { Atomics.store(ta, index, one); }, error);
++  assertThrows(() => { Atomics.load(ta, index); }, error);
++  assertThrows(() => { Atomics.exchange(ta, index, one); }, error);
++  assertThrows(() => { Atomics.compareExchange(ta, index, one, one); },
++               error);
++  assertThrows(() => { Atomics.add(ta, index, one); }, error);
++  assertThrows(() => { Atomics.sub(ta, index, one); }, error);
++  assertThrows(() => { Atomics.and(ta, index, one); }, error);
++  assertThrows(() => { Atomics.or(ta, index, one); }, error);
++  assertThrows(() => { Atomics.xor(ta, index, one); }, error);
++}
+diff --git a/test/mjsunit/typedarray-resizablearraybuffer-atomics.js b/test/mjsunit/typedarray-resizablearraybuffer-atomics.js
+new file mode 100644
+index 00000000000..a78f22b04a3
+--- /dev/null
++++ b/test/mjsunit/typedarray-resizablearraybuffer-atomics.js
+@@ -0,0 +1,370 @@
++// Copyright 2022 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Flags: --harmony-rab-gsab --allow-natives-syntax
++
++"use strict";
++
++d8.file.execute('test/mjsunit/typedarray-helpers.js');
++
++const notSharedErrorMessage =
++    'TypeError: [object Object] is not a shared typed array.';
++
++(function AtomicsWait() {
++  // Test that trying to wait on a non-shared ArrayBuffer fails, even
++  // when done on a worker thread.
++  const workerScript = function() {
++    onmessage = function(msg) {
++      const rab = new ArrayBuffer(100, {maxByteLength: 200});
++      const i32a = new Int32Array(rab, 0);
++      try {
++        Atomics.wait(i32a, 0, 0, 5000);
++        postMessage('Didn\'t get an error');
++      } catch (e) {
++        postMessage('Got error: ' + e);
++      }
++    };
++  }
++
++  const worker = new Worker(workerScript, {type: 'function'});
++  worker.postMessage('start');
++  assertEquals('Got error: ' + notSharedErrorMessage, worker.getMessage());
++  worker.terminate();
++})();
++
++(function AtomicsWaitAsync() {
++  // Test that trying to waitAsync on a non-shared ArrayBuffer fails.
++  for (let ctor of [Int32Array, BigInt64Array, MyBigInt64Array]) {
++    const rab = CreateResizableArrayBuffer(4 * ctor.BYTES_PER_ELEMENT,
++                                           8 * ctor.BYTES_PER_ELEMENT);
++    const lengthTracking = new ctor(rab, 0);
++
++    const initialValue = false;  // Can be converted to both Number and BigInt.
++    assertThrows(() => { Atomics.waitAsync(lengthTracking, 0, initialValue); },
++                 TypeError);
++  }
++})();
++
++(function AtomicsWaitFailWithWrongArrayTypes() {
++  const rab = CreateResizableArrayBuffer(400, 800);
++
++  const i8a = new Int8Array(rab);
++  const i16a = new Int16Array(rab);
++  const ui8a = new Uint8Array(rab);
++  const ui8ca = new Uint8ClampedArray(rab);
++  const ui16a = new Uint16Array(rab);
++  const ui32a = new Uint32Array(rab);
++  const f32a = new Float32Array(rab);
++  const f64a = new Float64Array(rab);
++  const myui8 = new MyUint8Array(rab);
++  const bui64 = new BigUint64Array(rab);
++
++  [i8a, i16a, ui8a, ui8ca, ui16a, ui32a, f32a, f64a, myui8, bui64].forEach(
++      function(ta) {
++        // Can be converted both to Number and BigInt.
++        const exampleValue = false;
++        assertThrows(() => { Atomics.wait(ta, 0, exampleValue); },
++                     TypeError);
++        assertThrows(() => { Atomics.notify(ta, 0, 1); },
++                     TypeError);
++        assertThrows(() => { Atomics.waitAsync(ta, 0, exampleValue); },
++                     TypeError);
++      });
++})();
++
++(function TestAtomics() {
++  for (let ctor of intCtors) {
++    const rab = CreateResizableArrayBuffer(4 * ctor.BYTES_PER_ELEMENT,
++                                           8 * ctor.BYTES_PER_ELEMENT);
++    const fixedLength = new ctor(rab, 0, 4);
++    const fixedLengthWithOffset = new ctor(rab, 2 * ctor.BYTES_PER_ELEMENT, 2);
++    const lengthTracking = new ctor(rab);
++    const lengthTrackingWithOffset = new ctor(rab, 2 * ctor.BYTES_PER_ELEMENT);
++
++    TestAtomicsOperations(fixedLength, 0);
++    TestAtomicsOperations(fixedLengthWithOffset, 0);
++    TestAtomicsOperations(lengthTracking, 0);
++    TestAtomicsOperations(lengthTrackingWithOffset, 0);
++
++    AssertAtomicsOperationsThrow(fixedLength, 4, RangeError);
++    AssertAtomicsOperationsThrow(fixedLengthWithOffset, 2, RangeError);
++    AssertAtomicsOperationsThrow(lengthTracking, 4, RangeError);
++    AssertAtomicsOperationsThrow(lengthTrackingWithOffset, 2, RangeError);
++
++    // Shrink so that fixed length TAs go out of bounds.
++    rab.resize(3 * ctor.BYTES_PER_ELEMENT);
++
++    AssertAtomicsOperationsThrow(fixedLength, 0, RangeError);
++    AssertAtomicsOperationsThrow(fixedLengthWithOffset, 0, RangeError);
++    TestAtomicsOperations(lengthTracking, 0);
++    TestAtomicsOperations(lengthTrackingWithOffset, 0);
++
++    // Shrink so that the TAs with offset go out of bounds.
++    rab.resize(1 * ctor.BYTES_PER_ELEMENT);
++
++    AssertAtomicsOperationsThrow(fixedLength, 0, RangeError);
++    AssertAtomicsOperationsThrow(fixedLengthWithOffset, 0, RangeError);
++    AssertAtomicsOperationsThrow(lengthTrackingWithOffset, 0, RangeError);
++    TestAtomicsOperations(lengthTracking, 0);
++
++    // Shrink to zero.
++    rab.resize(0);
++
++    AssertAtomicsOperationsThrow(fixedLength, 0, RangeError);
++    AssertAtomicsOperationsThrow(fixedLengthWithOffset, 0, RangeError);
++    AssertAtomicsOperationsThrow(lengthTracking, 0, RangeError);
++    AssertAtomicsOperationsThrow(lengthTrackingWithOffset, 0, RangeError);
++
++    // Grow so that all TAs are back in-bounds.
++    rab.resize(6 * ctor.BYTES_PER_ELEMENT);
++
++    TestAtomicsOperations(fixedLength, 0);
++    TestAtomicsOperations(fixedLengthWithOffset, 0);
++    TestAtomicsOperations(lengthTracking, 0);
++    TestAtomicsOperations(lengthTrackingWithOffset, 0);
++
++    AssertAtomicsOperationsThrow(fixedLength, 4, RangeError);
++    AssertAtomicsOperationsThrow(fixedLengthWithOffset, 2, RangeError);
++
++    TestAtomicsOperations(lengthTracking, 5);
++    TestAtomicsOperations(lengthTrackingWithOffset, 3);
++  }
++})();
++
++(function AtomicsFailWithNonIntegerArray() {
++  const rab = CreateResizableArrayBuffer(400, 800);
++
++  const ui8ca = new Uint8ClampedArray(rab);
++  const f32a = new Float32Array(rab);
++  const f64a = new Float64Array(rab);
++  const mf32a = new MyFloat32Array(rab);
++
++  [ui8ca, f32a, f64a, mf32a].forEach((ta) => {
++      AssertAtomicsOperationsThrow(ta, 0, TypeError); });
++})();
++
++const oneParameterFuncs = [(ta, index) => { Atomics.load(ta, index); }];
++
++const twoParameterFuncs = [
++    (ta, index, value) => { Atomics.store(ta, index, value); },
++    (ta, index, value) => { Atomics.add(ta, index, value); },
++    (ta, index, value) => { Atomics.sub(ta, index, value); },
++    (ta, index, value) => { Atomics.and(ta, index, value); },
++    (ta, index, value) => { Atomics.or(ta, index, value); },
++    (ta, index, value) => { Atomics.xor(ta, index, value); },
++    (ta, index, value) => { Atomics.exchange(ta, index, value); },
++  ];
++
++const threeParameterFuncs = [
++    (ta, index, value1, value2) => {
++        Atomics.compareExchange(ta, index, value1, value2); }
++  ];
++
++(function TestAtomicsParameterConversionShrinks() {
++  let rab;
++  let resizeTo;
++  const evilIndex = { valueOf: () => { rab.resize(resizeTo); return 2; }};
++  // false can be converted both to Number and BigInt.
++  const evilValue = { valueOf: () => { rab.resize(resizeTo); return false; }};
++
++  for (let func of oneParameterFuncs) {
++    // Fixed-length TA + first parameter resizes.
++    for (let ctor of intCtors) {
++      rab = CreateResizableArrayBuffer(4 * ctor.BYTES_PER_ELEMENT,
++                                       8 * ctor.BYTES_PER_ELEMENT);
++      resizeTo = 2 * ctor.BYTES_PER_ELEMENT;
++      const fixedLength = new ctor(rab, 0, 4);
++
++      assertThrows(() => { func(fixedLength, evilIndex); }, TypeError);
++    }
++    // Length tracking TA + first parameter resizes.
++    for (let ctor of intCtors) {
++        rab = CreateResizableArrayBuffer(4 * ctor.BYTES_PER_ELEMENT,
++                                         8 * ctor.BYTES_PER_ELEMENT);
++        resizeTo = 2 * ctor.BYTES_PER_ELEMENT;
++        const lengthTracking = new ctor(rab);
++
++        assertThrows(() => { func(lengthTracking, evilIndex); }, TypeError);
++    }
++  }
++
++  for (let func of twoParameterFuncs) {
++    // Fixed-length TA + first parameter resizes.
++    for (let ctor of intCtors) {
++      rab = CreateResizableArrayBuffer(4 * ctor.BYTES_PER_ELEMENT,
++                                       8 * ctor.BYTES_PER_ELEMENT);
++      resizeTo = 2 * ctor.BYTES_PER_ELEMENT;
++      const fixedLength = new ctor(rab, 0, 4);
++      const one = IsBigIntTypedArray(fixedLength) ? 1n : 1;
++
++      assertThrows(() => { func(fixedLength, evilIndex, one); }, TypeError);
++    }
++    // Fixed-length TA + second parameter resizes.
++    for (let ctor of intCtors) {
++      rab = CreateResizableArrayBuffer(4 * ctor.BYTES_PER_ELEMENT,
++                                       8 * ctor.BYTES_PER_ELEMENT);
++      resizeTo = 2 * ctor.BYTES_PER_ELEMENT;
++      const fixedLength = new ctor(rab, 0, 4);
++
++      assertThrows(() => { func(fixedLength, 0, evilValue); }, TypeError);
++    }
++    // Length tracking TA + first parameter resizes.
++    for (let ctor of intCtors) {
++      rab = CreateResizableArrayBuffer(4 * ctor.BYTES_PER_ELEMENT,
++                                       8 * ctor.BYTES_PER_ELEMENT);
++      resizeTo = 2 * ctor.BYTES_PER_ELEMENT;
++      const lengthTracking = new ctor(rab);
++      const one = IsBigIntTypedArray(lengthTracking) ? 1n : 1;
++
++      assertThrows(() => { func(lengthTracking, evilIndex, one); }, TypeError);
++    }
++    // Length tracking TA + second parameter resizes.
++    for (let ctor of intCtors) {
++      rab = CreateResizableArrayBuffer(4 * ctor.BYTES_PER_ELEMENT,
++                                       8 * ctor.BYTES_PER_ELEMENT);
++      resizeTo = 2 * ctor.BYTES_PER_ELEMENT;
++      const lengthTracking = new ctor(rab);
++
++      assertThrows(() => { func(lengthTracking, 2, evilValue); }, TypeError);
++    }
++  }
++
++  for (let func of threeParameterFuncs) {
++    // Fixed-length TA + first parameter resizes.
++    for (let ctor of intCtors) {
++      rab = CreateResizableArrayBuffer(4 * ctor.BYTES_PER_ELEMENT,
++                                       8 * ctor.BYTES_PER_ELEMENT);
++      resizeTo = 2 * ctor.BYTES_PER_ELEMENT;
++      const fixedLength = new ctor(rab, 0, 4);
++      const one = IsBigIntTypedArray(fixedLength) ? 1n : 1;
++
++      assertThrows(() => { func(fixedLength, evilIndex, one, one); },
++                   TypeError);
++    }
++    // Fixed-length TA + second parameter resizes.
++    for (let ctor of intCtors) {
++      rab = CreateResizableArrayBuffer(4 * ctor.BYTES_PER_ELEMENT,
++                                       8 * ctor.BYTES_PER_ELEMENT);
++      resizeTo = 2 * ctor.BYTES_PER_ELEMENT;
++      const fixedLength = new ctor(rab, 0, 4);
++      const one = IsBigIntTypedArray(fixedLength) ? 1n : 1;
++
++      assertThrows(() => { func(fixedLength, 0, evilValue, one); },
++                   TypeError);
++    }
++    // Fixed-length TA + third parameter resizes.
++    for (let ctor of intCtors) {
++      rab = CreateResizableArrayBuffer(4 * ctor.BYTES_PER_ELEMENT,
++                                       8 * ctor.BYTES_PER_ELEMENT);
++      resizeTo = 2 * ctor.BYTES_PER_ELEMENT;
++      const fixedLength = new ctor(rab, 0, 4);
++      const one = IsBigIntTypedArray(fixedLength) ? 1n : 1;
++
++      assertThrows(() => { func(fixedLength, 0, one, evilValue); },
++                   TypeError);
++    }
++    // Length tracking TA + first parameter resizes.
++    for (let ctor of intCtors) {
++      rab = CreateResizableArrayBuffer(4 * ctor.BYTES_PER_ELEMENT,
++                                       8 * ctor.BYTES_PER_ELEMENT);
++      resizeTo = 2 * ctor.BYTES_PER_ELEMENT;
++      const lengthTracking = new ctor(rab);
++      const one = IsBigIntTypedArray(lengthTracking) ? 1n : 1;
++
++      assertThrows(() => { func(lengthTracking, evilIndex, one, one); },
++                   TypeError);
++    }
++    // Length tracking TA + second parameter resizes.
++    for (let ctor of intCtors) {
++      rab = CreateResizableArrayBuffer(4 * ctor.BYTES_PER_ELEMENT,
++                                       8 * ctor.BYTES_PER_ELEMENT);
++      resizeTo = 2 * ctor.BYTES_PER_ELEMENT;
++      const lengthTracking = new ctor(rab);
++      const one = IsBigIntTypedArray(lengthTracking) ? 1n : 1;
++
++      assertThrows(() => { func(lengthTracking, 2, evilValue, one); },
++                   TypeError);
++    }
++    // Length tracking TA + third parameter resizes.
++    for (let ctor of intCtors) {
++      rab = CreateResizableArrayBuffer(4 * ctor.BYTES_PER_ELEMENT,
++                                       8 * ctor.BYTES_PER_ELEMENT);
++      resizeTo = 2 * ctor.BYTES_PER_ELEMENT;
++      const lengthTracking = new ctor(rab);
++      const one = IsBigIntTypedArray(lengthTracking) ? 1n : 1;
++
++      assertThrows(() => { func(lengthTracking, 2, one, evilValue); },
++                   TypeError);
++    }
++  }
++})();
++
++(function TestAtomicsParameterConversionDetaches() {
++  let rab;
++  const evilIndex = { valueOf: () => { %ArrayBufferDetach(rab); return 0; }};
++  // false can be converted both to Number and BigInt.
++  const evilValue = {
++      valueOf: () => { %ArrayBufferDetach(rab); return false; }};
++
++  for (let func of oneParameterFuncs) {
++    for (let ctor of intCtors) {
++      rab = CreateResizableArrayBuffer(4 * ctor.BYTES_PER_ELEMENT,
++                                       8 * ctor.BYTES_PER_ELEMENT);
++      const fixedLength = new ctor(rab, 0, 4);
++
++      assertThrows(() => { func(fixedLength, evilIndex); }, TypeError);
++    }
++  }
++
++  for (let func of twoParameterFuncs) {
++    for (let ctor of intCtors) {
++      rab = CreateResizableArrayBuffer(4 * ctor.BYTES_PER_ELEMENT,
++                                       8 * ctor.BYTES_PER_ELEMENT);
++      const fixedLength = new ctor(rab, 0, 4);
++      const one = IsBigIntTypedArray(fixedLength) ? 1n : 1;
++
++      assertThrows(() => { func(fixedLength, evilIndex, one); }, TypeError);
++    }
++    for (let ctor of intCtors) {
++      rab = CreateResizableArrayBuffer(4 * ctor.BYTES_PER_ELEMENT,
++                                       8 * ctor.BYTES_PER_ELEMENT);
++      const fixedLength = new ctor(rab, 0, 4);
++
++      assertThrows(() => { func(fixedLength, 0, evilValue); }, TypeError);
++    }
++  }
++
++  for (let func of threeParameterFuncs) {
++    for (let ctor of intCtors) {
++      rab = CreateResizableArrayBuffer(4 * ctor.BYTES_PER_ELEMENT,
++                                       8 * ctor.BYTES_PER_ELEMENT);
++      const fixedLength = new ctor(rab, 0, 4);
++      const one = IsBigIntTypedArray(fixedLength) ? 1n : 1;
++
++      assertThrows(
++          () => { func(fixedLength, evilIndex, one, one); },
++          TypeError);
++    }
++    for (let ctor of intCtors) {
++      rab = CreateResizableArrayBuffer(4 * ctor.BYTES_PER_ELEMENT,
++                                       8 * ctor.BYTES_PER_ELEMENT);
++      const fixedLength = new ctor(rab, 0, 4);
++      const one = IsBigIntTypedArray(fixedLength) ? 1n : 1;
++
++      assertThrows(
++          () => { func(fixedLength, 0, evilValue, one); },
++          TypeError);
++    }
++    for (let ctor of intCtors) {
++      rab = CreateResizableArrayBuffer(4 * ctor.BYTES_PER_ELEMENT,
++                                       8 * ctor.BYTES_PER_ELEMENT);
++      const fixedLength = new ctor(rab, 0, 4);
++      const one = IsBigIntTypedArray(fixedLength) ? 1n : 1;
++
++      assertThrows(
++          () => { Atomics.compareExchange(fixedLength, 0, one, evilValue); },
++          TypeError);
++    }
++  }
++})();
+-- 
+2.35.1
+

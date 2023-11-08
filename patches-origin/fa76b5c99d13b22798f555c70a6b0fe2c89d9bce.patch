@@ -1,0 +1,801 @@
+From fa76b5c99d13b22798f555c70a6b0fe2c89d9bce Mon Sep 17 00:00:00 2001
+From: Yujie Wang <hex6770@gmail.com>
+Date: Thu, 11 Nov 2021 06:29:25 +0000
+Subject: [PATCH] [riscv64] Add packing and unpacking instructions for
+ WebAssembly SIMD
+
+- Add Wasm SIMD packing instruction:
+  `LiftoffAssembler::emit_i8x16_{s,u}convert_i16x8`
+
+- Add Wasm SIMD unpacking instructions:
+  `LiftoffAssembler::emit_i64x2_{s,u}convert_i32x4_{low,high}`
+  `LiftoffAssembler::emit_i32x4_{s,u}convert_i16x8_{low,high}`
+  `LiftoffAssembler::emit_i64x2_{s,u}convert_i32x4_{low,high}`
+
+- Add RVV instrucions: `vzext_vf{2,4,8}` and `vsext_vf{2,4,8}`
+
+- Fixed simulator for `vslidedown_vi`
+
+Bug: v8:11976
+Change-Id: Idd383bc566589ce183f4fcef2201d2ccfe03519f
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3273812
+Reviewed-by: ji qiu <qiuji@iscas.ac.cn>
+Reviewed-by: Yahan Lu <yahan@iscas.ac.cn>
+Commit-Queue: ji qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#77865}
+---
+ src/codegen/riscv64/assembler-riscv64.cc      |  15 +++
+ src/codegen/riscv64/assembler-riscv64.h       |  14 +++
+ src/codegen/riscv64/constants-riscv64.h       |   3 +
+ .../backend/riscv64/code-generator-riscv64.cc | 119 ++++++++++++++++++
+ src/diagnostics/riscv64/disasm-riscv64.cc     |  17 +++
+ src/execution/riscv64/simulator-riscv64.cc    | 104 ++++++++++++++-
+ src/execution/riscv64/simulator-riscv64.h     |  11 ++
+ .../riscv64/liftoff-assembler-riscv64.h       |  98 +++++++++------
+ test/cctest/test-assembler-riscv64.cc         | 104 ++++++++++++++-
+ test/cctest/test-disasm-riscv64.cc            |   8 ++
+ 10 files changed, 453 insertions(+), 40 deletions(-)
+
+diff --git a/src/codegen/riscv64/assembler-riscv64.cc b/src/codegen/riscv64/assembler-riscv64.cc
+index dce8f468ceb..46b1de69788 100644
+--- a/src/codegen/riscv64/assembler-riscv64.cc
++++ b/src/codegen/riscv64/assembler-riscv64.cc
+@@ -2584,6 +2584,12 @@ void Assembler::vrgather_vx(VRegister vd, VRegister vs2, Register rs1,
+     GenInstrV(funct6, OP_FVF, vd, fs1, vs2, mask);                        \
+   }
+ 
++// vector integer extension
++#define DEFINE_OPMVV_VIE(name, vs1)                                  \
++  void Assembler::name(VRegister vd, VRegister vs2, MaskType mask) { \
++    GenInstrV(VXUNARY0_FUNCT6, OP_MVV, vd, vs1, vs2, mask);          \
++  }
++
+ void Assembler::vfmv_vf(VRegister vd, FPURegister fs1, MaskType mask) {
+   GenInstrV(VMV_FUNCT6, OP_FVF, vd, fs1, v0, mask);
+ }
+@@ -2721,6 +2727,14 @@ DEFINE_OPIVV(vnclipu, VNCLIPU_FUNCT6)
+ DEFINE_OPIVX(vnclipu, VNCLIPU_FUNCT6)
+ DEFINE_OPIVI(vnclipu, VNCLIPU_FUNCT6)
+ 
++// Vector Integer Extension
++DEFINE_OPMVV_VIE(vzext_vf8, 0b00010)
++DEFINE_OPMVV_VIE(vsext_vf8, 0b00011)
++DEFINE_OPMVV_VIE(vzext_vf4, 0b00100)
++DEFINE_OPMVV_VIE(vsext_vf4, 0b00101)
++DEFINE_OPMVV_VIE(vzext_vf2, 0b00110)
++DEFINE_OPMVV_VIE(vsext_vf2, 0b00111)
++
+ #undef DEFINE_OPIVI
+ #undef DEFINE_OPIVV
+ #undef DEFINE_OPIVX
+@@ -2728,6 +2742,7 @@ DEFINE_OPIVI(vnclipu, VNCLIPU_FUNCT6)
+ #undef DEFINE_OPFVF
+ #undef DEFINE_OPFVV_FMA
+ #undef DEFINE_OPFVF_FMA
++#undef DEFINE_OPMVV_VIE
+ 
+ void Assembler::vsetvli(Register rd, Register rs1, VSew vsew, Vlmul vlmul,
+                         TailAgnosticType tail, MaskAgnosticType mask) {
+diff --git a/src/codegen/riscv64/assembler-riscv64.h b/src/codegen/riscv64/assembler-riscv64.h
+index 42bb92fd879..fbbe5b76ae0 100644
+--- a/src/codegen/riscv64/assembler-riscv64.h
++++ b/src/codegen/riscv64/assembler-riscv64.h
+@@ -785,6 +785,9 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   void name##_vf(VRegister vd, FPURegister fs1, VRegister vs2, \
+                  MaskType mask = NoMask);
+ 
++#define DEFINE_OPMVV_VIE(name) \
++  void name(VRegister vd, VRegister vs2, MaskType mask = NoMask);
++
+   DEFINE_OPIVV(vadd, VADD_FUNCT6)
+   DEFINE_OPIVX(vadd, VADD_FUNCT6)
+   DEFINE_OPIVI(vadd, VADD_FUNCT6)
+@@ -918,6 +921,14 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+   DEFINE_OPIVX(vnclipu, VNCLIPU_FUNCT6)
+   DEFINE_OPIVI(vnclipu, VNCLIPU_FUNCT6)
+ 
++  // Vector Integer Extension
++  DEFINE_OPMVV_VIE(vzext_vf8)
++  DEFINE_OPMVV_VIE(vsext_vf8)
++  DEFINE_OPMVV_VIE(vzext_vf4)
++  DEFINE_OPMVV_VIE(vsext_vf4)
++  DEFINE_OPMVV_VIE(vzext_vf2)
++  DEFINE_OPMVV_VIE(vsext_vf2)
++
+ #undef DEFINE_OPIVI
+ #undef DEFINE_OPIVV
+ #undef DEFINE_OPIVX
+@@ -927,6 +938,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+ #undef DEFINE_OPFVF
+ #undef DEFINE_OPFVV_FMA
+ #undef DEFINE_OPFVF_FMA
++#undef DEFINE_OPMVV_VIE
+ 
+ #define DEFINE_VFUNARY(name, funct6, vs1)                          \
+   void name(VRegister vd, VRegister vs2, MaskType mask = NoMask) { \
+@@ -1533,6 +1545,8 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+                  VRegister vs2, MaskType mask = NoMask);
+   void GenInstrV(uint8_t funct6, Opcode opcode, VRegister vd, int8_t vs1,
+                  VRegister vs2, MaskType mask = NoMask);
++  void GenInstrV(uint8_t funct6, Opcode opcode, VRegister vd, VRegister vs2,
++                 MaskType mask = NoMask);
+   // OPMVV OPFVV
+   void GenInstrV(uint8_t funct6, Opcode opcode, Register rd, VRegister vs1,
+                  VRegister vs2, MaskType mask = NoMask);
+diff --git a/src/codegen/riscv64/constants-riscv64.h b/src/codegen/riscv64/constants-riscv64.h
+index 173a5d04576..c4741820ecb 100644
+--- a/src/codegen/riscv64/constants-riscv64.h
++++ b/src/codegen/riscv64/constants-riscv64.h
+@@ -850,6 +850,9 @@ enum Opcode : uint32_t {
+   RO_V_VWXUNARY0 = OP_MVV | (VWXUNARY0_FUNCT6 << kRvvFunct6Shift),
+   RO_V_VRXUNARY0 = OP_MVX | (VRXUNARY0_FUNCT6 << kRvvFunct6Shift),
+ 
++  VXUNARY0_FUNCT6 = 0b010010,
++  RO_V_VXUNARY0 = OP_MVV | (VXUNARY0_FUNCT6 << kRvvFunct6Shift),
++
+   VWFUNARY0_FUNCT6 = 0b010000,
+   RO_V_VFMV_FS = OP_FVV | (VWFUNARY0_FUNCT6 << kRvvFunct6Shift),
+ 
+diff --git a/src/compiler/backend/riscv64/code-generator-riscv64.cc b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+index 475ecf3f71a..6b1d43cb903 100644
+--- a/src/compiler/backend/riscv64/code-generator-riscv64.cc
++++ b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+@@ -2570,6 +2570,125 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       __ vmv_vv(i.OutputSimd128Register(), kSimd128ScratchReg);
+       break;
+     }
++    case kRiscvI64x2SConvertI32x4Low: {
++      __ VU.set(kScratchReg, E64, m1);
++      __ vmv_vv(kSimd128ScratchReg, i.InputSimd128Register(0));
++      __ vsext_vf2(i.OutputSimd128Register(), kSimd128ScratchReg);
++
++      break;
++    }
++    case kRiscvI64x2SConvertI32x4High: {
++      __ VU.set(kScratchReg, E32, m1);
++      __ vslidedown_vi(kSimd128ScratchReg, i.InputSimd128Register(0), 2);
++      __ VU.set(kScratchReg, E64, m1);
++      __ vsext_vf2(i.OutputSimd128Register(), kSimd128ScratchReg);
++      break;
++    }
++    case kRiscvI64x2UConvertI32x4Low: {
++      __ VU.set(kScratchReg, E64, m1);
++      __ vmv_vv(kSimd128ScratchReg, i.InputSimd128Register(0));
++      __ vzext_vf2(i.OutputSimd128Register(), kSimd128ScratchReg);
++      break;
++    }
++    case kRiscvI64x2UConvertI32x4High: {
++      __ VU.set(kScratchReg, E32, m1);
++      __ vslidedown_vi(kSimd128ScratchReg, i.InputSimd128Register(0), 2);
++      __ VU.set(kScratchReg, E64, m1);
++      __ vzext_vf2(i.OutputSimd128Register(), kSimd128ScratchReg);
++      break;
++    }
++    case kRiscvI32x4SConvertI16x8Low: {
++      __ VU.set(kScratchReg, E32, m1);
++      __ vmv_vv(kSimd128ScratchReg, i.InputSimd128Register(0));
++      __ vsext_vf2(i.OutputSimd128Register(), kSimd128ScratchReg);
++      break;
++    }
++    case kRiscvI32x4SConvertI16x8High: {
++      __ VU.set(kScratchReg, E16, m1);
++      __ vslidedown_vi(kSimd128ScratchReg, i.InputSimd128Register(0), 4);
++      __ VU.set(kScratchReg, E32, m1);
++      __ vsext_vf2(i.OutputSimd128Register(), kSimd128ScratchReg);
++      break;
++    }
++    case kRiscvI32x4UConvertI16x8Low: {
++      __ VU.set(kScratchReg, E32, m1);
++      __ vmv_vv(kSimd128ScratchReg, i.InputSimd128Register(0));
++      __ vzext_vf2(i.OutputSimd128Register(), kSimd128ScratchReg);
++      break;
++    }
++    case kRiscvI32x4UConvertI16x8High: {
++      __ VU.set(kScratchReg, E16, m1);
++      __ vslidedown_vi(kSimd128ScratchReg, i.InputSimd128Register(0), 4);
++      __ VU.set(kScratchReg, E32, m1);
++      __ vzext_vf2(i.OutputSimd128Register(), kSimd128ScratchReg);
++      break;
++    }
++    case kRiscvI16x8SConvertI8x16Low: {
++      __ VU.set(kScratchReg, E16, m1);
++      __ vmv_vv(kSimd128ScratchReg, i.InputSimd128Register(0));
++      __ vsext_vf2(i.OutputSimd128Register(), kSimd128ScratchReg);
++      break;
++    }
++    case kRiscvI16x8SConvertI8x16High: {
++      __ VU.set(kScratchReg, E8, m1);
++      __ vslidedown_vi(kSimd128ScratchReg, i.InputSimd128Register(0), 8);
++      __ VU.set(kScratchReg, E16, m1);
++      __ vsext_vf2(i.OutputSimd128Register(), kSimd128ScratchReg);
++      break;
++    }
++    case kRiscvI16x8UConvertI8x16Low: {
++      __ VU.set(kScratchReg, E16, m1);
++      __ vmv_vv(kSimd128ScratchReg, i.InputSimd128Register(0));
++      __ vzext_vf2(i.OutputSimd128Register(), kSimd128ScratchReg);
++      break;
++    }
++    case kRiscvI16x8UConvertI8x16High: {
++      __ VU.set(kScratchReg, E8, m1);
++      __ vslidedown_vi(kSimd128ScratchReg, i.InputSimd128Register(0), 8);
++      __ VU.set(kScratchReg, E16, m1);
++      __ vzext_vf2(i.OutputSimd128Register(), kSimd128ScratchReg);
++      break;
++    }
++    case kRiscvI8x16SConvertI16x8: {
++      __ VU.set(kScratchReg, E16, m1);
++      __ vmv_vv(kSimd128ScratchReg2, i.InputSimd128Register(0));
++      __ vmv_vv(kSimd128ScratchReg, i.InputSimd128Register(1));
++      __ VU.set(kScratchReg, E8, m1);
++      __ VU.set(RoundingMode::RNE);
++      __ vnclip_vi(i.OutputSimd128Register(), kSimd128ScratchReg2, 0);
++      break;
++    }
++    case kRiscvI8x16UConvertI16x8: {
++      __ VU.set(kScratchReg, E16, m1);
++      __ vmv_vv(kSimd128ScratchReg2, i.InputSimd128Register(0));
++      __ vmv_vv(kSimd128ScratchReg, i.InputSimd128Register(1));
++      __ VU.set(kScratchReg, E16, m2);
++      __ vmax_vx(kSimd128ScratchReg2, kSimd128ScratchReg2, zero_reg);
++      __ VU.set(kScratchReg, E8, m1);
++      __ VU.set(RoundingMode::RNE);
++      __ vnclipu_vi(i.OutputSimd128Register(), kSimd128ScratchReg2, 0);
++      break;
++    }
++    case kRiscvI16x8SConvertI32x4: {
++      __ VU.set(kScratchReg, E32, m1);
++      __ vmv_vv(kSimd128ScratchReg2, i.InputSimd128Register(0));
++      __ vmv_vv(kSimd128ScratchReg, i.InputSimd128Register(1));
++      __ VU.set(kScratchReg, E16, m1);
++      __ VU.set(RoundingMode::RNE);
++      __ vnclip_vi(i.OutputSimd128Register(), kSimd128ScratchReg2, 0);
++      break;
++    }
++    case kRiscvI16x8UConvertI32x4: {
++      __ VU.set(kScratchReg, E32, m1);
++      __ vmv_vv(kSimd128ScratchReg2, i.InputSimd128Register(0));
++      __ vmv_vv(kSimd128ScratchReg, i.InputSimd128Register(1));
++      __ VU.set(kScratchReg, E32, m2);
++      __ vmax_vx(kSimd128ScratchReg2, kSimd128ScratchReg2, zero_reg);
++      __ VU.set(kScratchReg, E16, m1);
++      __ VU.set(RoundingMode::RNE);
++      __ vnclipu_vi(i.OutputSimd128Register(), kSimd128ScratchReg2, 0);
++      break;
++    }
+     default:
+ #ifdef DEBUG
+       switch (arch_opcode) {
+diff --git a/src/diagnostics/riscv64/disasm-riscv64.cc b/src/diagnostics/riscv64/disasm-riscv64.cc
+index dc6d0572eaa..03b0c7c578d 100644
+--- a/src/diagnostics/riscv64/disasm-riscv64.cc
++++ b/src/diagnostics/riscv64/disasm-riscv64.cc
+@@ -2218,6 +2218,23 @@ void Decoder::DecodeRvvMVV(Instruction* instr) {
+     case RO_V_VREDMINU:
+       Format(instr, "vredminu.vs  'vd, 'vs2, 'vs1'vm");
+       break;
++    case RO_V_VXUNARY0:
++      if (instr->Vs1Value() == 0b00010) {
++        Format(instr, "vzext.vf8 'vd, 'vs2'vm");
++      } else if (instr->Vs1Value() == 0b00011) {
++        Format(instr, "vsext.vf8 'vd, 'vs2'vm");
++      } else if (instr->Vs1Value() == 0b00100) {
++        Format(instr, "vzext.vf4 'vd, 'vs2'vm");
++      } else if (instr->Vs1Value() == 0b00101) {
++        Format(instr, "vsext.vf4 'vd, 'vs2'vm");
++      } else if (instr->Vs1Value() == 0b00110) {
++        Format(instr, "vzext.vf2 'vd, 'vs2'vm");
++      } else if (instr->Vs1Value() == 0b00111) {
++        Format(instr, "vsext.vf2 'vd, 'vs2'vm");
++      } else {
++        UNSUPPORTED_RISCV();
++      }
++      break;
+     default:
+       UNSUPPORTED_RISCV();
+       break;
+diff --git a/src/execution/riscv64/simulator-riscv64.cc b/src/execution/riscv64/simulator-riscv64.cc
+index 19bcb0453c4..46a139f8600 100644
+--- a/src/execution/riscv64/simulator-riscv64.cc
++++ b/src/execution/riscv64/simulator-riscv64.cc
+@@ -845,7 +845,6 @@ inline Dst unsigned_saturation(Src v, uint n) {
+   RVV_VI_GENERAL_LOOP_BASE                                       \
+   RVV_VI_LOOP_MASK_SKIP()                                        \
+   if (rvv_vsew() == E8) {                                        \
+-    UNREACHABLE();                                               \
+     VN_UPARAMS(16);                                              \
+     vd = unsigned_saturation<uint16_t, uint8_t>(                 \
+         (static_cast<uint16_t>(vs2) >> uimm5) +                  \
+@@ -875,7 +874,6 @@ inline Dst unsigned_saturation(Src v, uint n) {
+   RVV_VI_GENERAL_LOOP_BASE                                                    \
+   RVV_VI_LOOP_MASK_SKIP()                                                     \
+   if (rvv_vsew() == E8) {                                                     \
+-    UNREACHABLE();                                                            \
+     VN_PARAMS(16);                                                            \
+     vd = signed_saturation<int16_t, int8_t>(                                  \
+         (vs2 >> uimm5) + get_round(static_cast<int>(rvv_vxrm()), vs2, uimm5), \
+@@ -898,6 +896,81 @@ inline Dst unsigned_saturation(Src v, uint n) {
+   RVV_VI_LOOP_END                                                             \
+   rvv_trace_vd();
+ 
++#define RVV_VI_VIE_8_LOOP(signed)      \
++  RVV_VI_GENERAL_LOOP_BASE             \
++  RVV_VI_LOOP_MASK_SKIP()              \
++  if (rvv_vsew() == E64) {             \
++    if (signed) {                      \
++      VI_VIE_PARAMS(64, 8);            \
++      vd = static_cast<int64_t>(vs2);  \
++    } else {                           \
++      VI_VIE_UPARAMS(64, 8);           \
++      vd = static_cast<uint64_t>(vs2); \
++    }                                  \
++  } else {                             \
++    UNREACHABLE();                     \
++  }                                    \
++  RVV_VI_LOOP_END                      \
++  rvv_trace_vd();
++
++#define RVV_VI_VIE_4_LOOP(signed)      \
++  RVV_VI_GENERAL_LOOP_BASE             \
++  RVV_VI_LOOP_MASK_SKIP()              \
++  if (rvv_vsew() == E32) {             \
++    if (signed) {                      \
++      VI_VIE_PARAMS(32, 4);            \
++      vd = static_cast<int32_t>(vs2);  \
++    } else {                           \
++      VI_VIE_UPARAMS(32, 4);           \
++      vd = static_cast<uint32_t>(vs2); \
++    }                                  \
++  } else if (rvv_vsew() == E64) {      \
++    if (signed) {                      \
++      VI_VIE_PARAMS(64, 4);            \
++      vd = static_cast<int64_t>(vs2);  \
++    } else {                           \
++      VI_VIE_UPARAMS(64, 4);           \
++      vd = static_cast<uint64_t>(vs2); \
++    }                                  \
++  } else {                             \
++    UNREACHABLE();                     \
++  }                                    \
++  RVV_VI_LOOP_END                      \
++  rvv_trace_vd();
++
++#define RVV_VI_VIE_2_LOOP(signed)      \
++  RVV_VI_GENERAL_LOOP_BASE             \
++  RVV_VI_LOOP_MASK_SKIP()              \
++  if (rvv_vsew() == E16) {             \
++    if (signed) {                      \
++      VI_VIE_PARAMS(16, 2);            \
++      vd = static_cast<int16_t>(vs2);  \
++    } else {                           \
++      VI_VIE_UPARAMS(16, 2);           \
++      vd = static_cast<uint16_t>(vs2); \
++    }                                  \
++  } else if (rvv_vsew() == E32) {      \
++    if (signed) {                      \
++      VI_VIE_PARAMS(32, 2);            \
++      vd = static_cast<int32_t>(vs2);  \
++    } else {                           \
++      VI_VIE_UPARAMS(32, 2);           \
++      vd = static_cast<uint32_t>(vs2); \
++    }                                  \
++  } else if (rvv_vsew() == E64) {      \
++    if (signed) {                      \
++      VI_VIE_PARAMS(64, 2);            \
++      vd = static_cast<int64_t>(vs2);  \
++    } else {                           \
++      VI_VIE_UPARAMS(64, 2);           \
++      vd = static_cast<uint64_t>(vs2); \
++    }                                  \
++  } else {                             \
++    UNREACHABLE();                     \
++  }                                    \
++  RVV_VI_LOOP_END                      \
++  rvv_trace_vd();
++
+ namespace v8 {
+ namespace internal {
+ 
+@@ -3738,6 +3811,10 @@ bool Simulator::DecodeRvvVL() {
+           RVV_VI_LD(0, (i * nf + fn), int32, false);
+           break;
+         }
++        case 64: {
++          RVV_VI_LD(0, (i * nf + fn), int64, false);
++          break;
++        }
+         default:
+           UNIMPLEMENTED_RISCV();
+           break;
+@@ -3799,6 +3876,10 @@ bool Simulator::DecodeRvvVS() {
+           RVV_VI_ST(0, (i * nf + fn), uint32, false);
+           break;
+         }
++        case 64: {
++          RVV_VI_ST(0, (i * nf + fn), uint64, false);
++          break;
++        }
+         default:
+           UNIMPLEMENTED_RISCV();
+           break;
+@@ -4806,7 +4887,7 @@ void Simulator::DecodeRvvIVI() {
+         offset = sh;
+       }
+ 
+-      switch (rvv_sew()) {
++      switch (rvv_vsew()) {
+         case E8: {
+           VI_XI_SLIDEDOWN_PARAMS(8, offset);
+           vd = is_valid ? vs2 : 0;
+@@ -5105,6 +5186,23 @@ void Simulator::DecodeRvvMVV() {
+       RVV_VI_VV_LOOP_REDUCTION(
+           { vd_0_res = (vd_0_res <= vs2) ? vd_0_res : vs2; })
+       break;
++    case RO_V_VXUNARY0:
++      if (rvv_vs1_reg() == 0b00010) {
++        RVV_VI_VIE_8_LOOP(false);
++      } else if (rvv_vs1_reg() == 0b00011) {
++        RVV_VI_VIE_8_LOOP(true);
++      } else if (rvv_vs1_reg() == 0b00100) {
++        RVV_VI_VIE_4_LOOP(false);
++      } else if (rvv_vs1_reg() == 0b00101) {
++        RVV_VI_VIE_4_LOOP(true);
++      } else if (rvv_vs1_reg() == 0b00110) {
++        RVV_VI_VIE_2_LOOP(false);
++      } else if (rvv_vs1_reg() == 0b00111) {
++        RVV_VI_VIE_2_LOOP(true);
++      } else {
++        UNSUPPORTED_RISCV();
++      }
++      break;
+     default:
+       v8::base::EmbeddedVector<char, 256> buffer;
+       disasm::NameConverter converter;
+diff --git a/src/execution/riscv64/simulator-riscv64.h b/src/execution/riscv64/simulator-riscv64.h
+index 32cdc155ba2..a77261ad0cb 100644
+--- a/src/execution/riscv64/simulator-riscv64.h
++++ b/src/execution/riscv64/simulator-riscv64.h
+@@ -792,6 +792,17 @@ class Simulator : public SimulatorBase {
+   auto& vd = Rvvelt<type_sew_t<x>::type>(rvv_vd_reg(), i, true); \
+   auto vs2 = Rvvelt<type_sew_t<x>::type>(rvv_vs2_reg(), i - offset);
+ 
++/* Vector Integer Extension */
++#define VI_VIE_PARAMS(x, scale)                                  \
++  if ((x / scale) < 8) UNREACHABLE();                            \
++  auto& vd = Rvvelt<type_sew_t<x>::type>(rvv_vd_reg(), i, true); \
++  auto vs2 = Rvvelt<type_sew_t<x / scale>::type>(rvv_vs2_reg(), i);
++
++#define VI_VIE_UPARAMS(x, scale)                                 \
++  if ((x / scale) < 8) UNREACHABLE();                            \
++  auto& vd = Rvvelt<type_sew_t<x>::type>(rvv_vd_reg(), i, true); \
++  auto vs2 = Rvvelt<type_usew_t<x / scale>::type>(rvv_vs2_reg(), i);
++
+   inline void rvv_trace_vd() {
+     if (::v8::internal::FLAG_trace_sim) {
+       __int128_t value = Vregister_[rvv_vd_reg()];
+diff --git a/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h b/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
+index 0b47e8535f1..2a5df9b8e4c 100644
+--- a/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
++++ b/src/wasm/baseline/riscv64/liftoff-assembler-riscv64.h
+@@ -1853,22 +1853,32 @@ void LiftoffAssembler::emit_i64x2_bitmask(LiftoffRegister dst,
+ 
+ void LiftoffAssembler::emit_i64x2_sconvert_i32x4_low(LiftoffRegister dst,
+                                                      LiftoffRegister src) {
+-  bailout(kSimd, "i64x2_sconvert_i32x4_low");
++  VU.set(kScratchReg, E64, m1);
++  vmv_vv(kSimd128ScratchReg, src.fp().toV());
++  vsext_vf2(dst.fp().toV(), kSimd128ScratchReg);
+ }
+ 
+ void LiftoffAssembler::emit_i64x2_sconvert_i32x4_high(LiftoffRegister dst,
+                                                       LiftoffRegister src) {
+-  bailout(kSimd, "i64x2_sconvert_i32x4_high");
++  VU.set(kScratchReg, E32, m1);
++  vslidedown_vi(kSimd128ScratchReg, src.fp().toV(), 2);
++  VU.set(kScratchReg, E64, m1);
++  vsext_vf2(dst.fp().toV(), kSimd128ScratchReg);
+ }
+ 
+ void LiftoffAssembler::emit_i64x2_uconvert_i32x4_low(LiftoffRegister dst,
+                                                      LiftoffRegister src) {
+-  bailout(kSimd, "i64x2_uconvert_i32x4_low");
++  VU.set(kScratchReg, E64, m1);
++  vmv_vv(kSimd128ScratchReg, src.fp().toV());
++  vzext_vf2(dst.fp().toV(), kSimd128ScratchReg);
+ }
+ 
+ void LiftoffAssembler::emit_i64x2_uconvert_i32x4_high(LiftoffRegister dst,
+                                                       LiftoffRegister src) {
+-  bailout(kSimd, "i64x2_uconvert_i32x4_high");
++  VU.set(kScratchReg, E32, m1);
++  vslidedown_vi(kSimd128ScratchReg, src.fp().toV(), 2);
++  VU.set(kScratchReg, E64, m1);
++  vzext_vf2(dst.fp().toV(), kSimd128ScratchReg);
+ }
+ 
+ void LiftoffAssembler::emit_i8x16_eq(LiftoffRegister dst, LiftoffRegister lhs,
+@@ -2764,91 +2774,109 @@ void LiftoffAssembler::emit_f32x4_uconvert_i32x4(LiftoffRegister dst,
+ void LiftoffAssembler::emit_i8x16_sconvert_i16x8(LiftoffRegister dst,
+                                                  LiftoffRegister lhs,
+                                                  LiftoffRegister rhs) {
+-  bailout(kSimd, "emit_i8x16_sconvert_i16x8");
++  VU.set(kScratchReg, E16, m1);
++  vmv_vv(kSimd128ScratchReg2, lhs.fp().toV());
++  vmv_vv(kSimd128ScratchReg, lhs.fp().toV());
++  VU.set(kScratchReg, E8, m1);
++  VU.set(RoundingMode::RNE);
++  vnclip_vi(dst.fp().toV(), kSimd128ScratchReg2, 0);
+ }
+ 
+ void LiftoffAssembler::emit_i8x16_uconvert_i16x8(LiftoffRegister dst,
+                                                  LiftoffRegister lhs,
+                                                  LiftoffRegister rhs) {
+-  bailout(kSimd, "emit_i8x16_uconvert_i16x8");
++  VU.set(kScratchReg, E16, m1);
++  vmv_vv(kSimd128ScratchReg2, lhs.fp().toV());
++  vmv_vv(kSimd128ScratchReg, lhs.fp().toV());
++  VU.set(kScratchReg, E16, m2);
++  vmax_vx(kSimd128ScratchReg2, kSimd128ScratchReg2, zero_reg);
++  VU.set(kScratchReg, E8, m1);
++  VU.set(RoundingMode::RNE);
++  vnclipu_vi(dst.fp().toV(), kSimd128ScratchReg2, 0);
+ }
+ 
+ void LiftoffAssembler::emit_i16x8_sconvert_i32x4(LiftoffRegister dst,
+                                                  LiftoffRegister lhs,
+                                                  LiftoffRegister rhs) {
+-  VRegister dst_v = dst.fp().toV();
+-  VRegister lhs_v = lhs.fp().toV();
+-  VRegister rhs_v = rhs.fp().toV();
+-  VU.set(kScratchReg, E32, m2);
+-  VRegister tmp_lo =
+-      GetUnusedRegister(kFpReg, LiftoffRegList::ForRegs(lhs, rhs)).fp().toV();
+-  VRegister tmp_hi = VRegister::from_code(tmp_lo.code() + 1);
+   VU.set(kScratchReg, E32, m1);
+-  vmv_vv(tmp_lo, rhs_v);
+-  vmv_vv(tmp_hi, lhs_v);
++  vmv_vv(kSimd128ScratchReg2, lhs.fp().toV());
++  vmv_vv(kSimd128ScratchReg, lhs.fp().toV());
+   VU.set(kScratchReg, E16, m1);
+   VU.set(RoundingMode::RNE);
+-  vnclip_vi(dst_v, tmp_lo, 0);
++  vnclip_vi(dst.fp().toV(), kSimd128ScratchReg2, 0);
+ }
+ 
+ void LiftoffAssembler::emit_i16x8_uconvert_i32x4(LiftoffRegister dst,
+                                                  LiftoffRegister lhs,
+                                                  LiftoffRegister rhs) {
+-  VRegister dst_v = dst.fp().toV();
+-  VRegister lhs_v = lhs.fp().toV();
+-  VRegister rhs_v = rhs.fp().toV();
+-  VU.set(kScratchReg, E32, m2);
+-  VRegister tmp_lo =
+-      GetUnusedRegister(kFpReg, LiftoffRegList::ForRegs(lhs, rhs)).fp().toV();
+-  VRegister tmp_hi = VRegister::from_code(tmp_lo.code() + 1);
+   VU.set(kScratchReg, E32, m1);
+-  vmv_vv(tmp_lo, rhs_v);
+-  vmv_vv(tmp_hi, lhs_v);
++  vmv_vv(kSimd128ScratchReg2, lhs.fp().toV());
++  vmv_vv(kSimd128ScratchReg, lhs.fp().toV());
+   VU.set(kScratchReg, E32, m2);
+-  vmax_vx(tmp_lo, tmp_lo, zero_reg);
++  vmax_vx(kSimd128ScratchReg2, kSimd128ScratchReg2, zero_reg);
+   VU.set(kScratchReg, E16, m1);
+   VU.set(RoundingMode::RNE);
+-  vnclipu_vi(dst_v, tmp_lo, 0);
++  vnclipu_vi(dst.fp().toV(), kSimd128ScratchReg2, 0);
+ }
+ 
+ void LiftoffAssembler::emit_i16x8_sconvert_i8x16_low(LiftoffRegister dst,
+                                                      LiftoffRegister src) {
+-  bailout(kSimd, "emit_i16x8_sconvert_i8x16_low");
++  VU.set(kScratchReg, E16, m1);
++  vmv_vv(kSimd128ScratchReg, src.fp().toV());
++  vsext_vf2(dst.fp().toV(), kSimd128ScratchReg);
+ }
+ 
+ void LiftoffAssembler::emit_i16x8_sconvert_i8x16_high(LiftoffRegister dst,
+                                                       LiftoffRegister src) {
+-  bailout(kSimd, "emit_i16x8_sconvert_i8x16_high");
++  VU.set(kScratchReg, E8, m1);
++  vslidedown_vi(kSimd128ScratchReg, src.fp().toV(), 8);
++  VU.set(kScratchReg, E16, m1);
++  vsext_vf2(dst.fp().toV(), kSimd128ScratchReg);
+ }
+ 
+ void LiftoffAssembler::emit_i16x8_uconvert_i8x16_low(LiftoffRegister dst,
+                                                      LiftoffRegister src) {
+-  bailout(kSimd, "emit_i16x8_uconvert_i8x16_low");
++  VU.set(kScratchReg, E16, m1);
++  vmv_vv(kSimd128ScratchReg, src.fp().toV());
++  vzext_vf2(dst.fp().toV(), kSimd128ScratchReg);
+ }
+ 
+ void LiftoffAssembler::emit_i16x8_uconvert_i8x16_high(LiftoffRegister dst,
+                                                       LiftoffRegister src) {
+-  bailout(kSimd, "emit_i16x8_uconvert_i8x16_high");
++  VU.set(kScratchReg, E8, m1);
++  vslidedown_vi(kSimd128ScratchReg, src.fp().toV(), 8);
++  VU.set(kScratchReg, E16, m1);
++  vzext_vf2(dst.fp().toV(), kSimd128ScratchReg);
+ }
+ 
+ void LiftoffAssembler::emit_i32x4_sconvert_i16x8_low(LiftoffRegister dst,
+                                                      LiftoffRegister src) {
+-  bailout(kSimd, "emit_i32x4_sconvert_i16x8_low");
++  VU.set(kScratchReg, E32, m1);
++  vmv_vv(kSimd128ScratchReg, src.fp().toV());
++  vsext_vf2(dst.fp().toV(), kSimd128ScratchReg);
+ }
+ 
+ void LiftoffAssembler::emit_i32x4_sconvert_i16x8_high(LiftoffRegister dst,
+                                                       LiftoffRegister src) {
+-  bailout(kSimd, "emit_i32x4_sconvert_i16x8_high");
++  VU.set(kScratchReg, E16, m1);
++  vslidedown_vi(kSimd128ScratchReg, src.fp().toV(), 4);
++  VU.set(kScratchReg, E32, m1);
++  vsext_vf2(dst.fp().toV(), kSimd128ScratchReg);
+ }
+ 
+ void LiftoffAssembler::emit_i32x4_uconvert_i16x8_low(LiftoffRegister dst,
+                                                      LiftoffRegister src) {
+-  bailout(kSimd, "emit_i32x4_uconvert_i16x8_low");
++  VU.set(kScratchReg, E32, m1);
++  vmv_vv(kSimd128ScratchReg, src.fp().toV());
++  vzext_vf2(dst.fp().toV(), kSimd128ScratchReg);
+ }
+ 
+ void LiftoffAssembler::emit_i32x4_uconvert_i16x8_high(LiftoffRegister dst,
+                                                       LiftoffRegister src) {
+-  bailout(kSimd, "emit_i32x4_uconvert_i16x8_high");
++  VU.set(kScratchReg, E16, m1);
++  vslidedown_vi(kSimd128ScratchReg, src.fp().toV(), 4);
++  VU.set(kScratchReg, E32, m1);
++  vzext_vf2(dst.fp().toV(), kSimd128ScratchReg);
+ }
+ 
+ void LiftoffAssembler::emit_i8x16_rounding_average_u(LiftoffRegister dst,
+diff --git a/test/cctest/test-assembler-riscv64.cc b/test/cctest/test-assembler-riscv64.cc
+index 2f425a6d966..fd555a4b942 100644
+--- a/test/cctest/test-assembler-riscv64.cc
++++ b/test/cctest/test-assembler-riscv64.cc
+@@ -2382,8 +2382,8 @@ static inline uint8_t get_round(int vxrm, uint64_t v, uint8_t shift) {
+           sign##int16_t dst[8] = {0};                                        \
+           sign##int16_t ref[8] = {0};                                        \
+         } t;                                                                 \
+-        for (auto src : t.src) src = static_cast<sign##int32_t>(x);          \
+-        for (auto ref : t.ref)                                               \
++        for (auto& src : t.src) src = static_cast<sign##int32_t>(x);         \
++        for (auto& ref : t.ref)                                              \
+           ref = base::saturated_cast<sign##int16_t>(                         \
+               (static_cast<sign##int32_t>(x) >> shift) +                     \
+               get_round(vxrm, x, shift));                                    \
+@@ -2398,6 +2398,106 @@ UTEST_RVV_VNCLIP_E32M2_E16M1(vnclip_vi, )
+ 
+ #undef UTEST_RVV_VNCLIP_E32M2_E16M1
+ 
++// Tests for vector integer extension instructions
++#define UTEST_RVV_VI_VIE_FORM_WITH_RES(instr_name, type, width, frac_width, \
++                                       array, expect_res)                   \
++  TEST(RISCV_UTEST_##instr_name##_##width##_##frac_width) {                 \
++    constexpr uint32_t vlen = 128;                                          \
++    constexpr uint32_t n = vlen / width;                                    \
++    CcTest::InitializeVM();                                                 \
++    for (int##frac_width##_t x : array) {                                   \
++      int##frac_width##_t src[n] = {0};                                     \
++      type dst[n] = {0};                                                    \
++      for (uint32_t i = 0; i < n; i++) src[i] = x;                          \
++      auto fn = [](MacroAssembler& assm) {                                  \
++        __ VU.set(t0, VSew::E##frac_width, Vlmul::m1);                      \
++        __ vl(v1, a0, 0, VSew::E##frac_width);                              \
++        __ VU.set(t0, VSew::E##width, Vlmul::m1);                           \
++        __ instr_name(v2, v1);                                              \
++        __ vs(v2, a1, 0, VSew::E##width);                                   \
++      };                                                                    \
++      GenAndRunTest<int64_t, int64_t>((int64_t)src, (int64_t)dst, fn);      \
++      for (uint32_t i = 0; i < n; i++) {                                    \
++        CHECK_EQ(expect_res, dst[i]);                                       \
++      }                                                                     \
++    }                                                                       \
++  }
++
++#define ARRAY(type) compiler::ValueHelper::GetVector<type>()
++
++UTEST_RVV_VI_VIE_FORM_WITH_RES(vzext_vf2, uint64_t, 64, 32, ARRAY(int32_t),
++                               static_cast<uint64_t>(dst[i]))
++UTEST_RVV_VI_VIE_FORM_WITH_RES(vzext_vf4, uint64_t, 64, 16, ARRAY(int16_t),
++                               static_cast<uint64_t>(dst[i]))
++UTEST_RVV_VI_VIE_FORM_WITH_RES(vzext_vf8, uint64_t, 64, 8, ARRAY(int8_t),
++                               static_cast<uint64_t>(dst[i]))
++UTEST_RVV_VI_VIE_FORM_WITH_RES(vzext_vf2, uint32_t, 32, 16, ARRAY(int16_t),
++                               static_cast<uint32_t>(dst[i]))
++UTEST_RVV_VI_VIE_FORM_WITH_RES(vzext_vf4, uint32_t, 32, 8, ARRAY(int8_t),
++                               static_cast<uint32_t>(dst[i]))
++UTEST_RVV_VI_VIE_FORM_WITH_RES(vzext_vf2, uint16_t, 16, 8, ARRAY(int8_t),
++                               static_cast<uint16_t>(dst[i]))
++
++UTEST_RVV_VI_VIE_FORM_WITH_RES(vsext_vf2, int64_t, 64, 32, ARRAY(int32_t),
++                               static_cast<int64_t>(dst[i]))
++UTEST_RVV_VI_VIE_FORM_WITH_RES(vsext_vf4, int64_t, 64, 16, ARRAY(int16_t),
++                               static_cast<int64_t>(dst[i]))
++UTEST_RVV_VI_VIE_FORM_WITH_RES(vsext_vf8, int64_t, 64, 8, ARRAY(int8_t),
++                               static_cast<int64_t>(dst[i]))
++UTEST_RVV_VI_VIE_FORM_WITH_RES(vsext_vf2, int32_t, 32, 16, ARRAY(int16_t),
++                               static_cast<int32_t>(dst[i]))
++UTEST_RVV_VI_VIE_FORM_WITH_RES(vsext_vf4, int32_t, 32, 8, ARRAY(int8_t),
++                               static_cast<int32_t>(dst[i]))
++UTEST_RVV_VI_VIE_FORM_WITH_RES(vsext_vf2, int16_t, 16, 8, ARRAY(int8_t),
++                               static_cast<int16_t>(dst[i]))
++
++#undef UTEST_RVV_VI_VIE_FORM_WITH_RES
++
++// Tests for vector permutation instructions vector slide instructions
++#define UTEST_RVV_VP_VS_VI_FORM_WITH_RES(instr_name, type, width, array, \
++                                         expect_res)                     \
++  TEST(RISCV_UTEST_##instr_name##_##type) {                              \
++    constexpr uint32_t vlen = 128;                                       \
++    constexpr uint32_t n = vlen / width;                                 \
++    CcTest::InitializeVM();                                              \
++    for (type x : array) {                                               \
++      for (uint32_t offset = 0; offset < n; offset++) {                  \
++        type src[n] = {0};                                               \
++        type dst[n] = {0};                                               \
++        for (uint32_t i = 0; i < n; i++) src[i] = x + i;                 \
++        auto fn = [offset](MacroAssembler& assm) {                       \
++          __ VU.set(t0, VSew::E##width, Vlmul::m1);                      \
++          __ vl(v1, a0, 0, VSew::E##width);                              \
++          __ instr_name(v2, v1, offset);                                 \
++          __ vs(v2, a1, 0, VSew::E##width);                              \
++        };                                                               \
++        GenAndRunTest<int64_t, int64_t>((int64_t)src, (int64_t)dst, fn); \
++        for (uint32_t i = 0; i < n; i++) {                               \
++          CHECK_EQ(expect_res, dst[i]);                                  \
++        }                                                                \
++      }                                                                  \
++    }                                                                    \
++  }
++
++UTEST_RVV_VP_VS_VI_FORM_WITH_RES(vslidedown_vi, int64_t, 64, ARRAY(int64_t),
++                                 (i + offset) < n ? src[i + offset] : 0)
++UTEST_RVV_VP_VS_VI_FORM_WITH_RES(vslidedown_vi, int32_t, 32, ARRAY(int32_t),
++                                 (i + offset) < n ? src[i + offset] : 0)
++UTEST_RVV_VP_VS_VI_FORM_WITH_RES(vslidedown_vi, int16_t, 16, ARRAY(int16_t),
++                                 (i + offset) < n ? src[i + offset] : 0)
++UTEST_RVV_VP_VS_VI_FORM_WITH_RES(vslidedown_vi, int8_t, 8, ARRAY(int8_t),
++                                 (i + offset) < n ? src[i + offset] : 0)
++
++UTEST_RVV_VP_VS_VI_FORM_WITH_RES(vslidedown_vi, uint32_t, 32, ARRAY(uint32_t),
++                                 (i + offset) < n ? src[i + offset] : 0)
++UTEST_RVV_VP_VS_VI_FORM_WITH_RES(vslidedown_vi, uint16_t, 16, ARRAY(uint16_t),
++                                 (i + offset) < n ? src[i + offset] : 0)
++UTEST_RVV_VP_VS_VI_FORM_WITH_RES(vslidedown_vi, uint8_t, 8, ARRAY(uint8_t),
++                                 (i + offset) < n ? src[i + offset] : 0)
++
++#undef UTEST_RVV_VP_VS_VI_FORM_WITH_RES
++#undef ARRAY
++
+ #endif
+ 
+ #undef __
+diff --git a/test/cctest/test-disasm-riscv64.cc b/test/cctest/test-disasm-riscv64.cc
+index 08288008469..6177de78843 100644
+--- a/test/cctest/test-disasm-riscv64.cc
++++ b/test/cctest/test-disasm-riscv64.cc
+@@ -614,6 +614,14 @@ TEST(RVV) {
+   COMPARE(vnclipu_vx(v17, v14, a5), "bae7c8d7       vnclipu.wx v17, v14, a5");
+   COMPARE(vnclipu_vv(v17, v14, v28), "baee08d7       vnclipu.wv v17, v14, v28");
+ 
++  // Vector Integer Extension
++  COMPARE(vzext_vf8(v17, v14), "4ae128d7       vzext.vf8 v17, v14");
++  COMPARE(vsext_vf8(v17, v14), "4ae1a8d7       vsext.vf8 v17, v14");
++  COMPARE(vzext_vf4(v17, v14), "4ae228d7       vzext.vf4 v17, v14");
++  COMPARE(vsext_vf4(v17, v14), "4ae2a8d7       vsext.vf4 v17, v14");
++  COMPARE(vzext_vf2(v17, v14), "4ae328d7       vzext.vf2 v17, v14");
++  COMPARE(vsext_vf2(v17, v14), "4ae3a8d7       vsext.vf2 v17, v14");
++
+   VERIFY_RUN();
+ }
+ #endif
+-- 
+2.35.1
+

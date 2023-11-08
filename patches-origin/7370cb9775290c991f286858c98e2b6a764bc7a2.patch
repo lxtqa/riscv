@@ -1,0 +1,227 @@
+From 7370cb9775290c991f286858c98e2b6a764bc7a2 Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Wed, 31 Aug 2022 18:33:50 +0800
+Subject: [PATCH] [riscv]Port [wasm] Keep call_indirect index on the stack
+
+Port commit ed90ea5cf77a7192239f0a7e3c273fcb4f0e1a17
+Port commit ed90ea5cf77a7192239f0a7e3c273fcb4f0e1a17
+Port commit ab5db111d0329cb0954c110a8cc67b9793b2bb8f
+
+Change-Id: I7981793d7f38d3769a1c9fdca23b7607d7772089
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3867138
+Auto-Submit: Yahan Lu <yahan@iscas.ac.cn>
+Commit-Queue: ji qiu <qiuji@iscas.ac.cn>
+Reviewed-by: ji qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#82878}
+---
+ src/builtins/riscv/builtins-riscv.cc          | 23 ++++++++++-
+ src/codegen/riscv/macro-assembler-riscv.h     |  2 +-
+ .../riscv/liftoff-assembler-riscv32.h         | 38 +++++++++++++------
+ .../riscv/liftoff-assembler-riscv64.h         | 34 ++++++++++++-----
+ 4 files changed, 72 insertions(+), 25 deletions(-)
+
+diff --git a/src/builtins/riscv/builtins-riscv.cc b/src/builtins/riscv/builtins-riscv.cc
+index 072b2a4c760..7e5412a7df8 100644
+--- a/src/builtins/riscv/builtins-riscv.cc
++++ b/src/builtins/riscv/builtins-riscv.cc
+@@ -949,6 +949,25 @@ void ResetFeedbackVectorOsrUrgency(MacroAssembler* masm,
+ }  // namespace
+ 
+ // static
++void Builtins::Generate_BaselineOutOfLinePrologueDeopt(MacroAssembler* masm) {
++  // We're here because we got deopted during BaselineOutOfLinePrologue's stack
++  // check. Undo all its frame creation and call into the interpreter instead.
++
++  // Drop bytecode offset (was the feedback vector but got replaced during
++  // deopt) and bytecode array.
++  __ AddWord(sp, sp, Operand(2 * kPointerSize));
++
++  // Context, closure, argc.
++  __ Pop(kContextRegister, kJavaScriptCallTargetRegister,
++         kJavaScriptCallArgCountRegister);
++
++  // Drop frame pointer
++  __ LeaveFrame(StackFrame::BASELINE);
++
++  // Enter the interpreter.
++  __ TailCallBuiltin(Builtin::kInterpreterEntryTrampoline);
++}
++
+ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+   UseScratchRegisterScope temps(masm);
+   temps.Include({kScratchReg, kScratchReg2});
+@@ -1752,14 +1771,14 @@ void OnStackReplacement(MacroAssembler* masm, OsrSourceTier source,
+ }  // namespace
+ 
+ void Builtins::Generate_InterpreterOnStackReplacement(MacroAssembler* masm) {
+-  using D = InterpreterOnStackReplacementDescriptor;
++  using D = OnStackReplacementDescriptor;
+   static_assert(D::kParameterCount == 1);
+   OnStackReplacement(masm, OsrSourceTier::kInterpreter,
+                      D::MaybeTargetCodeRegister());
+ }
+ 
+ void Builtins::Generate_BaselineOnStackReplacement(MacroAssembler* masm) {
+-  using D = BaselineOnStackReplacementDescriptor;
++  using D = OnStackReplacementDescriptor;
+   static_assert(D::kParameterCount == 1);
+ 
+   __ LoadWord(kContextRegister,
+diff --git a/src/codegen/riscv/macro-assembler-riscv.h b/src/codegen/riscv/macro-assembler-riscv.h
+index a3b59f3a720..70adc8aa6bf 100644
+--- a/src/codegen/riscv/macro-assembler-riscv.h
++++ b/src/codegen/riscv/macro-assembler-riscv.h
+@@ -1023,7 +1023,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   static int ActivationFrameAlignment();
+ 
+   // Calculated scaled address (rd) as rt + rs << sa
+-  void CalcScaledAddress(Register rd, Register rs, Register rt, uint8_t sa);
++  void CalcScaledAddress(Register rd, Register rt, Register rs, uint8_t sa);
+ 
+   // Compute the start of the generated instruction stream from the current PC.
+   // This is an alternative to embedding the {CodeObject} handle as a reference.
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h
+index 0ec1fffb254..c0aa014f5a9 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv32.h
+@@ -61,15 +61,26 @@ inline MemOperand GetHalfStackSlot(int offset, RegPairHalf half) {
+ 
+ inline MemOperand GetMemOp(LiftoffAssembler* assm, Register addr,
+                            Register offset, uintptr_t offset_imm,
+-                           Register scratch) {
+-  Register dst = no_reg;
++                           Register scratch, unsigned shift_amount = 0) {
++  DCHECK_NE(scratch, kScratchReg2);
++  DCHECK_NE(addr, kScratchReg2);
++  DCHECK_NE(offset, kScratchReg2);
+   if (offset != no_reg) {
+-    dst = scratch;
+-    assm->emit_i32_add(dst, addr, offset);
++    if (shift_amount != 0) {
++      assm->CalcScaledAddress(scratch, addr, offset, shift_amount);
++    } else {
++      assm->AddWord(scratch, offset, addr);
++    }
++    addr = scratch;
++  }
++  if (is_int31(offset_imm)) {
++    int32_t offset_imm32 = static_cast<int32_t>(offset_imm);
++    return MemOperand(addr, offset_imm32);
++  } else {
++    assm->li(kScratchReg2, Operand(offset_imm));
++    assm->AddWord(kScratchReg2, addr, kScratchReg2);
++    return MemOperand(kScratchReg2, 0);
+   }
+-  MemOperand dst_op = (offset != no_reg) ? MemOperand(dst, offset_imm)
+-                                         : MemOperand(addr, offset_imm);
+-  return dst_op;
+ }
+ 
+ inline void Load(LiftoffAssembler* assm, LiftoffRegister dst, Register base,
+@@ -194,10 +205,11 @@ void LiftoffAssembler::LoadConstant(LiftoffRegister reg, WasmValue value,
+ 
+ void LiftoffAssembler::LoadTaggedPointer(Register dst, Register src_addr,
+                                          Register offset_reg,
+-                                         int32_t offset_imm) {
++                                         int32_t offset_imm, bool needs_shift) {
+   static_assert(kTaggedSize == kSystemPointerSize);
+   Load(LiftoffRegister(dst), src_addr, offset_reg,
+-       static_cast<uint32_t>(offset_imm), LoadType::kI32Load);
++       static_cast<uint32_t>(offset_imm), LoadType::kI32Load, nullptr, false,
++       false, needs_shift);
+ }
+ 
+ void LiftoffAssembler::LoadFullPointer(Register dst, Register src_addr,
+@@ -238,9 +250,11 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+ void LiftoffAssembler::Load(LiftoffRegister dst, Register src_addr,
+                             Register offset_reg, uintptr_t offset_imm,
+                             LoadType type, uint32_t* protected_load_pc,
+-                            bool is_load_mem, bool i64_offset) {
+-  MemOperand src_op =
+-      liftoff::GetMemOp(this, src_addr, offset_reg, offset_imm, kScratchReg);
++                            bool /* is_load_mem */, bool /* i64_offset */,
++                            bool needs_shift) {
++  unsigned shift_amount = needs_shift ? type.size_log_2() : 0;
++  MemOperand src_op = liftoff::GetMemOp(this, src_addr, offset_reg, offset_imm,
++                                        kScratchReg, shift_amount);
+ 
+   if (protected_load_pc) *protected_load_pc = pc_offset();
+   switch (type.value()) {
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
+index befce17c8b7..b9d18c127cc 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
+@@ -47,7 +47,9 @@ namespace liftoff {
+ 
+ inline MemOperand GetMemOp(LiftoffAssembler* assm, Register addr,
+                            Register offset, uintptr_t offset_imm,
+-                           bool i64_offset = false) {
++                           bool i64_offset = false, unsigned shift_amount = 0) {
++  DCHECK_NE(addr, kScratchReg2);
++  DCHECK_NE(offset, kScratchReg2);
+   if (!i64_offset && offset != no_reg) {
+     // extract bit[0:31] without sign extend
+     assm->ExtractBits(kScratchReg2, offset, 0, 32, false);
+@@ -56,18 +58,25 @@ inline MemOperand GetMemOp(LiftoffAssembler* assm, Register addr,
+   if (is_uint31(offset_imm)) {
+     int32_t offset_imm32 = static_cast<int32_t>(offset_imm);
+     if (offset == no_reg) return MemOperand(addr, offset_imm32);
+-    assm->Add64(kScratchReg2, addr, offset);
++    if (shift_amount != 0) {
++      assm->CalcScaledAddress(kScratchReg2, addr, offset, shift_amount);
++    } else {
++      assm->Add64(kScratchReg2, offset, addr);
++    }
+     return MemOperand(kScratchReg2, offset_imm32);
+   }
+   // Offset immediate does not fit in 31 bits.
+   assm->li(kScratchReg2, offset_imm);
+   assm->Add64(kScratchReg2, kScratchReg2, addr);
+   if (offset != no_reg) {
+-    assm->Add64(kScratchReg2, kScratchReg2, offset);
++    if (shift_amount != 0) {
++      assm->CalcScaledAddress(kScratchReg2, kScratchReg2, offset, shift_amount);
++    } else {
++      assm->Add64(kScratchReg2, kScratchReg2, offset);
++    }
+   }
+   return MemOperand(kScratchReg2, 0);
+ }
+-
+ inline void Load(LiftoffAssembler* assm, LiftoffRegister dst, MemOperand src,
+                  ValueKind kind) {
+   switch (kind) {
+@@ -166,9 +175,12 @@ void LiftoffAssembler::LoadConstant(LiftoffRegister reg, WasmValue value,
+ 
+ void LiftoffAssembler::LoadTaggedPointer(Register dst, Register src_addr,
+                                          Register offset_reg,
+-                                         int32_t offset_imm) {
+-  MemOperand src_op = liftoff::GetMemOp(this, src_addr, offset_reg, offset_imm);
+-  LoadTaggedPointerField(dst, src_op);
++                                         int32_t offset_imm, bool needs_shift) {
++  static_assert(kTaggedSize == kInt64Size);
++  unsigned shift_amount = !needs_shift ? 0 : 3;
++  MemOperand src_op = liftoff::GetMemOp(this, src_addr, offset_reg, offset_imm,
++                                        false, shift_amount);
++  Ld(dst, src_op);
+ }
+ 
+ void LiftoffAssembler::LoadFullPointer(Register dst, Register src_addr,
+@@ -208,9 +220,11 @@ void LiftoffAssembler::StoreTaggedPointer(Register dst_addr,
+ void LiftoffAssembler::Load(LiftoffRegister dst, Register src_addr,
+                             Register offset_reg, uintptr_t offset_imm,
+                             LoadType type, uint32_t* protected_load_pc,
+-                            bool is_load_mem, bool i64_offset) {
+-  MemOperand src_op =
+-      liftoff::GetMemOp(this, src_addr, offset_reg, offset_imm, i64_offset);
++                            bool is_load_mem, bool i64_offset,
++                            bool needs_shift) {
++  unsigned shift_amount = needs_shift ? type.size_log_2() : 0;
++  MemOperand src_op = liftoff::GetMemOp(this, src_addr, offset_reg, offset_imm,
++                                        i64_offset, shift_amount);
+ 
+   if (protected_load_pc) *protected_load_pc = pc_offset();
+   switch (type.value()) {
+-- 
+2.35.1
+

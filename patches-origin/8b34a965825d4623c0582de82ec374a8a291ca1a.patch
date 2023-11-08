@@ -1,0 +1,263 @@
+From 8b34a965825d4623c0582de82ec374a8a291ca1a Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Wed, 27 Apr 2022 11:59:22 +0800
+Subject: [PATCH] [riscv64] Reland "[osr] Use the new OSR cache"
+
+Port 9145388055f7f89d8c19fd944fe7612413fae182
+
+Change-Id: I863c060cee8a0830a33594d8843898e40e7a71d0
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3606619
+Auto-Submit: Yahan Lu <yahan@iscas.ac.cn>
+Reviewed-by: ji qiu <qiuji@iscas.ac.cn>
+Commit-Queue: ji qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#80197}
+---
+ .../riscv64/baseline-assembler-riscv64-inl.h  | 28 +++++++
+ src/builtins/riscv64/builtins-riscv64.cc      | 80 +++++++++++++------
+ .../riscv64/macro-assembler-riscv64.cc        | 15 ++++
+ src/codegen/riscv64/macro-assembler-riscv64.h |  3 +
+ 4 files changed, 101 insertions(+), 25 deletions(-)
+
+diff --git a/src/baseline/riscv64/baseline-assembler-riscv64-inl.h b/src/baseline/riscv64/baseline-assembler-riscv64-inl.h
+index c6b59c18e2f..61c253e1c73 100644
+--- a/src/baseline/riscv64/baseline-assembler-riscv64-inl.h
++++ b/src/baseline/riscv64/baseline-assembler-riscv64-inl.h
+@@ -381,6 +381,34 @@ void BaselineAssembler::StoreTaggedFieldNoWriteBarrier(Register target,
+   __ StoreTaggedField(value, FieldMemOperand(target, offset));
+ }
+ 
++void BaselineAssembler::TryLoadOptimizedOsrCode(Register scratch_and_result,
++                                                Register feedback_vector,
++                                                FeedbackSlot slot,
++                                                Label* on_result,
++                                                Label::Distance) {
++  Label fallthrough, clear_slot;
++  LoadTaggedPointerField(scratch_and_result, feedback_vector,
++                         FeedbackVector::OffsetOfElementAt(slot.ToInt()));
++  __ LoadWeakValue(scratch_and_result, scratch_and_result, &fallthrough);
++
++  // Is it marked_for_deoptimization? If yes, clear the slot.
++  {
++    ScratchRegisterScope temps(this);
++    __ JumpIfCodeTIsMarkedForDeoptimization(
++        scratch_and_result, temps.AcquireScratch(), &clear_slot);
++    Jump(on_result);
++  }
++
++  __ bind(&clear_slot);
++  __ li(scratch_and_result, __ ClearedValue());
++  StoreTaggedFieldNoWriteBarrier(
++      feedback_vector, FeedbackVector::OffsetOfElementAt(slot.ToInt()),
++      scratch_and_result);
++
++  __ bind(&fallthrough);
++  Move(scratch_and_result, 0);
++}
++
+ void BaselineAssembler::AddToInterruptBudgetAndJumpIfNotExceeded(
+     int32_t weight, Label* skip_interrupt_label) {
+   ASM_CODE_COMMENT(masm_);
+diff --git a/src/builtins/riscv64/builtins-riscv64.cc b/src/builtins/riscv64/builtins-riscv64.cc
+index 1641b5f852f..56d68655c1b 100644
+--- a/src/builtins/riscv64/builtins-riscv64.cc
++++ b/src/builtins/riscv64/builtins-riscv64.cc
+@@ -931,13 +931,8 @@ static void TailCallOptimizedCodeSlot(MacroAssembler* masm,
+ 
+   // Check if the optimized code is marked for deopt. If it is, call the
+   // runtime to clear it.
+-  __ LoadTaggedPointerField(
+-      a5,
+-      FieldMemOperand(optimized_code_entry, Code::kCodeDataContainerOffset));
+-  __ Lw(a5, FieldMemOperand(a5, CodeDataContainer::kKindSpecificFlagsOffset));
+-  __ And(a5, a5, Operand(1 << Code::kMarkedForDeoptimizationBit));
+-  __ Branch(&heal_optimized_code_slot, ne, a5, Operand(zero_reg),
+-            Label::Distance::kNear);
++  __ JumpIfCodeTIsMarkedForDeoptimization(optimized_code_entry, scratch1,
++                                          &heal_optimized_code_slot);
+ 
+   // Optimized code is good, get it into the closure and link the closure into
+   // the optimized functions list, then tail call the optimized code.
+@@ -1114,14 +1109,21 @@ static void MaybeOptimizeCodeOrTailCallOptimizedCodeSlot(
+ }
+ 
+ namespace {
+-void ResetBytecodeAgeAndOsrState(MacroAssembler* masm,
+-                                 Register bytecode_array) {
+-  // Reset code age and the OSR state (optimized to a single write).
+-  static_assert(BytecodeArray::kOsrStateAndBytecodeAgeAreContiguous32Bits);
++void ResetBytecodeAge(MacroAssembler* masm, Register bytecode_array) {
+   STATIC_ASSERT(BytecodeArray::kNoAgeBytecodeAge == 0);
+-  __ Sw(zero_reg,
+-        FieldMemOperand(bytecode_array,
+-                        BytecodeArray::kOsrUrgencyAndInstallTargetOffset));
++  __ Sh(zero_reg,
++        FieldMemOperand(bytecode_array, BytecodeArray::kBytecodeAgeOffset));
++}
++
++void ResetFeedbackVectorOsrUrgency(MacroAssembler* masm,
++                                   Register feedback_vector, Register scratch) {
++  DCHECK(!AreAliased(feedback_vector, scratch));
++  __ Lbu(scratch,
++         FieldMemOperand(feedback_vector, FeedbackVector::kOsrStateOffset));
++  __ And(scratch, scratch,
++         Operand(FeedbackVector::MaybeHasOptimizedOsrCodeBit::kMask));
++  __ Sb(scratch,
++        FieldMemOperand(feedback_vector, FeedbackVector::kOsrStateOffset));
+ }
+ 
+ }  // namespace
+@@ -1152,7 +1154,10 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+   Register optimization_state = temps.Acquire();
+   LoadTieringStateAndJumpIfNeedsProcessing(
+       masm, optimization_state, feedback_vector, &has_optimized_code_or_state);
+-
++  {
++    UseScratchRegisterScope temps(masm);
++    ResetFeedbackVectorOsrUrgency(masm, feedback_vector, temps.Acquire());
++  }
+   // Increment invocation count for the function.
+   {
+     UseScratchRegisterScope temps(masm);
+@@ -1187,7 +1192,7 @@ void Builtins::Generate_BaselineOutOfLinePrologue(MacroAssembler* masm) {
+     // the frame, so load it into a register.
+     Register bytecode_array = descriptor.GetRegisterParameter(
+         BaselineOutOfLinePrologueDescriptor::kInterpreterBytecodeArray);
+-    ResetBytecodeAgeAndOsrState(masm, bytecode_array);
++    ResetBytecodeAge(masm, bytecode_array);
+     __ Push(argc, bytecode_array);
+ 
+     // Baseline code frames store the feedback vector where interpreter would
+@@ -1318,6 +1323,10 @@ void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
+   Register optimization_state = a4;
+   LoadTieringStateAndJumpIfNeedsProcessing(
+       masm, optimization_state, feedback_vector, &has_optimized_code_or_state);
++  {
++    UseScratchRegisterScope temps(masm);
++    ResetFeedbackVectorOsrUrgency(masm, feedback_vector, temps.Acquire());
++  }
+ 
+   Label not_optimized;
+   __ bind(&not_optimized);
+@@ -1336,7 +1345,7 @@ void Builtins::Generate_InterpreterEntryTrampoline(MacroAssembler* masm) {
+   FrameScope frame_scope(masm, StackFrame::MANUAL);
+   __ PushStandardFrame(closure);
+ 
+-  ResetBytecodeAgeAndOsrState(masm, kInterpreterBytecodeArrayRegister);
++  ResetBytecodeAge(masm, kInterpreterBytecodeArrayRegister);
+ 
+   // Load initial bytecode offset.
+   __ li(kInterpreterBytecodeOffsetRegister,
+@@ -1860,7 +1869,21 @@ void Generate_OSREntry(MacroAssembler* masm, Register entry_address,
+   __ Ret();
+ }
+ 
+-void OnStackReplacement(MacroAssembler* masm, bool is_interpreter) {
++enum class OsrSourceTier {
++  kInterpreter,
++  kBaseline,
++};
++
++void OnStackReplacement(MacroAssembler* masm, OsrSourceTier source,
++                        Register maybe_target_code) {
++  Label jump_to_optimized_code;
++  {
++    // If maybe_target_code is not null, no need to call into runtime. A
++    // precondition here is: if maybe_target_code is a Code object, it must NOT
++    // be marked_for_deoptimization (callers must ensure this).
++    __ Branch(&jump_to_optimized_code, ne, maybe_target_code,
++              Operand(Smi::zero()));
++  }
+   ASM_CODE_COMMENT(masm);
+   {
+     FrameScope scope(masm, StackFrame::INTERNAL);
+@@ -1869,7 +1892,9 @@ void OnStackReplacement(MacroAssembler* masm, bool is_interpreter) {
+ 
+   // If the code object is null, just return to the caller.
+   __ Ret(eq, a0, Operand(Smi::zero()));
+-  if (is_interpreter) {
++
++  __ bind(&jump_to_optimized_code);
++  if (source == OsrSourceTier::kInterpreter) {
+     // Drop the handler frame that is be sitting on top of the actual
+     // JavaScript frame. This is the case then OSR is triggered from bytecode.
+     __ LeaveFrame(StackFrame::STUB);
+@@ -1894,13 +1919,20 @@ void OnStackReplacement(MacroAssembler* masm, bool is_interpreter) {
+ }  // namespace
+ 
+ void Builtins::Generate_InterpreterOnStackReplacement(MacroAssembler* masm) {
+-  return OnStackReplacement(masm, true);
++  using D = InterpreterOnStackReplacementDescriptor;
++  STATIC_ASSERT(D::kParameterCount == 1);
++  OnStackReplacement(masm, OsrSourceTier::kInterpreter,
++                     D::MaybeTargetCodeRegister());
+ }
+ 
+ void Builtins::Generate_BaselineOnStackReplacement(MacroAssembler* masm) {
++  using D = BaselineOnStackReplacementDescriptor;
++  STATIC_ASSERT(D::kParameterCount == 1);
++
+   __ Ld(kContextRegister,
+-        MemOperand(fp, StandardFrameConstants::kContextOffset));
+-  return OnStackReplacement(masm, false);
++        MemOperand(fp, BaselineFrameConstants::kContextOffset));
++  OnStackReplacement(masm, OsrSourceTier::kBaseline,
++                     D::MaybeTargetCodeRegister());
+ }
+ 
+ // static
+@@ -3786,11 +3818,9 @@ void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,
+   __ Pop(kInterpreterAccumulatorRegister);
+ 
+   if (is_osr) {
+-    // TODO(pthier): Separate baseline Sparkplug from TF arming and don't disarm
+-    // Sparkplug here.
+     __ Ld(kInterpreterBytecodeArrayRegister,
+           MemOperand(fp, InterpreterFrameConstants::kBytecodeArrayFromFp));
+-    ResetBytecodeAgeAndOsrState(masm, kInterpreterBytecodeArrayRegister);
++    ResetBytecodeAge(masm, kInterpreterBytecodeArrayRegister);
+     Generate_OSREntry(masm, code_obj,
+                       Operand(Code::kHeaderSize - kHeapObjectTag));
+   } else {
+diff --git a/src/codegen/riscv64/macro-assembler-riscv64.cc b/src/codegen/riscv64/macro-assembler-riscv64.cc
+index 0a403cdb0b8..e0f5d32a343 100644
+--- a/src/codegen/riscv64/macro-assembler-riscv64.cc
++++ b/src/codegen/riscv64/macro-assembler-riscv64.cc
+@@ -4564,6 +4564,21 @@ void TurboAssembler::JumpIfSmi(Register value, Label* smi_label) {
+   Branch(smi_label, eq, scratch, Operand(zero_reg));
+ }
+ 
++void MacroAssembler::JumpIfCodeTIsMarkedForDeoptimization(
++    Register codet, Register scratch, Label* if_marked_for_deoptimization) {
++  LoadTaggedPointerField(
++      scratch, FieldMemOperand(codet, Code::kCodeDataContainerOffset));
++  Lw(scratch,
++     FieldMemOperand(scratch, CodeDataContainer::kKindSpecificFlagsOffset));
++  And(scratch, scratch, Operand(1 << Code::kMarkedForDeoptimizationBit));
++  Branch(if_marked_for_deoptimization, ne, scratch, Operand(zero_reg));
++}
++
++Operand MacroAssembler::ClearedValue() const {
++  return Operand(
++      static_cast<int32_t>(HeapObjectReference::ClearedValue(isolate()).ptr()));
++}
++
+ void MacroAssembler::JumpIfNotSmi(Register value, Label* not_smi_label) {
+   ASM_CODE_COMMENT(this);
+   UseScratchRegisterScope temps(this);
+diff --git a/src/codegen/riscv64/macro-assembler-riscv64.h b/src/codegen/riscv64/macro-assembler-riscv64.h
+index cb738a26dc9..f91714ae315 100644
+--- a/src/codegen/riscv64/macro-assembler-riscv64.h
++++ b/src/codegen/riscv64/macro-assembler-riscv64.h
+@@ -1274,6 +1274,9 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
+                                        ArgumentsCountType type,
+                                        ArgumentsCountMode mode,
+                                        Register scratch = no_reg);
++  void JumpIfCodeTIsMarkedForDeoptimization(
++      Register codet, Register scratch, Label* if_marked_for_deoptimization);
++  Operand ClearedValue() const;
+ 
+   // Jump if the register contains a non-smi.
+   void JumpIfNotSmi(Register value, Label* not_smi_label);
+-- 
+2.35.1
+

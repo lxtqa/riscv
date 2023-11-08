@@ -1,0 +1,134 @@
+From 80e0dca303551edb94b8254aa2421b9e15823b24 Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Mon, 20 Dec 2021 19:24:32 +0800
+Subject: [PATCH] [riscv64] Use root register for addressing external
+ references.
+
+Port b36368d2dd366abdbc8ee2c52e0ccea997407092
+
+Change-Id: Icac5b041f2af423b2b81eab53bfc56644ca29374
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3347228
+Reviewed-by: ji qiu <qiuji@iscas.ac.cn>
+Commit-Queue: ji qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#78422}
+---
+ .../backend/riscv64/code-generator-riscv64.cc |  2 +
+ .../riscv64/instruction-codes-riscv64.h       |  6 ++-
+ .../riscv64/instruction-selector-riscv64.cc   | 18 +++++++++
+ .../instruction-selector-riscv64-unittest.cc  | 39 +++++++++++++++++++
+ 4 files changed, 63 insertions(+), 2 deletions(-)
+
+diff --git a/src/compiler/backend/riscv64/code-generator-riscv64.cc b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+index 4f30213e9d3..9ad821fecce 100644
+--- a/src/compiler/backend/riscv64/code-generator-riscv64.cc
++++ b/src/compiler/backend/riscv64/code-generator-riscv64.cc
+@@ -126,6 +126,8 @@ class RiscvOperandConverter final : public InstructionOperandConverter {
+       case kMode_MRI:
+         *first_index += 2;
+         return MemOperand(InputRegister(index + 0), InputInt32(index + 1));
++      case kMode_Root:
++        return MemOperand(kRootRegister, InputInt32(index));
+       case kMode_MRR:
+         // TODO(plind): r6 address mode, to be implemented ...
+         UNREACHABLE();
+diff --git a/src/compiler/backend/riscv64/instruction-codes-riscv64.h b/src/compiler/backend/riscv64/instruction-codes-riscv64.h
+index 307379be324..8cfeced1e1e 100644
+--- a/src/compiler/backend/riscv64/instruction-codes-riscv64.h
++++ b/src/compiler/backend/riscv64/instruction-codes-riscv64.h
+@@ -416,10 +416,12 @@ namespace compiler {
+ // I = immediate (handle, external, int32)
+ // MRI = [register + immediate]
+ // MRR = [register + register]
++// Root = [kRootregister + immediate]
+ // TODO(plind): Add the new r6 address modes.
+ #define TARGET_ADDRESSING_MODE_LIST(V) \
+-  V(MRI) /* [%r0 + K] */               \
+-  V(MRR) /* [%r0 + %r1] */
++  V(MRI)  /* [%r0 + K] */              \
++  V(MRR)  /* [%r0 + %r1] */            \
++  V(Root) /* [root + k] */
+ 
+ }  // namespace compiler
+ }  // namespace internal
+diff --git a/src/compiler/backend/riscv64/instruction-selector-riscv64.cc b/src/compiler/backend/riscv64/instruction-selector-riscv64.cc
+index 905250d8ef0..79f6b9288cd 100644
+--- a/src/compiler/backend/riscv64/instruction-selector-riscv64.cc
++++ b/src/compiler/backend/riscv64/instruction-selector-riscv64.cc
+@@ -374,6 +374,24 @@ void EmitLoad(InstructionSelector* selector, Node* node, InstructionCode opcode,
+   Node* base = node->InputAt(0);
+   Node* index = node->InputAt(1);
+ 
++  ExternalReferenceMatcher m(base);
++  if (m.HasResolvedValue() && g.IsIntegerConstant(index) &&
++      selector->CanAddressRelativeToRootsRegister(m.ResolvedValue())) {
++    ptrdiff_t const delta =
++        g.GetIntegerConstantValue(index) +
++        TurboAssemblerBase::RootRegisterOffsetForExternalReference(
++            selector->isolate(), m.ResolvedValue());
++    // Check that the delta is a 32-bit integer due to the limitations of
++    // immediate operands.
++    if (is_int32(delta)) {
++      opcode |= AddressingModeField::encode(kMode_Root);
++      selector->Emit(opcode,
++                     g.DefineAsRegister(output == nullptr ? node : output),
++                     g.UseImmediate(static_cast<int32_t>(delta)));
++      return;
++    }
++  }
++
+   if (g.CanBeImmediate(index, opcode)) {
+     selector->Emit(opcode | AddressingModeField::encode(kMode_MRI),
+                    g.DefineAsRegister(output == nullptr ? node : output),
+diff --git a/test/unittests/compiler/riscv64/instruction-selector-riscv64-unittest.cc b/test/unittests/compiler/riscv64/instruction-selector-riscv64-unittest.cc
+index 9b7687b6c4b..ed657d9c4c7 100644
+--- a/test/unittests/compiler/riscv64/instruction-selector-riscv64-unittest.cc
++++ b/test/unittests/compiler/riscv64/instruction-selector-riscv64-unittest.cc
+@@ -1601,6 +1601,45 @@ TEST_F(InstructionSelectorTest, Word64ReverseBytes) {
+   }
+ }
+ 
++TEST_F(InstructionSelectorTest, ExternalReferenceLoad1) {
++  // Test offsets we can use kMode_Root for.
++  const int64_t kOffsets[] = {0, 1, 4, INT32_MIN, INT32_MAX};
++  TRACED_FOREACH(int64_t, offset, kOffsets) {
++    StreamBuilder m(this, MachineType::Int64());
++    ExternalReference reference =
++        bit_cast<ExternalReference>(isolate()->isolate_root() + offset);
++    Node* const value =
++        m.Load(MachineType::Int64(), m.ExternalConstant(reference));
++    m.Return(value);
++
++    Stream s = m.Build();
++
++    ASSERT_EQ(1U, s.size());
++    EXPECT_EQ(kRiscvLd, s[0]->arch_opcode());
++    EXPECT_EQ(kMode_Root, s[0]->addressing_mode());
++    EXPECT_EQ(1U, s[0]->InputCount());
++    EXPECT_EQ(s.ToInt64(s[0]->InputAt(0)), offset);
++    EXPECT_EQ(1U, s[0]->OutputCount());
++  }
++}
++
++TEST_F(InstructionSelectorTest, ExternalReferenceLoad2) {
++  // Offset too large, we cannot use kMode_Root.
++  StreamBuilder m(this, MachineType::Int64());
++  int64_t offset = 0x100000000;
++  ExternalReference reference =
++      bit_cast<ExternalReference>(isolate()->isolate_root() + offset);
++  Node* const value =
++      m.Load(MachineType::Int64(), m.ExternalConstant(reference));
++  m.Return(value);
++
++  Stream s = m.Build();
++
++  ASSERT_EQ(1U, s.size());
++  EXPECT_EQ(kRiscvLd, s[0]->arch_opcode());
++  EXPECT_NE(kMode_Root, s[0]->addressing_mode());
++}
++
+ }  // namespace compiler
+ }  // namespace internal
+ }  // namespace v8
+-- 
+2.35.1
+

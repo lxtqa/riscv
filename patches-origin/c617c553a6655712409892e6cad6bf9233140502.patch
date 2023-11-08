@@ -1,0 +1,287 @@
+From c617c553a6655712409892e6cad6bf9233140502 Mon Sep 17 00:00:00 2001
+From: Leszek Swirski <leszeks@chromium.org>
+Date: Wed, 11 Jan 2023 16:18:25 +0000
+Subject: [PATCH] Revert "[turbofan] Properly perform range check for array
+ access"
+
+This reverts commit ec4f19d530520ce09cd5eac2ca9db6138d787087.
+
+Reason for revert: Speculative revert for speculative-lowering failures in the roll (e.g. https://ci.chromium.org/ui/p/chromium/builders/try/linux_optional_gpu_tests_rel/b8792253516032578097/test-results?q=ExactID%3Aninja%3A%2F%2Fchrome%2Ftest%3Atelemetry_gpu_integration_test%2Fgpu_tests.webgl2_conformance_integration_test.WebGL2ConformanceIntegrationTest.deqp%2Ffunctional%2Fgles3%2Ffbocolorbuffer%2Fblend.html+VHash%3Aa55ece39ab587dea&clean=&sortby=&groupby=)
+
+Original change's description:
+> [turbofan] Properly perform range check for array access
+>
+> Turbofan optimized array access returned incorrect values in some cases
+> when a negative index was provided. This CL fixes this by changing the
+> way those bounds checks are performed in JSNativeContextSpecialization.
+>
+> Bug: chromium:1320641
+> Change-Id: Id1f06680ccf7964994d179f7fb44199a0b1245b1
+> Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4147622
+> Reviewed-by: Darius Mercadier <dmercadier@chromium.org>
+> Commit-Queue: Nico Hartmann <nicohartmann@chromium.org>
+> Cr-Commit-Position: refs/heads/main@{#85207}
+
+Bug: chromium:1320641
+Change-Id: I4e7899eb89ec8ef5541a57f7a0fb8fe6a452371a
+No-Presubmit: true
+No-Tree-Checks: true
+No-Try: true
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4156871
+Owners-Override: Leszek Swirski <leszeks@chromium.org>
+Auto-Submit: Leszek Swirski <leszeks@chromium.org>
+Commit-Queue: Rubber Stamper <rubber-stamper@appspot.gserviceaccount.com>
+Bot-Commit: Rubber Stamper <rubber-stamper@appspot.gserviceaccount.com>
+Cr-Commit-Position: refs/heads/main@{#85229}
+---
+ src/compiler/graph-assembler.h                |  4 +-
+ .../js-native-context-specialization.cc       | 71 +++++++------------
+ .../js-native-context-specialization.h        |  6 +-
+ src/compiler/operation-typer.h                |  1 -
+ src/compiler/simplified-lowering.cc           |  1 -
+ src/compiler/typer.cc                         |  1 +
+ test/mjsunit/mjsunit.status                   |  1 -
+ test/mjsunit/regress/regress-1320641.js       | 16 -----
+ 8 files changed, 32 insertions(+), 69 deletions(-)
+ delete mode 100644 test/mjsunit/regress/regress-1320641.js
+
+diff --git a/src/compiler/graph-assembler.h b/src/compiler/graph-assembler.h
+index b491dea9589..604b143d921 100644
+--- a/src/compiler/graph-assembler.h
++++ b/src/compiler/graph-assembler.h
+@@ -79,7 +79,7 @@ class Reducer;
+   V(Float64Sub)                                     \
+   V(Int32Add)                                       \
+   V(Int32LessThan)                                  \
+-  T(Int32LessThanOrEqual, BoolT, Int32T, Int32T)    \
++  V(Int32LessThanOrEqual)                           \
+   V(Int32Mul)                                       \
+   V(Int32Sub)                                       \
+   V(Int64Add)                                       \
+@@ -88,7 +88,7 @@ class Reducer;
+   V(IntLessThan)                                    \
+   V(IntMul)                                         \
+   V(IntSub)                                         \
+-  T(Uint32LessThan, BoolT, Uint32T, Uint32T)        \
++  V(Uint32LessThan)                                 \
+   T(Uint32LessThanOrEqual, BoolT, Uint32T, Uint32T) \
+   V(Uint64LessThan)                                 \
+   T(Uint64LessThanOrEqual, BoolT, Uint64T, Uint64T) \
+diff --git a/src/compiler/js-native-context-specialization.cc b/src/compiler/js-native-context-specialization.cc
+index cac77da7b22..de36d214b7c 100644
+--- a/src/compiler/js-native-context-specialization.cc
++++ b/src/compiler/js-native-context-specialization.cc
+@@ -3124,8 +3124,8 @@ JSNativeContextSpecialization::BuildElementAccess(
+   if (IsTypedArrayElementsKind(elements_kind) ||
+       IsRabGsabTypedArrayElementsKind(elements_kind)) {
+     return BuildElementAccessForTypedArrayOrRabGsabTypedArray(
+-        receiver, index, value, effect, control, context, elements_kind,
+-        keyed_mode);
++        elements_kind, receiver, index, value, effect, control, context,
++        access_info, keyed_mode);
+   }
+ 
+   // Load the elements for the {receiver}.
+@@ -3477,8 +3477,9 @@ JSNativeContextSpecialization::BuildElementAccess(
+ JSNativeContextSpecialization::ValueEffectControl
+ JSNativeContextSpecialization::
+     BuildElementAccessForTypedArrayOrRabGsabTypedArray(
+-        Node* receiver, Node* index, Node* value, Node* effect, Node* control,
+-        Node* context, ElementsKind elements_kind,
++        ElementsKind elements_kind, Node* receiver, Node* index, Node* value,
++        Node* effect, Node* control, Node* context,
++        ElementAccessInfo const& access_info,
+         KeyedAccessMode const& keyed_mode) {
+   DCHECK(IsTypedArrayElementsKind(elements_kind) ||
+          IsRabGsabTypedArrayElementsKind(elements_kind));
+@@ -3578,9 +3579,8 @@ JSNativeContextSpecialization::
+     buffer_or_receiver = buffer;
+   }
+ 
+-  enum Situation { kBoundsCheckDone, kHandleOOB_SmiAndRangeCheckComputed };
++  enum Situation { kBoundsCheckDone, kHandleOOB_SmiCheckDone };
+   Situation situation;
+-  TNode<BoolT> check;
+   if ((keyed_mode.IsLoad() &&
+        keyed_mode.load_mode() == LOAD_IGNORE_OUT_OF_BOUNDS) ||
+       (keyed_mode.IsStore() &&
+@@ -3590,24 +3590,12 @@ JSNativeContextSpecialization::
+     // bounds for the {receiver}.
+     index = effect = graph()->NewNode(simplified()->CheckSmi(FeedbackSource()),
+                                       index, effect, control);
+-    TNode<Boolean> compare_length = TNode<Boolean>::UncheckedCast(
+-        graph()->NewNode(simplified()->NumberLessThan(), index, length));
+ 
+-    JSGraphAssembler assembler(jsgraph_, zone(), BranchSemantics::kJS,
+-                               [this](Node* n) { this->Revisit(n); });
+-    assembler.InitializeEffectControl(effect, control);
+-    TNode<BoolT> check_less_than_length =
+-        assembler.EnterMachineGraph<BoolT>(compare_length, UseInfo::Bool());
+-    TNode<Int32T> index_int32 = assembler.EnterMachineGraph<Int32T>(
+-        TNode<Smi>::UncheckedCast(index), UseInfo::TruncatingWord32());
+-    TNode<BoolT> check_non_negative =
+-        assembler.Int32LessThanOrEqual(assembler.Int32Constant(0), index_int32);
+-    check = TNode<BoolT>::UncheckedCast(
+-        assembler.Word32And(check_less_than_length, check_non_negative));
+-    std::tie(effect, control) =
+-        ReleaseEffectAndControlFromAssembler(&assembler);
+-
+-    situation = kHandleOOB_SmiAndRangeCheckComputed;
++    // Cast the {index} to Unsigned32 range, so that the bounds checks
++    // below are performed on unsigned values, which means that all the
++    // Negative32 values are treated as out-of-bounds.
++    index = graph()->NewNode(simplified()->NumberToUint32(), index);
++    situation = kHandleOOB_SmiCheckDone;
+   } else {
+     // Check that the {index} is in the valid range for the {receiver}.
+     index = effect = graph()->NewNode(
+@@ -3623,11 +3611,11 @@ JSNativeContextSpecialization::
+   switch (keyed_mode.access_mode()) {
+     case AccessMode::kLoad: {
+       // Check if we can return undefined for out-of-bounds loads.
+-      if (situation == kHandleOOB_SmiAndRangeCheckComputed) {
+-        DCHECK_NE(check, nullptr);
+-        Node* branch = graph()->NewNode(
+-            common()->Branch(BranchHint::kTrue, BranchSemantics::kMachine),
+-            check, control);
++      if (situation == kHandleOOB_SmiCheckDone) {
++        Node* check =
++            graph()->NewNode(simplified()->NumberLessThan(), index, length);
++        Node* branch = graph()->NewNode(common()->Branch(BranchHint::kTrue),
++                                        check, control);
+ 
+         Node* if_true = graph()->NewNode(common()->IfTrue(), branch);
+         Node* etrue = effect;
+@@ -3702,13 +3690,13 @@ JSNativeContextSpecialization::
+         value = graph()->NewNode(simplified()->NumberToUint8Clamped(), value);
+       }
+ 
+-      if (situation == kHandleOOB_SmiAndRangeCheckComputed) {
++      if (situation == kHandleOOB_SmiCheckDone) {
+         // We have to detect OOB stores and handle them without deopt (by
+         // simply not performing them).
+-        DCHECK_NE(check, nullptr);
+-        Node* branch = graph()->NewNode(
+-            common()->Branch(BranchHint::kTrue, BranchSemantics::kMachine),
+-            check, control);
++        Node* check =
++            graph()->NewNode(simplified()->NumberLessThan(), index, length);
++        Node* branch = graph()->NewNode(common()->Branch(BranchHint::kTrue),
++                                        check, control);
+ 
+         Node* if_true = graph()->NewNode(common()->IfTrue(), branch);
+         Node* etrue = effect;
+@@ -3750,18 +3738,11 @@ JSNativeContextSpecialization::
+       break;
+     }
+     case AccessMode::kHas:
+-      if (situation == kHandleOOB_SmiAndRangeCheckComputed) {
+-        DCHECK_NE(check, nullptr);
+-        JSGraphAssembler assembler(jsgraph_, zone(), BranchSemantics::kJS,
+-                                   [this](Node* n) { this->Revisit(n); });
+-        assembler.InitializeEffectControl(effect, control);
+-        value = assembler.MachineSelectIf<Boolean>(check)
+-                    .Then([&]() { return assembler.TrueConstant(); })
+-                    .Else([&]() { return assembler.FalseConstant(); })
+-                    .ExpectTrue()
+-                    .Value();
+-        std::tie(effect, control) =
+-            ReleaseEffectAndControlFromAssembler(&assembler);
++      if (situation == kHandleOOB_SmiCheckDone) {
++        value = effect =
++            graph()->NewNode(simplified()->SpeculativeNumberLessThan(
++                                 NumberOperationHint::kSignedSmall),
++                             index, length, effect, control);
+       } else {
+         DCHECK_EQ(kBoundsCheckDone, situation);
+         // For has-property on a typed array, all we need is a bounds check.
+diff --git a/src/compiler/js-native-context-specialization.h b/src/compiler/js-native-context-specialization.h
+index da04e70511f..4298ec15d47 100644
+--- a/src/compiler/js-native-context-specialization.h
++++ b/src/compiler/js-native-context-specialization.h
+@@ -194,9 +194,9 @@ class V8_EXPORT_PRIVATE JSNativeContextSpecialization final
+                                         ElementAccessInfo const& access_info,
+                                         KeyedAccessMode const& keyed_mode);
+   ValueEffectControl BuildElementAccessForTypedArrayOrRabGsabTypedArray(
+-      Node* receiver, Node* index, Node* value, Node* effect, Node* control,
+-      Node* context, ElementsKind elements_kind,
+-      KeyedAccessMode const& keyed_mode);
++      ElementsKind elements_kind, Node* receiver, Node* index, Node* value,
++      Node* effect, Node* control, Node* context,
++      ElementAccessInfo const& access_info, KeyedAccessMode const& keyed_mode);
+ 
+   // Construct appropriate subgraph to load from a String.
+   Node* BuildIndexedStringLoad(Node* receiver, Node* index, Node* length,
+diff --git a/src/compiler/operation-typer.h b/src/compiler/operation-typer.h
+index d0b43082303..804432805ea 100644
+--- a/src/compiler/operation-typer.h
++++ b/src/compiler/operation-typer.h
+@@ -11,7 +11,6 @@
+ 
+ #define TYPER_SUPPORTED_MACHINE_BINOP_LIST(V) \
+   V(Int32Add)                                 \
+-  V(Int32LessThanOrEqual)                     \
+   V(Int64Add)                                 \
+   V(Int32Sub)                                 \
+   V(Int64Sub)                                 \
+diff --git a/src/compiler/simplified-lowering.cc b/src/compiler/simplified-lowering.cc
+index 6ac75326481..020cf41469e 100644
+--- a/src/compiler/simplified-lowering.cc
++++ b/src/compiler/simplified-lowering.cc
+@@ -4486,7 +4486,6 @@ class RepresentationSelector {
+         return;
+       }
+       case IrOpcode::kInt32Add:
+-      case IrOpcode::kInt32LessThanOrEqual:
+       case IrOpcode::kInt32Sub:
+       case IrOpcode::kUint32LessThan:
+       case IrOpcode::kUint32LessThanOrEqual:
+diff --git a/src/compiler/typer.cc b/src/compiler/typer.cc
+index 1df9506319b..76ddcefff78 100644
+--- a/src/compiler/typer.cc
++++ b/src/compiler/typer.cc
+@@ -159,6 +159,7 @@ class Typer::Visitor : public Reducer {
+       DECLARE_IMPOSSIBLE_CASE(Uint64MulHigh)
+       DECLARE_IMPOSSIBLE_CASE(Word64Equal)
+       DECLARE_IMPOSSIBLE_CASE(Int32LessThan)
++      DECLARE_IMPOSSIBLE_CASE(Int32LessThanOrEqual)
+       DECLARE_IMPOSSIBLE_CASE(Int64LessThan)
+       DECLARE_IMPOSSIBLE_CASE(Int64LessThanOrEqual)
+       DECLARE_IMPOSSIBLE_CASE(Uint64LessThan)
+diff --git a/test/mjsunit/mjsunit.status b/test/mjsunit/mjsunit.status
+index bbde6fc18d3..8b6efcfac15 100644
+--- a/test/mjsunit/mjsunit.status
++++ b/test/mjsunit/mjsunit.status
+@@ -508,7 +508,6 @@
+   'wasm/huge-memory': [SKIP],
+   'wasm/huge-typedarray': [SKIP],
+   'wasm/bigint-opt': [SKIP],
+-  'regress/regress-1320641': [SKIP],
+ }],  # 'arch in (ia32, arm, riscv32)'
+ 
+ ##############################################################################
+diff --git a/test/mjsunit/regress/regress-1320641.js b/test/mjsunit/regress/regress-1320641.js
+deleted file mode 100644
+index 6c52c9d1786..00000000000
+--- a/test/mjsunit/regress/regress-1320641.js
++++ /dev/null
+@@ -1,16 +0,0 @@
+-// Copyright 2023 the V8 project authors. All rights reserved.
+-// Use of this source code is governed by a BSD-style license that can be
+-// found in the LICENSE file.
+-
+-// Flags: --allow-natives-syntax
+-
+-function foo(){
+-  const xs = new Uint16Array(3775336418);
+-  return xs[-981886074];
+-}
+-%PrepareFunctionForOptimization(foo);
+-foo();
+-
+-assertEquals(undefined, foo());
+-%OptimizeFunctionOnNextCall(foo);
+-assertEquals(undefined, foo());
+-- 
+2.35.1
+

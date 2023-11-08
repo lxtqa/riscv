@@ -1,0 +1,351 @@
+From 1fa61dfed434e2610c9cab2ae95342dad6b3359a Mon Sep 17 00:00:00 2001
+From: jingpeiyang <jingpeiyang@eswincomputing.com>
+Date: Mon, 3 Apr 2023 20:02:14 +0800
+Subject: [PATCH] [riscv] Implement vfmerge instruction and test
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+1）Implement vfmerge instruction and test
+2）Modify the implementation of the following SIMD instructions：
+  - F64x2Splat
+  - F64x2ReplaceLane
+
+Signed-off-by: jingpeiyang <jingpeiyang@eswincomputing.com>
+Change-Id: Ic778c7da28f064317ec3a7eb3ca61f99790c5885
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4380702
+Reviewed-by: Yahan Lu <yahan@iscas.ac.cn>
+Commit-Queue: Yahan Lu <yahan@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#86888}
+---
+ src/codegen/riscv/constant-riscv-v.h          |  1 +
+ src/codegen/riscv/extension-riscv-v.cc        |  8 ++-
+ src/codegen/riscv/extension-riscv-v.h         |  3 +-
+ .../backend/riscv/code-generator-riscv.cc     | 12 +---
+ src/diagnostics/riscv/disasm-riscv.cc         |  6 +-
+ src/execution/riscv/simulator-riscv.cc        | 68 ++++++++++++++++---
+ .../riscv/liftoff-assembler-riscv64.h         |  6 +-
+ test/cctest/test-assembler-riscv32.cc         | 37 ++++++++++
+ test/cctest/test-assembler-riscv64.cc         | 37 ++++++++++
+ 9 files changed, 151 insertions(+), 27 deletions(-)
+
+diff --git a/src/codegen/riscv/constant-riscv-v.h b/src/codegen/riscv/constant-riscv-v.h
+index 05172849c0c..5fce946c601 100644
+--- a/src/codegen/riscv/constant-riscv-v.h
++++ b/src/codegen/riscv/constant-riscv-v.h
+@@ -264,6 +264,7 @@ constexpr Opcode RO_V_VFMV_VF = OP_FVF | (VMV_FUNCT6 << kRvvFunct6Shift);
+ constexpr Opcode RO_V_VMERGE_VI = RO_V_VMV_VI;
+ constexpr Opcode RO_V_VMERGE_VV = RO_V_VMV_VV;
+ constexpr Opcode RO_V_VMERGE_VX = RO_V_VMV_VX;
++constexpr Opcode RO_V_VFMERGE_VF = RO_V_VFMV_VF;
+ 
+ constexpr Opcode VMSEQ_FUNCT6 = 0b011000;
+ constexpr Opcode RO_V_VMSEQ_VI = OP_IVI | (VMSEQ_FUNCT6 << kRvvFunct6Shift);
+diff --git a/src/codegen/riscv/extension-riscv-v.cc b/src/codegen/riscv/extension-riscv-v.cc
+index 552738cb418..b0c29f57d28 100644
+--- a/src/codegen/riscv/extension-riscv-v.cc
++++ b/src/codegen/riscv/extension-riscv-v.cc
+@@ -199,8 +199,8 @@ void AssemblerRISCVV::vid_v(VRegister vd, MaskType mask) {
+     GenInstrV(VXUNARY0_FUNCT6, OP_MVV, vd, vs1, vs2, mask);                \
+   }
+ 
+-void AssemblerRISCVV::vfmv_vf(VRegister vd, FPURegister fs1, MaskType mask) {
+-  GenInstrV(VMV_FUNCT6, OP_FVF, vd, fs1, v0, mask);
++void AssemblerRISCVV::vfmv_vf(VRegister vd, FPURegister fs1) {
++  GenInstrV(VMV_FUNCT6, OP_FVF, vd, fs1, v0, NoMask);
+ }
+ 
+ void AssemblerRISCVV::vfmv_fs(FPURegister fd, VRegister vs2) {
+@@ -211,6 +211,10 @@ void AssemblerRISCVV::vfmv_sf(VRegister vd, FPURegister fs) {
+   GenInstrV(VRFUNARY0_FUNCT6, OP_FVF, vd, fs, v0, NoMask);
+ }
+ 
++void AssemblerRISCVV::vfmerge_vf(VRegister vd, FPURegister fs1, VRegister vs2) {
++  GenInstrV(VMV_FUNCT6, OP_FVF, vd, fs1, vs2, Mask);
++}
++
+ DEFINE_OPIVV(vadd, VADD_FUNCT6)
+ DEFINE_OPIVX(vadd, VADD_FUNCT6)
+ DEFINE_OPIVI(vadd, VADD_FUNCT6)
+diff --git a/src/codegen/riscv/extension-riscv-v.h b/src/codegen/riscv/extension-riscv-v.h
+index d7b90fc028c..6900f9b7121 100644
+--- a/src/codegen/riscv/extension-riscv-v.h
++++ b/src/codegen/riscv/extension-riscv-v.h
+@@ -95,9 +95,10 @@ class AssemblerRISCVV : public AssemblerRiscvBase {
+   void vmadc_vx(VRegister vd, Register rs1, VRegister vs2);
+   void vmadc_vi(VRegister vd, uint8_t imm5, VRegister vs2);
+ 
+-  void vfmv_vf(VRegister vd, FPURegister fs1, MaskType mask = NoMask);
++  void vfmv_vf(VRegister vd, FPURegister fs1);
+   void vfmv_fs(FPURegister fd, VRegister vs2);
+   void vfmv_sf(VRegister vd, FPURegister fs);
++  void vfmerge_vf(VRegister vd, FPURegister fs1, VRegister vs2);
+ 
+   void vwaddu_wx(VRegister vd, VRegister vs2, Register rs1,
+                  MaskType mask = NoMask);
+diff --git a/src/compiler/backend/riscv/code-generator-riscv.cc b/src/compiler/backend/riscv/code-generator-riscv.cc
+index 351ac433022..6c37b3e1995 100644
+--- a/src/compiler/backend/riscv/code-generator-riscv.cc
++++ b/src/compiler/backend/riscv/code-generator-riscv.cc
+@@ -3072,14 +3072,11 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       __ vfsqrt_v(i.OutputSimd128Register(), i.InputSimd128Register(0));
+       break;
+     }
+-#if V8_TARGET_ARCH_RISCV64
+     case kRiscvF64x2Splat: {
+       (__ VU).set(kScratchReg, E64, m1);
+-      __ fmv_x_d(kScratchReg, i.InputDoubleRegister(0));
+-      __ vmv_vx(i.OutputSimd128Register(), kScratchReg);
++      __ vfmv_vf(i.OutputSimd128Register(), i.InputDoubleRegister(0));
+       break;
+     }
+-#endif
+     case kRiscvF64x2Abs: {
+       __ VU.set(kScratchReg, VSew::E64, Vlmul::m1);
+       __ vfabs_vv(i.OutputSimd128Register(), i.InputSimd128Register(0));
+@@ -3126,17 +3123,14 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       __ vmerge_vi(i.OutputSimd128Register(), -1, i.OutputSimd128Register());
+       break;
+     }
+-#if V8_TARGET_ARCH_RISCV64
+     case kRiscvF64x2ReplaceLane: {
+       __ VU.set(kScratchReg, E64, m1);
+       __ li(kScratchReg, 0x1 << i.InputInt8(1));
+       __ vmv_sx(v0, kScratchReg);
+-      __ fmv_x_d(kScratchReg, i.InputSingleRegister(2));
+-      __ vmerge_vx(i.OutputSimd128Register(), kScratchReg,
+-                   i.InputSimd128Register(0));
++      __ vfmerge_vf(i.OutputSimd128Register(), i.InputSingleRegister(2),
++                    i.InputSimd128Register(0));
+       break;
+     }
+-#endif
+     case kRiscvF64x2Lt: {
+       __ VU.set(kScratchReg, E64, m1);
+       __ vmflt_vv(v0, i.InputSimd128Register(0), i.InputSimd128Register(1));
+diff --git a/src/diagnostics/riscv/disasm-riscv.cc b/src/diagnostics/riscv/disasm-riscv.cc
+index c6ec1a2c556..97cd5505e0e 100644
+--- a/src/diagnostics/riscv/disasm-riscv.cc
++++ b/src/diagnostics/riscv/disasm-riscv.cc
+@@ -2595,7 +2595,11 @@ void Decoder::DecodeRvvFVF(Instruction* instr) {
+       Format(instr, "vfsgnjn.vf   'vd, 'vs2, 'fs1'vm");
+       break;
+     case RO_V_VFMV_VF:
+-      Format(instr, "vfmv.v.f  'vd, 'fs1");
++      if (instr->RvvVM()) {
++        Format(instr, "vfmv.v.f  'vd, 'fs1");
++      } else {
++        Format(instr, "vfmerge.vfm 'vd, 'vs2, 'fs1, v0");
++      }
+       break;
+     case RO_V_VFMADD_VF:
+       Format(instr, "vfmadd.vf 'vd, 'fs1, 'vs2'vm");
+diff --git a/src/execution/riscv/simulator-riscv.cc b/src/execution/riscv/simulator-riscv.cc
+index a6d3d88a4ef..f35a512f9b9 100644
+--- a/src/execution/riscv/simulator-riscv.cc
++++ b/src/execution/riscv/simulator-riscv.cc
+@@ -830,6 +830,39 @@ struct type_sew_t<128> {
+   }                               \
+   RVV_VI_LOOP_CMP_END
+ 
++#define RVV_VI_VF_MERGE_LOOP_BASE \
++  for (uint64_t i = rvv_vstart(); i < rvv_vl(); i++) {
++#define RVV_VI_VF_MERGE_LOOP_END \
++  set_rvv_vstart(0);             \
++  }
++
++#define RVV_VI_VF_MERGE_LOOP(BODY16, BODY32, BODY64)      \
++  RVV_VI_VF_MERGE_LOOP_BASE                               \
++  switch (rvv_vsew()) {                                   \
++    case E16: {                                           \
++      UNIMPLEMENTED();                                    \
++    }                                                     \
++    case E32: {                                           \
++      float& vd = Rvvelt<float>(rvv_vd_reg(), i, true);   \
++      float fs1 = get_fpu_register_float(rs1_reg());      \
++      float vs2 = Rvvelt<float>(rvv_vs2_reg(), i);        \
++      BODY32;                                             \
++      break;                                              \
++    }                                                     \
++    case E64: {                                           \
++      double& vd = Rvvelt<double>(rvv_vd_reg(), i, true); \
++      double fs1 = get_fpu_register_double(rs1_reg());    \
++      double vs2 = Rvvelt<double>(rvv_vs2_reg(), i);      \
++      BODY64;                                             \
++      break;                                              \
++    }                                                     \
++    default:                                              \
++      UNREACHABLE();                                      \
++      break;                                              \
++  }                                                       \
++  RVV_VI_VF_MERGE_LOOP_END                                \
++  rvv_trace_vd();
++
+ #define RVV_VI_VFP_LOOP_BASE                           \
+   for (uint64_t i = rvv_vstart(); i < rvv_vl(); ++i) { \
+     RVV_VI_LOOP_MASK_SKIP();
+@@ -7148,16 +7181,31 @@ void Simulator::DecodeRvvFVF() {
+           { vd = fsgnj64(vs2, fs1, false, true); })
+       break;
+     case RO_V_VFMV_VF:
+-      RVV_VI_VFP_VF_LOOP(
+-          {},
+-          {
+-            vd = fs1;
+-            USE(vs2);
+-          },
+-          {
+-            vd = fs1;
+-            USE(vs2);
+-          })
++      if (instr_.RvvVM()) {
++        RVV_VI_VF_MERGE_LOOP(
++            {},
++            {
++              vd = fs1;
++              USE(vs2);
++            },
++            {
++              vd = fs1;
++              USE(vs2);
++            });
++      } else {
++        RVV_VI_VF_MERGE_LOOP(
++            {},
++            {
++              bool use_first =
++                  (Rvvelt<uint64_t>(0, (i / 64)) >> (i % 64)) & 0x1;
++              vd = use_first ? fs1 : vs2;
++            },
++            {
++              bool use_first =
++                  (Rvvelt<uint64_t>(0, (i / 64)) >> (i % 64)) & 0x1;
++              vd = use_first ? fs1 : vs2;
++            });
++      }
+       break;
+     case RO_V_VFADD_VF:
+       RVV_VI_VFP_VF_LOOP(
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
+index 1d6ae09e8ba..05976082377 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
+@@ -1540,8 +1540,7 @@ void LiftoffAssembler::emit_i8x16_shuffle(LiftoffRegister dst,
+ void LiftoffAssembler::emit_f64x2_splat(LiftoffRegister dst,
+                                         LiftoffRegister src) {
+   VU.set(kScratchReg, E64, m1);
+-  fmv_x_d(kScratchReg, src.fp());
+-  vmv_vx(dst.fp().toV(), kScratchReg);
++  vfmv_vf(dst.fp().toV(), src.fp());
+ }
+ 
+ void LiftoffAssembler::emit_f64x2_min(LiftoffRegister dst, LiftoffRegister lhs,
+@@ -1641,8 +1640,7 @@ void LiftoffAssembler::emit_f64x2_replace_lane(LiftoffRegister dst,
+   VU.set(kScratchReg, E64, m1);
+   li(kScratchReg, 0x1 << imm_lane_idx);
+   vmv_sx(v0, kScratchReg);
+-  fmv_x_d(kScratchReg, src2.fp());
+-  vmerge_vx(dst.fp().toV(), kScratchReg, src1.fp().toV());
++  vfmerge_vf(dst.fp().toV(), src2.fp(), src1.fp().toV());
+ }
+ 
+ void LiftoffAssembler::CallC(const ValueKindSig* sig,
+diff --git a/test/cctest/test-assembler-riscv32.cc b/test/cctest/test-assembler-riscv32.cc
+index 5e68352f290..8f0e6a9c762 100644
+--- a/test/cctest/test-assembler-riscv32.cc
++++ b/test/cctest/test-assembler-riscv32.cc
+@@ -2502,6 +2502,43 @@ UTEST_RVV_VI_VIE_FORM_WITH_RES(vsext_vf2, int16_t, 16, 8, ARRAY(int8_t),
+ 
+ #undef UTEST_RVV_VI_VIE_FORM_WITH_RES
+ 
++// Tests for vector Floating-Point merge instruction
++#define UTEST_RVV_VF_VFMERGE_VF_FORM_WITH_RES(type, int_type, width,     \
++                                              expect_res)                \
++  TEST(RISCV_UTEST_vfmerge_vf_##type) {                                  \
++    if (!CpuFeatures::IsSupported(RISCV_SIMD)) return;                   \
++    constexpr uint32_t n = kRvvVLEN / width;                             \
++    CcTest::InitializeVM();                                              \
++    for (type fval : compiler::ValueHelper::GetVector<type>()) {         \
++      int_type rs1_fval = base::bit_cast<int_type>(fval);                \
++      for (uint32_t mask = 0; mask < (1 << n); mask++) {                 \
++        int_type src[n] = {0};                                           \
++        int_type dst[n] = {0};                                           \
++        dst[0] = rs1_fval;                                               \
++        for (uint32_t i = 0; i < n; i++) src[i] = i;                     \
++        auto fn = [mask](MacroAssembler& assm) {                         \
++          __ VU.set(t0, VSew::E##width, Vlmul::m1);                      \
++          __ vl(v1, a0, 0, VSew::E##width);                              \
++          __ vl(v24, a1, 0, VSew::E##width);                             \
++          __ vmv_vi(v0, mask);                                           \
++          __ vfmv_fs(ft0, v24);                                          \
++          __ vfmerge_vf(v2, ft0, v1);                                    \
++          __ vs(v2, a1, 0, VSew::E##width);                              \
++        };                                                               \
++        GenAndRunTest<int64_t, int64_t>((int64_t)src, (int64_t)dst, fn); \
++        for (uint32_t i = 0; i < n; i++) {                               \
++          CHECK_EQ(expect_res, dst[i]);                                  \
++        }                                                                \
++      }                                                                  \
++    }                                                                    \
++  }
++
++UTEST_RVV_VF_VFMERGE_VF_FORM_WITH_RES(double, int64_t, 64,
++                                      ((mask >> i) & 0x1) ? rs1_fval : src[i])
++UTEST_RVV_VF_VFMERGE_VF_FORM_WITH_RES(float, int32_t, 32,
++                                      ((mask >> i) & 0x1) ? rs1_fval : src[i])
++#undef UTEST_RVV_VF_VFMERGE_VF_FORM_WITH_RES
++
+ // Tests for vector permutation instructions vector slide instructions
+ #define UTEST_RVV_VP_VSLIDE_VI_FORM_WITH_RES(instr_name, type, width, array, \
+                                              expect_res)                     \
+diff --git a/test/cctest/test-assembler-riscv64.cc b/test/cctest/test-assembler-riscv64.cc
+index 9f4f48f1f6c..b1e018e9a30 100644
+--- a/test/cctest/test-assembler-riscv64.cc
++++ b/test/cctest/test-assembler-riscv64.cc
+@@ -2780,6 +2780,43 @@ UTEST_RVV_VI_VIE_FORM_WITH_RES(vsext_vf2, int16_t, 16, 8, ARRAY(int8_t),
+ 
+ #undef UTEST_RVV_VI_VIE_FORM_WITH_RES
+ 
++// Tests for vector Floating-Point merge instruction
++#define UTEST_RVV_VF_VFMERGE_VF_FORM_WITH_RES(type, int_type, width,     \
++                                              expect_res)                \
++  TEST(RISCV_UTEST_vfmerge_vf_##type) {                                  \
++    if (!CpuFeatures::IsSupported(RISCV_SIMD)) return;                   \
++    constexpr uint32_t n = kRvvVLEN / width;                             \
++    CcTest::InitializeVM();                                              \
++    for (type fval : compiler::ValueHelper::GetVector<type>()) {         \
++      int_type rs1_fval = base::bit_cast<int_type>(fval);                \
++      for (uint32_t mask = 0; mask < (1 << n); mask++) {                 \
++        int_type src[n] = {0};                                           \
++        int_type dst[n] = {0};                                           \
++        dst[0] = rs1_fval;                                               \
++        for (uint32_t i = 0; i < n; i++) src[i] = i;                     \
++        auto fn = [mask](MacroAssembler& assm) {                         \
++          __ VU.set(t0, VSew::E##width, Vlmul::m1);                      \
++          __ vl(v1, a0, 0, VSew::E##width);                              \
++          __ vl(v24, a1, 0, VSew::E##width);                             \
++          __ vmv_vi(v0, mask);                                           \
++          __ vfmv_fs(ft0, v24);                                          \
++          __ vfmerge_vf(v2, ft0, v1);                                    \
++          __ vs(v2, a1, 0, VSew::E##width);                              \
++        };                                                               \
++        GenAndRunTest<int64_t, int64_t>((int64_t)src, (int64_t)dst, fn); \
++        for (uint32_t i = 0; i < n; i++) {                               \
++          CHECK_EQ(expect_res, dst[i]);                                  \
++        }                                                                \
++      }                                                                  \
++    }                                                                    \
++  }
++
++UTEST_RVV_VF_VFMERGE_VF_FORM_WITH_RES(double, int64_t, 64,
++                                      ((mask >> i) & 0x1) ? rs1_fval : src[i])
++UTEST_RVV_VF_VFMERGE_VF_FORM_WITH_RES(float, int32_t, 32,
++                                      ((mask >> i) & 0x1) ? rs1_fval : src[i])
++#undef UTEST_RVV_VF_VFMERGE_VF_FORM_WITH_RES
++
+ // Tests for vector permutation instructions vector slide instructions
+ #define UTEST_RVV_VP_VSLIDE_VI_FORM_WITH_RES(instr_name, type, width, array, \
+                                              expect_res)                     \
+-- 
+2.35.1
+

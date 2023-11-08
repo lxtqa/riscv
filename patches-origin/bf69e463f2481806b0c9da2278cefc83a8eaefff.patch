@@ -1,0 +1,271 @@
+From bf69e463f2481806b0c9da2278cefc83a8eaefff Mon Sep 17 00:00:00 2001
+From: Deepti Gandluri <gdeepti@chromium.org>
+Date: Tue, 21 Feb 2023 23:20:06 -0800
+Subject: [PATCH] [wasm-relaxed-simd] Enable Qfma/Qfms on Arm
+
+Bug: v8:12284
+Change-Id: I8226ab6bb60d781cf8e209899b8f68f43679064f
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4279825
+Reviewed-by: Ilya Rezvov <irezvov@chromium.org>
+Commit-Queue: Deepti Gandluri <gdeepti@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#86013}
+---
+ .../backend/arm/code-generator-arm.cc         | 34 +++++++++++++++++++
+ .../backend/arm/instruction-codes-arm.h       |  4 +++
+ .../backend/arm/instruction-scheduler-arm.cc  |  4 +++
+ .../backend/arm/instruction-selector-arm.cc   | 14 ++++++++
+ src/compiler/backend/instruction-selector.cc  | 11 ------
+ src/wasm/baseline/arm/liftoff-assembler-arm.h | 20 ++++++++---
+ .../cctest/wasm/test-run-wasm-relaxed-simd.cc | 19 +++++------
+ 7 files changed, 81 insertions(+), 25 deletions(-)
+
+diff --git a/src/compiler/backend/arm/code-generator-arm.cc b/src/compiler/backend/arm/code-generator-arm.cc
+index 66ed969eb7f..d500b97c3d6 100644
+--- a/src/compiler/backend/arm/code-generator-arm.cc
++++ b/src/compiler/backend/arm/code-generator-arm.cc
+@@ -1988,6 +1988,28 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       __ vmov(dst.high(), rhs.high(), gt);
+       break;
+     }
++    case kArmF64x2Qfma: {
++      Simd128Register dst = i.OutputSimd128Register();
++      Simd128Register src0 = i.InputSimd128Register(0);
++      Simd128Register src1 = i.InputSimd128Register(1);
++      Simd128Register src2 = i.InputSimd128Register(2);
++      __ vmul(dst.low(), src0.low(), src1.low());
++      __ vmul(dst.high(), src0.high(), src1.high());
++      __ vadd(dst.low(), src2.low(), dst.low());
++      __ vadd(dst.high(), src2.high(), dst.high());
++      break;
++    }
++    case kArmF64x2Qfms: {
++      Simd128Register dst = i.OutputSimd128Register();
++      Simd128Register src0 = i.InputSimd128Register(0);
++      Simd128Register src1 = i.InputSimd128Register(1);
++      Simd128Register src2 = i.InputSimd128Register(2);
++      __ vmul(dst.low(), src0.low(), src1.low());
++      __ vmul(dst.high(), src0.high(), src1.high());
++      __ vsub(dst.low(), src2.low(), dst.low());
++      __ vsub(dst.high(), src2.high(), dst.high());
++      break;
++    }
+     case kArmF64x2Ceil: {
+       CpuFeatureScope scope(masm(), ARMv8);
+       Simd128Register dst = i.OutputSimd128Register();
+@@ -2288,6 +2310,18 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       __ vbsl(dst, rhs, lhs);
+       break;
+     }
++    case kArmF32x4Qfma: {
++      Simd128Register dst = i.OutputSimd128Register();
++      __ vmul(dst, i.InputSimd128Register(0), i.InputSimd128Register(1));
++      __ vadd(dst, i.InputSimd128Register(2), dst);
++      break;
++    }
++    case kArmF32x4Qfms: {
++      Simd128Register dst = i.OutputSimd128Register();
++      __ vmul(dst, i.InputSimd128Register(0), i.InputSimd128Register(1));
++      __ vsub(dst, i.InputSimd128Register(2), dst);
++      break;
++    }
+     case kArmF32x4DemoteF64x2Zero: {
+       Simd128Register dst = i.OutputSimd128Register();
+       Simd128Register src = i.InputSimd128Register(0);
+diff --git a/src/compiler/backend/arm/instruction-codes-arm.h b/src/compiler/backend/arm/instruction-codes-arm.h
+index 75f6aee953c..051ad456778 100644
+--- a/src/compiler/backend/arm/instruction-codes-arm.h
++++ b/src/compiler/backend/arm/instruction-codes-arm.h
+@@ -152,6 +152,8 @@ namespace compiler {
+   V(ArmF64x2Le)                    \
+   V(ArmF64x2Pmin)                  \
+   V(ArmF64x2Pmax)                  \
++  V(ArmF64x2Qfma)                  \
++  V(ArmF64x2Qfms)                  \
+   V(ArmF64x2Ceil)                  \
+   V(ArmF64x2Floor)                 \
+   V(ArmF64x2Trunc)                 \
+@@ -179,6 +181,8 @@ namespace compiler {
+   V(ArmF32x4Le)                    \
+   V(ArmF32x4Pmin)                  \
+   V(ArmF32x4Pmax)                  \
++  V(ArmF32x4Qfma)                  \
++  V(ArmF32x4Qfms)                  \
+   V(ArmF32x4DemoteF64x2Zero)       \
+   V(ArmI64x2SplatI32Pair)          \
+   V(ArmI64x2ReplaceLaneI32Pair)    \
+diff --git a/src/compiler/backend/arm/instruction-scheduler-arm.cc b/src/compiler/backend/arm/instruction-scheduler-arm.cc
+index 8b4a623cc32..777c8e960af 100644
+--- a/src/compiler/backend/arm/instruction-scheduler-arm.cc
++++ b/src/compiler/backend/arm/instruction-scheduler-arm.cc
+@@ -129,6 +129,8 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kArmF64x2Ne:
+     case kArmF64x2Lt:
+     case kArmF64x2Le:
++    case kArmF64x2Qfma:
++    case kArmF64x2Qfms:
+     case kArmF64x2Pmin:
+     case kArmF64x2Pmax:
+     case kArmF64x2Ceil:
+@@ -156,6 +158,8 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kArmF32x4Ne:
+     case kArmF32x4Lt:
+     case kArmF32x4Le:
++    case kArmF32x4Qfma:
++    case kArmF32x4Qfms:
+     case kArmF32x4Pmin:
+     case kArmF32x4Pmax:
+     case kArmF32x4DemoteF64x2Zero:
+diff --git a/src/compiler/backend/arm/instruction-selector-arm.cc b/src/compiler/backend/arm/instruction-selector-arm.cc
+index 48e649051b6..f8edda48c54 100644
+--- a/src/compiler/backend/arm/instruction-selector-arm.cc
++++ b/src/compiler/backend/arm/instruction-selector-arm.cc
+@@ -2918,6 +2918,20 @@ void InstructionSelector::VisitI64x2RelaxedLaneSelect(Node* node) {
+   VisitS128Select(node);
+ }
+ 
++#define VISIT_SIMD_QFMOP(op)                        \
++  void InstructionSelector::Visit##op(Node* node) { \
++    ArmOperandGenerator g(this);                    \
++    Emit(kArm##op, g.DefineAsRegister(node),        \
++         g.UseUniqueRegister(node->InputAt(0)),     \
++         g.UseUniqueRegister(node->InputAt(1)),     \
++         g.UseUniqueRegister(node->InputAt(2)));    \
++  }
++VISIT_SIMD_QFMOP(F64x2Qfma)
++VISIT_SIMD_QFMOP(F64x2Qfms)
++VISIT_SIMD_QFMOP(F32x4Qfma)
++VISIT_SIMD_QFMOP(F32x4Qfms)
++#undef VISIT_SIMD_QFMOP
++
+ #if V8_ENABLE_WEBASSEMBLY
+ namespace {
+ 
+diff --git a/src/compiler/backend/instruction-selector.cc b/src/compiler/backend/instruction-selector.cc
+index 4f8ae600ea1..008b0897e22 100644
+--- a/src/compiler/backend/instruction-selector.cc
++++ b/src/compiler/backend/instruction-selector.cc
+@@ -2818,17 +2818,6 @@ void InstructionSelector::VisitI64x2ReplaceLane(Node* node) { UNIMPLEMENTED(); }
+ #endif  // !V8_TARGET_ARCH_ARM64
+ #endif  // !V8_TARGET_ARCH_X64 && !V8_TARGET_ARCH_S390X && !V8_TARGET_ARCH_PPC64
+ 
+-#if !V8_TARGET_ARCH_X64 && !V8_TARGET_ARCH_S390X && !V8_TARGET_ARCH_PPC64 && \
+-    !V8_TARGET_ARCH_ARM64 && !V8_TARGET_ARCH_IA32 &&                         \
+-    !V8_TARGET_ARCH_RISCV32 && !V8_TARGET_ARCH_RISCV64
+-void InstructionSelector::VisitF64x2Qfma(Node* node) { UNIMPLEMENTED(); }
+-void InstructionSelector::VisitF64x2Qfms(Node* node) { UNIMPLEMENTED(); }
+-void InstructionSelector::VisitF32x4Qfma(Node* node) { UNIMPLEMENTED(); }
+-void InstructionSelector::VisitF32x4Qfms(Node* node) { UNIMPLEMENTED(); }
+-#endif  // !V8_TARGET_ARCH_X64 && !V8_TARGET_ARCH_S390X && !V8_TARGET_ARCH_PPC64
+-        // && !V8_TARGET_ARCH_ARM64 && !V8_TARGET_ARCH_IA32 &&
+-        // !V8_TARGET_ARCH_RISCV64 && !V8_TARGET_ARCH_RISCV32
+-
+ #if !V8_TARGET_ARCH_ARM64 && !V8_TARGET_ARCH_X64 && !V8_TARGET_ARCH_IA32
+ void InstructionSelector::VisitI16x8DotI8x16I7x16S(Node* node) {
+   UNIMPLEMENTED();
+diff --git a/src/wasm/baseline/arm/liftoff-assembler-arm.h b/src/wasm/baseline/arm/liftoff-assembler-arm.h
+index adf797dcaaf..c707be55913 100644
+--- a/src/wasm/baseline/arm/liftoff-assembler-arm.h
++++ b/src/wasm/baseline/arm/liftoff-assembler-arm.h
+@@ -4206,28 +4206,40 @@ void LiftoffAssembler::emit_f32x4_qfma(LiftoffRegister dst,
+                                        LiftoffRegister src1,
+                                        LiftoffRegister src2,
+                                        LiftoffRegister src3) {
+-  bailout(kRelaxedSimd, "emit_f32x4_qfma");
++  vmul(liftoff::GetSimd128Register(dst), liftoff::GetSimd128Register(src1),
++       liftoff::GetSimd128Register(src2));
++  vadd(liftoff::GetSimd128Register(dst), liftoff::GetSimd128Register(src3),
++       liftoff::GetSimd128Register(dst));
+ }
+ 
+ void LiftoffAssembler::emit_f32x4_qfms(LiftoffRegister dst,
+                                        LiftoffRegister src1,
+                                        LiftoffRegister src2,
+                                        LiftoffRegister src3) {
+-  bailout(kRelaxedSimd, "emit_f32x4_qfms");
++  vmul(liftoff::GetSimd128Register(dst), liftoff::GetSimd128Register(src1),
++       liftoff::GetSimd128Register(src2));
++  vsub(liftoff::GetSimd128Register(dst), liftoff::GetSimd128Register(src3),
++       liftoff::GetSimd128Register(dst));
+ }
+ 
+ void LiftoffAssembler::emit_f64x2_qfma(LiftoffRegister dst,
+                                        LiftoffRegister src1,
+                                        LiftoffRegister src2,
+                                        LiftoffRegister src3) {
+-  bailout(kRelaxedSimd, "emit_f64x2_qfma");
++  vmul(dst.low_fp(), src1.low_fp(), src2.low_fp());
++  vmul(dst.high_fp(), src1.high_fp(), src2.high_fp());
++  vadd(dst.low_fp(), src3.low_fp(), dst.low_fp());
++  vadd(dst.high_fp(), src3.high_fp(), dst.high_fp());
+ }
+ 
+ void LiftoffAssembler::emit_f64x2_qfms(LiftoffRegister dst,
+                                        LiftoffRegister src1,
+                                        LiftoffRegister src2,
+                                        LiftoffRegister src3) {
+-  bailout(kRelaxedSimd, "emit_f64x2_qfms");
++  vmul(dst.low_fp(), src1.low_fp(), src2.low_fp());
++  vmul(dst.high_fp(), src1.high_fp(), src2.high_fp());
++  vsub(dst.low_fp(), src3.low_fp(), dst.low_fp());
++  vsub(dst.high_fp(), src3.high_fp(), dst.high_fp());
+ }
+ 
+ void LiftoffAssembler::StackCheck(Label* ool_code, Register limit_address) {
+diff --git a/test/cctest/wasm/test-run-wasm-relaxed-simd.cc b/test/cctest/wasm/test-run-wasm-relaxed-simd.cc
+index 8119bc42b16..7f9576b279e 100644
+--- a/test/cctest/wasm/test-run-wasm-relaxed-simd.cc
++++ b/test/cctest/wasm/test-run-wasm-relaxed-simd.cc
+@@ -38,8 +38,6 @@ namespace test_run_wasm_relaxed_simd {
+   }                                                             \
+   void RunWasm_##name##_Impl(TestExecutionTier execution_tier)
+ 
+-#if V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_S390X || \
+-    V8_TARGET_ARCH_PPC64 || V8_TARGET_ARCH_IA32 || V8_TARGET_ARCH_RISCV64
+ // Only used for qfma and qfms tests below.
+ 
+ // FMOperation holds the params (a, b, c) for a Multiply-Add or
+@@ -114,23 +112,26 @@ static constexpr base::Vector<const FMOperation<T>> qfms_vector() {
+   return base::ArrayVector(qfms_array<T>);
+ }
+ 
+-// Fused results only when fma3 feature is enabled, and running on TurboFan or
+-// Liftoff (which can fall back to TurboFan if FMA is not implemented).
+ bool ExpectFused(TestExecutionTier tier) {
+ #if V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_IA32
++  // Fused results only when fma3 feature is enabled, and running on TurboFan or
++  // Liftoff (which can fall back to TurboFan if FMA is not implemented).
+   return CpuFeatures::IsSupported(FMA3) &&
+          (tier == TestExecutionTier::kTurbofan ||
+           tier == TestExecutionTier::kLiftoff);
++#elif V8_TARGET_ARCH_ARM
++  // Consistent feature detection for Neonv2 is required before emitting
++  // fused instructions on Arm32. Not all Neon enabled Arm32 devices have
++  // FMA instructions.
++  return false;
+ #else
++  // All ARM64 Neon enabled devices have support for FMA instructions, only the
++  // Liftoff/Turbofan tiers emit codegen for fused results.
+   return (tier == TestExecutionTier::kTurbofan ||
+           tier == TestExecutionTier::kLiftoff);
+ #endif  // V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_IA32
+ }
+-#endif  // V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_S390X ||
+-        // V8_TARGET_ARCH_PPC64 || V8_TARGET_ARCH_IA32 || V8_TARGET_ARCH_RISCV64
+ 
+-#if V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_S390X || \
+-    V8_TARGET_ARCH_PPC64 || V8_TARGET_ARCH_IA32 || V8_TARGET_ARCH_RISCV64
+ WASM_RELAXED_SIMD_TEST(F32x4Qfma) {
+   WasmRunner<int32_t, float, float, float> r(execution_tier);
+   // Set up global to hold mask output.
+@@ -256,8 +257,6 @@ TEST(RunWasm_RegressFmaReg_liftoff) {
+     }
+   }
+ }
+-#endif  // V8_TARGET_ARCH_X64 || V8_TARGET_ARCH_ARM64 || V8_TARGET_ARCH_S390X ||
+-        // V8_TARGET_ARCH_PPC64 || V8_TARGET_ARCH_IA32 || V8_TARGET_ARCH_RISCV64
+ 
+ namespace {
+ // Helper to convert an array of T into an array of uint8_t to be used a v128
+-- 
+2.35.1
+

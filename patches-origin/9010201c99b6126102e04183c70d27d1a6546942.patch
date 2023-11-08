@@ -1,0 +1,3985 @@
+From 9010201c99b6126102e04183c70d27d1a6546942 Mon Sep 17 00:00:00 2001
+From: Dan Elphick <delphick@chromium.org>
+Date: Tue, 22 Jun 2021 14:27:00 +0100
+Subject: [PATCH] [base] Create base/strings.h
+
+Moves VSNPrintf, SNPrintf and StrNCpy out of utils/utils.h into
+base/strings.h.
+
+Bug: v8:11879
+Change-Id: I0e165cb27c42f89c9acd1c6378514b40a90cd18d
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/2972732
+Auto-Submit: Dan Elphick <delphick@chromium.org>
+Reviewed-by: Clemens Backes <clemensb@chromium.org>
+Reviewed-by: Ross McIlroy <rmcilroy@chromium.org>
+Commit-Queue: Dan Elphick <delphick@chromium.org>
+Cr-Commit-Position: refs/heads/master@{#75308}
+---
+ BUILD.bazel                                   |   2 +
+ BUILD.gn                                      |   2 +
+ src/ast/prettyprinter.cc                      |   5 +-
+ src/base/strings.cc                           |  33 ++
+ src/base/strings.h                            |  28 ++
+ src/debug/debug-wasm-objects.cc               |   3 +-
+ src/diagnostics/arm/disasm-arm.cc             | 234 +++++++-------
+ src/diagnostics/arm64/disasm-arm64.cc         |  10 +-
+ src/diagnostics/arm64/disasm-arm64.h          |   1 -
+ src/diagnostics/code-tracer.h                 |  10 +-
+ src/diagnostics/disassembler.cc               |   1 +
+ src/diagnostics/gdb-jit.cc                    |   1 +
+ src/diagnostics/ia32/disasm-ia32.cc           |  12 +-
+ src/diagnostics/mips/disasm-mips.cc           |   2 +
+ src/diagnostics/mips64/disasm-mips64.cc       | 121 +++----
+ src/diagnostics/ppc/disasm-ppc.cc             |  51 +--
+ src/diagnostics/riscv64/disasm-riscv64.cc     |  69 ++--
+ src/diagnostics/s390/disasm-s390.cc           | 118 ++++---
+ src/diagnostics/x64/disasm-x64.cc             |  13 +-
+ src/extensions/cputracemark-extension.h       |   6 +-
+ src/extensions/gc-extension.h                 |   6 +-
+ .../vtunedomain-support-extension.h           |   7 +-
+ src/heap/gc-tracer.cc                         |   3 +-
+ src/logging/log-utils.cc                      |   4 +-
+ src/profiler/strings-storage.cc               |   7 +-
+ src/snapshot/embedded/embedded-file-writer.cc |  26 +-
+ src/snapshot/embedded/embedded-file-writer.h  |   9 +-
+ src/utils/utils.cc                            |  17 +-
+ src/utils/utils.h                             |   9 -
+ src/utils/version.cc                          |   9 +-
+ src/wasm/decoder.h                            |   3 +-
+ src/wasm/function-body-decoder-impl.h         |   3 +-
+ src/wasm/function-compiler.cc                 |   3 +-
+ src/wasm/memory-tracing.cc                    |  12 +-
+ src/wasm/wasm-result.cc                       |  10 +-
+ test/cctest/cctest.cc                         |   3 +-
+ test/cctest/heap/test-heap.cc                 | 305 +++++++++---------
+ test/cctest/parsing/test-preparser.cc         |   3 +-
+ test/cctest/test-api-array-buffer.cc          |   7 +-
+ test/cctest/test-api-stack-traces.cc          |  18 +-
+ test/cctest/test-api-typed-array.cc           |  72 +++--
+ test/cctest/test-api.cc                       | 157 ++++-----
+ test/cctest/test-cpu-profiler.cc              |  59 ++--
+ test/cctest/test-debug.cc                     |   8 +-
+ test/cctest/test-deoptimization.cc            |   8 +-
+ test/cctest/test-heap-profiler.cc             |  40 +--
+ test/cctest/test-log-stack-tracer.cc          |  13 +-
+ test/cctest/test-log.cc                       |  31 +-
+ test/cctest/test-parsing.cc                   |  49 ++-
+ test/cctest/test-profile-generator.cc         |   3 +-
+ .../osr-optimized-code-cache-unittest.cc      |   4 +-
+ 51 files changed, 880 insertions(+), 750 deletions(-)
+ create mode 100644 src/base/strings.cc
+ create mode 100644 src/base/strings.h
+
+diff --git a/BUILD.bazel b/BUILD.bazel
+index f2645428392..1a13361ac40 100644
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -238,6 +238,8 @@ filegroup(
+         "src/base/safe_conversions_arm_impl.h",
+         "src/base/safe_conversions_impl.h",
+         "src/base/small-vector.h",
++        "src/base/strings.cc",
++        "src/base/strings.h",
+         "src/base/sys-info.cc",
+         "src/base/sys-info.h",
+         "src/base/template-utils.h",
+diff --git a/BUILD.gn b/BUILD.gn
+index 0fce4849692..306eaae6cbf 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -4698,6 +4698,8 @@ v8_component("v8_libbase") {
+     "src/base/sanitizer/lsan.h",
+     "src/base/sanitizer/msan.h",
+     "src/base/small-vector.h",
++    "src/base/strings.cc",
++    "src/base/strings.h",
+     "src/base/sys-info.cc",
+     "src/base/sys-info.h",
+     "src/base/template-utils.h",
+diff --git a/src/ast/prettyprinter.cc b/src/ast/prettyprinter.cc
+index 5d96b503b93..19d45e5abbc 100644
+--- a/src/ast/prettyprinter.cc
++++ b/src/ast/prettyprinter.cc
+@@ -9,6 +9,7 @@
+ #include "src/ast/ast-value-factory.h"
+ #include "src/ast/scopes.h"
+ #include "src/base/platform/platform.h"
++#include "src/base/strings.h"
+ #include "src/base/vector.h"
+ #include "src/common/globals.h"
+ #include "src/objects/objects-inl.h"
+@@ -648,8 +649,8 @@ void AstPrinter::Print(const char* format, ...) {
+   for (;;) {
+     va_list arguments;
+     va_start(arguments, format);
+-    int n =
+-        VSNPrintF(base::Vector<char>(output_, size_) + pos_, format, arguments);
++    int n = base::VSNPrintF(base::Vector<char>(output_, size_) + pos_, format,
++                            arguments);
+     va_end(arguments);
+ 
+     if (n >= 0) {
+diff --git a/src/base/strings.cc b/src/base/strings.cc
+new file mode 100644
+index 00000000000..3b872352716
+--- /dev/null
++++ b/src/base/strings.cc
+@@ -0,0 +1,33 @@
++// Copyright 2021 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "src/base/strings.h"
++
++#include <cstdint>
++#include <cstring>
++#include <limits>
++
++#include "src/base/platform/platform.h"
++
++namespace v8 {
++namespace base {
++
++int VSNPrintF(Vector<char> str, const char* format, va_list args) {
++  return OS::VSNPrintF(str.begin(), str.length(), format, args);
++}
++
++int SNPrintF(Vector<char> str, const char* format, ...) {
++  va_list args;
++  va_start(args, format);
++  int result = VSNPrintF(str, format, args);
++  va_end(args);
++  return result;
++}
++
++void StrNCpy(base::Vector<char> dest, const char* src, size_t n) {
++  base::OS::StrNCpy(dest.begin(), dest.length(), src, n);
++}
++
++}  // namespace base
++}  // namespace v8
+diff --git a/src/base/strings.h b/src/base/strings.h
+new file mode 100644
+index 00000000000..c19ff4aaba1
+--- /dev/null
++++ b/src/base/strings.h
+@@ -0,0 +1,28 @@
++// Copyright 2021 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef V8_BASE_STRINGS_H_
++#define V8_BASE_STRINGS_H_
++
++#include "src/base/base-export.h"
++#include "src/base/macros.h"
++#include "src/base/vector.h"
++
++namespace v8 {
++namespace base {
++
++V8_BASE_EXPORT int PRINTF_FORMAT(2, 0)
++    VSNPrintF(Vector<char> str, const char* format, va_list args);
++
++// Safe formatting print. Ensures that str is always null-terminated.
++// Returns the number of chars written, or -1 if output was truncated.
++V8_BASE_EXPORT int PRINTF_FORMAT(2, 3)
++    SNPrintF(Vector<char> str, const char* format, ...);
++
++V8_BASE_EXPORT void StrNCpy(base::Vector<char> dest, const char* src, size_t n);
++
++}  // namespace base
++}  // namespace v8
++
++#endif  // V8_BASE_STRINGS_H_
+diff --git a/src/debug/debug-wasm-objects.cc b/src/debug/debug-wasm-objects.cc
+index 08461ef4569..ce8435d80c4 100644
+--- a/src/debug/debug-wasm-objects.cc
++++ b/src/debug/debug-wasm-objects.cc
+@@ -6,6 +6,7 @@
+ 
+ #include "src/api/api-inl.h"
+ #include "src/api/api-natives.h"
++#include "src/base/strings.h"
+ #include "src/debug/debug-wasm-objects-inl.h"
+ #include "src/execution/frames-inl.h"
+ #include "src/objects/property-descriptor.h"
+@@ -819,7 +820,7 @@ Handle<String> GetRefTypeName(Isolate* isolate, wasm::ValueType type,
+           long_type_name.SubVector(len, long_type_name.size());
+       // StrNCpy requires that there is room for an assumed trailing \0...
+       DCHECK_EQ(suffix.size(), name_vec.size() + 1);
+-      StrNCpy(suffix, name_vec.data(), name_vec.size());
++      base::StrNCpy(suffix, name_vec.data(), name_vec.size());
+       // ...but we actually write ')' into that byte.
+       long_type_name[required_length - 1] = ')';
+       Handle<String> result =
+diff --git a/src/diagnostics/arm/disasm-arm.cc b/src/diagnostics/arm/disasm-arm.cc
+index e23e2a815d8..38596295ce6 100644
+--- a/src/diagnostics/arm/disasm-arm.cc
++++ b/src/diagnostics/arm/disasm-arm.cc
+@@ -32,6 +32,7 @@
+ 
+ #include "src/base/bits.h"
+ #include "src/base/platform/platform.h"
++#include "src/base/strings.h"
+ #include "src/base/vector.h"
+ #include "src/codegen/arm/assembler-arm.h"
+ #include "src/codegen/arm/constants-arm.h"
+@@ -210,13 +211,13 @@ void Decoder::PrintShiftRm(Instruction* instr) {
+     } else if (((shift == LSR) || (shift == ASR)) && (shift_amount == 0)) {
+       shift_amount = 32;
+     }
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, ", %s #%d",
+-                                shift_names[shift_index], shift_amount);
++    out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, ", %s #%d",
++                                      shift_names[shift_index], shift_amount);
+   } else {
+     // by register
+     int rs = instr->RsValue();
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, ", %s ",
+-                                shift_names[shift_index]);
++    out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, ", %s ",
++                                      shift_names[shift_index]);
+     PrintRegister(rs);
+   }
+ }
+@@ -227,7 +228,7 @@ void Decoder::PrintShiftImm(Instruction* instr) {
+   int rotate = instr->RotateValue() * 2;
+   int immed8 = instr->Immed8Value();
+   int imm = base::bits::RotateRight32(immed8, rotate);
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "#%d", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "#%d", imm);
+ }
+ 
+ // Print the optional shift and immediate used by saturating instructions.
+@@ -235,8 +236,8 @@ void Decoder::PrintShiftSat(Instruction* instr) {
+   int shift = instr->Bits(11, 7);
+   if (shift > 0) {
+     out_buffer_pos_ +=
+-        SNPrintF(out_buffer_ + out_buffer_pos_, ", %s #%d",
+-                 shift_names[instr->Bit(6) * 2], instr->Bits(11, 7));
++        base::SNPrintF(out_buffer_ + out_buffer_pos_, ", %s #%d",
++                       shift_names[instr->Bit(6) * 2], instr->Bits(11, 7));
+   }
+ }
+ 
+@@ -277,10 +278,12 @@ void Decoder::PrintSoftwareInterrupt(SoftwareInterruptCodes svc) {
+       return;
+     default:
+       if (svc >= kStopCode) {
+-        out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d - 0x%x",
+-                                    svc & kStopCodeMask, svc & kStopCodeMask);
++        out_buffer_pos_ +=
++            base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d - 0x%x",
++                           svc & kStopCodeMask, svc & kStopCodeMask);
+       } else {
+-        out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", svc);
++        out_buffer_pos_ +=
++            base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", svc);
+       }
+       return;
+   }
+@@ -382,34 +385,35 @@ int Decoder::FormatVFPinstruction(Instruction* instr, const char* format) {
+ 
+ void Decoder::FormatNeonList(int Vd, int type) {
+   if (type == nlt_1) {
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "{d%d}", Vd);
++    out_buffer_pos_ +=
++        base::SNPrintF(out_buffer_ + out_buffer_pos_, "{d%d}", Vd);
+   } else if (type == nlt_2) {
+     out_buffer_pos_ +=
+-        SNPrintF(out_buffer_ + out_buffer_pos_, "{d%d, d%d}", Vd, Vd + 1);
++        base::SNPrintF(out_buffer_ + out_buffer_pos_, "{d%d, d%d}", Vd, Vd + 1);
+   } else if (type == nlt_3) {
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_,
+-                                "{d%d, d%d, d%d}", Vd, Vd + 1, Vd + 2);
++    out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_,
++                                      "{d%d, d%d, d%d}", Vd, Vd + 1, Vd + 2);
+   } else if (type == nlt_4) {
+     out_buffer_pos_ +=
+-        SNPrintF(out_buffer_ + out_buffer_pos_, "{d%d, d%d, d%d, d%d}", Vd,
+-                 Vd + 1, Vd + 2, Vd + 3);
++        base::SNPrintF(out_buffer_ + out_buffer_pos_, "{d%d, d%d, d%d, d%d}",
++                       Vd, Vd + 1, Vd + 2, Vd + 3);
+   }
+ }
+ 
+ void Decoder::FormatNeonMemory(int Rn, int align, int Rm) {
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "[%s",
+-                              converter_.NameOfCPURegister(Rn));
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "[%s",
++                                    converter_.NameOfCPURegister(Rn));
+   if (align != 0) {
+     out_buffer_pos_ +=
+-        SNPrintF(out_buffer_ + out_buffer_pos_, ":%d", (1 << align) << 6);
++        base::SNPrintF(out_buffer_ + out_buffer_pos_, ":%d", (1 << align) << 6);
+   }
+   if (Rm == 15) {
+     Print("]");
+   } else if (Rm == 13) {
+     Print("]!");
+   } else {
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "], %s",
+-                                converter_.NameOfCPURegister(Rm));
++    out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "], %s",
++                                      converter_.NameOfCPURegister(Rm));
+   }
+ }
+ 
+@@ -418,7 +422,8 @@ void Decoder::PrintMovwMovt(Instruction* instr) {
+   int imm = instr->ImmedMovwMovtValue();
+   int rd = instr->RdValue();
+   PrintRegister(rd);
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, ", #%d", imm);
++  out_buffer_pos_ +=
++      base::SNPrintF(out_buffer_ + out_buffer_pos_, ", #%d", imm);
+ }
+ 
+ // FormatOption takes a formatting string and interprets it based on
+@@ -449,7 +454,8 @@ int Decoder::FormatOption(Instruction* instr, const char* format) {
+     }
+     case 'd': {  // 'd: vmov double immediate.
+       double d = instr->DoubleImmedVmov().get_scalar();
+-      out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "#%g", d);
++      out_buffer_pos_ +=
++          base::SNPrintF(out_buffer_ + out_buffer_pos_, "#%g", d);
+       return 1;
+     }
+     case 'f': {  // 'f: bitfield instructions - v7 and above.
+@@ -462,8 +468,8 @@ int Decoder::FormatOption(Instruction* instr, const char* format) {
+         DCHECK_GT(width, 0);
+       }
+       DCHECK_LE(width + lsbit, 32);
+-      out_buffer_pos_ +=
+-          SNPrintF(out_buffer_ + out_buffer_pos_, "#%d, #%d", lsbit, width);
++      out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_,
++                                        "#%d, #%d", lsbit, width);
+       return 1;
+     }
+     case 'h': {  // 'h: halfword operation for extra loads and stores
+@@ -483,8 +489,8 @@ int Decoder::FormatOption(Instruction* instr, const char* format) {
+       DCHECK((lsb >= 0) && (lsb <= 31));
+       DCHECK_LE(width + lsb, 32);
+ 
+-      out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d",
+-                                  instr->Bits(width + lsb - 1, lsb));
++      out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d",
++                                        instr->Bits(width + lsb - 1, lsb));
+       return 8;
+     }
+     case 'l': {  // 'l: branch and link
+@@ -521,29 +527,30 @@ int Decoder::FormatOption(Instruction* instr, const char* format) {
+       DCHECK(STRING_STARTS_WITH(format, "msg"));
+       byte* str =
+           reinterpret_cast<byte*>(instr->InstructionBits() & 0x0FFFFFFF);
+-      out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%s",
+-                                  converter_.NameInCode(str));
++      out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%s",
++                                        converter_.NameInCode(str));
+       return 3;
+     }
+     case 'o': {
+       if ((format[3] == '1') && (format[4] == '2')) {
+         // 'off12: 12-bit offset for load and store instructions
+         DCHECK(STRING_STARTS_WITH(format, "off12"));
+-        out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d",
+-                                    instr->Offset12Value());
++        out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d",
++                                          instr->Offset12Value());
+         return 5;
+       } else if (format[3] == '0') {
+         // 'off0to3and8to19 16-bit immediate encoded in bits 19-8 and 3-0.
+         DCHECK(STRING_STARTS_WITH(format, "off0to3and8to19"));
+         out_buffer_pos_ +=
+-            SNPrintF(out_buffer_ + out_buffer_pos_, "%d",
+-                     (instr->Bits(19, 8) << 4) + instr->Bits(3, 0));
++            base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d",
++                           (instr->Bits(19, 8) << 4) + instr->Bits(3, 0));
+         return 15;
+       }
+       // 'off8: 8-bit offset for extra load and store instructions
+       DCHECK(STRING_STARTS_WITH(format, "off8"));
+       int offs8 = (instr->ImmedHValue() << 4) | instr->ImmedLValue();
+-      out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", offs8);
++      out_buffer_pos_ +=
++          base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", offs8);
+       return 4;
+     }
+     case 'p': {  // 'pu: P and U bits for load and store instructions
+@@ -591,7 +598,8 @@ int Decoder::FormatOption(Instruction* instr, const char* format) {
+                  STRING_STARTS_WITH(format, "size3"));
+           int sz = 8 << (format[4] == '2' ? instr->Bits(19, 18)
+                                           : instr->Bits(21, 20));
+-          out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", sz);
++          out_buffer_pos_ +=
++              base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", sz);
+           return 5;
+         }
+       } else if (format[1] == 'p') {
+@@ -624,7 +632,7 @@ int Decoder::FormatOption(Instruction* instr, const char* format) {
+     case 't': {  // 'target: target of branch instructions
+       DCHECK(STRING_STARTS_WITH(format, "target"));
+       int off = (static_cast<uint32_t>(instr->SImmed24Value()) << 2) + 8u;
+-      out_buffer_pos_ += SNPrintF(
++      out_buffer_pos_ += base::SNPrintF(
+           out_buffer_ + out_buffer_pos_, "%+d -> %s", off,
+           converter_.NameOfAddress(reinterpret_cast<byte*>(instr) + off));
+       return 6;
+@@ -672,8 +680,8 @@ int Decoder::FormatOption(Instruction* instr, const char* format) {
+         }
+       }
+       out_buffer_pos_ +=
+-          SNPrintF(out_buffer_ + out_buffer_pos_, "0x%08" PRIxPTR,
+-                   reinterpret_cast<uintptr_t>(addr));
++          base::SNPrintF(out_buffer_ + out_buffer_pos_, "0x%08" PRIxPTR,
++                         reinterpret_cast<uintptr_t>(addr));
+       return 1;
+     }
+     case 'S':
+@@ -1470,8 +1478,8 @@ void Decoder::DecodeTypeVFP(Instruction* instr) {
+         // vcvt.f64.s32 Dd, Dd, #<fbits>
+         int fraction_bits = 32 - ((instr->Bits(3, 0) << 1) | instr->Bit(5));
+         Format(instr, "vcvt'cond.f64.s32 'Dd, 'Dd");
+-        out_buffer_pos_ +=
+-            SNPrintF(out_buffer_ + out_buffer_pos_, ", #%d", fraction_bits);
++        out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_,
++                                          ", #%d", fraction_bits);
+       } else if (((instr->Opc2Value() >> 1) == 0x6) &&
+                  (instr->Opc3Value() & 0x1)) {
+         DecodeVCVTBetweenFloatingPointAndInteger(instr);
+@@ -1560,13 +1568,15 @@ void Decoder::DecodeTypeVFP(Instruction* instr) {
+           if ((opc1_opc2 & 0x8) != 0) {
+             // NeonS8 / NeonU8
+             int i = opc1_opc2 & 0x7;
+-            out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_,
+-                                        "vmov.8 d%d[%d], %s", vd, i, rt_name);
++            out_buffer_pos_ +=
++                base::SNPrintF(out_buffer_ + out_buffer_pos_,
++                               "vmov.8 d%d[%d], %s", vd, i, rt_name);
+           } else if ((opc1_opc2 & 0x1) != 0) {
+             // NeonS16 / NeonU16
+             int i = (opc1_opc2 >> 1) & 0x3;
+-            out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_,
+-                                        "vmov.16 d%d[%d], %s", vd, i, rt_name);
++            out_buffer_pos_ +=
++                base::SNPrintF(out_buffer_ + out_buffer_pos_,
++                               "vmov.16 d%d[%d], %s", vd, i, rt_name);
+           } else {
+             Unknown(instr);
+           }
+@@ -1579,8 +1589,8 @@ void Decoder::DecodeTypeVFP(Instruction* instr) {
+           size = 8;
+         }
+         int Vd = instr->VFPNRegValue(kSimd128Precision);
+-        out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_,
+-                                    "vdup.%i q%d, %s", size, Vd, rt_name);
++        out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_,
++                                          "vdup.%i q%d, %s", size, Vd, rt_name);
+       }
+     } else if ((instr->VLValue() == 0x1) && (instr->VCValue() == 0x1)) {
+       int opc1_opc2 = (instr->Bits(22, 21) << 2) | instr->Bits(6, 5);
+@@ -1599,14 +1609,14 @@ void Decoder::DecodeTypeVFP(Instruction* instr) {
+           // NeonS8 / NeonU8
+           int i = opc1_opc2 & 0x7;
+           out_buffer_pos_ +=
+-              SNPrintF(out_buffer_ + out_buffer_pos_, "vmov.%c8 %s, d%d[%d]",
+-                       sign, rt_name, vn, i);
++              base::SNPrintF(out_buffer_ + out_buffer_pos_,
++                             "vmov.%c8 %s, d%d[%d]", sign, rt_name, vn, i);
+         } else if ((opc1_opc2 & 0x1) != 0) {
+           // NeonS16 / NeonU16
+           int i = (opc1_opc2 >> 1) & 0x3;
+           out_buffer_pos_ +=
+-              SNPrintF(out_buffer_ + out_buffer_pos_, "vmov.%c16 %s, d%d[%d]",
+-                       sign, rt_name, vn, i);
++              base::SNPrintF(out_buffer_ + out_buffer_pos_,
++                             "vmov.%c16 %s, d%d[%d]", sign, rt_name, vn, i);
+         } else {
+           Unknown(instr);
+         }
+@@ -1770,13 +1780,13 @@ void Decoder::DecodeVmovImmediate(Instruction* instr) {
+   switch (cmode) {
+     case 0: {
+       uint32_t imm32 = imm;
+-      out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_,
+-                                  "vmov.i32 q%d, %d", vd, imm32);
++      out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_,
++                                        "vmov.i32 q%d, %d", vd, imm32);
+       break;
+     }
+     case 0xe: {
+-      out_buffer_pos_ +=
+-          SNPrintF(out_buffer_ + out_buffer_pos_, "vmov.i8 q%d, %d", vd, imm);
++      out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_,
++                                        "vmov.i8 q%d, %d", vd, imm);
+       break;
+     }
+     default:
+@@ -2161,15 +2171,15 @@ void Decoder::DecodeAdvancedSIMDDataProcessing(Instruction* instr) {
+         if (q) {
+           int Vd = instr->VFPDRegValue(kSimd128Precision);
+           int Vm = instr->VFPMRegValue(kSimd128Precision);
+-          out_buffer_pos_ +=
+-              SNPrintF(out_buffer_ + out_buffer_pos_, "vshr.%s%d q%d, q%d, #%d",
+-                       u ? "u" : "s", size, Vd, Vm, shift);
++          out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_,
++                                            "vshr.%s%d q%d, q%d, #%d",
++                                            u ? "u" : "s", size, Vd, Vm, shift);
+         } else {
+           int Vd = instr->VFPDRegValue(kDoublePrecision);
+           int Vm = instr->VFPMRegValue(kDoublePrecision);
+-          out_buffer_pos_ +=
+-              SNPrintF(out_buffer_ + out_buffer_pos_, "vshr.%s%d d%d, d%d, #%d",
+-                       u ? "u" : "s", size, Vd, Vm, shift);
++          out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_,
++                                            "vshr.%s%d d%d, d%d, #%d",
++                                            u ? "u" : "s", size, Vd, Vm, shift);
+         }
+       } else if (imm3H_L != 0 && opc == 1) {
+         // vsra.<type><size> Qd, Qm, shift
+@@ -2180,15 +2190,15 @@ void Decoder::DecodeAdvancedSIMDDataProcessing(Instruction* instr) {
+         if (q) {
+           int Vd = instr->VFPDRegValue(kSimd128Precision);
+           int Vm = instr->VFPMRegValue(kSimd128Precision);
+-          out_buffer_pos_ +=
+-              SNPrintF(out_buffer_ + out_buffer_pos_, "vsra.%s%d q%d, q%d, #%d",
+-                       u ? "u" : "s", size, Vd, Vm, shift);
++          out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_,
++                                            "vsra.%s%d q%d, q%d, #%d",
++                                            u ? "u" : "s", size, Vd, Vm, shift);
+         } else {
+           int Vd = instr->VFPDRegValue(kDoublePrecision);
+           int Vm = instr->VFPMRegValue(kDoublePrecision);
+-          out_buffer_pos_ +=
+-              SNPrintF(out_buffer_ + out_buffer_pos_, "vsra.%s%d d%d, d%d, #%d",
+-                       u ? "u" : "s", size, Vd, Vm, shift);
++          out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_,
++                                            "vsra.%s%d d%d, d%d, #%d",
++                                            u ? "u" : "s", size, Vd, Vm, shift);
+         }
+       } else if (imm3H_L != 0 && imm3L == 0 && opc == 0b1010 && !q) {
+         // vmovl
+@@ -2197,8 +2207,8 @@ void Decoder::DecodeAdvancedSIMDDataProcessing(Instruction* instr) {
+         int Vm = instr->VFPMRegValue(kDoublePrecision);
+         int imm3H = instr->Bits(21, 19);
+         out_buffer_pos_ +=
+-            SNPrintF(out_buffer_ + out_buffer_pos_, "vmovl.%s%d q%d, d%d",
+-                     u ? "u" : "s", imm3H * 8, Vd, Vm);
++            base::SNPrintF(out_buffer_ + out_buffer_pos_, "vmovl.%s%d q%d, d%d",
++                           u ? "u" : "s", imm3H * 8, Vd, Vm);
+       } else if (!u && imm3H_L != 0 && opc == 0b0101) {
+         // vshl.i<size> Qd, Qm, shift
+         int imm7 = (l << 6) | instr->Bits(21, 16);
+@@ -2207,8 +2217,8 @@ void Decoder::DecodeAdvancedSIMDDataProcessing(Instruction* instr) {
+         int Vd = instr->VFPDRegValue(kSimd128Precision);
+         int Vm = instr->VFPMRegValue(kSimd128Precision);
+         out_buffer_pos_ +=
+-            SNPrintF(out_buffer_ + out_buffer_pos_, "vshl.i%d q%d, q%d, #%d",
+-                     size, Vd, Vm, shift);
++            base::SNPrintF(out_buffer_ + out_buffer_pos_,
++                           "vshl.i%d q%d, q%d, #%d", size, Vd, Vm, shift);
+       } else if (u && imm3H_L != 0 && (opc & 0b1110) == 0b0100) {
+         // vsli.<size> Dd, Dm, shift
+         // vsri.<size> Dd, Dm, shift
+@@ -2225,9 +2235,9 @@ void Decoder::DecodeAdvancedSIMDDataProcessing(Instruction* instr) {
+         }
+         int Vd = instr->VFPDRegValue(kDoublePrecision);
+         int Vm = instr->VFPMRegValue(kDoublePrecision);
+-        out_buffer_pos_ +=
+-            SNPrintF(out_buffer_ + out_buffer_pos_, "vs%ci.%d d%d, d%d, #%d",
+-                     direction, size, Vd, Vm, shift);
++        out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_,
++                                          "vs%ci.%d d%d, d%d, #%d", direction,
++                                          size, Vd, Vm, shift);
+       }
+     }
+   } else {
+@@ -2247,8 +2257,9 @@ void Decoder::DecodeAdvancedSIMDTwoOrThreeRegisters(Instruction* instr) {
+     int Vd = instr->VFPDRegValue(kSimd128Precision);
+     int Vm = instr->VFPMRegValue(kSimd128Precision);
+     int Vn = instr->VFPNRegValue(kSimd128Precision);
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_,
+-                                "vext.8 q%d, q%d, q%d, #%d", Vd, Vn, Vm, imm4);
++    out_buffer_pos_ +=
++        base::SNPrintF(out_buffer_ + out_buffer_pos_,
++                       "vext.8 q%d, q%d, q%d, #%d", Vd, Vn, Vm, imm4);
+   } else if (op0 && op1 == 0b11 && ((op2 >> 1) == 0)) {
+     // Advanced SIMD two registers misc
+     int size = instr->Bits(19, 18);
+@@ -2262,8 +2273,9 @@ void Decoder::DecodeAdvancedSIMDTwoOrThreeRegisters(Instruction* instr) {
+     if (opc1 == 0 && (opc2 >> 2) == 0) {
+       int op = kBitsPerByte << (static_cast<int>(Neon64) - instr->Bits(8, 7));
+       // vrev<op>.<esize> Qd, Qm.
+-      out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_,
+-                                  "vrev%d.%d q%d, q%d", op, esize, Vd, Vm);
++      out_buffer_pos_ +=
++          base::SNPrintF(out_buffer_ + out_buffer_pos_, "vrev%d.%d q%d, q%d",
++                         op, esize, Vd, Vm);
+     } else if (opc1 == 0 && opc2 == 0b0100) {
+       Format(instr, q ? "vpaddl.s'size2 'Qd, 'Qm" : "vpaddl.s'size2 'Dd, 'Dm");
+     } else if (opc1 == 0 && opc2 == 0b0101) {
+@@ -2305,8 +2317,8 @@ void Decoder::DecodeAdvancedSIMDTwoOrThreeRegisters(Instruction* instr) {
+       const char* name = op == 0b01 ? "vqmovun" : "vqmovn";
+       char type = op == 0b11 ? 'u' : 's';
+       out_buffer_pos_ +=
+-          SNPrintF(out_buffer_ + out_buffer_pos_, "%s.%c%i d%d, q%d", name,
+-                   type, esize << 1, Vd, Vm);
++          base::SNPrintF(out_buffer_ + out_buffer_pos_, "%s.%c%i d%d, q%d",
++                         name, type, esize << 1, Vd, Vm);
+     } else if (opc1 == 0b10 && opc2 == 0b1000) {
+       Format(instr, q ? "vrintn.f32 'Qd, 'Qm" : "vrintn.f32 'Dd, 'Dm");
+     } else if (opc1 == 0b10 && opc2 == 0b1011) {
+@@ -2336,8 +2348,8 @@ void Decoder::DecodeAdvancedSIMDTwoOrThreeRegisters(Instruction* instr) {
+           suffix = "u32.f32";
+           break;
+       }
+-      out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_,
+-                                  "vcvt.%s q%d, q%d", suffix, Vd, Vm);
++      out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_,
++                                        "vcvt.%s q%d, q%d", suffix, Vd, Vm);
+     }
+   } else if (op0 && op1 == 0b11 && op2 == 0b10) {
+     // VTBL, VTBX
+@@ -2346,8 +2358,9 @@ void Decoder::DecodeAdvancedSIMDTwoOrThreeRegisters(Instruction* instr) {
+     int Vm = instr->VFPMRegValue(kDoublePrecision);
+     int len = instr->Bits(9, 8);
+     NeonListOperand list(DwVfpRegister::from_code(Vn), len + 1);
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%s d%d, ",
+-                                instr->Bit(6) == 0 ? "vtbl.8" : "vtbx.8", Vd);
++    out_buffer_pos_ +=
++        base::SNPrintF(out_buffer_ + out_buffer_pos_, "%s d%d, ",
++                       instr->Bit(6) == 0 ? "vtbl.8" : "vtbx.8", Vd);
+     FormatNeonList(Vn, list.type());
+     Print(", ");
+     PrintDRegister(Vm);
+@@ -2371,13 +2384,13 @@ void Decoder::DecodeAdvancedSIMDTwoOrThreeRegisters(Instruction* instr) {
+       if (instr->Bit(6) == 0) {
+         int Vd = instr->VFPDRegValue(kDoublePrecision);
+         out_buffer_pos_ +=
+-            SNPrintF(out_buffer_ + out_buffer_pos_, "vdup.%i d%d, d%d[%d]",
+-                     esize, Vd, Vm, index);
++            base::SNPrintF(out_buffer_ + out_buffer_pos_,
++                           "vdup.%i d%d, d%d[%d]", esize, Vd, Vm, index);
+       } else {
+         int Vd = instr->VFPDRegValue(kSimd128Precision);
+         out_buffer_pos_ +=
+-            SNPrintF(out_buffer_ + out_buffer_pos_, "vdup.%i q%d, d%d[%d]",
+-                     esize, Vd, Vm, index);
++            base::SNPrintF(out_buffer_ + out_buffer_pos_,
++                           "vdup.%i q%d, d%d[%d]", esize, Vd, Vm, index);
+       }
+     } else {
+       Unknown(instr);
+@@ -2408,16 +2421,19 @@ void Decoder::DecodeMemoryHintsAndBarriers(Instruction* instr) {
+     int option = instr->Bits(3, 0);
+     switch (instr->Bits(7, 4)) {
+       case 4:
+-        out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "dsb %s",
+-                                    barrier_option_names[option]);
++        out_buffer_pos_ +=
++            base::SNPrintF(out_buffer_ + out_buffer_pos_, "dsb %s",
++                           barrier_option_names[option]);
+         break;
+       case 5:
+-        out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "dmb %s",
+-                                    barrier_option_names[option]);
++        out_buffer_pos_ +=
++            base::SNPrintF(out_buffer_ + out_buffer_pos_, "dmb %s",
++                           barrier_option_names[option]);
+         break;
+       case 6:
+-        out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "isb %s",
+-                                    barrier_option_names[option]);
++        out_buffer_pos_ +=
++            base::SNPrintF(out_buffer_ + out_buffer_pos_, "isb %s",
++                           barrier_option_names[option]);
+         break;
+       default:
+         Unknown(instr);
+@@ -2428,13 +2444,13 @@ void Decoder::DecodeMemoryHintsAndBarriers(Instruction* instr) {
+     int offset = instr->Bits(11, 0);
+     if (offset == 0) {
+       out_buffer_pos_ +=
+-          SNPrintF(out_buffer_ + out_buffer_pos_, "pld [%s]", rn_name);
++          base::SNPrintF(out_buffer_ + out_buffer_pos_, "pld [%s]", rn_name);
+     } else if (instr->Bit(23) == 0) {
+-      out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_,
+-                                  "pld [%s, #-%d]", rn_name, offset);
++      out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_,
++                                        "pld [%s, #-%d]", rn_name, offset);
+     } else {
+-      out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_,
+-                                  "pld [%s, #+%d]", rn_name, offset);
++      out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_,
++                                        "pld [%s, #+%d]", rn_name, offset);
+     }
+   } else {
+     Unknown(instr);
+@@ -2460,7 +2476,7 @@ void Decoder::DecodeAdvancedSIMDElementOrStructureLoadStore(
+       int align = instr->Bits(5, 4);
+       const char* op = l ? "vld1.%d " : "vst1.%d ";
+       out_buffer_pos_ +=
+-          SNPrintF(out_buffer_ + out_buffer_pos_, op, (1 << size) << 3);
++          base::SNPrintF(out_buffer_ + out_buffer_pos_, op, (1 << size) << 3);
+       FormatNeonList(Vd, itype);
+       Print(", ");
+       FormatNeonMemory(Rn, align, Rm);
+@@ -2474,8 +2490,8 @@ void Decoder::DecodeAdvancedSIMDElementOrStructureLoadStore(
+       int size = instr->Bits(7, 6);
+       DCHECK_NE(0b11, size);
+       int type = instr->Bit(5) ? nlt_2 : nlt_1;
+-      out_buffer_pos_ +=
+-          SNPrintF(out_buffer_ + out_buffer_pos_, "vld1.%d ", (1 << size) << 3);
++      out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_,
++                                        "vld1.%d ", (1 << size) << 3);
+       FormatNeonList(Vd, type);
+       DCHECK_EQ(0, instr->Bit(4));  // Alignment not supported.
+       Print(", ");
+@@ -2493,8 +2509,8 @@ void Decoder::DecodeAdvancedSIMDElementOrStructureLoadStore(
+       // vst1 (single element to one lane) - A1, A2, A3.
+       // Omit alignment.
+       out_buffer_pos_ +=
+-          SNPrintF(out_buffer_ + out_buffer_pos_, "v%s1.%d {d%d[%d]}",
+-                   (l ? "ld" : "st"), (1 << size) << 3, Vd, index);
++          base::SNPrintF(out_buffer_ + out_buffer_pos_, "v%s1.%d {d%d[%d]}",
++                         (l ? "ld" : "st"), (1 << size) << 3, Vd, index);
+       Print(", ");
+       FormatNeonMemory(Rn, 0, Rm);
+     } else {
+@@ -2525,17 +2541,17 @@ int Decoder::ConstantPoolSizeAt(byte* instr_ptr) {
+ int Decoder::InstructionDecode(byte* instr_ptr) {
+   Instruction* instr = Instruction::At(reinterpret_cast<Address>(instr_ptr));
+   // Print raw instruction bytes.
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%08x       ",
+-                              instr->InstructionBits());
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_,
++                                    "%08x       ", instr->InstructionBits());
+   if (instr->ConditionField() == kSpecialCondition) {
+     DecodeSpecialCondition(instr);
+     return kInstrSize;
+   }
+   int instruction_bits = *(reinterpret_cast<int*>(instr_ptr));
+   if ((instruction_bits & kConstantPoolMarkerMask) == kConstantPoolMarker) {
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_,
+-                                "constant pool begin (length %d)",
+-                                DecodeConstantPoolLength(instruction_bits));
++    out_buffer_pos_ += base::SNPrintF(
++        out_buffer_ + out_buffer_pos_, "constant pool begin (length %d)",
++        DecodeConstantPoolLength(instruction_bits));
+     return kInstrSize;
+   }
+   switch (instr->TypeValue()) {
+@@ -2583,7 +2599,7 @@ int Decoder::InstructionDecode(byte* instr_ptr) {
+ namespace disasm {
+ 
+ const char* NameConverter::NameOfAddress(byte* addr) const {
+-  v8::internal::SNPrintF(tmp_buffer_, "%p", static_cast<void*>(addr));
++  v8::base::SNPrintF(tmp_buffer_, "%p", static_cast<void*>(addr));
+   return tmp_buffer_.begin();
+ }
+ 
+diff --git a/src/diagnostics/arm64/disasm-arm64.cc b/src/diagnostics/arm64/disasm-arm64.cc
+index b51ab9fcd99..93b9531bd5d 100644
+--- a/src/diagnostics/arm64/disasm-arm64.cc
++++ b/src/diagnostics/arm64/disasm-arm64.cc
+@@ -13,6 +13,8 @@
+ 
+ #include "src/base/platform/platform.h"
+ #include "src/base/platform/wrappers.h"
++#include "src/base/strings.h"
++#include "src/base/vector.h"
+ #include "src/codegen/arm64/decoder-arm64-inl.h"
+ #include "src/codegen/arm64/utils-arm64.h"
+ #include "src/diagnostics/arm64/disasm-arm64.h"
+@@ -4318,7 +4320,7 @@ void PrintDisassembler::ProcessOutput(Instruction* instr) {
+ namespace disasm {
+ 
+ const char* NameConverter::NameOfAddress(byte* addr) const {
+-  v8::internal::SNPrintF(tmp_buffer_, "%p", static_cast<void*>(addr));
++  v8::base::SNPrintF(tmp_buffer_, "%p", static_cast<void*>(addr));
+   return tmp_buffer_.begin();
+ }
+ 
+@@ -4334,7 +4336,7 @@ const char* NameConverter::NameOfCPURegister(int reg) const {
+   if (ureg == v8::internal::kZeroRegCode) {
+     return "xzr";
+   }
+-  v8::internal::SNPrintF(tmp_buffer_, "x%u", ureg);
++  v8::base::SNPrintF(tmp_buffer_, "x%u", ureg);
+   return tmp_buffer_.begin();
+ }
+ 
+@@ -4364,8 +4366,8 @@ class BufferDisassembler : public v8::internal::DisassemblingDecoder {
+   ~BufferDisassembler() {}
+ 
+   virtual void ProcessOutput(v8::internal::Instruction* instr) {
+-    v8::internal::SNPrintF(out_buffer_, "%08" PRIx32 "       %s",
+-                           instr->InstructionBits(), GetOutput());
++    v8::base::SNPrintF(out_buffer_, "%08" PRIx32 "       %s",
++                       instr->InstructionBits(), GetOutput());
+   }
+ 
+  private:
+diff --git a/src/diagnostics/arm64/disasm-arm64.h b/src/diagnostics/arm64/disasm-arm64.h
+index 68d7fddd9dd..ba76ae65230 100644
+--- a/src/diagnostics/arm64/disasm-arm64.h
++++ b/src/diagnostics/arm64/disasm-arm64.h
+@@ -9,7 +9,6 @@
+ #include "src/codegen/arm64/decoder-arm64.h"
+ #include "src/codegen/arm64/instructions-arm64.h"
+ #include "src/common/globals.h"
+-#include "src/utils/utils.h"
+ 
+ namespace v8 {
+ namespace internal {
+diff --git a/src/diagnostics/code-tracer.h b/src/diagnostics/code-tracer.h
+index 823f0231069..1454c929436 100644
+--- a/src/diagnostics/code-tracer.h
++++ b/src/diagnostics/code-tracer.h
+@@ -7,6 +7,7 @@
+ 
+ #include "src/base/optional.h"
+ #include "src/base/platform/wrappers.h"
++#include "src/base/strings.h"
+ #include "src/base/vector.h"
+ #include "src/common/globals.h"
+ #include "src/flags/flags.h"
+@@ -26,12 +27,13 @@ class CodeTracer final : public Malloced {
+     }
+ 
+     if (FLAG_redirect_code_traces_to != nullptr) {
+-      StrNCpy(filename_, FLAG_redirect_code_traces_to, filename_.length());
++      base::StrNCpy(filename_, FLAG_redirect_code_traces_to,
++                    filename_.length());
+     } else if (isolate_id >= 0) {
+-      SNPrintF(filename_, "code-%d-%d.asm", base::OS::GetCurrentProcessId(),
+-               isolate_id);
++      base::SNPrintF(filename_, "code-%d-%d.asm",
++                     base::OS::GetCurrentProcessId(), isolate_id);
+     } else {
+-      SNPrintF(filename_, "code-%d.asm", base::OS::GetCurrentProcessId());
++      base::SNPrintF(filename_, "code-%d.asm", base::OS::GetCurrentProcessId());
+     }
+ 
+     WriteChars(filename_.begin(), "", 0, false);
+diff --git a/src/diagnostics/disassembler.cc b/src/diagnostics/disassembler.cc
+index 94880c61318..a4e1acafb0d 100644
+--- a/src/diagnostics/disassembler.cc
++++ b/src/diagnostics/disassembler.cc
+@@ -12,6 +12,7 @@
+ #include <vector>
+ 
+ #include "src/base/memory.h"
++#include "src/base/strings.h"
+ #include "src/base/vector.h"
+ #include "src/codegen/assembler-inl.h"
+ #include "src/codegen/code-comments.h"
+diff --git a/src/diagnostics/gdb-jit.cc b/src/diagnostics/gdb-jit.cc
+index cc6e933fa71..4125dfaa4c6 100644
+--- a/src/diagnostics/gdb-jit.cc
++++ b/src/diagnostics/gdb-jit.cc
+@@ -13,6 +13,7 @@
+ #include "src/base/hashmap.h"
+ #include "src/base/platform/platform.h"
+ #include "src/base/platform/wrappers.h"
++#include "src/base/strings.h"
+ #include "src/base/vector.h"
+ #include "src/execution/frames-inl.h"
+ #include "src/execution/frames.h"
+diff --git a/src/diagnostics/ia32/disasm-ia32.cc b/src/diagnostics/ia32/disasm-ia32.cc
+index 3019db9944f..84799ff34cd 100644
+--- a/src/diagnostics/ia32/disasm-ia32.cc
++++ b/src/diagnostics/ia32/disasm-ia32.cc
+@@ -9,9 +9,9 @@
+ #if V8_TARGET_ARCH_IA32
+ 
+ #include "src/base/compiler-specific.h"
++#include "src/base/strings.h"
+ #include "src/codegen/ia32/sse-instr.h"
+ #include "src/diagnostics/disasm.h"
+-#include "src/utils/utils.h"
+ 
+ namespace disasm {
+ 
+@@ -377,7 +377,7 @@ void DisassemblerIA32::AppendToBuffer(const char* format, ...) {
+   v8::base::Vector<char> buf = tmp_buffer_ + tmp_buffer_pos_;
+   va_list args;
+   va_start(args, format);
+-  int result = v8::internal::VSNPrintF(buf, format, args);
++  int result = v8::base::VSNPrintF(buf, format, args);
+   va_end(args);
+   tmp_buffer_pos_ += result;
+ }
+@@ -2883,13 +2883,13 @@ int DisassemblerIA32::InstructionDecode(v8::base::Vector<char> out_buffer,
+   int outp = 0;
+   // Instruction bytes.
+   for (byte* bp = instr; bp < data; bp++) {
+-    outp += v8::internal::SNPrintF(out_buffer + outp, "%02x", *bp);
++    outp += v8::base::SNPrintF(out_buffer + outp, "%02x", *bp);
+   }
+   for (int i = 6 - instr_len; i >= 0; i--) {
+-    outp += v8::internal::SNPrintF(out_buffer + outp, "  ");
++    outp += v8::base::SNPrintF(out_buffer + outp, "  ");
+   }
+ 
+-  outp += v8::internal::SNPrintF(out_buffer + outp, " %s", tmp_buffer_.begin());
++  outp += v8::base::SNPrintF(out_buffer + outp, " %s", tmp_buffer_.begin());
+   return instr_len;
+ }
+ 
+@@ -2905,7 +2905,7 @@ static const char* const xmm_regs[8] = {"xmm0", "xmm1", "xmm2", "xmm3",
+                                         "xmm4", "xmm5", "xmm6", "xmm7"};
+ 
+ const char* NameConverter::NameOfAddress(byte* addr) const {
+-  v8::internal::SNPrintF(tmp_buffer_, "%p", static_cast<void*>(addr));
++  v8::base::SNPrintF(tmp_buffer_, "%p", static_cast<void*>(addr));
+   return tmp_buffer_.begin();
+ }
+ 
+diff --git a/src/diagnostics/mips/disasm-mips.cc b/src/diagnostics/mips/disasm-mips.cc
+index 9aee24a1d40..1ec705fd785 100644
+--- a/src/diagnostics/mips/disasm-mips.cc
++++ b/src/diagnostics/mips/disasm-mips.cc
+@@ -30,6 +30,8 @@
+ #if V8_TARGET_ARCH_MIPS
+ 
+ #include "src/base/platform/platform.h"
++#include "src/base/strings.h"
++#include "src/base/vector.h"
+ #include "src/codegen/macro-assembler.h"
+ #include "src/codegen/mips/constants-mips.h"
+ #include "src/diagnostics/disasm.h"
+diff --git a/src/diagnostics/mips64/disasm-mips64.cc b/src/diagnostics/mips64/disasm-mips64.cc
+index cc598e41bbf..11100c0df10 100644
+--- a/src/diagnostics/mips64/disasm-mips64.cc
++++ b/src/diagnostics/mips64/disasm-mips64.cc
+@@ -30,6 +30,8 @@
+ #if V8_TARGET_ARCH_MIPS64
+ 
+ #include "src/base/platform/platform.h"
++#include "src/base/strings.h"
++#include "src/base/vector.h"
+ #include "src/codegen/macro-assembler.h"
+ #include "src/codegen/mips64/constants-mips64.h"
+ #include "src/diagnostics/disasm.h"
+@@ -252,25 +254,26 @@ void Decoder::PrintFd(Instruction* instr) {
+ // Print the integer value of the sa field.
+ void Decoder::PrintSa(Instruction* instr) {
+   int sa = instr->SaValue();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", sa);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", sa);
+ }
+ 
+ // Print the integer value of the sa field of a lsa instruction.
+ void Decoder::PrintLsaSa(Instruction* instr) {
+   int sa = instr->LsaSaValue() + 1;
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", sa);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", sa);
+ }
+ 
+ // Print the integer value of the rd field, when it is not used as reg.
+ void Decoder::PrintSd(Instruction* instr) {
+   int sd = instr->RdValue();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", sd);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", sd);
+ }
+ 
+ // Print the integer value of ext/dext/dextu size from the msbd field.
+ void Decoder::PrintSs1(Instruction* instr) {
+   int msbd = instr->RdValue();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", msbd + 1);
++  out_buffer_pos_ +=
++      base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", msbd + 1);
+ }
+ 
+ // Print the integer value of ins/dins/dinsu size from the msb and lsb fields
+@@ -279,72 +282,74 @@ void Decoder::PrintSs2(Instruction* instr) {
+   int msb = instr->RdValue();
+   int lsb = instr->SaValue();
+   out_buffer_pos_ +=
+-      SNPrintF(out_buffer_ + out_buffer_pos_, "%d", msb - lsb + 1);
++      base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", msb - lsb + 1);
+ }
+ 
+ // Print the integer value of dextm size from the msbdminus32 field.
+ void Decoder::PrintSs3(Instruction* instr) {
+   int msbdminus32 = instr->RdValue();
+   out_buffer_pos_ +=
+-      SNPrintF(out_buffer_ + out_buffer_pos_, "%d", msbdminus32 + 32 + 1);
++      base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", msbdminus32 + 32 + 1);
+ }
+ 
+ // Print the integer value of dinsm size from the msbminus32 and lsb fields.
+ void Decoder::PrintSs4(Instruction* instr) {
+   int msbminus32 = instr->RdValue();
+-  int lsb = instr->SaValue();
+-  out_buffer_pos_ +=
+-      SNPrintF(out_buffer_ + out_buffer_pos_, "%d", msbminus32 + 32 - lsb + 1);
++  int lsb = instr->S_buffer_pos_ +=
++
++      base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d",
++                     msbminus32 + 32 - lsb + 1);
+ }
+ 
+ // Print the integer value of dextu/dinsu pos from the lsbminus32 field.
+ void Decoder::PrintSs5(Instruction* instr) {
+   int lsbminus32 = instr->SaValue();
+   out_buffer_pos_ +=
+-      SNPrintF(out_buffer_ + out_buffer_pos_, "%d", lsbminus32 + 32);
++      base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", lsbminus32 + 32);
+ }
+ 
+ // Print the integer value of the cc field for the bc1t/f instructions.
+ void Decoder::PrintBc(Instruction* instr) {
+   int cc = instr->FBccValue();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", cc);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", cc);
+ }
+ 
+ // Print the integer value of the cc field for the FP compare instructions.
+ void Decoder::PrintCc(Instruction* instr) {
+-  int cc = instr->FCccValue();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "cc(%d)", cc);
++  int cc = instr->FC ccValue();
++  out_buffer_pos_ +=
++      base::SNPrintF(out_buffer_ + out_buffer_pos_, "cc(%d)", cc);
+ }
+ 
+ // Print 9-bit unsigned immediate value.
+ void Decoder::PrintUImm9(Instruction* instr) {
+   int32_t imm = instr->Imm9Value();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%u", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%u", imm);
+ }
+ 
+ // Print 9-bit signed immediate value.
+ void Decoder::PrintSImm9(Instruction* instr) {
+   int32_t imm = ((instr->Imm9Value()) << 23) >> 23;
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
+ }
+ 
+ // Print 16-bit unsigned immediate value.
+ void Decoder::PrintUImm16(Instruction* instr) {
+   int32_t imm = instr->Imm16Value();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%u", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%u", imm);
+ }
+ 
+ // Print 16-bit signed immediate value.
+ void Decoder::PrintSImm16(Instruction* instr) {
+   int32_t imm =
+       ((instr->Imm16Value()) << (32 - kImm16Bits)) >> (32 - kImm16Bits);
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
+ }
+ 
+ // Print 16-bit hexa immediate value.
+ void Decoder::PrintXImm16(Instruction* instr) {
+   int32_t imm = instr->Imm16Value();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "0x%x", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "0x%x", imm);
+ }
+ 
+ // Print absoulte address for 16-bit offset or immediate value.
+@@ -353,28 +358,28 @@ void Decoder::PrintXImm16(Instruction* instr) {
+ void Decoder::PrintPCImm16(Instruction* instr, int delta_pc, int n_bits) {
+   int16_t offset = instr->Imm16Value();
+   out_buffer_pos_ +=
+-      SNPrintF(out_buffer_ + out_buffer_pos_, "%s",
+-               converter_.NameOfAddress(reinterpret_cast<byte*>(instr) +
+-                                        delta_pc + (offset << n_bits)));
++      base::SNP rintF(out_buffer_ + out_buffer_pos_, "%s",
++                      converter_.NameOfAddress(reinterpret_cast<byte*>(instr) +
++                                               delta_pc + (offset << n_bits)));
+ }
+ 
+ // Print 18-bit signed immediate value.
+ void Decoder::PrintSImm18(Instruction* instr) {
+   int32_t imm =
+       ((instr->Imm18Value()) << (32 - kImm18Bits)) >> (32 - kImm18Bits);
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
+ }
+ 
+ // Print 18-bit hexa immediate value.
+ void Decoder::PrintXImm18(Instruction* instr) {
+   int32_t imm = instr->Imm18Value();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "0x%x", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "0x%x", imm);
+ }
+ 
+ // Print 19-bit hexa immediate value.
+ void Decoder::PrintXImm19(Instruction* instr) {
+   int32_t imm = instr->Imm19Value();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "0x%x", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "0x%x", imm);
+ }
+ 
+ // Print 19-bit signed immediate value.
+@@ -383,13 +388,13 @@ void Decoder::PrintSImm19(Instruction* instr) {
+   // set sign
+   imm19 <<= (32 - kImm19Bits);
+   imm19 >>= (32 - kImm19Bits);
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm19);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm19);
+ }
+ 
+ // Print 21-bit immediate value.
+ void Decoder::PrintXImm21(Instruction* instr) {
+   uint32_t imm = instr->Imm21Value();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "0x%x", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "0x%x", imm);
+ }
+ 
+ // Print 21-bit signed immediate value.
+@@ -398,7 +403,7 @@ void Decoder::PrintSImm21(Instruction* instr) {
+   // set sign
+   imm21 <<= (32 - kImm21Bits);
+   imm21 >>= (32 - kImm21Bits);
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm21);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm21);
+ }
+ 
+ // Print absoulte address for 21-bit offset or immediate value.
+@@ -410,9 +415,9 @@ void Decoder::PrintPCImm21(Instruction* instr, int delta_pc, int n_bits) {
+   imm21 <<= (32 - kImm21Bits);
+   imm21 >>= (32 - kImm21Bits);
+   out_buffer_pos_ +=
+-      SNPrintF(out_buffer_ + out_buffer_pos_, "%s",
+-               converter_.NameOfAddress(reinterpret_cast<byte*>(instr) +
+-                                        delta_pc + (imm21 << n_bits)));
++      base::SNP rintF(out_buffer_ + out_buffer_pos_, "%s",
++                      converter_.NameOfAddress(reinterpret_cast<byte*>(instr) +
++                                               delta_pc + (imm21 << n_bits)));
+ }
+ 
+ // Print 26-bit hex immediate value.
+@@ -421,7 +426,7 @@ void Decoder::PrintXImm26(Instruction* instr) {
+                     << kImmFieldShift;
+   target = (reinterpret_cast<uint64_t>(instr) & ~0xFFFFFFF) | target;
+   out_buffer_pos_ +=
+-      SNPrintF(out_buffer_ + out_buffer_pos_, "0x%" PRIx64, target);
++      base::SNPrintF(out_buffer_ + out_buffer_pos_, "0x%" PRIx64, target);
+ }
+ 
+ // Print 26-bit signed immediate value.
+@@ -430,7 +435,7 @@ void Decoder::PrintSImm26(Instruction* instr) {
+   // set sign
+   imm26 <<= (32 - kImm26Bits);
+   imm26 >>= (32 - kImm26Bits);
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm26);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm26);
+ }
+ 
+ // Print absoulte address for 26-bit offset or immediate value.
+@@ -442,9 +447,9 @@ void Decoder::PrintPCImm26(Instruction* instr, int delta_pc, int n_bits) {
+   imm26 <<= (32 - kImm26Bits);
+   imm26 >>= (32 - kImm26Bits);
+   out_buffer_pos_ +=
+-      SNPrintF(out_buffer_ + out_buffer_pos_, "%s",
+-               converter_.NameOfAddress(reinterpret_cast<byte*>(instr) +
+-                                        delta_pc + (imm26 << n_bits)));
++      base::SNP rintF(out_buffer_ + out_buffer_pos_, "%s",
++                      converter_.NameOfAddress(reinterpret_cast<byte*>(instr) +
++                                               delta_pc + (imm26 << n_bits)));
+ }
+ 
+ // Print absoulte address for 26-bit offset or immediate value.
+@@ -455,18 +460,18 @@ void Decoder::PrintPCImm26(Instruction* instr) {
+   uint64_t pc_mask = ~0xFFFFFFF;
+   uint64_t pc = ((uint64_t)(instr + 1) & pc_mask) | (imm26 << 2);
+   out_buffer_pos_ +=
+-      SNPrintF(out_buffer_ + out_buffer_pos_, "%s",
+-               converter_.NameOfAddress((reinterpret_cast<byte*>(pc))));
++      base::SNP rintF(out_buffer_ + out_buffer_pos_, "%s",
++                      converter_.NameOfAddress((reinterpret_cast<byte*>(pc))));
+ }
+ 
+ void Decoder::PrintBp2(Instruction* instr) {
+   int bp2 = instr->Bp2Value();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", bp2);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", bp2);
+ }
+ 
+ void Decoder::PrintBp3(Instruction* instr) {
+   int bp3 = instr->Bp3Value();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", bp3);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", bp3);
+ }
+ 
+ // Print 26-bit immediate value.
+@@ -475,9 +480,10 @@ void Decoder::PrintCode(Instruction* instr) {
+     return;  // Not a break or trap instruction.
+   switch (instr->FunctionFieldRaw()) {
+     case BREAK: {
+-      int32_t code = instr->Bits(25, 6);
+-      out_buffer_pos_ +=
+-          SNPrintF(out_buffer_ + out_buffer_pos_, "0x%05x (%d)", code, code);
++      int32_t code = ins_buffer_pos_ +=
++
++          base::SNPrintF(out_buffer_ + out_buffer_pos_, "0x%05x (%d)", code,
++                         code);
+       break;
+     }
+     case TGE:
+@@ -488,7 +494,7 @@ void Decoder::PrintCode(Instruction* instr) {
+     case TNE: {
+       int32_t code = instr->Bits(15, 6);
+       out_buffer_pos_ +=
+-          SNPrintF(out_buffer_ + out_buffer_pos_, "0x%03x", code);
++          base::SNPrintF(out_buffer_ + out_buffer_pos_, "0x%03x", code);
+       break;
+     }
+     default:  // Not a break or trap instruction.
+@@ -498,50 +504,49 @@ void Decoder::PrintCode(Instruction* instr) {
+ 
+ void Decoder::PrintMsaXImm8(Instruction* instr) {
+   int32_t imm = instr->MsaImm8Value();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "0x%x", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "0x%x", imm);
+ }
+ 
+ void Decoder::PrintMsaImm8(Instruction* instr) {
+   int32_t imm = instr->MsaImm8Value();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%u", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%u", imm);
+ }
+ 
+ void Decoder::PrintMsaImm5(Instruction* instr) {
+   int32_t imm = instr->MsaImm5Value();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%u", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%u", imm);
+ }
+ 
+ void Decoder::PrintMsaSImm5(Instruction* instr) {
+   int32_t imm = instr->MsaImm5Value();
+   imm <<= (32 - kMsaImm5Bits);
+   imm >>= (32 - kMsaImm5Bits);
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
+ }
+ 
+ void Decoder::PrintMsaSImm10(Instruction* instr, bool is_mi10) {
+   int32_t imm = is_mi10 ? instr->MsaImmMI10Value() : instr->MsaImm10Value();
+   imm <<= (32 - kMsaImm10Bits);
+   imm >>= (32 - kMsaImm10Bits);
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
+ }
+ 
+ void Decoder::PrintMsaImmBit(Instruction* instr) {
+   int32_t m = instr->MsaBitMValue();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%u", m);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%u", m);
+ }
+ 
+ void Decoder::PrintMsaImmElm(Instruction* instr) {
+   int32_t n = instr->MsaElmNValue();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%u", n);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%u", n);
+ }
+ 
+ void Decoder::PrintMsaCopy(Instruction* instr) {
+   int32_t rd = instr->WdValue();
+   int32_t ws = instr->WsValue();
+-  int32_t n = instr->MsaElmNValue();
+-  out_buffer_pos_ +=
+-      SNPrintF(out_buffer_ + out_buffer_pos_, "%s, %s[%u]",
+-               converter_.NameOfCPURegister(rd), MSARegisters::Name(ws), n);
++  int32_t n = instr - buffer_pos_ +=
++      rintF(out_buffer_ + out_buffer_po _, "%s, %s[%u]",
++            converter_.NameOfCPURegister(rd), MSARegisters::Name(ws), n);
+ }
+ 
+ void Decoder::PrintFormat(Instruction* instr) {
+@@ -1032,7 +1037,7 @@ int Decoder::DecodeBreakInstr(Instruction* instr) {
+   if (instr->Bits(25, 6) == static_cast<int>(kMaxStopCode)) {
+     // This is stop(msg).
+     Format(instr, "break, code: 'code");
+-    out_buffer_pos_ += SNPrintF(
++    out_buffer_pos_ += base::SNPrintF(
+         out_buffer_ + out_buffer_pos_, "\n%p       %08" PRIx64,
+         static_cast<void*>(reinterpret_cast<int32_t*>(instr + kInstrSize)),
+         reinterpret_cast<uint64_t>(
+@@ -2941,8 +2946,8 @@ void Decoder::DecodeTypeMsa2RF(Instruction* instr) {
+ int Decoder::InstructionDecode(byte* instr_ptr) {
+   Instruction* instr = Instruction::At(instr_ptr);
+   // Print raw instruction bytes.
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%08x       ",
+-                              instr->InstructionBits());
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_,
++                                    "%08x       ", instr->InstructionBits());
+   switch (instr->InstructionType()) {
+     case Instruction::kRegisterType: {
+       return DecodeTypeRegister(instr);
+@@ -2971,7 +2976,7 @@ int Decoder::InstructionDecode(byte* instr_ptr) {
+ namespace disasm {
+ 
+ const char* NameConverter::NameOfAddress(byte* addr) const {
+-  v8::internal::SNPrintF(tmp_buffer_, "%p", static_cast<void*>(addr));
++  v8::internal::base::SNPrintF(tmp_buffer_, "%p", static_cast<void*>(addr));
+   return tmp_buffer_.begin();
+ }
+ 
+diff --git a/src/diagnostics/ppc/disasm-ppc.cc b/src/diagnostics/ppc/disasm-ppc.cc
+index 859367a356f..db1d831e3ca 100644
+--- a/src/diagnostics/ppc/disasm-ppc.cc
++++ b/src/diagnostics/ppc/disasm-ppc.cc
+@@ -30,6 +30,8 @@
+ #if V8_TARGET_ARCH_PPC || V8_TARGET_ARCH_PPC64
+ 
+ #include "src/base/platform/platform.h"
++#include "src/base/strings.h"
++#include "src/base/vector.h"
+ #include "src/codegen/macro-assembler.h"
+ #include "src/codegen/ppc/constants-ppc.h"
+ #include "src/codegen/register-configuration.h"
+@@ -137,10 +139,12 @@ void Decoder::PrintSoftwareInterrupt(SoftwareInterruptCodes svc) {
+       return;
+     default:
+       if (svc >= kStopCode) {
+-        out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d - 0x%x",
+-                                    svc & kStopCodeMask, svc & kStopCodeMask);
++        out_buffer_pos_ +=
++            base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d - 0x%x",
++                           svc & kStopCodeMask, svc & kStopCodeMask);
+       } else {
+-        out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", svc);
++        out_buffer_pos_ +=
++            base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", svc);
+       }
+       return;
+   }
+@@ -252,32 +256,38 @@ int Decoder::FormatOption(Instruction* instr, const char* format) {
+     }
+     case 'i': {  // int16
+       int32_t value = (instr->Bits(15, 0) << 16) >> 16;
+-      out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
++      out_buffer_pos_ +=
++          base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
+       return 5;
+     }
+     case 'I': {  // IMM8
+       int8_t value = instr->Bits(18, 11);
+-      out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
++      out_buffer_pos_ +=
++          base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
+       return 4;
+     }
+     case 'u': {  // uint16
+       int32_t value = instr->Bits(15, 0);
+-      out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
++      out_buffer_pos_ +=
++          base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
+       return 6;
+     }
+     case 'F': {  // FXM
+       uint8_t value = instr->Bits(19, 12);
+-      out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
++      out_buffer_pos_ +=
++          base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
+       return 3;
+     }
+     case 'S': {  // SIM
+       int32_t value = static_cast<int32_t>(SIGN_EXT_IMM5(instr->Bits(20, 16)));
+-      out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
++      out_buffer_pos_ +=
++          base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
+       return 3;
+     }
+     case 'U': {  // UIM
+       int32_t value = instr->Bits(20, 16);
+-      out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
++      out_buffer_pos_ +=
++          base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
+       return 3;
+     }
+     case 'l': {
+@@ -298,7 +308,7 @@ int Decoder::FormatOption(Instruction* instr, const char* format) {
+       int code = instr->Bits(20, 18);
+       if (code != 7) {
+         out_buffer_pos_ +=
+-            SNPrintF(out_buffer_ + out_buffer_pos_, " cr%d", code);
++            base::SNPrintF(out_buffer_ + out_buffer_pos_, " cr%d", code);
+       }
+       return 2;
+     }
+@@ -307,13 +317,13 @@ int Decoder::FormatOption(Instruction* instr, const char* format) {
+       DCHECK(STRING_STARTS_WITH(format, "target"));
+       if ((format[6] == '2') && (format[7] == '6')) {
+         int off = ((instr->Bits(25, 2)) << 8) >> 6;
+-        out_buffer_pos_ += SNPrintF(
++        out_buffer_pos_ += base::SNPrintF(
+             out_buffer_ + out_buffer_pos_, "%+d -> %s", off,
+             converter_.NameOfAddress(reinterpret_cast<byte*>(instr) + off));
+         return 8;
+       } else if ((format[6] == '1') && (format[7] == '6')) {
+         int off = ((instr->Bits(15, 2)) << 18) >> 16;
+-        out_buffer_pos_ += SNPrintF(
++        out_buffer_pos_ += base::SNPrintF(
+             out_buffer_ + out_buffer_pos_, "%+d -> %s", off,
+             converter_.NameOfAddress(reinterpret_cast<byte*>(instr) + off));
+         return 8;
+@@ -332,7 +342,8 @@ int Decoder::FormatOption(Instruction* instr, const char* format) {
+           // SH Bits 15-11
+           value = (sh << 26) >> 26;
+         }
+-        out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
++        out_buffer_pos_ +=
++            base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
+         return 2;
+       }
+       case 'm': {
+@@ -356,14 +367,16 @@ int Decoder::FormatOption(Instruction* instr, const char* format) {
+         } else {
+           UNREACHABLE();  // bad format
+         }
+-        out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
++        out_buffer_pos_ +=
++            base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
+         return 2;
+       }
+     }
+ #if V8_TARGET_ARCH_PPC64
+     case 'd': {  // ds value for offset
+       int32_t value = SIGN_EXT_IMM16(instr->Bits(15, 0) & ~3);
+-      out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
++      out_buffer_pos_ +=
++          base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
+       return 1;
+     }
+ #endif
+@@ -408,7 +421,7 @@ void Decoder::Unknown(Instruction* instr) { Format(instr, "unknown"); }
+ // instruction bits.
+ void Decoder::UnknownFormat(Instruction* instr, const char* name) {
+   char buffer[100];
+-  snprintf(buffer, sizeof(buffer), "%s (unknown-format)", name);
++  base::snprintf(buffer, sizeof(buffer), "%s (unknown-format)", name);
+   Format(instr, buffer);
+ }
+ 
+@@ -1366,8 +1379,8 @@ void Decoder::DecodeExt6(Instruction* instr) {
+ int Decoder::InstructionDecode(byte* instr_ptr) {
+   Instruction* instr = Instruction::At(instr_ptr);
+   // Print raw instruction bytes.
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%08x       ",
+-                              instr->InstructionBits());
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_,
++                                    "%08x       ", instr->InstructionBits());
+ 
+   if (ABI_USES_FUNCTION_DESCRIPTORS && instr->InstructionBits() == 0) {
+     // The first field will be identified as a jump table entry.  We
+@@ -1696,7 +1709,7 @@ int Decoder::InstructionDecode(byte* instr_ptr) {
+ namespace disasm {
+ 
+ const char* NameConverter::NameOfAddress(byte* addr) const {
+-  v8::internal::SNPrintF(tmp_buffer_, "%p", static_cast<void*>(addr));
++  v8::internal::base::SNPrintF(tmp_buffer_, "%p", static_cast<void*>(addr));
+   return tmp_buffer_.begin();
+ }
+ 
+diff --git a/src/diagnostics/riscv64/disasm-riscv64.cc b/src/diagnostics/riscv64/disasm-riscv64.cc
+index fa027fa71ad..043c33f62fc 100644
+--- a/src/diagnostics/riscv64/disasm-riscv64.cc
++++ b/src/diagnostics/riscv64/disasm-riscv64.cc
+@@ -30,6 +30,8 @@
+ #if V8_TARGET_ARCH_RISCV64
+ 
+ #include "src/base/platform/platform.h"
++#include "src/base/strings.h"
++#include "src/base/vector.h"
+ #include "src/codegen/macro-assembler.h"
+ #include "src/codegen/riscv64/constants-riscv64.h"
+ #include "src/diagnostics/disasm.h"
+@@ -179,7 +181,7 @@ void Decoder::PrintRd(Instruction* instr) {
+ 
+ void Decoder::PrintVs1(Instruction* instr) {
+   int val = instr->Rs1Value();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "0x%x", val);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "0x%x", val);
+ }
+ 
+ // Print the FPUregister name according to the active name converter.
+@@ -209,12 +211,12 @@ void Decoder::PrintFRd(Instruction* instr) {
+ 
+ void Decoder::PrintImm12X(Instruction* instr) {
+   int32_t imm = instr->Imm12Value();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "0x%x", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "0x%x", imm);
+ }
+ 
+ void Decoder::PrintImm12(Instruction* instr) {
+   int32_t imm = instr->Imm12Value();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
+ }
+ 
+ void Decoder::PrintTarget(Instruction* instr) {
+@@ -226,7 +228,7 @@ void Decoder::PrintTarget(Instruction* instr) {
+       const char* target =
+           converter_.NameOfAddress(reinterpret_cast<byte*>(instr - 4) + imm);
+       out_buffer_pos_ +=
+-          SNPrintF(out_buffer_ + out_buffer_pos_, " -> %s", target);
++          base::SNPrintF(out_buffer_ + out_buffer_pos_, " -> %s", target);
+       return;
+     }
+   }
+@@ -237,17 +239,17 @@ void Decoder::PrintBranchOffset(Instruction* instr) {
+   const char* target =
+       converter_.NameOfAddress(reinterpret_cast<byte*>(instr) + imm);
+   out_buffer_pos_ +=
+-      SNPrintF(out_buffer_ + out_buffer_pos_, "%d -> %s", imm, target);
++      base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d -> %s", imm, target);
+ }
+ 
+ void Decoder::PrintStoreOffset(Instruction* instr) {
+   int32_t imm = instr->StoreOffset();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
+ }
+ 
+ void Decoder::PrintImm20U(Instruction* instr) {
+   int32_t imm = instr->Imm20UValue();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "0x%x", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "0x%x", imm);
+ }
+ 
+ void Decoder::PrintImm20J(Instruction* instr) {
+@@ -255,95 +257,95 @@ void Decoder::PrintImm20J(Instruction* instr) {
+   const char* target =
+       converter_.NameOfAddress(reinterpret_cast<byte*>(instr) + imm);
+   out_buffer_pos_ +=
+-      SNPrintF(out_buffer_ + out_buffer_pos_, "%d -> %s", imm, target);
++      base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d -> %s", imm, target);
+ }
+ 
+ void Decoder::PrintShamt(Instruction* instr) {
+   int32_t imm = instr->Shamt();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
+ }
+ 
+ void Decoder::PrintShamt32(Instruction* instr) {
+   int32_t imm = instr->Shamt32();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
+ }
+ 
+ void Decoder::PrintRvcImm6(Instruction* instr) {
+   int32_t imm = instr->RvcImm6Value();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
+ }
+ 
+ void Decoder::PrintRvcImm6U(Instruction* instr) {
+   int32_t imm = instr->RvcImm6Value() & 0xFFFFF;
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "0x%x", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "0x%x", imm);
+ }
+ 
+ void Decoder::PrintRvcImm6Addi16sp(Instruction* instr) {
+   int32_t imm = instr->RvcImm6Addi16spValue();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
+ }
+ 
+ void Decoder::PrintRvcShamt(Instruction* instr) {
+   int32_t imm = instr->RvcShamt6();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
+ }
+ 
+ void Decoder::PrintRvcImm6Ldsp(Instruction* instr) {
+   int32_t imm = instr->RvcImm6LdspValue();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
+ }
+ 
+ void Decoder::PrintRvcImm6Lwsp(Instruction* instr) {
+   int32_t imm = instr->RvcImm6LwspValue();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
+ }
+ 
+ void Decoder::PrintRvcImm6Swsp(Instruction* instr) {
+   int32_t imm = instr->RvcImm6SwspValue();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
+ }
+ 
+ void Decoder::PrintRvcImm6Sdsp(Instruction* instr) {
+   int32_t imm = instr->RvcImm6SdspValue();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
+ }
+ 
+ void Decoder::PrintRvcImm5W(Instruction* instr) {
+   int32_t imm = instr->RvcImm5WValue();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
+ }
+ 
+ void Decoder::PrintRvcImm5D(Instruction* instr) {
+   int32_t imm = instr->RvcImm5DValue();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
+ }
+ 
+ void Decoder::PrintRvcImm8Addi4spn(Instruction* instr) {
+   int32_t imm = instr->RvcImm8Addi4spnValue();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
+ }
+ 
+ void Decoder::PrintRvcImm11CJ(Instruction* instr) {
+   int32_t imm = instr->RvcImm11CJValue();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
+ }
+ 
+ void Decoder::PrintRvcImm8B(Instruction* instr) {
+   int32_t imm = instr->RvcImm8BValue();
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", imm);
+ }
+ 
+ void Decoder::PrintAcquireRelease(Instruction* instr) {
+   bool aq = instr->AqValue();
+   bool rl = instr->RlValue();
+   if (aq || rl) {
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, ".");
++    out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, ".");
+   }
+   if (aq) {
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "aq");
++    out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "aq");
+   }
+   if (rl) {
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "rl");
++    out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "rl");
+   }
+ }
+ 
+@@ -381,7 +383,8 @@ void Decoder::PrintCSRReg(Instruction* instr) {
+     default:
+       UNREACHABLE();
+   }
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%s", s.c_str());
++  out_buffer_pos_ +=
++      base::SNPrintF(out_buffer_ + out_buffer_pos_, "%s", s.c_str());
+ }
+ 
+ void Decoder::PrintRoundingMode(Instruction* instr) {
+@@ -409,7 +412,8 @@ void Decoder::PrintRoundingMode(Instruction* instr) {
+     default:
+       UNREACHABLE();
+   }
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%s", s.c_str());
++  out_buffer_pos_ +=
++      base::SNPrintF(out_buffer_ + out_buffer_pos_, "%s", s.c_str());
+ }
+ 
+ void Decoder::PrintMemoryOrder(Instruction* instr, bool is_pred) {
+@@ -427,7 +431,8 @@ void Decoder::PrintMemoryOrder(Instruction* instr, bool is_pred) {
+   if ((memOrder & PSW) == PSW) {
+     s += "w";
+   }
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%s", s.c_str());
++  out_buffer_pos_ +=
++      base::SNPrintF(out_buffer_ + out_buffer_pos_, "%s", s.c_str());
+ }
+ 
+ // Printing of instruction name.
+@@ -1793,8 +1798,8 @@ void Decoder::DecodeCBType(Instruction* instr) {
+ int Decoder::InstructionDecode(byte* instr_ptr) {
+   Instruction* instr = Instruction::At(instr_ptr);
+   // Print raw instruction bytes.
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%08x       ",
+-                              instr->InstructionBits());
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_,
++                                    "%08x       ", instr->InstructionBits());
+   switch (instr->InstructionType()) {
+     case Instruction::kRType:
+       DecodeRType(instr);
+@@ -1859,7 +1864,7 @@ int Decoder::InstructionDecode(byte* instr_ptr) {
+ namespace disasm {
+ 
+ const char* NameConverter::NameOfAddress(byte* addr) const {
+-  v8::internal::SNPrintF(tmp_buffer_, "%p", static_cast<void*>(addr));
++  v8::internal::base::SNPrintF(tmp_buffer_, "%p", static_cast<void*>(addr));
+   return tmp_buffer_.begin();
+ }
+ 
+diff --git a/src/diagnostics/s390/disasm-s390.cc b/src/diagnostics/s390/disasm-s390.cc
+index 8cf470b4bbf..b51e854ed64 100644
+--- a/src/diagnostics/s390/disasm-s390.cc
++++ b/src/diagnostics/s390/disasm-s390.cc
+@@ -30,6 +30,8 @@
+ #if V8_TARGET_ARCH_S390
+ 
+ #include "src/base/platform/platform.h"
++#include "src/base/strings.h"
++#include "src/base/vector.h"
+ #include "src/codegen/macro-assembler.h"
+ #include "src/codegen/register-configuration.h"
+ #include "src/codegen/s390/constants-s390.h"
+@@ -127,10 +129,12 @@ void Decoder::PrintSoftwareInterrupt(SoftwareInterruptCodes svc) {
+       return;
+     default:
+       if (svc >= kStopCode) {
+-        out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d - 0x%x",
+-                                    svc & kStopCodeMask, svc & kStopCodeMask);
++        out_buffer_pos_ +=
++            base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d - 0x%x",
++                           svc & kStopCodeMask, svc & kStopCodeMask);
+       } else {
+-        out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", svc);
++        out_buffer_pos_ +=
++            base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", svc);
+       }
+       return;
+   }
+@@ -252,7 +256,8 @@ int Decoder::FormatOption(Instruction* instr, const char* format) {
+     }
+     case 'u': {  // uint16
+       int32_t value = instr->Bits(15, 0);
+-      out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
++      out_buffer_pos_ +=
++          base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
+       return 6;
+     }
+     case 'l': {
+@@ -274,13 +279,13 @@ int Decoder::FormatOption(Instruction* instr, const char* format) {
+       DCHECK(STRING_STARTS_WITH(format, "target"));
+       if ((format[6] == '2') && (format[7] == '6')) {
+         int off = ((instr->Bits(25, 2)) << 8) >> 6;
+-        out_buffer_pos_ += SNPrintF(
++        out_buffer_pos_ += base::SNPrintF(
+             out_buffer_ + out_buffer_pos_, "%+d -> %s", off,
+             converter_.NameOfAddress(reinterpret_cast<byte*>(instr) + off));
+         return 8;
+       } else if ((format[6] == '1') && (format[7] == '6')) {
+         int off = ((instr->Bits(15, 2)) << 18) >> 16;
+-        out_buffer_pos_ += SNPrintF(
++        out_buffer_pos_ += base::SNPrintF(
+             out_buffer_ + out_buffer_pos_, "%+d -> %s", off,
+             converter_.NameOfAddress(reinterpret_cast<byte*>(instr) + off));
+         return 8;
+@@ -306,30 +311,36 @@ int Decoder::FormatMask(Instruction* instr, const char* format) {
+   int32_t value = 0;
+   if ((format[1] == '1')) {  // prints the mask format in bits 8-12
+     value = reinterpret_cast<RRInstruction*>(instr)->R1Value();
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "0x%x", value);
++    out_buffer_pos_ +=
++        base::SNPrintF(out_buffer_ + out_buffer_pos_, "0x%x", value);
+     return 2;
+   } else if (format[1] == '2') {  // mask format in bits 16-19
+     value = reinterpret_cast<RXInstruction*>(instr)->B2Value();
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "0x%x", value);
++    out_buffer_pos_ +=
++        base::SNPrintF(out_buffer_ + out_buffer_pos_, "0x%x", value);
+     return 2;
+   } else if (format[1] == '3') {  // mask format in bits 20-23
+     value = reinterpret_cast<RRFInstruction*>(instr)->M4Value();
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "0x%x", value);
++    out_buffer_pos_ +=
++        base::SNPrintF(out_buffer_ + out_buffer_pos_, "0x%x", value);
+     return 2;
+   } else if (format[1] == '4') {  // mask format in bits 32-35
+     value = reinterpret_cast<VRR_C_Instruction*>(instr)->M4Value();
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "0x%x", value);
++    out_buffer_pos_ +=
++        base::SNPrintF(out_buffer_ + out_buffer_pos_, "0x%x", value);
+     return 2;
+   } else if (format[1] == '5') {  // mask format in bits 28-31
+     value = reinterpret_cast<VRR_C_Instruction*>(instr)->M5Value();
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "0x%x", value);
++    out_buffer_pos_ +=
++        base::SNPrintF(out_buffer_ + out_buffer_pos_, "0x%x", value);
+     return 2;
+   } else if (format[1] == '6') {  // mask format in bits 24-27
+     value = reinterpret_cast<VRR_C_Instruction*>(instr)->M6Value();
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "0x%x", value);
++    out_buffer_pos_ +=
++        base::SNPrintF(out_buffer_ + out_buffer_pos_, "0x%x", value);
+     return 2;
+   }
+-  out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
++  out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
+   return 2;
+ }
+ 
+@@ -339,27 +350,32 @@ int Decoder::FormatDisplacement(Instruction* instr, const char* format) {
+   if (format[1] == '1') {  // displacement in 20-31
+     RSInstruction* rsinstr = reinterpret_cast<RSInstruction*>(instr);
+     uint16_t value = rsinstr->D2Value();
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
++    out_buffer_pos_ +=
++        base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
+ 
+     return 2;
+   } else if (format[1] == '2') {  // displacement in 20-39
+     RXYInstruction* rxyinstr = reinterpret_cast<RXYInstruction*>(instr);
+     int32_t value = rxyinstr->D2Value();
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
++    out_buffer_pos_ +=
++        base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
+     return 2;
+   } else if (format[1] == '4') {  // SS displacement 2 36-47
+     SSInstruction* ssInstr = reinterpret_cast<SSInstruction*>(instr);
+     uint16_t value = ssInstr->D2Value();
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
++    out_buffer_pos_ +=
++        base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
+     return 2;
+   } else if (format[1] == '3') {  // SS displacement 1 20 - 32
+     SSInstruction* ssInstr = reinterpret_cast<SSInstruction*>(instr);
+     uint16_t value = ssInstr->D1Value();
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
++    out_buffer_pos_ +=
++        base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
+     return 2;
+   } else {  // s390 specific
+     int32_t value = SIGN_EXT_IMM16(instr->Bits(15, 0) & ~3);
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
++    out_buffer_pos_ +=
++        base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
+     return 1;
+   }
+ }
+@@ -370,27 +386,30 @@ int Decoder::FormatImmediate(Instruction* instr, const char* format) {
+   if (format[1] == '1') {  // immediate in 16-31
+     RIInstruction* riinstr = reinterpret_cast<RIInstruction*>(instr);
+     int16_t value = riinstr->I2Value();
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
++    out_buffer_pos_ +=
++        base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
+     return 2;
+   } else if (format[1] == '2') {  // immediate in 16-48
+     RILInstruction* rilinstr = reinterpret_cast<RILInstruction*>(instr);
+     int32_t value = rilinstr->I2Value();
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
++    out_buffer_pos_ +=
++        base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
+     return 2;
+   } else if (format[1] == '3') {  // immediate in I format
+     IInstruction* iinstr = reinterpret_cast<IInstruction*>(instr);
+     int8_t value = iinstr->IValue();
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
++    out_buffer_pos_ +=
++        base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
+     return 2;
+   } else if (format[1] == '4') {  // immediate in 16-31, but outputs as offset
+     RIInstruction* riinstr = reinterpret_cast<RIInstruction*>(instr);
+     int16_t value = riinstr->I2Value() * 2;
+     if (value >= 0)
+-      out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "*+");
++      out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "*+");
+     else
+-      out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "*");
++      out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "*");
+ 
+-    out_buffer_pos_ += SNPrintF(
++    out_buffer_pos_ += base::SNPrintF(
+         out_buffer_ + out_buffer_pos_, "%d -> %s", value,
+         converter_.NameOfAddress(reinterpret_cast<byte*>(instr) + value));
+     return 2;
+@@ -398,63 +417,71 @@ int Decoder::FormatImmediate(Instruction* instr, const char* format) {
+     RILInstruction* rilinstr = reinterpret_cast<RILInstruction*>(instr);
+     int32_t value = rilinstr->I2Value() * 2;
+     if (value >= 0)
+-      out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "*+");
++      out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "*+");
+     else
+-      out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "*");
++      out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "*");
+ 
+-    out_buffer_pos_ += SNPrintF(
++    out_buffer_pos_ += base::SNPrintF(
+         out_buffer_ + out_buffer_pos_, "%d -> %s", value,
+         converter_.NameOfAddress(reinterpret_cast<byte*>(instr) + value));
+     return 2;
+   } else if (format[1] == '6') {  // unsigned immediate in 16-31
+     RIInstruction* riinstr = reinterpret_cast<RIInstruction*>(instr);
+     uint16_t value = riinstr->I2UnsignedValue();
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
++    out_buffer_pos_ +=
++        base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
+     return 2;
+   } else if (format[1] == '7') {  // unsigned immediate in 16-47
+     RILInstruction* rilinstr = reinterpret_cast<RILInstruction*>(instr);
+     uint32_t value = rilinstr->I2UnsignedValue();
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
++    out_buffer_pos_ +=
++        base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
+     return 2;
+   } else if (format[1] == '8') {  // unsigned immediate in 8-15
+     SSInstruction* ssinstr = reinterpret_cast<SSInstruction*>(instr);
+     uint8_t value = ssinstr->Length();
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
++    out_buffer_pos_ +=
++        base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
+     return 2;
+   } else if (format[1] == '9') {  // unsigned immediate in 16-23
+     RIEInstruction* rie_instr = reinterpret_cast<RIEInstruction*>(instr);
+     uint8_t value = rie_instr->I3Value();
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
++    out_buffer_pos_ +=
++        base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
+     return 2;
+   } else if (format[1] == 'a') {  // unsigned immediate in 24-31
+     RIEInstruction* rie_instr = reinterpret_cast<RIEInstruction*>(instr);
+     uint8_t value = rie_instr->I4Value();
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
++    out_buffer_pos_ +=
++        base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
+     return 2;
+   } else if (format[1] == 'b') {  // unsigned immediate in 32-39
+     RIEInstruction* rie_instr = reinterpret_cast<RIEInstruction*>(instr);
+     uint8_t value = rie_instr->I5Value();
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
++    out_buffer_pos_ +=
++        base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
+     return 2;
+   } else if (format[1] == 'c') {  // signed immediate in 8-15
+     SSInstruction* ssinstr = reinterpret_cast<SSInstruction*>(instr);
+     int8_t value = ssinstr->Length();
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
++    out_buffer_pos_ +=
++        base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
+     return 2;
+   } else if (format[1] == 'd') {  // signed immediate in 32-47
+     SILInstruction* silinstr = reinterpret_cast<SILInstruction*>(instr);
+     int16_t value = silinstr->I2Value();
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
++    out_buffer_pos_ +=
++        base::SNPrintF(out_buffer_ + out_buffer_pos_, "%d", value);
+     return 2;
+   } else if (format[1] == 'e') {  // immediate in 16-47, but outputs as offset
+     RILInstruction* rilinstr = reinterpret_cast<RILInstruction*>(instr);
+     int32_t value = rilinstr->I2Value() * 2;
+     if (value >= 0)
+-      out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "*+");
++      out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "*+");
+     else
+-      out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "*");
++      out_buffer_pos_ += base::SNPrintF(out_buffer_ + out_buffer_pos_, "*");
+ 
+-    out_buffer_pos_ += SNPrintF(
++    out_buffer_pos_ += base::SNPrintF(
+         out_buffer_ + out_buffer_pos_, "%d -> %s", value,
+         converter_.NameOfAddress(reinterpret_cast<byte*>(instr) + value));
+     return 2;
+@@ -989,15 +1016,16 @@ int Decoder::InstructionDecode(byte* instr_ptr) {
+   // Print the Instruction bits.
+   if (instrLength == 2) {
+     out_buffer_pos_ +=
+-        SNPrintF(out_buffer_ + out_buffer_pos_, "%04x           ",
+-                 instr->InstructionBits<TwoByteInstr>());
++        base::SNPrintF(out_buffer_ + out_buffer_pos_, "%04x           ",
++                       instr->InstructionBits<TwoByteInstr>());
+   } else if (instrLength == 4) {
+-    out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%08x       ",
+-                                instr->InstructionBits<FourByteInstr>());
++    out_buffer_pos_ +=
++        base::SNPrintF(out_buffer_ + out_buffer_pos_, "%08x       ",
++                       instr->InstructionBits<FourByteInstr>());
+   } else {
+     out_buffer_pos_ +=
+-        SNPrintF(out_buffer_ + out_buffer_pos_, "%012" PRIx64 "   ",
+-                 instr->InstructionBits<SixByteInstr>());
++        base::SNPrintF(out_buffer_ + out_buffer_pos_, "%012" PRIx64 "   ",
++                       instr->InstructionBits<SixByteInstr>());
+   }
+ 
+   bool decoded = DecodeSpecial(instr);
+@@ -1014,7 +1042,7 @@ int Decoder::InstructionDecode(byte* instr_ptr) {
+ namespace disasm {
+ 
+ const char* NameConverter::NameOfAddress(byte* addr) const {
+-  v8::internal::SNPrintF(tmp_buffer_, "%p", static_cast<void*>(addr));
++  v8::internal::base::SNPrintF(tmp_buffer_, "%p", static_cast<void*>(addr));
+   return tmp_buffer_.begin();
+ }
+ 
+diff --git a/src/diagnostics/x64/disasm-x64.cc b/src/diagnostics/x64/disasm-x64.cc
+index e15614f6f08..2d94c70ca35 100644
+--- a/src/diagnostics/x64/disasm-x64.cc
++++ b/src/diagnostics/x64/disasm-x64.cc
+@@ -12,11 +12,12 @@
+ #include "src/base/compiler-specific.h"
+ #include "src/base/lazy-instance.h"
+ #include "src/base/memory.h"
++#include "src/base/strings.h"
+ #include "src/base/v8-fallthrough.h"
+ #include "src/codegen/x64/register-x64.h"
+ #include "src/codegen/x64/sse-instr.h"
++#include "src/common/globals.h"
+ #include "src/diagnostics/disasm.h"
+-#include "src/utils/utils.h"
+ 
+ namespace disasm {
+ 
+@@ -478,7 +479,7 @@ void DisassemblerX64::AppendToBuffer(const char* format, ...) {
+   v8::base::Vector<char> buf = tmp_buffer_ + tmp_buffer_pos_;
+   va_list args;
+   va_start(args, format);
+-  int result = v8::internal::VSNPrintF(buf, format, args);
++  int result = v8::base::VSNPrintF(buf, format, args);
+   va_end(args);
+   tmp_buffer_pos_ += result;
+ }
+@@ -2798,13 +2799,13 @@ int DisassemblerX64::InstructionDecode(v8::base::Vector<char> out_buffer,
+   int outp = 0;
+   // Instruction bytes.
+   for (byte* bp = instr; bp < data; bp++) {
+-    outp += v8::internal::SNPrintF(out_buffer + outp, "%02x", *bp);
++    outp += v8::base::SNPrintF(out_buffer + outp, "%02x", *bp);
+   }
+   for (int i = 6 - instr_len; i >= 0; i--) {
+-    outp += v8::internal::SNPrintF(out_buffer + outp, "  ");
++    outp += v8::base::SNPrintF(out_buffer + outp, "  ");
+   }
+ 
+-  outp += v8::internal::SNPrintF(out_buffer + outp, " %s", tmp_buffer_.begin());
++  outp += v8::base::SNPrintF(out_buffer + outp, " %s", tmp_buffer_.begin());
+   return instr_len;
+ }
+ 
+@@ -2823,7 +2824,7 @@ static const char* const xmm_regs[16] = {
+     "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15"};
+ 
+ const char* NameConverter::NameOfAddress(byte* addr) const {
+-  v8::internal::SNPrintF(tmp_buffer_, "%p", static_cast<void*>(addr));
++  v8::base::SNPrintF(tmp_buffer_, "%p", static_cast<void*>(addr));
+   return tmp_buffer_.begin();
+ }
+ 
+diff --git a/src/extensions/cputracemark-extension.h b/src/extensions/cputracemark-extension.h
+index 184199f149d..362bdcebd3c 100644
+--- a/src/extensions/cputracemark-extension.h
++++ b/src/extensions/cputracemark-extension.h
+@@ -6,7 +6,7 @@
+ #define V8_EXTENSIONS_CPUTRACEMARK_EXTENSION_H_
+ 
+ #include "include/v8.h"
+-#include "src/utils/utils.h"
++#include "src/base/strings.h"
+ 
+ namespace v8 {
+ namespace internal {
+@@ -24,8 +24,8 @@ class CpuTraceMarkExtension : public v8::Extension {
+   static void Mark(const v8::FunctionCallbackInfo<v8::Value>& args);
+ 
+   static const char* BuildSource(char* buf, size_t size, const char* fun_name) {
+-    SNPrintF(base::Vector<char>(buf, static_cast<int>(size)),
+-             "native function %s();", fun_name);
++    base::SNPrintF(base::Vector<char>(buf, static_cast<int>(size)),
++                   "native function %s();", fun_name);
+     return buf;
+   }
+ 
+diff --git a/src/extensions/gc-extension.h b/src/extensions/gc-extension.h
+index 29bd45b2121..c5750c5e801 100644
+--- a/src/extensions/gc-extension.h
++++ b/src/extensions/gc-extension.h
+@@ -6,7 +6,7 @@
+ #define V8_EXTENSIONS_GC_EXTENSION_H_
+ 
+ #include "include/v8.h"
+-#include "src/utils/utils.h"
++#include "src/base/strings.h"
+ 
+ namespace v8 {
+ namespace internal {
+@@ -37,8 +37,8 @@ class GCExtension : public v8::Extension {
+ 
+  private:
+   static const char* BuildSource(char* buf, size_t size, const char* fun_name) {
+-    SNPrintF(base::Vector<char>(buf, static_cast<int>(size)),
+-             "native function %s();", fun_name);
++    base::SNPrintF(base::Vector<char>(buf, static_cast<int>(size)),
++                   "native function %s();", fun_name);
+     return buf;
+   }
+ 
+diff --git a/src/extensions/vtunedomain-support-extension.h b/src/extensions/vtunedomain-support-extension.h
+index a695ba66d74..4640d0dfa5e 100644
+--- a/src/extensions/vtunedomain-support-extension.h
++++ b/src/extensions/vtunedomain-support-extension.h
+@@ -6,8 +6,9 @@
+ #define V8_EXTENSIONS_VTUNEDOMAIN_SUPPORT_EXTENSION_H_
+ 
+ #include "include/v8.h"
++#include "src/base/strings.h"
++#include "src/base/vector.h"
+ #include "src/third_party/vtune/vtuneapi.h"
+-#include "src/utils/utils.h"
+ 
+ #define UNKNOWN_PARAMS 1 << 0
+ #define NO_DOMAIN_NAME 1 << 1
+@@ -33,8 +34,8 @@ class VTuneDomainSupportExtension : public v8::Extension {
+   static void Mark(const v8::FunctionCallbackInfo<v8::Value>& args);
+ 
+   static const char* BuildSource(char* buf, size_t size, const char* fun_name) {
+-    SNPrintF(base::Vector<char>(buf, static_cast<int>(size)),
+-             "native function %s();", fun_name);
++    base::SNPrintF(base::Vector<char>(buf, static_cast<int>(size)),
++                   "native function %s();", fun_name);
+     return buf;
+   }
+ 
+diff --git a/src/heap/gc-tracer.cc b/src/heap/gc-tracer.cc
+index 631d983bf78..3d7468b22ea 100644
+--- a/src/heap/gc-tracer.cc
++++ b/src/heap/gc-tracer.cc
+@@ -8,6 +8,7 @@
+ 
+ #include "include/v8-metrics.h"
+ #include "src/base/atomic-utils.h"
++#include "src/base/strings.h"
+ #include "src/common/globals.h"
+ #include "src/execution/isolate.h"
+ #include "src/execution/thread-id.h"
+@@ -535,7 +536,7 @@ void GCTracer::Output(const char* format, ...) const {
+   base::Vector<char> buffer(raw_buffer, kBufferSize);
+   va_list arguments2;
+   va_start(arguments2, format);
+-  VSNPrintF(buffer, format, arguments2);
++  base::VSNPrintF(buffer, format, arguments2);
+   va_end(arguments2);
+ 
+   heap_->AddToRingBuffer(buffer.begin());
+diff --git a/src/logging/log-utils.cc b/src/logging/log-utils.cc
+index 6871fde13f7..5e27880560b 100644
+--- a/src/logging/log-utils.cc
++++ b/src/logging/log-utils.cc
+@@ -9,11 +9,11 @@
+ 
+ #include "src/base/platform/mutex.h"
+ #include "src/base/platform/platform.h"
++#include "src/base/strings.h"
+ #include "src/base/vector.h"
+ #include "src/common/assert-scope.h"
+ #include "src/objects/objects-inl.h"
+ #include "src/strings/string-stream.h"
+-#include "src/utils/utils.h"
+ #include "src/utils/version.h"
+ 
+ namespace v8 {
+@@ -215,7 +215,7 @@ void Log::MessageBuilder::AppendSymbolNameDetails(String str,
+ int Log::MessageBuilder::FormatStringIntoBuffer(const char* format,
+                                                 va_list args) {
+   base::Vector<char> buf(log_->format_buffer_.get(), Log::kMessageBufferSize);
+-  int length = v8::internal::VSNPrintF(buf, format, args);
++  int length = base::VSNPrintF(buf, format, args);
+   // |length| is -1 if output was truncated.
+   if (length == -1) length = Log::kMessageBufferSize;
+   DCHECK_LE(length, Log::kMessageBufferSize);
+diff --git a/src/profiler/strings-storage.cc b/src/profiler/strings-storage.cc
+index 1c8a23cadc8..2609d761fb3 100644
+--- a/src/profiler/strings-storage.cc
++++ b/src/profiler/strings-storage.cc
+@@ -6,8 +6,9 @@
+ 
+ #include <memory>
+ 
+-#include "src/utils/allocation.h"
++#include "src/base/strings.h"
+ #include "src/objects/objects-inl.h"
++#include "src/utils/allocation.h"
+ 
+ namespace v8 {
+ namespace internal {
+@@ -32,7 +33,7 @@ const char* StringsStorage::GetCopy(const char* src) {
+   base::HashMap::Entry* entry = GetEntry(src, len);
+   if (entry->value == nullptr) {
+     base::Vector<char> dst = base::Vector<char>::New(len + 1);
+-    StrNCpy(dst, src, len);
++    base::StrNCpy(dst, src, len);
+     dst[len] = '\0';
+     entry->key = dst.begin();
+   }
+@@ -65,7 +66,7 @@ const char* StringsStorage::AddOrDisposeString(char* str, int len) {
+ 
+ const char* StringsStorage::GetVFormatted(const char* format, va_list args) {
+   base::Vector<char> str = base::Vector<char>::New(1024);
+-  int len = VSNPrintF(str, format, args);
++  int len = base::VSNPrintF(str, format, args);
+   if (len == -1) {
+     DeleteArray(str.begin());
+     return GetCopy(format);
+diff --git a/src/snapshot/embedded/embedded-file-writer.cc b/src/snapshot/embedded/embedded-file-writer.cc
+index 6462cc7cac0..5adc3e01158 100644
+--- a/src/snapshot/embedded/embedded-file-writer.cc
++++ b/src/snapshot/embedded/embedded-file-writer.cc
+@@ -55,10 +55,10 @@ void EmbeddedFileWriter::WriteBuiltin(PlatformEmbeddedFileWriterBase* w,
+   base::EmbeddedVector<char, kTemporaryStringLength> builtin_symbol;
+   if (is_default_variant) {
+     // Create nicer symbol names for the default mode.
+-    i::SNPrintF(builtin_symbol, "Builtins_%s", i::Builtins::name(builtin));
++    base::SNPrintF(builtin_symbol, "Builtins_%s", i::Builtins::name(builtin));
+   } else {
+-    i::SNPrintF(builtin_symbol, "%s_Builtins_%s", embedded_variant_,
+-                i::Builtins::name(builtin));
++    base::SNPrintF(builtin_symbol, "%s_Builtins_%s", embedded_variant_,
++                   i::Builtins::name(builtin));
+   }
+ 
+   // Labels created here will show up in backtraces. We check in
+@@ -171,8 +171,8 @@ void EmbeddedFileWriter::WriteFileEpilogue(PlatformEmbeddedFileWriterBase* w,
+   {
+     base::EmbeddedVector<char, kTemporaryStringLength>
+         embedded_blob_code_symbol;
+-    i::SNPrintF(embedded_blob_code_symbol, "v8_%s_embedded_blob_code_",
+-                embedded_variant_);
++    base::SNPrintF(embedded_blob_code_symbol, "v8_%s_embedded_blob_code_",
++                   embedded_variant_);
+ 
+     w->Comment("Pointer to the beginning of the embedded blob code.");
+     w->SectionData();
+@@ -183,8 +183,8 @@ void EmbeddedFileWriter::WriteFileEpilogue(PlatformEmbeddedFileWriterBase* w,
+ 
+     base::EmbeddedVector<char, kTemporaryStringLength>
+         embedded_blob_data_symbol;
+-    i::SNPrintF(embedded_blob_data_symbol, "v8_%s_embedded_blob_data_",
+-                embedded_variant_);
++    base::SNPrintF(embedded_blob_data_symbol, "v8_%s_embedded_blob_data_",
++                   embedded_variant_);
+ 
+     w->Comment("Pointer to the beginning of the embedded blob data section.");
+     w->AlignToDataAlignment();
+@@ -196,8 +196,8 @@ void EmbeddedFileWriter::WriteFileEpilogue(PlatformEmbeddedFileWriterBase* w,
+   {
+     base::EmbeddedVector<char, kTemporaryStringLength>
+         embedded_blob_code_size_symbol;
+-    i::SNPrintF(embedded_blob_code_size_symbol,
+-                "v8_%s_embedded_blob_code_size_", embedded_variant_);
++    base::SNPrintF(embedded_blob_code_size_symbol,
++                   "v8_%s_embedded_blob_code_size_", embedded_variant_);
+ 
+     w->Comment("The size of the embedded blob code in bytes.");
+     w->SectionRoData();
+@@ -207,8 +207,8 @@ void EmbeddedFileWriter::WriteFileEpilogue(PlatformEmbeddedFileWriterBase* w,
+ 
+     base::EmbeddedVector<char, kTemporaryStringLength>
+         embedded_blob_data_size_symbol;
+-    i::SNPrintF(embedded_blob_data_size_symbol,
+-                "v8_%s_embedded_blob_data_size_", embedded_variant_);
++    base::SNPrintF(embedded_blob_data_size_symbol,
++                   "v8_%s_embedded_blob_data_size_", embedded_variant_);
+ 
+     w->Comment("The size of the embedded blob data section in bytes.");
+     w->DeclareUint32(embedded_blob_data_size_symbol.begin(), blob->data_size());
+@@ -218,8 +218,8 @@ void EmbeddedFileWriter::WriteFileEpilogue(PlatformEmbeddedFileWriterBase* w,
+ #if defined(V8_OS_WIN64)
+   {
+     base::EmbeddedVector<char, kTemporaryStringLength> unwind_info_symbol;
+-    i::SNPrintF(unwind_info_symbol, "%s_Builtins_UnwindInfo",
+-                embedded_variant_);
++    base::SNPrintF(unwind_info_symbol, "%s_Builtins_UnwindInfo",
++                   embedded_variant_);
+ 
+     w->MaybeEmitUnwindData(unwind_info_symbol.begin(),
+                            EmbeddedBlobCodeDataSymbol().c_str(), blob,
+diff --git a/src/snapshot/embedded/embedded-file-writer.h b/src/snapshot/embedded/embedded-file-writer.h
+index 486ca4ecb83..4845be036c0 100644
+--- a/src/snapshot/embedded/embedded-file-writer.h
++++ b/src/snapshot/embedded/embedded-file-writer.h
+@@ -10,6 +10,7 @@
+ #include <cstring>
+ #include <memory>
+ 
++#include "src/base/strings.h"
+ #include "src/common/globals.h"
+ #include "src/snapshot/embedded/embedded-data.h"
+ #include "src/snapshot/embedded/embedded-file-writer-interface.h"
+@@ -127,16 +128,16 @@ class EmbeddedFileWriter : public EmbeddedFileWriterInterface {
+   std::string EmbeddedBlobCodeDataSymbol() const {
+     base::EmbeddedVector<char, kTemporaryStringLength>
+         embedded_blob_code_data_symbol;
+-    i::SNPrintF(embedded_blob_code_data_symbol,
+-                "v8_%s_embedded_blob_code_data_", embedded_variant_);
++    base::SNPrintF(embedded_blob_code_data_symbol,
++                   "v8_%s_embedded_blob_code_data_", embedded_variant_);
+     return std::string{embedded_blob_code_data_symbol.begin()};
+   }
+ 
+   std::string EmbeddedBlobDataDataSymbol() const {
+     base::EmbeddedVector<char, kTemporaryStringLength>
+         embedded_blob_data_data_symbol;
+-    i::SNPrintF(embedded_blob_data_data_symbol,
+-                "v8_%s_embedded_blob_data_data_", embedded_variant_);
++    base::SNPrintF(embedded_blob_data_data_symbol,
++                   "v8_%s_embedded_blob_data_data_", embedded_variant_);
+     return std::string{embedded_blob_data_data_symbol.begin()};
+   }
+ 
+diff --git a/src/utils/utils.cc b/src/utils/utils.cc
+index a33f27c0e1b..e4e4a4b0a99 100644
+--- a/src/utils/utils.cc
++++ b/src/utils/utils.cc
+@@ -14,6 +14,7 @@
+ #include "src/base/logging.h"
+ #include "src/base/platform/platform.h"
+ #include "src/base/platform/wrappers.h"
++#include "src/base/strings.h"
+ 
+ namespace v8 {
+ namespace internal {
+@@ -61,22 +62,6 @@ void PrintIsolate(void* isolate, const char* format, ...) {
+   va_end(arguments);
+ }
+ 
+-int SNPrintF(base::Vector<char> str, const char* format, ...) {
+-  va_list args;
+-  va_start(args, format);
+-  int result = VSNPrintF(str, format, args);
+-  va_end(args);
+-  return result;
+-}
+-
+-int VSNPrintF(base::Vector<char> str, const char* format, va_list args) {
+-  return base::OS::VSNPrintF(str.begin(), str.length(), format, args);
+-}
+-
+-void StrNCpy(base::Vector<char> dest, const char* src, size_t n) {
+-  base::OS::StrNCpy(dest.begin(), dest.length(), src, n);
+-}
+-
+ char* ReadLine(const char* prompt) {
+   char* result = nullptr;
+   char line_buf[256];
+diff --git a/src/utils/utils.h b/src/utils/utils.h
+index 6e3cf97e101..d19551def21 100644
+--- a/src/utils/utils.h
++++ b/src/utils/utils.h
+@@ -560,15 +560,6 @@ void PRINTF_FORMAT(1, 2) PrintPID(const char* format, ...);
+ // Prepends the current process ID and given isolate pointer to the output.
+ void PRINTF_FORMAT(2, 3) PrintIsolate(void* isolate, const char* format, ...);
+ 
+-// Safe formatting print. Ensures that str is always null-terminated.
+-// Returns the number of chars written, or -1 if output was truncated.
+-V8_EXPORT_PRIVATE int PRINTF_FORMAT(2, 3)
+-    SNPrintF(base::Vector<char> str, const char* format, ...);
+-V8_EXPORT_PRIVATE int PRINTF_FORMAT(2, 0)
+-    VSNPrintF(base::Vector<char> str, const char* format, va_list args);
+-
+-void StrNCpy(base::Vector<char> dest, const char* src, size_t n);
+-
+ // Read a line of characters after printing the prompt to stdout. The resulting
+ // char* needs to be disposed off with DeleteArray by the caller.
+ char* ReadLine(const char* prompt);
+diff --git a/src/utils/version.cc b/src/utils/version.cc
+index 51af0b90b93..b2628687f0b 100644
+--- a/src/utils/version.cc
++++ b/src/utils/version.cc
+@@ -6,6 +6,7 @@
+ 
+ #include "include/v8-version-string.h"
+ #include "include/v8-version.h"
++#include "src/base/strings.h"
+ #include "src/utils/utils.h"
+ 
+ // Define SONAME to have the build system put a specific SONAME into the
+@@ -29,11 +30,11 @@ const char* Version::version_string_ = V8_VERSION_STRING;
+ void Version::GetString(base::Vector<char> str) {
+   const char* candidate = IsCandidate() ? " (candidate)" : "";
+   if (GetPatch() > 0) {
+-    SNPrintF(str, "%d.%d.%d.%d%s%s", GetMajor(), GetMinor(), GetBuild(),
+-             GetPatch(), GetEmbedder(), candidate);
++    base::SNPrintF(str, "%d.%d.%d.%d%s%s", GetMajor(), GetMinor(), GetBuild(),
++                   GetPatch(), GetEmbedder(), candidate);
+   } else {
+-    SNPrintF(str, "%d.%d.%d%s%s", GetMajor(), GetMinor(), GetBuild(),
+-             GetEmbedder(), candidate);
++    base::SNPrintF(str, "%d.%d.%d%s%s", GetMajor(), GetMinor(), GetBuild(),
++                   GetEmbedder(), candidate);
+   }
+ }
+ 
+diff --git a/src/wasm/decoder.h b/src/wasm/decoder.h
+index 379f846b58d..75972052464 100644
+--- a/src/wasm/decoder.h
++++ b/src/wasm/decoder.h
+@@ -15,6 +15,7 @@
+ 
+ #include "src/base/compiler-specific.h"
+ #include "src/base/memory.h"
++#include "src/base/strings.h"
+ #include "src/base/vector.h"
+ #include "src/codegen/signature.h"
+ #include "src/flags/flags.h"
+@@ -356,7 +357,7 @@ class Decoder {
+     if (!ok()) return;
+     constexpr int kMaxErrorMsg = 256;
+     base::EmbeddedVector<char, kMaxErrorMsg> buffer;
+-    int len = VSNPrintF(buffer, format, args);
++    int len = base::VSNPrintF(buffer, format, args);
+     CHECK_LT(0, len);
+     error_ = {offset, {buffer.begin(), static_cast<size_t>(len)}};
+     onFirstError();
+diff --git a/src/wasm/function-body-decoder-impl.h b/src/wasm/function-body-decoder-impl.h
+index ad6258b5aac..e2c0f09789f 100644
+--- a/src/wasm/function-body-decoder-impl.h
++++ b/src/wasm/function-body-decoder-impl.h
+@@ -17,6 +17,7 @@
+ #include "src/base/platform/elapsed-timer.h"
+ #include "src/base/platform/wrappers.h"
+ #include "src/base/small-vector.h"
++#include "src/base/strings.h"
+ #include "src/utils/bit-vector.h"
+ #include "src/wasm/decoder.h"
+ #include "src/wasm/function-body-decoder.h"
+@@ -2358,7 +2359,7 @@ class WasmFullDecoder : public WasmDecoder<validate> {
+       va_start(va_args, format);
+       size_t remaining_len = kMaxLen - len_;
+       base::Vector<char> remaining_msg_space(buffer_ + len_, remaining_len);
+-      int len = VSNPrintF(remaining_msg_space, format, va_args);
++      int len = base::VSNPrintF(remaining_msg_space, format, va_args);
+       va_end(va_args);
+       len_ += len < 0 ? remaining_len : len;
+     }
+diff --git a/src/wasm/function-compiler.cc b/src/wasm/function-compiler.cc
+index 522dba819e6..cb18b21b14f 100644
+--- a/src/wasm/function-compiler.cc
++++ b/src/wasm/function-compiler.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "src/wasm/function-compiler.h"
+ 
++#include "src/base/strings.h"
+ #include "src/codegen/compiler.h"
+ #include "src/codegen/macro-assembler-inl.h"
+ #include "src/codegen/optimized-compilation-info.h"
+@@ -237,7 +238,7 @@ void RecordWasmHeapStubCompilation(Isolate* isolate, Handle<Code> code,
+   base::ScopedVector<char> buffer(128);
+   va_list arguments;
+   va_start(arguments, format);
+-  int len = VSNPrintF(buffer, format, arguments);
++  int len = base::VSNPrintF(buffer, format, arguments);
+   CHECK_LT(0, len);
+   va_end(arguments);
+   Handle<String> name_str =
+diff --git a/src/wasm/memory-tracing.cc b/src/wasm/memory-tracing.cc
+index 5460fbcf4b6..ecf344add28 100644
+--- a/src/wasm/memory-tracing.cc
++++ b/src/wasm/memory-tracing.cc
+@@ -7,8 +7,8 @@
+ #include <cinttypes>
+ 
+ #include "src/base/memory.h"
++#include "src/base/strings.h"
+ #include "src/base/vector.h"
+-#include "src/utils/utils.h"
+ 
+ namespace v8 {
+ namespace internal {
+@@ -21,11 +21,11 @@ void TraceMemoryOperation(base::Optional<ExecutionTier> tier,
+   auto mem_rep = static_cast<MachineRepresentation>(info->mem_rep);
+   Address address = reinterpret_cast<Address>(mem_start) + info->offset;
+   switch (mem_rep) {
+-#define TRACE_TYPE(rep, str, format, ctype1, ctype2)        \
+-  case MachineRepresentation::rep:                          \
+-    SNPrintF(value, str ":" format,                         \
+-             base::ReadLittleEndianValue<ctype1>(address),  \
+-             base::ReadLittleEndianValue<ctype2>(address)); \
++#define TRACE_TYPE(rep, str, format, ctype1, ctype2)              \
++  case MachineRepresentation::rep:                                \
++    base::SNPrintF(value, str ":" format,                         \
++                   base::ReadLittleEndianValue<ctype1>(address),  \
++                   base::ReadLittleEndianValue<ctype2>(address)); \
+     break;
+     TRACE_TYPE(kWord8, " i8", "%d / %02x", uint8_t, uint8_t)
+     TRACE_TYPE(kWord16, "i16", "%d / %04x", uint16_t, uint16_t)
+diff --git a/src/wasm/wasm-result.cc b/src/wasm/wasm-result.cc
+index 342aa66ddc5..5f49e54ddb4 100644
+--- a/src/wasm/wasm-result.cc
++++ b/src/wasm/wasm-result.cc
+@@ -4,13 +4,13 @@
+ 
+ #include "src/wasm/wasm-result.h"
+ 
++#include "src/base/platform/platform.h"
++#include "src/base/strings.h"
+ #include "src/execution/isolate-inl.h"
+ #include "src/heap/factory.h"
+ #include "src/heap/heap.h"
+ #include "src/objects/objects.h"
+ 
+-#include "src/base/platform/platform.h"
+-
+ namespace v8 {
+ namespace internal {
+ namespace wasm {
+@@ -29,9 +29,9 @@ void VPrintFToString(std::string* str, size_t str_offset, const char* format,
+     va_list args_copy;
+     va_copy(args_copy, args);
+     int written =
+-        VSNPrintF(base::Vector<char>(&str->front() + str_offset,
+-                                     static_cast<int>(len - str_offset)),
+-                  format, args_copy);
++        base::VSNPrintF(base::Vector<char>(&str->front() + str_offset,
++                                           static_cast<int>(len - str_offset)),
++                        format, args_copy);
+     va_end(args_copy);
+     if (written < 0) continue;  // not enough space.
+     str->resize(str_offset + written);
+diff --git a/test/cctest/cctest.cc b/test/cctest/cctest.cc
+index 661941d2d59..ab0b8f2c306 100644
+--- a/test/cctest/cctest.cc
++++ b/test/cctest/cctest.cc
+@@ -30,6 +30,7 @@
+ #include "include/cppgc/platform.h"
+ #include "include/libplatform/libplatform.h"
+ #include "include/v8.h"
++#include "src/base/strings.h"
+ #include "src/codegen/compiler.h"
+ #include "src/codegen/optimized-compilation-info.h"
+ #include "src/compiler/pipeline.h"
+@@ -171,7 +172,7 @@ i::Handle<i::String> CcTest::MakeString(const char* str) {
+ 
+ i::Handle<i::String> CcTest::MakeName(const char* str, int suffix) {
+   v8::base::EmbeddedVector<char, 128> buffer;
+-  i::SNPrintF(buffer, "%s%d", str, suffix);
++  v8::base::SNPrintF(buffer, "%s%d", str, suffix);
+   return CcTest::MakeString(buffer.begin());
+ }
+ 
+diff --git a/test/cctest/heap/test-heap.cc b/test/cctest/heap/test-heap.cc
+index 2d04414c36d..930084f61d1 100644
+--- a/test/cctest/heap/test-heap.cc
++++ b/test/cctest/heap/test-heap.cc
+@@ -30,6 +30,7 @@
+ #include <utility>
+ 
+ #include "src/api/api-inl.h"
++#include "src/base/strings.h"
+ #include "src/codegen/assembler-inl.h"
+ #include "src/codegen/compilation-cache.h"
+ #include "src/codegen/macro-assembler-inl.h"
+@@ -1531,13 +1532,13 @@ TEST(CompilationCacheCachingBehavior) {
+ static void OptimizeEmptyFunction(const char* name) {
+   HandleScope scope(CcTest::i_isolate());
+   base::EmbeddedVector<char, 256> source;
+-  SNPrintF(source,
+-           "function %s() { return 0; }"
+-           "%%PrepareFunctionForOptimization(%s);"
+-           "%s(); %s();"
+-           "%%OptimizeFunctionOnNextCall(%s);"
+-           "%s();",
+-           name, name, name, name, name, name);
++  base::SNPrintF(source,
++                 "function %s() { return 0; }"
++                 "%%PrepareFunctionForOptimization(%s);"
++                 "%s(); %s();"
++                 "%%OptimizeFunctionOnNextCall(%s);"
++                 "%s();",
++                 name, name, name, name, name, name);
+   CompileRun(source.begin());
+ }
+ 
+@@ -2512,21 +2513,21 @@ TEST(OptimizedPretenuringAllocationFolding) {
+   GrowNewSpaceToMaximumCapacity(CcTest::heap());
+ 
+   base::ScopedVector<char> source(1024);
+-  i::SNPrintF(source,
+-              "var number_elements = %d;"
+-              "var elements = new Array();"
+-              "function f() {"
+-              "  for (var i = 0; i < number_elements; i++) {"
+-              "    elements[i] = [[{}], [1.1]];"
+-              "  }"
+-              "  return elements[number_elements-1]"
+-              "};"
+-              "%%PrepareFunctionForOptimization(f);"
+-              "f(); gc();"
+-              "f(); f();"
+-              "%%OptimizeFunctionOnNextCall(f);"
+-              "f();",
+-              kPretenureCreationCount);
++  base::SNPrintF(source,
++                 "var number_elements = %d;"
++                 "var elements = new Array();"
++                 "function f() {"
++                 "  for (var i = 0; i < number_elements; i++) {"
++                 "    elements[i] = [[{}], [1.1]];"
++                 "  }"
++                 "  return elements[number_elements-1]"
++                 "};"
++                 "%%PrepareFunctionForOptimization(f);"
++                 "f(); gc();"
++                 "f(); f();"
++                 "%%OptimizeFunctionOnNextCall(f);"
++                 "f();",
++                 kPretenureCreationCount);
+ 
+   v8::Local<v8::Value> res = CompileRun(source.begin());
+ 
+@@ -2563,21 +2564,21 @@ TEST(OptimizedPretenuringObjectArrayLiterals) {
+   GrowNewSpaceToMaximumCapacity(CcTest::heap());
+ 
+   base::ScopedVector<char> source(1024);
+-  i::SNPrintF(source,
+-              "var number_elements = %d;"
+-              "var elements = new Array(number_elements);"
+-              "function f() {"
+-              "  for (var i = 0; i < number_elements; i++) {"
+-              "    elements[i] = [{}, {}, {}];"
+-              "  }"
+-              "  return elements[number_elements - 1];"
+-              "};"
+-              "%%PrepareFunctionForOptimization(f);"
+-              "f(); gc();"
+-              "f(); f();"
+-              "%%OptimizeFunctionOnNextCall(f);"
+-              "f();",
+-              kPretenureCreationCount);
++  base::SNPrintF(source,
++                 "var number_elements = %d;"
++                 "var elements = new Array(number_elements);"
++                 "function f() {"
++                 "  for (var i = 0; i < number_elements; i++) {"
++                 "    elements[i] = [{}, {}, {}];"
++                 "  }"
++                 "  return elements[number_elements - 1];"
++                 "};"
++                 "%%PrepareFunctionForOptimization(f);"
++                 "f(); gc();"
++                 "f(); f();"
++                 "%%OptimizeFunctionOnNextCall(f);"
++                 "f();",
++                 kPretenureCreationCount);
+ 
+   v8::Local<v8::Value> res = CompileRun(source.begin());
+ 
+@@ -2603,22 +2604,22 @@ TEST(OptimizedPretenuringNestedInObjectProperties) {
+ 
+   // Keep the nested literal alive while its root is freed
+   base::ScopedVector<char> source(1024);
+-  i::SNPrintF(source,
+-              "let number_elements = %d;"
+-              "let elements = new Array(number_elements);"
+-              "function f() {"
+-              "  for (let i = 0; i < number_elements; i++) {"
+-              "     let l =  {a: {c: 2.2, d: {e: 3.3}}, b: 1.1}; "
+-              "    elements[i] = l.a;"
+-              "  }"
+-              "  return elements[number_elements-1];"
+-              "};"
+-              "%%PrepareFunctionForOptimization(f);"
+-              "f(); gc(); gc();"
+-              "f(); f();"
+-              "%%OptimizeFunctionOnNextCall(f);"
+-              "f();",
+-              kPretenureCreationCount);
++  base::SNPrintF(source,
++                 "let number_elements = %d;"
++                 "let elements = new Array(number_elements);"
++                 "function f() {"
++                 "  for (let i = 0; i < number_elements; i++) {"
++                 "     let l =  {a: {c: 2.2, d: {e: 3.3}}, b: 1.1}; "
++                 "    elements[i] = l.a;"
++                 "  }"
++                 "  return elements[number_elements-1];"
++                 "};"
++                 "%%PrepareFunctionForOptimization(f);"
++                 "f(); gc(); gc();"
++                 "f(); f();"
++                 "%%OptimizeFunctionOnNextCall(f);"
++                 "f();",
++                 kPretenureCreationCount);
+ 
+   v8::Local<v8::Value> res = CompileRun(source.begin());
+ 
+@@ -2643,21 +2644,21 @@ TEST(OptimizedPretenuringMixedInObjectProperties) {
+   GrowNewSpaceToMaximumCapacity(CcTest::heap());
+ 
+   base::ScopedVector<char> source(1024);
+-  i::SNPrintF(source,
+-              "var number_elements = %d;"
+-              "var elements = new Array(number_elements);"
+-              "function f() {"
+-              "  for (var i = 0; i < number_elements; i++) {"
+-              "    elements[i] = {a: {c: 2.2, d: {}}, b: 1.1};"
+-              "  }"
+-              "  return elements[number_elements - 1];"
+-              "};"
+-              "%%PrepareFunctionForOptimization(f);"
+-              "f(); gc();"
+-              "f(); f();"
+-              "%%OptimizeFunctionOnNextCall(f);"
+-              "f();",
+-              kPretenureCreationCount);
++  base::SNPrintF(source,
++                 "var number_elements = %d;"
++                 "var elements = new Array(number_elements);"
++                 "function f() {"
++                 "  for (var i = 0; i < number_elements; i++) {"
++                 "    elements[i] = {a: {c: 2.2, d: {}}, b: 1.1};"
++                 "  }"
++                 "  return elements[number_elements - 1];"
++                 "};"
++                 "%%PrepareFunctionForOptimization(f);"
++                 "f(); gc();"
++                 "f(); f();"
++                 "%%OptimizeFunctionOnNextCall(f);"
++                 "f();",
++                 kPretenureCreationCount);
+ 
+   v8::Local<v8::Value> res = CompileRun(source.begin());
+ 
+@@ -2690,21 +2691,21 @@ TEST(OptimizedPretenuringDoubleArrayProperties) {
+   GrowNewSpaceToMaximumCapacity(CcTest::heap());
+ 
+   base::ScopedVector<char> source(1024);
+-  i::SNPrintF(source,
+-              "var number_elements = %d;"
+-              "var elements = new Array(number_elements);"
+-              "function f() {"
+-              "  for (var i = 0; i < number_elements; i++) {"
+-              "    elements[i] = {a: 1.1, b: 2.2};"
+-              "  }"
+-              "  return elements[i - 1];"
+-              "};"
+-              "%%PrepareFunctionForOptimization(f);"
+-              "f(); gc();"
+-              "f(); f();"
+-              "%%OptimizeFunctionOnNextCall(f);"
+-              "f();",
+-              kPretenureCreationCount);
++  base::SNPrintF(source,
++                 "var number_elements = %d;"
++                 "var elements = new Array(number_elements);"
++                 "function f() {"
++                 "  for (var i = 0; i < number_elements; i++) {"
++                 "    elements[i] = {a: 1.1, b: 2.2};"
++                 "  }"
++                 "  return elements[i - 1];"
++                 "};"
++                 "%%PrepareFunctionForOptimization(f);"
++                 "f(); gc();"
++                 "f(); f();"
++                 "%%OptimizeFunctionOnNextCall(f);"
++                 "f();",
++                 kPretenureCreationCount);
+ 
+   v8::Local<v8::Value> res = CompileRun(source.begin());
+ 
+@@ -2729,21 +2730,21 @@ TEST(OptimizedPretenuringDoubleArrayLiterals) {
+   GrowNewSpaceToMaximumCapacity(CcTest::heap());
+ 
+   base::ScopedVector<char> source(1024);
+-  i::SNPrintF(source,
+-              "var number_elements = %d;"
+-              "var elements = new Array(number_elements);"
+-              "function f() {"
+-              "  for (var i = 0; i < number_elements; i++) {"
+-              "    elements[i] = [1.1, 2.2, 3.3];"
+-              "  }"
+-              "  return elements[number_elements - 1];"
+-              "};"
+-              "%%PrepareFunctionForOptimization(f);"
+-              "f(); gc();"
+-              "f(); f();"
+-              "%%OptimizeFunctionOnNextCall(f);"
+-              "f();",
+-              kPretenureCreationCount);
++  base::SNPrintF(source,
++                 "var number_elements = %d;"
++                 "var elements = new Array(number_elements);"
++                 "function f() {"
++                 "  for (var i = 0; i < number_elements; i++) {"
++                 "    elements[i] = [1.1, 2.2, 3.3];"
++                 "  }"
++                 "  return elements[number_elements - 1];"
++                 "};"
++                 "%%PrepareFunctionForOptimization(f);"
++                 "f(); gc();"
++                 "f(); f();"
++                 "%%OptimizeFunctionOnNextCall(f);"
++                 "f();",
++                 kPretenureCreationCount);
+ 
+   v8::Local<v8::Value> res = CompileRun(source.begin());
+ 
+@@ -2767,21 +2768,21 @@ TEST(OptimizedPretenuringNestedMixedArrayLiterals) {
+   GrowNewSpaceToMaximumCapacity(CcTest::heap());
+ 
+   base::ScopedVector<char> source(1024);
+-  i::SNPrintF(source,
+-              "var number_elements = %d;"
+-              "var elements = new Array(number_elements);"
+-              "function f() {"
+-              "  for (var i = 0; i < number_elements; i++) {"
+-              "    elements[i] = [[{}, {}, {}], [1.1, 2.2, 3.3]];"
+-              "  }"
+-              "  return elements[number_elements - 1];"
+-              "};"
+-              "%%PrepareFunctionForOptimization(f);"
+-              "f(); gc();"
+-              "f(); f();"
+-              "%%OptimizeFunctionOnNextCall(f);"
+-              "f();",
+-              kPretenureCreationCount);
++  base::SNPrintF(source,
++                 "var number_elements = %d;"
++                 "var elements = new Array(number_elements);"
++                 "function f() {"
++                 "  for (var i = 0; i < number_elements; i++) {"
++                 "    elements[i] = [[{}, {}, {}], [1.1, 2.2, 3.3]];"
++                 "  }"
++                 "  return elements[number_elements - 1];"
++                 "};"
++                 "%%PrepareFunctionForOptimization(f);"
++                 "f(); gc();"
++                 "f(); f();"
++                 "%%OptimizeFunctionOnNextCall(f);"
++                 "f();",
++                 kPretenureCreationCount);
+ 
+   v8::Local<v8::Value> res = CompileRun(source.begin());
+ 
+@@ -2817,21 +2818,21 @@ TEST(OptimizedPretenuringNestedObjectLiterals) {
+   GrowNewSpaceToMaximumCapacity(CcTest::heap());
+ 
+   base::ScopedVector<char> source(1024);
+-  i::SNPrintF(source,
+-              "var number_elements = %d;"
+-              "var elements = new Array(number_elements);"
+-              "function f() {"
+-              "  for (var i = 0; i < number_elements; i++) {"
+-              "    elements[i] = [[{}, {}, {}],[{}, {}, {}]];"
+-              "  }"
+-              "  return elements[number_elements - 1];"
+-              "};"
+-              "%%PrepareFunctionForOptimization(f);"
+-              "f(); gc();"
+-              "f(); f();"
+-              "%%OptimizeFunctionOnNextCall(f);"
+-              "f();",
+-              kPretenureCreationCount);
++  base::SNPrintF(source,
++                 "var number_elements = %d;"
++                 "var elements = new Array(number_elements);"
++                 "function f() {"
++                 "  for (var i = 0; i < number_elements; i++) {"
++                 "    elements[i] = [[{}, {}, {}],[{}, {}, {}]];"
++                 "  }"
++                 "  return elements[number_elements - 1];"
++                 "};"
++                 "%%PrepareFunctionForOptimization(f);"
++                 "f(); gc();"
++                 "f(); f();"
++                 "%%OptimizeFunctionOnNextCall(f);"
++                 "f();",
++                 kPretenureCreationCount);
+ 
+   v8::Local<v8::Value> res = CompileRun(source.begin());
+ 
+@@ -2867,21 +2868,21 @@ TEST(OptimizedPretenuringNestedDoubleLiterals) {
+   GrowNewSpaceToMaximumCapacity(CcTest::heap());
+ 
+   base::ScopedVector<char> source(1024);
+-  i::SNPrintF(source,
+-              "var number_elements = %d;"
+-              "var elements = new Array(number_elements);"
+-              "function f() {"
+-              "  for (var i = 0; i < number_elements; i++) {"
+-              "    elements[i] = [[1.1, 1.2, 1.3],[2.1, 2.2, 2.3]];"
+-              "  }"
+-              "  return elements[number_elements - 1];"
+-              "};"
+-              "%%PrepareFunctionForOptimization(f);"
+-              "f(); gc();"
+-              "f(); f();"
+-              "%%OptimizeFunctionOnNextCall(f);"
+-              "f();",
+-              kPretenureCreationCount);
++  base::SNPrintF(source,
++                 "var number_elements = %d;"
++                 "var elements = new Array(number_elements);"
++                 "function f() {"
++                 "  for (var i = 0; i < number_elements; i++) {"
++                 "    elements[i] = [[1.1, 1.2, 1.3],[2.1, 2.2, 2.3]];"
++                 "  }"
++                 "  return elements[number_elements - 1];"
++                 "};"
++                 "%%PrepareFunctionForOptimization(f);"
++                 "f(); gc();"
++                 "f(); f();"
++                 "%%OptimizeFunctionOnNextCall(f);"
++                 "f();",
++                 kPretenureCreationCount);
+ 
+   v8::Local<v8::Value> res = CompileRun(source.begin());
+ 
+@@ -2963,7 +2964,7 @@ TEST(Regress1465) {
+     AlwaysAllocateScopeForTesting always_allocate(CcTest::i_isolate()->heap());
+     for (int i = 0; i < transitions_count; i++) {
+       base::EmbeddedVector<char, 64> buffer;
+-      SNPrintF(buffer, "var o = new F; o.prop%d = %d;", i, i);
++      base::SNPrintF(buffer, "var o = new F; o.prop%d = %d;", i, i);
+       CompileRun(buffer.begin());
+     }
+     CompileRun("var root = new F;");
+@@ -3001,7 +3002,7 @@ static void AddTransitions(int transitions_count) {
+   AlwaysAllocateScopeForTesting always_allocate(CcTest::i_isolate()->heap());
+   for (int i = 0; i < transitions_count; i++) {
+     base::EmbeddedVector<char, 64> buffer;
+-    SNPrintF(buffer, "var o = new F; o.prop%d = %d;", i, i);
++    base::SNPrintF(buffer, "var o = new F; o.prop%d = %d;", i, i);
+     CompileRun(buffer.begin());
+   }
+ }
+@@ -4320,13 +4321,13 @@ TEST(ObjectsInEagerlyDeoptimizedCodeAreWeak) {
+ static Handle<JSFunction> OptimizeDummyFunction(v8::Isolate* isolate,
+                                                 const char* name) {
+   base::EmbeddedVector<char, 256> source;
+-  SNPrintF(source,
+-           "function %s() { return 0; }"
+-           "%%PrepareFunctionForOptimization(%s);"
+-           "%s(); %s();"
+-           "%%OptimizeFunctionOnNextCall(%s);"
+-           "%s();",
+-           name, name, name, name, name, name);
++  base::SNPrintF(source,
++                 "function %s() { return 0; }"
++                 "%%PrepareFunctionForOptimization(%s);"
++                 "%s(); %s();"
++                 "%%OptimizeFunctionOnNextCall(%s);"
++                 "%s();",
++                 name, name, name, name, name, name);
+   CompileRun(source.begin());
+   i::Handle<JSFunction> fun = Handle<JSFunction>::cast(
+       v8::Utils::OpenHandle(*v8::Local<v8::Function>::Cast(
+diff --git a/test/cctest/parsing/test-preparser.cc b/test/cctest/parsing/test-preparser.cc
+index f4a7fda155a..a8b103920a2 100644
+--- a/test/cctest/parsing/test-preparser.cc
++++ b/test/cctest/parsing/test-preparser.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "src/api/api-inl.h"
+ #include "src/ast/ast.h"
++#include "src/base/strings.h"
+ #include "src/base/vector.h"
+ #include "src/codegen/compiler.h"
+ #include "src/objects/objects-inl.h"
+@@ -681,7 +682,7 @@ TEST(PreParserScopeAnalysis) {
+       int len = code_len + params_len + source_len;
+ 
+       v8::base::ScopedVector<char> program(len + 1);
+-      i::SNPrintF(program, code, inner.params, inner.source);
++      v8::base::SNPrintF(program, code, inner.params, inner.source);
+ 
+       i::HandleScope scope(isolate);
+ 
+diff --git a/test/cctest/test-api-array-buffer.cc b/test/cctest/test-api-array-buffer.cc
+index b0f76c7d1f1..ee614fc63cd 100644
+--- a/test/cctest/test-api-array-buffer.cc
++++ b/test/cctest/test-api-array-buffer.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "src/api/api-inl.h"
++#include "src/base/strings.h"
+ #include "src/objects/js-array-buffer-inl.h"
+ #include "test/cctest/test-api.h"
+ 
+@@ -26,9 +27,9 @@ void CheckIsDetached(v8::Local<v8::TypedArray> ta) {
+ 
+ void CheckIsTypedArrayVarDetached(const char* name) {
+   v8::base::ScopedVector<char> source(1024);
+-  i::SNPrintF(source,
+-              "%s.byteLength == 0 && %s.byteOffset == 0 && %s.length == 0",
+-              name, name, name);
++  v8::base::SNPrintF(
++      source, "%s.byteLength == 0 && %s.byteOffset == 0 && %s.length == 0",
++      name, name, name);
+   CHECK(CompileRun(source.begin())->IsTrue());
+   v8::Local<v8::TypedArray> ta = CompileRun(name).As<v8::TypedArray>();
+   CheckIsDetached(ta);
+diff --git a/test/cctest/test-api-stack-traces.cc b/test/cctest/test-api-stack-traces.cc
+index 125fcb2baa7..cec54c0a8f5 100644
+--- a/test/cctest/test-api-stack-traces.cc
++++ b/test/cctest/test-api-stack-traces.cc
+@@ -2,9 +2,9 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
+-#include "test/cctest/test-api.h"
+-
+ #include "src/api/api-inl.h"
++#include "src/base/strings.h"
++#include "test/cctest/test-api.h"
+ 
+ using ::v8::Array;
+ using ::v8::Context;
+@@ -715,9 +715,9 @@ TEST(SourceURLInStackTrace) {
+       "eval('(' + outer +')()%s');";
+ 
+   v8::base::ScopedVector<char> code(1024);
+-  i::SNPrintF(code, source, "//# sourceURL=eval_url");
++  v8::base::SNPrintF(code, source, "//# sourceURL=eval_url");
+   CHECK(CompileRun(code.begin())->IsUndefined());
+-  i::SNPrintF(code, source, "//@ sourceURL=eval_url");
++  v8::base::SNPrintF(code, source, "//@ sourceURL=eval_url");
+   CHECK(CompileRun(code.begin())->IsUndefined());
+ }
+ 
+@@ -793,9 +793,9 @@ TEST(InlineScriptWithSourceURLInStackTrace) {
+       "outer()\n%s";
+ 
+   v8::base::ScopedVector<char> code(1024);
+-  i::SNPrintF(code, source, "//# sourceURL=source_url");
++  v8::base::SNPrintF(code, source, "//# sourceURL=source_url");
+   CHECK(CompileRunWithOrigin(code.begin(), "url", 0, 1)->IsUndefined());
+-  i::SNPrintF(code, source, "//@ sourceURL=source_url");
++  v8::base::SNPrintF(code, source, "//@ sourceURL=source_url");
+   CHECK(CompileRunWithOrigin(code.begin(), "url", 0, 1)->IsUndefined());
+ }
+ 
+@@ -837,9 +837,9 @@ TEST(DynamicWithSourceURLInStackTrace) {
+       "outer()\n%s";
+ 
+   v8::base::ScopedVector<char> code(1024);
+-  i::SNPrintF(code, source, "//# sourceURL=source_url");
++  v8::base::SNPrintF(code, source, "//# sourceURL=source_url");
+   CHECK(CompileRunWithOrigin(code.begin(), "url", 0, 0)->IsUndefined());
+-  i::SNPrintF(code, source, "//@ sourceURL=source_url");
++  v8::base::SNPrintF(code, source, "//@ sourceURL=source_url");
+   CHECK(CompileRunWithOrigin(code.begin(), "url", 0, 0)->IsUndefined());
+ }
+ 
+@@ -857,7 +857,7 @@ TEST(DynamicWithSourceURLInStackTraceString) {
+       "outer()\n%s";
+ 
+   v8::base::ScopedVector<char> code(1024);
+-  i::SNPrintF(code, source, "//# sourceURL=source_url");
++  v8::base::SNPrintF(code, source, "//# sourceURL=source_url");
+   v8::TryCatch try_catch(context->GetIsolate());
+   CompileRunWithOrigin(code.begin(), "", 0, 0);
+   CHECK(try_catch.HasCaught());
+diff --git a/test/cctest/test-api-typed-array.cc b/test/cctest/test-api-typed-array.cc
+index ad5fc117839..6b0cde287c9 100644
+--- a/test/cctest/test-api-typed-array.cc
++++ b/test/cctest/test-api-typed-array.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "src/api/api-inl.h"
++#include "src/base/strings.h"
+ #include "src/objects/js-array-buffer-inl.h"
+ #include "test/cctest/test-api.h"
+ 
+@@ -116,11 +117,11 @@ void ObjectWithExternalArrayTestHelper(Local<Context> context,
+       "  }"
+       "}"
+       "res;";
+-  i::SNPrintF(test_buf, boundary_program, low);
++  v8::base::SNPrintF(test_buf, boundary_program, low);
+   result = CompileRun(test_buf.begin());
+   CHECK_EQ(low, result->IntegerValue(context).FromJust());
+ 
+-  i::SNPrintF(test_buf, boundary_program, high);
++  v8::base::SNPrintF(test_buf, boundary_program, high);
+   result = CompileRun(test_buf.begin());
+   CHECK_EQ(high, result->IntegerValue(context).FromJust());
+ 
+@@ -141,28 +142,28 @@ void ObjectWithExternalArrayTestHelper(Local<Context> context,
+   CHECK_EQ(28, result->Int32Value(context).FromJust());
+ 
+   // Make sure out-of-range loads do not throw.
+-  i::SNPrintF(test_buf,
+-              "var caught_exception = false;"
+-              "try {"
+-              "  ext_array[%d];"
+-              "} catch (e) {"
+-              "  caught_exception = true;"
+-              "}"
+-              "caught_exception;",
+-              element_count);
++  v8::base::SNPrintF(test_buf,
++                     "var caught_exception = false;"
++                     "try {"
++                     "  ext_array[%d];"
++                     "} catch (e) {"
++                     "  caught_exception = true;"
++                     "}"
++                     "caught_exception;",
++                     element_count);
+   result = CompileRun(test_buf.begin());
+   CHECK(!result->BooleanValue(v8_isolate));
+ 
+   // Make sure out-of-range stores do not throw.
+-  i::SNPrintF(test_buf,
+-              "var caught_exception = false;"
+-              "try {"
+-              "  ext_array[%d] = 1;"
+-              "} catch (e) {"
+-              "  caught_exception = true;"
+-              "}"
+-              "caught_exception;",
+-              element_count);
++  v8::base::SNPrintF(test_buf,
++                     "var caught_exception = false;"
++                     "try {"
++                     "  ext_array[%d] = 1;"
++                     "} catch (e) {"
++                     "  caught_exception = true;"
++                     "}"
++                     "caught_exception;",
++                     element_count);
+   result = CompileRun(test_buf.begin());
+   CHECK(!result->BooleanValue(v8_isolate));
+ 
+@@ -245,19 +246,20 @@ void ObjectWithExternalArrayTestHelper(Local<Context> context,
+                         array_type == i::kExternalUint32Array);
+     bool is_pixel_data = array_type == i::kExternalUint8ClampedArray;
+ 
+-    i::SNPrintF(test_buf,
+-                "%s"
+-                "var all_passed = true;"
+-                "for (var i = 0; i < source_data.length; i++) {"
+-                "  for (var j = 0; j < 8; j++) {"
+-                "    ext_array[j] = source_data[i];"
+-                "  }"
+-                "  all_passed = all_passed &&"
+-                "               (ext_array[5] == expected_results[i]);"
+-                "}"
+-                "all_passed;",
+-                (is_unsigned ? unsigned_data
+-                             : (is_pixel_data ? pixel_data : signed_data)));
++    v8::base::SNPrintF(
++        test_buf,
++        "%s"
++        "var all_passed = true;"
++        "for (var i = 0; i < source_data.length; i++) {"
++        "  for (var j = 0; j < 8; j++) {"
++        "    ext_array[j] = source_data[i];"
++        "  }"
++        "  all_passed = all_passed &&"
++        "               (ext_array[5] == expected_results[i]);"
++        "}"
++        "all_passed;",
++        (is_unsigned ? unsigned_data
++                     : (is_pixel_data ? pixel_data : signed_data)));
+     result = CompileRun(test_buf.begin());
+     CHECK(result->BooleanValue(v8_isolate));
+   }
+@@ -582,7 +584,7 @@ void TestOnHeapHasBuffer(const char* array_name, size_t elem_size) {
+   for (size_t size = 0; size <= i::JSTypedArray::kMaxSizeInHeap;
+        size += elem_size) {
+     size_t length = size / elem_size;
+-    i::SNPrintF(source, "new %sArray(%zu)", array_name, length);
++    v8::base::SNPrintF(source, "new %sArray(%zu)", array_name, length);
+     auto typed_array =
+         v8::Local<v8::TypedArray>::Cast(CompileRun(source.begin()));
+ 
+@@ -614,7 +616,7 @@ void TestOffHeapHasBuffer(const char* array_name, size_t elem_size) {
+   size_t size = i::JSTypedArray::kMaxSizeInHeap;
+   for (int i = 0; i < 3; i++) {
+     size_t length = 1 + (size / elem_size);
+-    i::SNPrintF(source, "new %sArray(%zu)", array_name, length);
++    v8::base::SNPrintF(source, "new %sArray(%zu)", array_name, length);
+     auto typed_array =
+         v8::Local<v8::TypedArray>::Cast(CompileRun(source.begin()));
+     CHECK_EQ(length, typed_array->Length());
+diff --git a/test/cctest/test-api.cc b/test/cctest/test-api.cc
+index 23f3af6ff15..11f623a9ee1 100644
+--- a/test/cctest/test-api.cc
++++ b/test/cctest/test-api.cc
+@@ -215,11 +215,11 @@ THREADED_TEST(IsolateOfContext) {
+ static void TestSignatureLooped(const char* operation, Local<Value> receiver,
+                                 v8::Isolate* isolate) {
+   v8::base::ScopedVector<char> source(200);
+-  i::SNPrintF(source,
+-              "for (var i = 0; i < 10; i++) {"
+-              "  %s"
+-              "}",
+-              operation);
++  v8::base::SNPrintF(source,
++                     "for (var i = 0; i < 10; i++) {"
++                     "  %s"
++                     "}",
++                     operation);
+   signature_callback_count = 0;
+   signature_expected_receiver = receiver;
+   bool expected_to_throw = receiver.IsEmpty();
+@@ -241,16 +241,16 @@ static void TestSignatureLooped(const char* operation, Local<Value> receiver,
+ static void TestSignatureOptimized(const char* operation, Local<Value> receiver,
+                                    v8::Isolate* isolate) {
+   v8::base::ScopedVector<char> source(200);
+-  i::SNPrintF(source,
+-              "function test() {"
+-              "  %s"
+-              "};"
+-              "%%PrepareFunctionForOptimization(test);"
+-              "try { test() } catch(e) {}"
+-              "try { test() } catch(e) {}"
+-              "%%OptimizeFunctionOnNextCall(test);"
+-              "test()",
+-              operation);
++  v8::base::SNPrintF(source,
++                     "function test() {"
++                     "  %s"
++                     "};"
++                     "%%PrepareFunctionForOptimization(test);"
++                     "try { test() } catch(e) {}"
++                     "try { test() } catch(e) {}"
++                     "%%OptimizeFunctionOnNextCall(test);"
++                     "test()",
++                     operation);
+   signature_callback_count = 0;
+   signature_expected_receiver = receiver;
+   bool expected_to_throw = receiver.IsEmpty();
+@@ -364,8 +364,8 @@ THREADED_TEST(ReceiverSignature) {
+   unsigned bad_signature_start_offset = 3;
+   for (unsigned i = 0; i < arraysize(test_objects); i++) {
+     v8::base::ScopedVector<char> source(200);
+-    i::SNPrintF(
+-        source, "var test_object = %s; test_object", test_objects[i]);
++    v8::base::SNPrintF(source, "var test_object = %s; test_object",
++                       test_objects[i]);
+     Local<Value> test_object = CompileRun(source.begin());
+     TestSignature("test_object.prop();", test_object, isolate);
+     TestSignature("test_object.accessor;", test_object, isolate);
+@@ -2993,7 +2993,7 @@ THREADED_TEST(InternalFieldsOfRegularObjects) {
+   const char* sources[] = {"new Object()", "{ a: 'a property' }", "arguments"};
+   for (size_t i = 0; i < arraysize(sources); ++i) {
+     v8::base::ScopedVector<char> source(128);
+-    i::SNPrintF(source, "(function() { return %s })()", sources[i]);
++    v8::base::SNPrintF(source, "(function() { return %s })()", sources[i]);
+     v8::Local<v8::Object> obj = CompileRun(source.begin()).As<v8::Object>();
+     CHECK_EQ(0, obj->InternalFieldCount());
+   }
+@@ -4130,7 +4130,7 @@ class TwoPassCallbackData {
+         metadata_(metadata) {
+     HandleScope scope(isolate);
+     v8::base::ScopedVector<char> buffer(40);
+-    i::SNPrintF(buffer, "%p", static_cast<void*>(this));
++    v8::base::SNPrintF(buffer, "%p", static_cast<void*>(this));
+     auto string =
+         v8::String::NewFromUtf8(isolate, buffer.begin()).ToLocalChecked();
+     cell_.Reset(isolate, string);
+@@ -7281,7 +7281,7 @@ TEST(ExtensionWithSourceLength) {
+        source_len <= kEmbeddedExtensionSourceValidLen + 1; ++source_len) {
+     v8::HandleScope handle_scope(CcTest::isolate());
+     v8::base::ScopedVector<char> extension_name(32);
+-    i::SNPrintF(extension_name, "ext #%d", source_len);
++    v8::base::SNPrintF(extension_name, "ext #%d", source_len);
+     v8::RegisterExtension(std::make_unique<Extension>(extension_name.begin(),
+                                                       kEmbeddedExtensionSource,
+                                                       0, nullptr, source_len));
+@@ -10941,7 +10941,7 @@ THREADED_TEST(Regress91517) {
+   // Force dictionary-based properties.
+   v8::base::ScopedVector<char> name_buf(1024);
+   for (int i = 1; i <= 1000; i++) {
+-    i::SNPrintF(name_buf, "sdf%d", i);
++    v8::base::SNPrintF(name_buf, "sdf%d", i);
+     t2->InstanceTemplate()->Set(v8_str(name_buf.begin()), v8_num(2));
+   }
+ 
+@@ -18619,11 +18619,13 @@ static int CalcFibonacci(v8::Isolate* isolate, int limit) {
+   v8::HandleScope scope(isolate);
+   LocalContext context(isolate);
+   v8::base::ScopedVector<char> code(1024);
+-  i::SNPrintF(code, "function fib(n) {"
+-                    "  if (n <= 2) return 1;"
+-                    "  return fib(n-1) + fib(n-2);"
+-                    "}"
+-                    "fib(%d)", limit);
++  v8::base::SNPrintF(code,
++                     "function fib(n) {"
++                     "  if (n <= 2) return 1;"
++                     "  return fib(n-1) + fib(n-2);"
++                     "}"
++                     "fib(%d)",
++                     limit);
+   Local<Value> value = CompileRun(code.begin());
+   CHECK(value->IsNumber());
+   return static_cast<int>(value->NumberValue(context.local()).FromJust());
+@@ -19929,7 +19931,7 @@ void RecursiveCall(const v8::FunctionCallbackInfo<v8::Value>& args) {
+     v8::base::OS::Print("Entering recursion level %d.\n", level);
+     char script[64];
+     v8::base::Vector<char> script_vector(script, sizeof(script));
+-    i::SNPrintF(script_vector, "recursion(%d)", level);
++    v8::base::SNPrintF(script_vector, "recursion(%d)", level);
+     CompileRun(script_vector.begin());
+     v8::base::OS::Print("Leaving recursion level %d.\n", level);
+     CHECK_EQ(0, callback_fired);
+@@ -21382,7 +21384,7 @@ void CheckCorrectThrow(const char* script) {
+   access_check_fail_thrown = false;
+   catch_callback_called = false;
+   v8::base::ScopedVector<char> source(1024);
+-  i::SNPrintF(source, "try { %s; } catch (e) { catcher(e); }", script);
++  v8::base::SNPrintF(source, "try { %s; } catch (e) { catcher(e); }", script);
+   CompileRun(source.begin());
+   CHECK(access_check_fail_thrown);
+   CHECK(catch_callback_called);
+@@ -22376,14 +22378,13 @@ class ApiCallOptimizationChecker {
+     // build wrap_function
+     v8::base::ScopedVector<char> wrap_function(200);
+     if (global) {
+-      i::SNPrintF(
+-          wrap_function,
+-          "function wrap_f_%d() { var f = g_f; return f(); }\n"
+-          "function wrap_get_%d() { return this.g_acc; }\n"
+-          "function wrap_set_%d() { return this.g_acc = 1; }\n",
+-          key, key, key);
++      v8::base::SNPrintF(wrap_function,
++                         "function wrap_f_%d() { var f = g_f; return f(); }\n"
++                         "function wrap_get_%d() { return this.g_acc; }\n"
++                         "function wrap_set_%d() { return this.g_acc = 1; }\n",
++                         key, key, key);
+     } else {
+-      i::SNPrintF(
++      v8::base::SNPrintF(
+           wrap_function,
+           "function wrap_f_%d() { return receiver_subclass.f(); }\n"
+           "function wrap_get_%d() { return receiver_subclass.acc; }\n"
+@@ -22392,37 +22393,37 @@ class ApiCallOptimizationChecker {
+     }
+     // build source string
+     v8::base::ScopedVector<char> source(1000);
+-    i::SNPrintF(source,
+-                "%s\n"  // wrap functions
+-                "function wrap_f() { return wrap_f_%d(); }\n"
+-                "function wrap_get() { return wrap_get_%d(); }\n"
+-                "function wrap_set() { return wrap_set_%d(); }\n"
+-                "check = function(returned) {\n"
+-                "  if (returned !== 'returned') { throw returned; }\n"
+-                "};\n"
+-                "\n"
+-                "%%PrepareFunctionForOptimization(wrap_f_%d);"
+-                "check(wrap_f());\n"
+-                "check(wrap_f());\n"
+-                "%%OptimizeFunctionOnNextCall(wrap_f_%d);\n"
+-                "check(wrap_f());\n"
+-                "\n"
+-                "%%PrepareFunctionForOptimization(wrap_get_%d);"
+-                "check(wrap_get());\n"
+-                "check(wrap_get());\n"
+-                "%%OptimizeFunctionOnNextCall(wrap_get_%d);\n"
+-                "check(wrap_get());\n"
+-                "\n"
+-                "check = function(returned) {\n"
+-                "  if (returned !== 1) { throw returned; }\n"
+-                "};\n"
+-                "%%PrepareFunctionForOptimization(wrap_set_%d);"
+-                "check(wrap_set());\n"
+-                "check(wrap_set());\n"
+-                "%%OptimizeFunctionOnNextCall(wrap_set_%d);\n"
+-                "check(wrap_set());\n",
+-                wrap_function.begin(), key, key, key, key, key, key, key, key,
+-                key);
++    v8::base::SNPrintF(source,
++                       "%s\n"  // wrap functions
++                       "function wrap_f() { return wrap_f_%d(); }\n"
++                       "function wrap_get() { return wrap_get_%d(); }\n"
++                       "function wrap_set() { return wrap_set_%d(); }\n"
++                       "check = function(returned) {\n"
++                       "  if (returned !== 'returned') { throw returned; }\n"
++                       "};\n"
++                       "\n"
++                       "%%PrepareFunctionForOptimization(wrap_f_%d);"
++                       "check(wrap_f());\n"
++                       "check(wrap_f());\n"
++                       "%%OptimizeFunctionOnNextCall(wrap_f_%d);\n"
++                       "check(wrap_f());\n"
++                       "\n"
++                       "%%PrepareFunctionForOptimization(wrap_get_%d);"
++                       "check(wrap_get());\n"
++                       "check(wrap_get());\n"
++                       "%%OptimizeFunctionOnNextCall(wrap_get_%d);\n"
++                       "check(wrap_get());\n"
++                       "\n"
++                       "check = function(returned) {\n"
++                       "  if (returned !== 1) { throw returned; }\n"
++                       "};\n"
++                       "%%PrepareFunctionForOptimization(wrap_set_%d);"
++                       "check(wrap_set());\n"
++                       "check(wrap_set());\n"
++                       "%%OptimizeFunctionOnNextCall(wrap_set_%d);\n"
++                       "check(wrap_set());\n",
++                       wrap_function.begin(), key, key, key, key, key, key, key,
++                       key, key);
+     v8::TryCatch try_catch(isolate);
+     CompileRun(source.begin());
+     CHECK(!try_catch.HasCaught());
+@@ -25680,26 +25681,26 @@ TEST(ObjectTemplateArrayProtoIntrinsics) {
+   for (unsigned i = 0; i < arraysize(intrinsics_comparisons); i++) {
+     v8::base::ScopedVector<char> test_string(64);
+ 
+-    i::SNPrintF(test_string, "typeof obj1.%s",
+-                intrinsics_comparisons[i].object_property_name);
++    v8::base::SNPrintF(test_string, "typeof obj1.%s",
++                       intrinsics_comparisons[i].object_property_name);
+     ExpectString(test_string.begin(), "function");
+ 
+-    i::SNPrintF(test_string, "obj1.%s === %s",
+-                intrinsics_comparisons[i].object_property_name,
+-                intrinsics_comparisons[i].array_property_name);
++    v8::base::SNPrintF(test_string, "obj1.%s === %s",
++                       intrinsics_comparisons[i].object_property_name,
++                       intrinsics_comparisons[i].array_property_name);
+     ExpectTrue(test_string.begin());
+ 
+-    i::SNPrintF(test_string, "obj1.%s = 42",
+-                intrinsics_comparisons[i].object_property_name);
++    v8::base::SNPrintF(test_string, "obj1.%s = 42",
++                       intrinsics_comparisons[i].object_property_name);
+     CompileRun(test_string.begin());
+ 
+-    i::SNPrintF(test_string, "obj1.%s === %s",
+-                intrinsics_comparisons[i].object_property_name,
+-                intrinsics_comparisons[i].array_property_name);
++    v8::base::SNPrintF(test_string, "obj1.%s === %s",
++                       intrinsics_comparisons[i].object_property_name,
++                       intrinsics_comparisons[i].array_property_name);
+     ExpectFalse(test_string.begin());
+ 
+-    i::SNPrintF(test_string, "typeof obj1.%s",
+-                intrinsics_comparisons[i].object_property_name);
++    v8::base::SNPrintF(test_string, "typeof obj1.%s",
++                       intrinsics_comparisons[i].object_property_name);
+     ExpectString(test_string.begin(), "number");
+   }
+ }
+diff --git a/test/cctest/test-cpu-profiler.cc b/test/cctest/test-cpu-profiler.cc
+index 94542387cf3..c95a4f157b4 100644
+--- a/test/cctest/test-cpu-profiler.cc
++++ b/test/cctest/test-cpu-profiler.cc
+@@ -35,6 +35,7 @@
+ #include "include/v8-profiler.h"
+ #include "src/api/api-inl.h"
+ #include "src/base/platform/platform.h"
++#include "src/base/strings.h"
+ #include "src/codegen/compilation-cache.h"
+ #include "src/codegen/source-position-table.h"
+ #include "src/deoptimizer/deoptimizer.h"
+@@ -141,16 +142,16 @@ i::AbstractCode CreateCode(i::Isolate* isolate, LocalContext* env) {
+   base::EmbeddedVector<char, 256> script;
+   base::EmbeddedVector<char, 32> name;
+ 
+-  i::SNPrintF(name, "function_%d", ++counter);
++  base::SNPrintF(name, "function_%d", ++counter);
+   const char* name_start = name.begin();
+-  i::SNPrintF(script,
+-              "function %s() {\n"
+-              "var counter = 0;\n"
+-              "for (var i = 0; i < %d; ++i) counter += i;\n"
+-              "return '%s_' + counter;\n"
+-              "}\n"
+-              "%s();\n",
+-              name_start, counter, name_start, name_start);
++  base::SNPrintF(script,
++                 "function %s() {\n"
++                 "var counter = 0;\n"
++                 "for (var i = 0; i < %d; ++i) counter += i;\n"
++                 "return '%s_' + counter;\n"
++                 "}\n"
++                 "%s();\n",
++                 name_start, counter, name_start, name_start);
+   CompileRun(script.begin());
+ 
+   i::Handle<i::JSFunction> fun = i::Handle<i::JSFunction>::cast(
+@@ -1231,29 +1232,29 @@ static void TickLines(bool optimize) {
+ 
+   const char* func_name = "func";
+   if (optimize) {
+-    i::SNPrintF(prepare_opt, "%%PrepareFunctionForOptimization(%s);\n",
+-                func_name);
+-    i::SNPrintF(optimize_call, "%%OptimizeFunctionOnNextCall(%s);\n",
+-                func_name);
++    base::SNPrintF(prepare_opt, "%%PrepareFunctionForOptimization(%s);\n",
++                   func_name);
++    base::SNPrintF(optimize_call, "%%OptimizeFunctionOnNextCall(%s);\n",
++                   func_name);
+   } else {
+     prepare_opt[0] = '\0';
+     optimize_call[0] = '\0';
+   }
+-  i::SNPrintF(script,
+-              "function %s() {\n"
+-              "  var n = 0;\n"
+-              "  var m = 100*100;\n"
+-              "  while (m > 1) {\n"
+-              "    m--;\n"
+-              "    n += m * m * m;\n"
+-              "  }\n"
+-              "}\n"
+-              "%s"
+-              "%s();\n"
+-              "%s"
+-              "%s();\n",
+-              func_name, prepare_opt.begin(), func_name, optimize_call.begin(),
+-              func_name);
++  base::SNPrintF(script,
++                 "function %s() {\n"
++                 "  var n = 0;\n"
++                 "  var m = 100*100;\n"
++                 "  while (m > 1) {\n"
++                 "    m--;\n"
++                 "    n += m * m * m;\n"
++                 "  }\n"
++                 "}\n"
++                 "%s"
++                 "%s();\n"
++                 "%s"
++                 "%s();\n",
++                 func_name, prepare_opt.begin(), func_name,
++                 optimize_call.begin(), func_name);
+ 
+   CompileRun(script.begin());
+ 
+@@ -2482,7 +2483,7 @@ TEST(CollectDeoptEvents) {
+ 
+   for (int i = 0; i < 3; ++i) {
+     base::EmbeddedVector<char, sizeof(opt_source) + 100> buffer;
+-    i::SNPrintF(buffer, opt_source, i, i);
++    base::SNPrintF(buffer, opt_source, i, i);
+     v8::Script::Compile(env, v8_str(buffer.begin()))
+         .ToLocalChecked()
+         ->Run(env)
+diff --git a/test/cctest/test-debug.cc b/test/cctest/test-debug.cc
+index d48d6cf925c..2effdabc1db 100644
+--- a/test/cctest/test-debug.cc
++++ b/test/cctest/test-debug.cc
+@@ -27,15 +27,15 @@
+ 
+ #include <stdlib.h>
+ 
+-#include "src/init/v8.h"
+-
+ #include "src/api/api-inl.h"
++#include "src/base/strings.h"
+ #include "src/codegen/compilation-cache.h"
+ #include "src/debug/debug-interface.h"
+ #include "src/debug/debug.h"
+ #include "src/deoptimizer/deoptimizer.h"
+ #include "src/execution/frames.h"
+ #include "src/execution/microtask-queue.h"
++#include "src/init/v8.h"
+ #include "src/objects/objects-inl.h"
+ #include "src/snapshot/snapshot.h"
+ #include "src/utils/utils.h"
+@@ -3695,8 +3695,8 @@ static void TestDebugBreakInLoop(const char* loop_head,
+     // have been hit.
+ 
+     v8::base::EmbeddedVector<char, 1024> buffer;
+-    i::SNPrintF(buffer, "function f() {%s%s%s}", loop_head, loop_bodies[i],
+-                loop_tail);
++    v8::base::SNPrintF(buffer, "function f() {%s%s%s}", loop_head,
++                       loop_bodies[i], loop_tail);
+ 
+     i::PrintF("%s\n", buffer.begin());
+ 
+diff --git a/test/cctest/test-deoptimization.cc b/test/cctest/test-deoptimization.cc
+index ea2a4d827fc..ac79a41d3e4 100644
+--- a/test/cctest/test-deoptimization.cc
++++ b/test/cctest/test-deoptimization.cc
+@@ -27,14 +27,14 @@
+ 
+ #include <stdlib.h>
+ 
+-#include "src/init/v8.h"
+-
+ #include "src/api/api-inl.h"
+ #include "src/base/platform/platform.h"
++#include "src/base/strings.h"
+ #include "src/codegen/compilation-cache.h"
+ #include "src/debug/debug.h"
+ #include "src/deoptimizer/deoptimizer.h"
+ #include "src/execution/isolate.h"
++#include "src/init/v8.h"
+ #include "src/objects/objects-inl.h"
+ #include "test/cctest/cctest.h"
+ 
+@@ -479,8 +479,8 @@ static void TestDeoptimizeBinaryOpHelper(LocalContext* env,
+                                          const char* binary_op) {
+   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>((*env)->GetIsolate());
+   v8::base::EmbeddedVector<char, SMALL_STRING_BUFFER_SIZE> f_source_buffer;
+-  i::SNPrintF(f_source_buffer, "function f(x, y) { return x %s y; };",
+-              binary_op);
++  v8::base::SNPrintF(f_source_buffer, "function f(x, y) { return x %s y; };",
++                     binary_op);
+   char* f_source = f_source_buffer.begin();
+ 
+   AllowNativesSyntaxNoInlining options;
+diff --git a/test/cctest/test-heap-profiler.cc b/test/cctest/test-heap-profiler.cc
+index d53cc74a193..743cb6e8f31 100644
+--- a/test/cctest/test-heap-profiler.cc
++++ b/test/cctest/test-heap-profiler.cc
+@@ -31,15 +31,15 @@
+ 
+ #include <memory>
+ 
+-#include "src/init/v8.h"
+-
+ #include "include/v8-profiler.h"
+ #include "src/api/api-inl.h"
+ #include "src/base/hashmap.h"
+ #include "src/base/optional.h"
++#include "src/base/strings.h"
+ #include "src/codegen/assembler-inl.h"
+ #include "src/debug/debug.h"
+ #include "src/heap/heap-inl.h"
++#include "src/init/v8.h"
+ #include "src/objects/objects-inl.h"
+ #include "src/profiler/allocation-tracker.h"
+ #include "src/profiler/heap-profiler.h"
+@@ -2624,7 +2624,7 @@ TEST(ManyLocalsInSharedContext) {
+   // ... well check just every 15th because otherwise it's too slow in debug.
+   for (int i = 0; i < num_objects - 1; i += 15) {
+     v8::base::EmbeddedVector<char, 100> var_name;
+-    i::SNPrintF(var_name, "f_%d", i);
++    v8::base::SNPrintF(var_name, "f_%d", i);
+     const v8::HeapGraphNode* f_object =
+         GetProperty(env->GetIsolate(), context_object,
+                     v8::HeapGraphEdge::kContextVariable, var_name.begin());
+@@ -2729,7 +2729,7 @@ static const v8::HeapGraphNode* GetNodeByPath(v8::Isolate* isolate,
+       v8::String::Utf8Value edge_name(isolate, edge->GetName());
+       v8::String::Utf8Value node_name(isolate, to_node->GetName());
+       v8::base::EmbeddedVector<char, 100> name;
+-      i::SNPrintF(name, "%s::%s", *edge_name, *node_name);
++      v8::base::SNPrintF(name, "%s::%s", *edge_name, *node_name);
+       if (strstr(name.begin(), path[current_depth])) {
+         node = to_node;
+         break;
+@@ -3933,22 +3933,22 @@ TEST(SamplingHeapProfilerPretenuredInlineAllocations) {
+   GrowNewSpaceToMaximumCapacity(CcTest::heap());
+ 
+   v8::base::ScopedVector<char> source(1024);
+-  i::SNPrintF(source,
+-              "var number_elements = %d;"
+-              "var elements = new Array(number_elements);"
+-              "function f() {"
+-              "  for (var i = 0; i < number_elements; i++) {"
+-              "    elements[i] = [{}, {}, {}];"
+-              "  }"
+-              "  return elements[number_elements - 1];"
+-              "};"
+-              "%%PrepareFunctionForOptimization(f);"
+-              "f(); gc();"
+-              "f(); f();"
+-              "%%OptimizeFunctionOnNextCall(f);"
+-              "f();"
+-              "f;",
+-              i::AllocationSite::kPretenureMinimumCreated + 1);
++  v8::base::SNPrintF(source,
++                     "var number_elements = %d;"
++                     "var elements = new Array(number_elements);"
++                     "function f() {"
++                     "  for (var i = 0; i < number_elements; i++) {"
++                     "    elements[i] = [{}, {}, {}];"
++                     "  }"
++                     "  return elements[number_elements - 1];"
++                     "};"
++                     "%%PrepareFunctionForOptimization(f);"
++                     "f(); gc();"
++                     "f(); f();"
++                     "%%OptimizeFunctionOnNextCall(f);"
++                     "f();"
++                     "f;",
++                     i::AllocationSite::kPretenureMinimumCreated + 1);
+ 
+   v8::Local<v8::Function> f =
+       v8::Local<v8::Function>::Cast(CompileRun(source.begin()));
+diff --git a/test/cctest/test-log-stack-tracer.cc b/test/cctest/test-log-stack-tracer.cc
+index c9c5971d9b0..db7917fd680 100644
+--- a/test/cctest/test-log-stack-tracer.cc
++++ b/test/cctest/test-log-stack-tracer.cc
+@@ -31,6 +31,7 @@
+ 
+ #include "include/v8-profiler.h"
+ #include "src/api/api-inl.h"
++#include "src/base/strings.h"
+ #include "src/diagnostics/disassembler.h"
+ #include "src/execution/frames.h"
+ #include "src/execution/isolate.h"
+@@ -121,12 +122,12 @@ static void CreateTraceCallerFunction(v8::Local<v8::Context> context,
+                                       const char* func_name,
+                                       const char* trace_func_name) {
+   v8::base::EmbeddedVector<char, 256> trace_call_buf;
+-  i::SNPrintF(trace_call_buf,
+-              "function %s() {"
+-              "  fp = new FPGrabber();"
+-              "  %s(fp.low_bits, fp.high_bits);"
+-              "}",
+-              func_name, trace_func_name);
++  v8::base::SNPrintF(trace_call_buf,
++                     "function %s() {"
++                     "  fp = new FPGrabber();"
++                     "  %s(fp.low_bits, fp.high_bits);"
++                     "}",
++                     func_name, trace_func_name);
+ 
+   // Create the FPGrabber function, which grabs the caller's frame pointer
+   // when called as a constructor.
+diff --git a/test/cctest/test-log.cc b/test/cctest/test-log.cc
+index c54768679b1..3676787b5c6 100644
+--- a/test/cctest/test-log.cc
++++ b/test/cctest/test-log.cc
+@@ -29,7 +29,9 @@
+ 
+ #include <unordered_set>
+ #include <vector>
++
+ #include "src/api/api-inl.h"
++#include "src/base/strings.h"
+ #include "src/builtins/builtins.h"
+ #include "src/codegen/compilation-cache.h"
+ #include "src/execution/vm-state-inl.h"
+@@ -351,7 +353,8 @@ UNINITIALIZED_TEST(LogCallbacks) {
+     ObjMethod1_entry = *FUNCTION_ENTRYPOINT_ADDRESS(ObjMethod1_entry);
+ #endif
+     v8::base::EmbeddedVector<char, 100> suffix_buffer;
+-    i::SNPrintF(suffix_buffer, ",0x%" V8PRIxPTR ",1,method1", ObjMethod1_entry);
++    v8::base::SNPrintF(suffix_buffer, ",0x%" V8PRIxPTR ",1,method1",
++                       ObjMethod1_entry);
+     CHECK(logger.ContainsLine(
+         {"code-creation,Callback,-2,", std::string(suffix_buffer.begin())}));
+   }
+@@ -395,8 +398,8 @@ UNINITIALIZED_TEST(LogAccessorCallbacks) {
+     Prop1Getter_entry = *FUNCTION_ENTRYPOINT_ADDRESS(Prop1Getter_entry);
+ #endif
+     v8::base::EmbeddedVector<char, 100> prop1_getter_record;
+-    i::SNPrintF(prop1_getter_record, ",0x%" V8PRIxPTR ",1,get prop1",
+-                Prop1Getter_entry);
++    v8::base::SNPrintF(prop1_getter_record, ",0x%" V8PRIxPTR ",1,get prop1",
++                       Prop1Getter_entry);
+     CHECK(logger.ContainsLine({"code-creation,Callback,-2,",
+                                std::string(prop1_getter_record.begin())}));
+ 
+@@ -405,8 +408,8 @@ UNINITIALIZED_TEST(LogAccessorCallbacks) {
+     Prop1Setter_entry = *FUNCTION_ENTRYPOINT_ADDRESS(Prop1Setter_entry);
+ #endif
+     v8::base::EmbeddedVector<char, 100> prop1_setter_record;
+-    i::SNPrintF(prop1_setter_record, ",0x%" V8PRIxPTR ",1,set prop1",
+-                Prop1Setter_entry);
++    v8::base::SNPrintF(prop1_setter_record, ",0x%" V8PRIxPTR ",1,set prop1",
++                       Prop1Setter_entry);
+     CHECK(logger.ContainsLine({"code-creation,Callback,-2,",
+                                std::string(prop1_setter_record.begin())}));
+ 
+@@ -415,8 +418,8 @@ UNINITIALIZED_TEST(LogAccessorCallbacks) {
+     Prop2Getter_entry = *FUNCTION_ENTRYPOINT_ADDRESS(Prop2Getter_entry);
+ #endif
+     v8::base::EmbeddedVector<char, 100> prop2_getter_record;
+-    i::SNPrintF(prop2_getter_record, ",0x%" V8PRIxPTR ",1,get prop2",
+-                Prop2Getter_entry);
++    v8::base::SNPrintF(prop2_getter_record, ",0x%" V8PRIxPTR ",1,get prop2",
++                       Prop2Getter_entry);
+     CHECK(logger.ContainsLine({"code-creation,Callback,-2,",
+                                std::string(prop2_getter_record.begin())}));
+   }
+@@ -433,9 +436,9 @@ UNINITIALIZED_TEST(LogVersion) {
+     logger.StopLogging();
+ 
+     v8::base::EmbeddedVector<char, 100> line_buffer;
+-    i::SNPrintF(line_buffer, "%d,%d,%d,%d,%d", i::Version::GetMajor(),
+-                i::Version::GetMinor(), i::Version::GetBuild(),
+-                i::Version::GetPatch(), i::Version::IsCandidate());
++    v8::base::SNPrintF(line_buffer, "%d,%d,%d,%d,%d", i::Version::GetMajor(),
++                       i::Version::GetMinor(), i::Version::GetBuild(),
++                       i::Version::GetPatch(), i::Version::IsCandidate());
+     CHECK(
+         logger.ContainsLine({"v8-version,", std::string(line_buffer.begin())}));
+   }
+@@ -1194,13 +1197,13 @@ UNINITIALIZED_TEST(BuiltinsNotLoggedAsLazyCompile) {
+     v8::base::EmbeddedVector<char, 100> buffer;
+ 
+     // Should only be logged as "Builtin" with a name, never as "LazyCompile".
+-    i::SNPrintF(buffer, ",0x%" V8PRIxPTR ",%d,BooleanConstructor",
+-                builtin->InstructionStart(), builtin->InstructionSize());
++    v8::base::SNPrintF(buffer, ",0x%" V8PRIxPTR ",%d,BooleanConstructor",
++                       builtin->InstructionStart(), builtin->InstructionSize());
+     CHECK(logger.ContainsLine(
+         {"code-creation,Builtin,2,", std::string(buffer.begin())}));
+ 
+-    i::SNPrintF(buffer, ",0x%" V8PRIxPTR ",%d,", builtin->InstructionStart(),
+-                builtin->InstructionSize());
++    v8::base::SNPrintF(buffer, ",0x%" V8PRIxPTR ",%d,",
++                       builtin->InstructionStart(), builtin->InstructionSize());
+     CHECK(!logger.ContainsLine(
+         {"code-creation,LazyCompile,2,", std::string(buffer.begin())}));
+   }
+diff --git a/test/cctest/test-parsing.cc b/test/cctest/test-parsing.cc
+index 71874c1f59e..777269baa80 100644
+--- a/test/cctest/test-parsing.cc
++++ b/test/cctest/test-parsing.cc
+@@ -31,16 +31,16 @@
+ 
+ #include <memory>
+ 
+-#include "src/init/v8.h"
+-
+ #include "src/api/api-inl.h"
+ #include "src/ast/ast-value-factory.h"
+ #include "src/ast/ast.h"
+ #include "src/base/enum-set.h"
++#include "src/base/strings.h"
+ #include "src/codegen/compiler.h"
+ #include "src/execution/execution.h"
+ #include "src/execution/isolate.h"
+ #include "src/flags/flags.h"
++#include "src/init/v8.h"
+ #include "src/objects/objects-inl.h"
+ #include "src/objects/objects.h"
+ #include "src/parsing/parse-info.h"
+@@ -51,7 +51,6 @@
+ #include "src/parsing/scanner-character-streams.h"
+ #include "src/parsing/token.h"
+ #include "src/zone/zone-list-inl.h"  // crbug.com/v8/8816
+-
+ #include "test/cctest/cctest.h"
+ #include "test/cctest/scope-test-helper.h"
+ #include "test/cctest/unicode-helpers.h"
+@@ -1119,8 +1118,8 @@ TEST(ScopeUsesArgumentsSuperThis) {
+                                               strlen(surroundings[j].suffix) +
+                                               strlen(source_data[i].body));
+       base::ScopedVector<char> program(kProgramByteSize + 1);
+-      i::SNPrintF(program, "%s%s%s", surroundings[j].prefix,
+-                  source_data[i].body, surroundings[j].suffix);
++      base::SNPrintF(program, "%s%s%s", surroundings[j].prefix,
++                     source_data[i].body, surroundings[j].suffix);
+       i::Handle<i::String> source =
+           factory->NewStringFromUtf8(base::CStrVector(program.begin()))
+               .ToHandleChecked();
+@@ -1492,10 +1491,8 @@ TEST(ScopePositions) {
+     int kProgramSize = kPrefixLen + kInnerLen + kSuffixLen;
+     int kProgramByteSize = kPrefixByteLen + kInnerByteLen + kSuffixByteLen;
+     base::ScopedVector<char> program(kProgramByteSize + 1);
+-    i::SNPrintF(program, "%s%s%s",
+-                         source_data[i].outer_prefix,
+-                         source_data[i].inner_source,
+-                         source_data[i].outer_suffix);
++    base::SNPrintF(program, "%s%s%s", source_data[i].outer_prefix,
++                   source_data[i].inner_source, source_data[i].outer_suffix);
+ 
+     // Parse program source.
+     i::Handle<i::String> source =
+@@ -1843,12 +1840,9 @@ TEST(ParserSync) {
+ 
+         // Plug the source code pieces together.
+         base::ScopedVector<char> program(kProgramSize + 1);
+-        int length = i::SNPrintF(program,
+-            "label: for (;;) { %s%s%s%s }",
+-            context_data[i][0],
+-            statement_data[j],
+-            termination_data[k],
+-            context_data[i][1]);
++        int length = base::SNPrintF(program, "label: for (;;) { %s%s%s%s }",
++                                    context_data[i][0], statement_data[j],
++                                    termination_data[k], context_data[i][1]);
+         CHECK_EQ(length, kProgramSize);
+         TestParserSync(program.begin(), nullptr, 0);
+       }
+@@ -1943,11 +1937,8 @@ void RunParserSyncTest(
+ 
+       // Plug the source code pieces together.
+       base::ScopedVector<char> program(kProgramSize + 1);
+-      int length = i::SNPrintF(program,
+-                               "%s%s%s",
+-                               context_data[i][0],
+-                               statement_data[j],
+-                               context_data[i][1]);
++      int length = base::SNPrintF(program, "%s%s%s", context_data[i][0],
++                                  statement_data[j], context_data[i][1]);
+       PrintF("%s\n", program.begin());
+       CHECK_EQ(length, kProgramSize);
+       TestParserSync(program.begin(), flags, flags_len, result,
+@@ -3342,7 +3333,7 @@ TEST(SerializationOfMaybeAssignmentFlag) {
+       "h();";
+ 
+   base::ScopedVector<char> program(Utf8LengthHelper(src) + 1);
+-  i::SNPrintF(program, "%s", src);
++  base::SNPrintF(program, "%s", src);
+   i::Handle<i::String> source = factory->InternalizeUtf8String(program.begin());
+   source->PrintOn(stdout);
+   printf("\n");
+@@ -3392,7 +3383,7 @@ TEST(IfArgumentsArrayAccessedThenParametersMaybeAssigned) {
+       "f(0);";
+ 
+   base::ScopedVector<char> program(Utf8LengthHelper(src) + 1);
+-  i::SNPrintF(program, "%s", src);
++  base::SNPrintF(program, "%s", src);
+   i::Handle<i::String> source = factory->InternalizeUtf8String(program.begin());
+   source->PrintOn(stdout);
+   printf("\n");
+@@ -3549,8 +3540,8 @@ TEST(InnerAssignment) {
+         int len = prefix_len + outer_len + midfix_len + inner_len + suffix_len;
+         base::ScopedVector<char> program(len + 1);
+ 
+-        i::SNPrintF(program, "%s%s%s%s%s", prefix, outer, midfix, inner,
+-                    suffix);
++        base::SNPrintF(program, "%s%s%s%s%s", prefix, outer, midfix, inner,
++                       suffix);
+ 
+         UnoptimizedCompileState compile_state(isolate);
+         std::unique_ptr<i::ParseInfo> info;
+@@ -3672,7 +3663,7 @@ TEST(MaybeAssignedParameters) {
+     for (unsigned allow_lazy = 0; allow_lazy < 2; ++allow_lazy) {
+       base::ScopedVector<char> program(Utf8LengthHelper(source) +
+                                        Utf8LengthHelper(suffix) + 1);
+-      i::SNPrintF(program, "%s%s", source, suffix);
++      base::SNPrintF(program, "%s%s", source, suffix);
+       std::unique_ptr<i::ParseInfo> info;
+       printf("%s\n", program.begin());
+       v8::Local<v8::Value> v = CompileRun(program.begin());
+@@ -11491,10 +11482,10 @@ TEST(NoPessimisticContextAllocation) {
+                 suffix_len;
+ 
+       base::ScopedVector<char> program(len + 1);
+-      i::SNPrintF(program, "%s", prefix);
+-      i::SNPrintF(program + prefix_len, inner_function, inners[i].params,
+-                  inners[i].source);
+-      i::SNPrintF(
++      base::SNPrintF(program, "%s", prefix);
++      base::SNPrintF(program + prefix_len, inner_function, inners[i].params,
++                     inners[i].source);
++      base::SNPrintF(
+           program + prefix_len + inner_function_len + params_len + source_len,
+           "%s", suffix);
+ 
+diff --git a/test/cctest/test-profile-generator.cc b/test/cctest/test-profile-generator.cc
+index c53631f53be..5fbf1198eff 100644
+--- a/test/cctest/test-profile-generator.cc
++++ b/test/cctest/test-profile-generator.cc
+@@ -29,6 +29,7 @@
+ 
+ #include "include/v8-profiler.h"
+ #include "src/api/api-inl.h"
++#include "src/base/strings.h"
+ #include "src/init/v8.h"
+ #include "src/logging/log.h"
+ #include "src/objects/objects-inl.h"
+@@ -727,7 +728,7 @@ TEST(Issue51919) {
+       titles;
+   for (int i = 0; i < CpuProfilesCollection::kMaxSimultaneousProfiles; ++i) {
+     base::Vector<char> title = v8::base::Vector<char>::New(16);
+-    i::SNPrintF(title, "%d", i);
++    base::SNPrintF(title, "%d", i);
+     CHECK_EQ(CpuProfilingStatus::kStarted,
+              collection.StartProfiling(title.begin()));
+     titles[i] = title.begin();
+diff --git a/test/unittests/objects/osr-optimized-code-cache-unittest.cc b/test/unittests/objects/osr-optimized-code-cache-unittest.cc
+index 8e90a44a43e..a9fb66dfd41 100644
+--- a/test/unittests/objects/osr-optimized-code-cache-unittest.cc
++++ b/test/unittests/objects/osr-optimized-code-cache-unittest.cc
+@@ -27,8 +27,8 @@ const char* code_template_string =
+     "f%d(); f%d;";
+ 
+ void GetSource(base::ScopedVector<char>* source, int index) {
+-  i::SNPrintF(*source, code_template_string, index, index, index, index, index,
+-              index, index);
++  base::SNPrintF(*source, code_template_string, index, index, index, index,
++                 index, index, index);
+ }
+ 
+ const int kInitialLength = OSROptimizedCodeCache::kInitialLength;
+-- 
+2.35.1
+

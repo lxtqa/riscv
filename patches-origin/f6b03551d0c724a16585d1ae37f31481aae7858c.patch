@@ -1,0 +1,688 @@
+From f6b03551d0c724a16585d1ae37f31481aae7858c Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Fri, 2 Jun 2023 13:12:44 +0800
+Subject: [PATCH] [riscv] Fix pointer compression
+
+Also, disable bitcast-elider on riscv64.
+
+
+Change-Id: I0683a78ca323ad5d179bcf2c9e2182f8b896727d
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4583609
+Commit-Queue: Jakob Linke <jgruber@chromium.org>
+Reviewed-by: Ji Qiu <qiuji@iscas.ac.cn>
+Auto-Submit: Yahan Lu <yahan@iscas.ac.cn>
+Reviewed-by: Jakob Linke <jgruber@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#88100}
+---
+ .../riscv/baseline-assembler-riscv-inl.h      | 12 +--
+ .../riscv/baseline-compiler-riscv-inl.h       |  5 +-
+ src/builtins/riscv/builtins-riscv.cc          |  1 +
+ src/codegen/riscv/macro-assembler-riscv.cc    | 36 ++++++++-
+ src/codegen/riscv/macro-assembler-riscv.h     |  5 ++
+ src/compiler/backend/bitcast-elider.cc        |  2 +-
+ .../backend/riscv/code-generator-riscv.cc     | 12 +++
+ .../backend/riscv/instruction-codes-riscv.h   |  3 +
+ .../riscv/instruction-scheduler-riscv.cc      |  3 +
+ .../riscv/instruction-selector-riscv.h        | 65 +++++++++++-----
+ .../riscv/instruction-selector-riscv64.cc     | 77 +++++++------------
+ src/diagnostics/riscv/disasm-riscv.cc         |  2 +-
+ src/execution/riscv/simulator-riscv.cc        | 23 +++---
+ .../riscv/liftoff-assembler-riscv64.h         | 35 ++++++---
+ test/cctest/test-macro-assembler-riscv64.cc   |  2 +
+ .../instruction-selector-riscv64-unittest.cc  | 20 ++---
+ 16 files changed, 190 insertions(+), 113 deletions(-)
+
+diff --git a/src/baseline/riscv/baseline-assembler-riscv-inl.h b/src/baseline/riscv/baseline-assembler-riscv-inl.h
+index fd295da3e37..2b7a9603bc7 100644
+--- a/src/baseline/riscv/baseline-assembler-riscv-inl.h
++++ b/src/baseline/riscv/baseline-assembler-riscv-inl.h
+@@ -160,18 +160,14 @@ void BaselineAssembler::JumpIfPointer(Condition cc, Register value,
+ }
+ void BaselineAssembler::JumpIfSmi(Condition cc, Register value, Smi smi,
+                                   Label* target, Label::Distance distance) {
+-  ScratchRegisterScope temps(this);
+-  Register temp = temps.AcquireScratch();
+-  __ li(temp, Operand(smi));
+-  __ SmiUntag(temp);
+-  __ Branch(target, cc, value, Operand(temp), distance);
++  __ CompareTaggedAndBranch(target, cc, value, Operand(smi));
+ }
+ void BaselineAssembler::JumpIfSmi(Condition cc, Register lhs, Register rhs,
+                                   Label* target, Label::Distance distance) {
+   // todo: compress pointer
+   __ AssertSmi(lhs);
+   __ AssertSmi(rhs);
+-  __ Branch(target, cc, lhs, Operand(rhs), distance);
++  __ CompareTaggedAndBranch(target, cc, lhs, Operand(rhs), distance);
+ }
+ void BaselineAssembler::JumpIfTagged(Condition cc, Register value,
+                                      MemOperand operand, Label* target,
+@@ -180,7 +176,7 @@ void BaselineAssembler::JumpIfTagged(Condition cc, Register value,
+   ScratchRegisterScope temps(this);
+   Register scratch = temps.AcquireScratch();
+   __ LoadWord(scratch, operand);
+-  __ Branch(target, cc, value, Operand(scratch), distance);
++  __ CompareTaggedAndBranch(target, cc, value, Operand(scratch), distance);
+ }
+ void BaselineAssembler::JumpIfTagged(Condition cc, MemOperand operand,
+                                      Register value, Label* target,
+@@ -189,7 +185,7 @@ void BaselineAssembler::JumpIfTagged(Condition cc, MemOperand operand,
+   ScratchRegisterScope temps(this);
+   Register scratch = temps.AcquireScratch();
+   __ LoadWord(scratch, operand);
+-  __ Branch(target, cc, scratch, Operand(value), distance);
++  __ CompareTaggedAndBranch(target, cc, scratch, Operand(value), distance);
+ }
+ void BaselineAssembler::JumpIfByte(Condition cc, Register value, int32_t byte,
+                                    Label* target, Label::Distance distance) {
+diff --git a/src/baseline/riscv/baseline-compiler-riscv-inl.h b/src/baseline/riscv/baseline-compiler-riscv-inl.h
+index d3b85ac4948..0a84881accd 100644
+--- a/src/baseline/riscv/baseline-compiler-riscv-inl.h
++++ b/src/baseline/riscv/baseline-compiler-riscv-inl.h
+@@ -72,11 +72,10 @@ void BaselineCompiler::PrologueFillFrame() {
+ 
+ void BaselineCompiler::VerifyFrameSize() {
+   ASM_CODE_COMMENT(&masm_);
+-  __ masm()->AddWord(kScratchReg, sp,
++  __ masm()->AddWord(t0, sp,
+                      Operand(InterpreterFrameConstants::kFixedFrameSizeFromFp +
+                              bytecode_->frame_size()));
+-  __ masm()->Assert(eq, AbortReason::kUnexpectedStackPointer, kScratchReg,
+-                    Operand(fp));
++  __ masm()->Assert(eq, AbortReason::kUnexpectedStackPointer, t0, Operand(fp));
+ }
+ 
+ #undef __
+diff --git a/src/builtins/riscv/builtins-riscv.cc b/src/builtins/riscv/builtins-riscv.cc
+index 0af4e3ec8ef..b435492e175 100644
+--- a/src/builtins/riscv/builtins-riscv.cc
++++ b/src/builtins/riscv/builtins-riscv.cc
+@@ -1759,6 +1759,7 @@ void OnStackReplacement(MacroAssembler* masm, OsrSourceTier source,
+   __ CompareTaggedAndBranch(&jump_to_optimized_code, ne, maybe_target_code,
+                             Operand(Smi::zero()));
+   __ Ret();
++  DCHECK_EQ(maybe_target_code, a0);  // Already in the right spot.
+ 
+   __ bind(&jump_to_optimized_code);
+ 
+diff --git a/src/codegen/riscv/macro-assembler-riscv.cc b/src/codegen/riscv/macro-assembler-riscv.cc
+index 9b19c9f5131..7c3c6a14b83 100644
+--- a/src/codegen/riscv/macro-assembler-riscv.cc
++++ b/src/codegen/riscv/macro-assembler-riscv.cc
+@@ -5476,7 +5476,8 @@ void MacroAssembler::JumpToExternalReference(const ExternalReference& builtin,
+ void MacroAssembler::LoadWeakValue(Register out, Register in,
+                                    Label* target_if_cleared) {
+   ASM_CODE_COMMENT(this);
+-  Branch(target_if_cleared, eq, in, Operand(kClearedWeakHeapObjectLower32));
++  CompareTaggedAndBranch(target_if_cleared, eq, in,
++                         Operand(kClearedWeakHeapObjectLower32));
+   And(out, in, Operand(~kWeakHeapObjectMask));
+ }
+ 
+@@ -6412,6 +6413,18 @@ void MacroAssembler::StoreTaggedField(const Register& value,
+   }
+ }
+ 
++void MacroAssembler::AtomicStoreTaggedField(Register src,
++                                            const MemOperand& dst) {
++  UseScratchRegisterScope temps(this);
++  Register scratch = temps.Acquire();
++  AddWord(scratch, dst.rm(), dst.offset());
++  if (COMPRESS_POINTERS_BOOL) {
++    amoswap_w(true, true, zero_reg, src, scratch);
++  } else {
++    amoswap_d(true, true, zero_reg, src, scratch);
++  }
++}
++
+ void MacroAssembler::DecompressTaggedSigned(const Register& destination,
+                                             const MemOperand& field_operand) {
+   ASM_CODE_COMMENT(this);
+@@ -6436,6 +6449,27 @@ void MacroAssembler::DecompressTagged(const Register& destination,
+   And(destination, source, Operand(0xFFFFFFFF));
+   AddWord(destination, kPtrComprCageBaseRegister, Operand(destination));
+ }
++
++void MacroAssembler::AtomicDecompressTaggedSigned(Register dst,
++                                                  const MemOperand& src) {
++  ASM_CODE_COMMENT(this);
++  Lwu(dst, src);
++  sync();
++  if (v8_flags.debug_code) {
++    // Corrupt the top 32 bits. Made up of 16 fixed bits and 16 pc offset bits.
++    AddWord(dst, dst,
++            Operand(((kDebugZapValue << 16) | (pc_offset() & 0xffff)) << 32));
++  }
++}
++
++void MacroAssembler::AtomicDecompressTagged(Register dst,
++                                            const MemOperand& src) {
++  ASM_CODE_COMMENT(this);
++  Lwu(dst, src);
++  sync();
++  AddWord(dst, kPtrComprCageBaseRegister, dst);
++}
++
+ #endif
+ void MacroAssembler::DropArguments(Register count, ArgumentsCountType type,
+                                    ArgumentsCountMode mode, Register scratch) {
+diff --git a/src/codegen/riscv/macro-assembler-riscv.h b/src/codegen/riscv/macro-assembler-riscv.h
+index 139d67d69e7..62700b1ad9b 100644
+--- a/src/codegen/riscv/macro-assembler-riscv.h
++++ b/src/codegen/riscv/macro-assembler-riscv.h
+@@ -1113,6 +1113,7 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
+   // Compresses and stores tagged value to given on-heap location.
+   void StoreTaggedField(const Register& value,
+                         const MemOperand& dst_field_operand);
++  void AtomicStoreTaggedField(Register dst, const MemOperand& src);
+ 
+   void DecompressTaggedSigned(const Register& destination,
+                               const MemOperand& field_operand);
+@@ -1120,6 +1121,10 @@ class V8_EXPORT_PRIVATE MacroAssembler : public MacroAssemblerBase {
+                         const MemOperand& field_operand);
+   void DecompressTagged(const Register& destination, const Register& source);
+   void DecompressTagged(Register dst, Tagged_t immediate);
++
++  void AtomicDecompressTaggedSigned(Register dst, const MemOperand& src);
++  void AtomicDecompressTagged(Register dst, const MemOperand& src);
++
+   void CmpTagged(const Register& rd, const Register& rs1, const Register& rs2) {
+     if (COMPRESS_POINTERS_BOOL) {
+       Sub32(rd, rs1, rs2);
+diff --git a/src/compiler/backend/bitcast-elider.cc b/src/compiler/backend/bitcast-elider.cc
+index 403e6d318c1..98d153783c0 100644
+--- a/src/compiler/backend/bitcast-elider.cc
++++ b/src/compiler/backend/bitcast-elider.cc
+@@ -21,7 +21,7 @@ bool IsBitcast(Node* node) {
+ }
+ 
+ bool OwnedByWord32Op(Node* node) {
+-#if V8_TARGET_ARCH_LOONG64 || V8_TARGET_ARCH_MIPS64
++#if V8_TARGET_ARCH_LOONG64 || V8_TARGET_ARCH_MIPS64 || V8_TARGET_ARCH_RISCV64
+   return false;
+ #else
+   for (Node* const use : node->uses()) {
+diff --git a/src/compiler/backend/riscv/code-generator-riscv.cc b/src/compiler/backend/riscv/code-generator-riscv.cc
+index 0cbe1083320..b6a33671d44 100644
+--- a/src/compiler/backend/riscv/code-generator-riscv.cc
++++ b/src/compiler/backend/riscv/code-generator-riscv.cc
+@@ -2218,6 +2218,18 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
+       __ DecompressTagged(result, operand);
+       break;
+     }
++    case kRiscvAtomicLoadDecompressTaggedSigned:
++      __ AtomicDecompressTaggedSigned(i.OutputRegister(), i.MemoryOperand());
++      break;
++    case kRiscvAtomicLoadDecompressTagged:
++      __ AtomicDecompressTagged(i.OutputRegister(), i.MemoryOperand());
++      break;
++    case kRiscvAtomicStoreCompressTagged: {
++      size_t index = 0;
++      MemOperand mem = i.MemoryOperand(&index);
++      __ AtomicStoreTaggedField(i.InputOrZeroRegister(index), mem);
++      break;
++    }
+ #endif
+     case kRiscvRvvSt: {
+       (__ VU).set(kScratchReg, VSew::E8, Vlmul::m1);
+diff --git a/src/compiler/backend/riscv/instruction-codes-riscv.h b/src/compiler/backend/riscv/instruction-codes-riscv.h
+index 56441bb7762..71d9081b138 100644
+--- a/src/compiler/backend/riscv/instruction-codes-riscv.h
++++ b/src/compiler/backend/riscv/instruction-codes-riscv.h
+@@ -65,6 +65,9 @@ namespace compiler {
+   V(RiscvStoreCompressTagged)               \
+   V(RiscvLoadDecompressTaggedSigned)        \
+   V(RiscvLoadDecompressTagged)              \
++  V(RiscvAtomicLoadDecompressTaggedSigned)  \
++  V(RiscvAtomicLoadDecompressTagged)        \
++  V(RiscvAtomicStoreCompressTagged)         \
+   V(RiscvWord64AtomicCompareExchangeUint64) \
+   V(RiscvTst64)
+ #elif V8_TARGET_ARCH_RISCV32
+diff --git a/src/compiler/backend/riscv/instruction-scheduler-riscv.cc b/src/compiler/backend/riscv/instruction-scheduler-riscv.cc
+index 0c630c28434..2bddd12da03 100644
+--- a/src/compiler/backend/riscv/instruction-scheduler-riscv.cc
++++ b/src/compiler/backend/riscv/instruction-scheduler-riscv.cc
+@@ -381,6 +381,9 @@ int InstructionScheduler::GetTargetInstructionFlags(
+     case kRiscvWord64AtomicLoadUint64:
+     case kRiscvLoadDecompressTaggedSigned:
+     case kRiscvLoadDecompressTagged:
++    case kRiscvAtomicLoadDecompressTaggedSigned:
++    case kRiscvAtomicLoadDecompressTagged:
++    case kRiscvAtomicStoreCompressTagged:
+ #elif V8_TARGET_ARCH_RISCV32
+     case kRiscvWord32AtomicPairLoad:
+ #endif
+diff --git a/src/compiler/backend/riscv/instruction-selector-riscv.h b/src/compiler/backend/riscv/instruction-selector-riscv.h
+index f9865771186..8c15b98f7dc 100644
+--- a/src/compiler/backend/riscv/instruction-selector-riscv.h
++++ b/src/compiler/backend/riscv/instruction-selector-riscv.h
+@@ -60,6 +60,24 @@ class RiscvOperandGenerator final : public OperandGenerator {
+   }
+ 
+   bool CanBeImmediate(Node* node, InstructionCode mode) {
++    if (node->opcode() == IrOpcode::kCompressedHeapConstant) {
++      if (!COMPRESS_POINTERS_BOOL) return false;
++      // For builtin code we need static roots
++      if (selector()->isolate()->bootstrapper() && !V8_STATIC_ROOTS_BOOL) {
++        return false;
++      }
++      const RootsTable& roots_table = selector()->isolate()->roots_table();
++      RootIndex root_index;
++      CompressedHeapObjectMatcher m(node);
++      if (m.HasResolvedValue() &&
++          roots_table.IsRootHandle(m.ResolvedValue(), &root_index)) {
++        if (!RootsTable::IsReadOnly(root_index)) return false;
++        return CanBeImmediate(MacroAssemblerBase::ReadOnlyRootPtr(
++                                  root_index, selector()->isolate()),
++                              mode);
++      }
++      return false;
++    }
+     return IsIntegerConstant(node) &&
+            CanBeImmediate(GetIntegerConstantValue(node), mode);
+   }
+@@ -351,8 +369,13 @@ void VisitWordCompare(InstructionSelector* selector, Node* node,
+ #elif V8_TARGET_ARCH_RISCV32
+     if (opcode == kRiscvTst32) {
+ #endif
+-      VisitCompare(selector, opcode, g.UseRegister(left), g.UseImmediate(right),
+-                   cont);
++      if (left->opcode() == IrOpcode::kTruncateInt64ToInt32) {
++        VisitCompare(selector, opcode, g.UseRegister(left->InputAt(0)),
++                     g.UseImmediate(right), cont);
++      } else {
++        VisitCompare(selector, opcode, g.UseRegister(left),
++                     g.UseImmediate(right), cont);
++      }
+     } else {
+       switch (cont->condition()) {
+         case kEqual:
+@@ -726,24 +749,26 @@ void InstructionSelector::VisitWord32Shr(Node* node) {
+ 
+ void InstructionSelector::VisitWord32Sar(Node* node) {
+   Int32BinopMatcher m(node);
+-  if (m.left().IsWord32Shl() && CanCover(node, m.left().node())) {
+-    Int32BinopMatcher mleft(m.left().node());
+-    if (m.right().HasResolvedValue() && mleft.right().HasResolvedValue()) {
+-      RiscvOperandGenerator g(this);
+-      uint32_t sar = m.right().ResolvedValue();
+-      uint32_t shl = mleft.right().ResolvedValue();
+-      if ((sar == shl) && (sar == 16)) {
+-        Emit(kRiscvSignExtendShort, g.DefineAsRegister(node),
+-             g.UseRegister(mleft.left().node()));
+-        return;
+-      } else if ((sar == shl) && (sar == 24)) {
+-        Emit(kRiscvSignExtendByte, g.DefineAsRegister(node),
+-             g.UseRegister(mleft.left().node()));
+-        return;
+-      } else if ((sar == shl) && (sar == 32)) {
+-        Emit(kRiscvShl32, g.DefineAsRegister(node),
+-             g.UseRegister(mleft.left().node()), g.TempImmediate(0));
+-        return;
++  if (CanCover(node, m.left().node())) {
++    RiscvOperandGenerator g(this);
++    if (m.left().IsWord32Shl()) {
++      Int32BinopMatcher mleft(m.left().node());
++      if (m.right().HasResolvedValue() && mleft.right().HasResolvedValue()) {
++        uint32_t sar = m.right().ResolvedValue();
++        uint32_t shl = mleft.right().ResolvedValue();
++        if ((sar == shl) && (sar == 16)) {
++          Emit(kRiscvSignExtendShort, g.DefineAsRegister(node),
++               g.UseRegister(mleft.left().node()));
++          return;
++        } else if ((sar == shl) && (sar == 24)) {
++          Emit(kRiscvSignExtendByte, g.DefineAsRegister(node),
++               g.UseRegister(mleft.left().node()));
++          return;
++        } else if ((sar == shl) && (sar == 32)) {
++          Emit(kRiscvShl32, g.DefineAsRegister(node),
++               g.UseRegister(mleft.left().node()), g.TempImmediate(0));
++          return;
++        }
+       }
+     }
+   }
+diff --git a/src/compiler/backend/riscv/instruction-selector-riscv64.cc b/src/compiler/backend/riscv/instruction-selector-riscv64.cc
+index 823a3c118f1..3369833d47c 100644
+--- a/src/compiler/backend/riscv/instruction-selector-riscv64.cc
++++ b/src/compiler/backend/riscv/instruction-selector-riscv64.cc
+@@ -561,6 +561,19 @@ void InstructionSelector::VisitWord64Shr(Node* node) {
+ 
+ void InstructionSelector::VisitWord64Sar(Node* node) {
+   if (TryEmitExtendingLoad(this, node, node)) return;
++  Int64BinopMatcher m(node);
++  if (m.left().IsChangeInt32ToInt64() && m.right().HasResolvedValue() &&
++      is_uint5(m.right().ResolvedValue()) && CanCover(node, m.left().node())) {
++    if ((m.left().InputAt(0)->opcode() != IrOpcode::kLoad &&
++         m.left().InputAt(0)->opcode() != IrOpcode::kLoadImmutable) ||
++        !CanCover(m.left().node(), m.left().InputAt(0))) {
++      RiscvOperandGenerator g(this);
++      Emit(kRiscvSar32, g.DefineAsRegister(node),
++           g.UseRegister(m.left().node()->InputAt(0)),
++           g.UseImmediate(m.right().node()));
++      return;
++    }
++  }
+   VisitRRO(this, kRiscvSar64, node);
+ }
+ 
+@@ -1044,52 +1057,6 @@ void InstructionSelector::VisitBitcastWord32ToWord64(Node* node) {
+ void EmitSignExtendWord(InstructionSelector* selector, Node* node) {
+   RiscvOperandGenerator g(selector);
+   Node* value = node->InputAt(0);
+-  IrOpcode::Value lastOpCode = value->opcode();
+-  if (lastOpCode == IrOpcode::kInt32Add || lastOpCode == IrOpcode::kInt32Sub ||
+-      lastOpCode == IrOpcode::kWord32And || lastOpCode == IrOpcode::kWord32Or ||
+-      lastOpCode == IrOpcode::kWord32Xor ||
+-      lastOpCode == IrOpcode::kWord32Shl ||
+-      lastOpCode == IrOpcode::kWord32Shr ||
+-      lastOpCode == IrOpcode::kWord32Sar ||
+-      lastOpCode == IrOpcode::kUint32Mod) {
+-    selector->Emit(kArchNop, g.DefineSameAsFirst(node), g.Use(value));
+-    return;
+-  }
+-  if (lastOpCode == IrOpcode::kInt32Mul) {
+-    Node* left = value->InputAt(0);
+-    Node* right = value->InputAt(1);
+-    if (selector->CanCover(value, left) && selector->CanCover(value, right)) {
+-      if (left->opcode() == IrOpcode::kWord64Sar &&
+-          right->opcode() == IrOpcode::kWord64Sar) {
+-        Int64BinopMatcher leftInput(left), rightInput(right);
+-        if (leftInput.right().Is(32) && rightInput.right().Is(32)) {
+-          selector->Emit(kRiscvSignExtendWord, g.DefineAsRegister(node),
+-                         g.UseRegister(value));
+-          return;
+-        }
+-      }
+-    }
+-    selector->Emit(kArchNop, g.DefineSameAsFirst(node), g.Use(value));
+-    return;
+-  }
+-  if (lastOpCode == IrOpcode::kInt32Mod) {
+-    Node* left = value->InputAt(0);
+-    Node* right = value->InputAt(1);
+-    if (selector->CanCover(value, left) && selector->CanCover(value, right)) {
+-      if (left->opcode() == IrOpcode::kWord64Sar &&
+-          right->opcode() == IrOpcode::kWord64Sar) {
+-        Int64BinopMatcher rightInput(right), leftInput(left);
+-        if (rightInput.right().Is(32) && leftInput.right().Is(32)) {
+-          // Combine both shifted operands with Dmod.
+-          selector->Emit(kRiscvSignExtendWord, g.DefineAsRegister(node),
+-                         g.UseRegister(value));
+-          return;
+-        }
+-      }
+-    }
+-    selector->Emit(kArchNop, g.DefineSameAsFirst(node), g.Use(value));
+-    return;
+-  }
+   selector->Emit(kRiscvSignExtendWord, g.DefineAsRegister(node),
+                  g.UseRegister(value));
+ }
+@@ -1117,6 +1084,8 @@ void InstructionSelector::VisitChangeInt32ToInt64(Node* node) {
+         // with kWord64 can also reach this line.
+         // For RV64, the lw loads a 32 bit value from memory and sign-extend it
+         // to 64 bits before storing it in rd register
++      case MachineRepresentation::kTaggedSigned:
++      case MachineRepresentation::kTagged:
+         opcode = kRiscvLw;
+         break;
+       default:
+@@ -1125,6 +1094,7 @@ void InstructionSelector::VisitChangeInt32ToInt64(Node* node) {
+     EmitLoad(this, value, opcode, node);
+   } else {
+     EmitSignExtendWord(this, node);
++    return;
+   }
+ }
+ 
+@@ -1184,12 +1154,12 @@ void InstructionSelector::VisitTruncateInt64ToInt32(Node* node) {
+         break;
+     }
+   }
+-
+   // Semantics of this machine IR is not clear. For example, x86 zero-extend the
+   // truncated value; arm treats it as nop thus the upper 32-bit as undefined;
+   // Riscv emits ext instruction which zero-extend the 32-bit value; for riscv,
+   // we do sign-extension of the truncated value
+-  EmitSignExtendWord(this, node);
++  Emit(kRiscvSignExtendWord, g.DefineAsRegister(node),
++       g.UseRegister(node->InputAt(0)), g.TempImmediate(0));
+ }
+ 
+ void InstructionSelector::VisitRoundInt64ToFloat32(Node* node) {
+@@ -1566,12 +1536,22 @@ void VisitAtomicLoad(InstructionSelector* selector, Node* node,
+     case MachineRepresentation::kWord64:
+       code = kRiscvWord64AtomicLoadUint64;
+       break;
++#ifdef V8_COMPRESS_POINTERS
++    case MachineRepresentation::kTaggedSigned:
++      code = kRiscvAtomicLoadDecompressTaggedSigned;
++      break;
++    case MachineRepresentation::kTaggedPointer:
++    case MachineRepresentation::kTagged:
++      code = kRiscvAtomicLoadDecompressTagged;
++      break;
++#else
+     case MachineRepresentation::kTaggedSigned:   // Fall through.
+     case MachineRepresentation::kTaggedPointer:  // Fall through.
+     case MachineRepresentation::kTagged:
+       DCHECK_EQ(kTaggedSize, 8);
+       code = kRiscvWord64AtomicLoadUint64;
+       break;
++#endif
+     default:
+       UNREACHABLE();
+   }
+@@ -1758,7 +1738,6 @@ void InstructionSelector::VisitWordCompareZero(Node* user, Node* value,
+     } else {
+       break;
+     }
+-
+     cont->Negate();
+   }
+ 
+diff --git a/src/diagnostics/riscv/disasm-riscv.cc b/src/diagnostics/riscv/disasm-riscv.cc
+index 8278ba069b2..8076567ecca 100644
+--- a/src/diagnostics/riscv/disasm-riscv.cc
++++ b/src/diagnostics/riscv/disasm-riscv.cc
+@@ -2943,7 +2943,7 @@ int Decoder::InstructionDecode(uint8_t* instr_ptr) {
+ #endif
+     default:
+       Format(instr, "UNSUPPORTED");
+-      UNSUPPORTED_RISCV();
++      break;
+   }
+   return instr->InstructionSize();
+ }
+diff --git a/src/execution/riscv/simulator-riscv.cc b/src/execution/riscv/simulator-riscv.cc
+index b2a284eb74e..9ff0d1300bb 100644
+--- a/src/execution/riscv/simulator-riscv.cc
++++ b/src/execution/riscv/simulator-riscv.cc
+@@ -7682,17 +7682,18 @@ void Simulator::InstructionDecode(Instruction* instr) {
+            " ",
+            reinterpret_cast<intptr_t>(watch_address_), *watch_address_,
+            *watch_address_);
+-    Object obj(*watch_address_);
+-    Heap* current_heap = isolate_->heap();
+-    if (obj.IsSmi() || IsValidHeapObject(current_heap, HeapObject::cast(obj))) {
+-      PrintF(" (");
+-      if (obj.IsSmi()) {
+-        PrintF("smi %d", Smi::ToInt(obj));
+-      } else {
+-        obj.ShortPrint();
+-      }
+-      PrintF(")");
+-    }
++    // Object obj(*watch_address_);
++    // Heap* current_heap = isolate_->heap();
++    // if (obj.IsSmi() || IsValidHeapObject(current_heap,
++    // HeapObject::cast(obj))) {
++    //   PrintF(" (");
++    //   if (obj.IsSmi()) {
++    //     PrintF("smi %d", Smi::ToInt(obj));
++    //   } else {
++    //     obj.ShortPrint();
++    //   }
++    //   PrintF(")");
++    // }
+     PrintF("\n");
+     if (watch_value_ != *watch_address_) {
+       RiscvDebugger dbg(this);
+diff --git a/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h b/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
+index f36591cdf75..e71f2255b59 100644
+--- a/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
++++ b/src/wasm/baseline/riscv/liftoff-assembler-riscv64.h
+@@ -173,7 +173,7 @@ void LiftoffAssembler::LoadConstant(LiftoffRegister reg, WasmValue value) {
+ void LiftoffAssembler::LoadTaggedPointer(Register dst, Register src_addr,
+                                          Register offset_reg,
+                                          int32_t offset_imm, bool needs_shift) {
+-  unsigned shift_amount = !needs_shift ? 0 : 3;
++  unsigned shift_amount = !needs_shift ? 0 : COMPRESS_POINTERS_BOOL ? 2 : 3;
+   MemOperand src_op = liftoff::GetMemOp(this, src_addr, offset_reg, offset_imm,
+                                         false, shift_amount);
+   LoadTaggedField(dst, src_op);
+@@ -1299,35 +1299,52 @@ void LiftoffAssembler::emit_cond_jump(Condition cond, Label* label,
+                                       Register rhs,
+                                       const FreezeCacheState& frozen) {
+   if (rhs == no_reg) {
+-    DCHECK(kind == kI32 || kind == kI64);
+-    MacroAssembler::Branch(label, cond, lhs, Operand(zero_reg));
++    if (kind == kI32) {
++      UseScratchRegisterScope temps(this);
++      Register scratch0 = temps.Acquire();
++      slliw(scratch0, lhs, 0);
++      MacroAssembler::Branch(label, cond, scratch0, Operand(zero_reg));
++    } else {
++      DCHECK(kind == kI64);
++      MacroAssembler::Branch(label, cond, lhs, Operand(zero_reg));
++    }
+   } else {
+-    DCHECK((kind == kI32 || kind == kI64) ||
+-           (is_reference(kind) && (cond == kEqual || cond == kNotEqual)));
+-    MacroAssembler::Branch(label, cond, lhs, Operand(rhs));
++    if (kind == kI64) {
++      MacroAssembler::Branch(label, cond, lhs, Operand(rhs));
++    } else {
++      DCHECK((kind == kI32) || (kind == kRtt) || (kind == kRef) ||
++             (kind == kRefNull));
++      MacroAssembler::CompareTaggedAndBranch(label, cond, lhs, Operand(rhs));
++    }
+   }
+ }
+ 
+ void LiftoffAssembler::emit_i32_cond_jumpi(Condition cond, Label* label,
+                                            Register lhs, int32_t imm,
+                                            const FreezeCacheState& frozen) {
+-  MacroAssembler::Branch(label, cond, lhs, Operand(imm));
++  MacroAssembler::CompareTaggedAndBranch(label, cond, lhs, Operand(imm));
+ }
+ 
+ void LiftoffAssembler::emit_i32_subi_jump_negative(
+     Register value, int subtrahend, Label* result_negative,
+     const FreezeCacheState& frozen) {
+-  Sub64(value, value, Operand(subtrahend));
++  Sub32(value, value, Operand(subtrahend));
+   MacroAssembler::Branch(result_negative, lt, value, Operand(zero_reg));
+ }
+ 
+ void LiftoffAssembler::emit_i32_eqz(Register dst, Register src) {
++  MacroAssembler::slliw(dst, src, 0);
+   MacroAssembler::Sltu(dst, src, 1);
+ }
+ 
+ void LiftoffAssembler::emit_i32_set_cond(Condition cond, Register dst,
+                                          Register lhs, Register rhs) {
+-  MacroAssembler::CompareI(dst, lhs, Operand(rhs), cond);
++  UseScratchRegisterScope temps(this);
++  Register scratch0 = temps.Acquire();
++  Register scratch1 = kScratchReg;
++  MacroAssembler::slliw(scratch0, lhs, 0);
++  MacroAssembler::slliw(scratch1, rhs, 0);
++  MacroAssembler::CompareI(dst, scratch0, Operand(scratch1), cond);
+ }
+ 
+ void LiftoffAssembler::emit_i64_eqz(Register dst, LiftoffRegister src) {
+diff --git a/test/cctest/test-macro-assembler-riscv64.cc b/test/cctest/test-macro-assembler-riscv64.cc
+index d88b2912f77..d42c8ee5295 100644
+--- a/test/cctest/test-macro-assembler-riscv64.cc
++++ b/test/cctest/test-macro-assembler-riscv64.cc
+@@ -659,6 +659,7 @@ TEST(min_max_nan) {
+ 
+   auto fn = [](MacroAssembler& masm) {
+     __ push(s6);
++    __ push(s11);
+     __ InitializeRootRegister();
+     __ LoadDouble(fa3, MemOperand(a0, offsetof(TestFloat, a)));
+     __ LoadDouble(fa4, MemOperand(a0, offsetof(TestFloat, b)));
+@@ -672,6 +673,7 @@ TEST(min_max_nan) {
+     __ StoreDouble(fa6, MemOperand(a0, offsetof(TestFloat, d)));
+     __ StoreFloat(fa7, MemOperand(a0, offsetof(TestFloat, g)));
+     __ StoreFloat(fa0, MemOperand(a0, offsetof(TestFloat, h)));
++    __ pop(s11);
+     __ pop(s6);
+   };
+   auto f = AssembleCode<F3>(isolate, fn);
+diff --git a/test/unittests/compiler/riscv64/instruction-selector-riscv64-unittest.cc b/test/unittests/compiler/riscv64/instruction-selector-riscv64-unittest.cc
+index 13de26ab4b7..a89533d6cff 100644
+--- a/test/unittests/compiler/riscv64/instruction-selector-riscv64-unittest.cc
++++ b/test/unittests/compiler/riscv64/instruction-selector-riscv64-unittest.cc
+@@ -183,28 +183,28 @@ const IntCmp kCmpInstructions[] = {
+      1U},
+     {{&RawMachineAssembler::Word32Equal, "Word32Equal", kRiscvCmp,
+       MachineType::Int32()},
+-     1U},
++     COMPRESS_POINTERS_BOOL ? 3U : 1U},
+     {{&RawMachineAssembler::Word32NotEqual, "Word32NotEqual", kRiscvCmp,
+       MachineType::Int32()},
+-     1U},
++     COMPRESS_POINTERS_BOOL ? 3U : 1U},
+     {{&RawMachineAssembler::Int32LessThan, "Int32LessThan", kRiscvCmp,
+       MachineType::Int32()},
+-     1U},
++     COMPRESS_POINTERS_BOOL ? 3U : 1U},
+     {{&RawMachineAssembler::Int32LessThanOrEqual, "Int32LessThanOrEqual",
+       kRiscvCmp, MachineType::Int32()},
+-     1U},
++     COMPRESS_POINTERS_BOOL ? 3U : 1U},
+     {{&RawMachineAssembler::Int32GreaterThan, "Int32GreaterThan", kRiscvCmp,
+       MachineType::Int32()},
+-     1U},
++     COMPRESS_POINTERS_BOOL ? 3U : 1U},
+     {{&RawMachineAssembler::Int32GreaterThanOrEqual, "Int32GreaterThanOrEqual",
+       kRiscvCmp, MachineType::Int32()},
+-     1U},
++     COMPRESS_POINTERS_BOOL ? 3U : 1U},
+     {{&RawMachineAssembler::Uint32LessThan, "Uint32LessThan", kRiscvCmp,
+       MachineType::Uint32()},
+-     1U},
++     COMPRESS_POINTERS_BOOL ? 3U : 1U},
+     {{&RawMachineAssembler::Uint32LessThanOrEqual, "Uint32LessThanOrEqual",
+       kRiscvCmp, MachineType::Uint32()},
+-     1U}};
++     COMPRESS_POINTERS_BOOL ? 3U : 1U}};
+ 
+ // ----------------------------------------------------------------------------
+ // Conversion instructions.
+@@ -312,7 +312,7 @@ TEST_P(InstructionSelectorCmpTest, Parameter) {
+   StreamBuilder m(this, type, type, type);
+   m.Return((m.*cmp.mi.constructor)(m.Parameter(0), m.Parameter(1)));
+   Stream s = m.Build();
+-
++  std::cout << type.representation() << std::endl;
+   if (v8_flags.debug_code &&
+       type.representation() == MachineRepresentation::kWord32) {
+ #ifndef V8_COMPRESS_POINTERS
+@@ -358,7 +358,7 @@ TEST_P(InstructionSelectorCmpTest, Parameter) {
+ #endif
+   } else {
+     ASSERT_EQ(cmp.expected_size, s.size());
+-    EXPECT_EQ(cmp.mi.arch_opcode, s[0]->arch_opcode());
++    EXPECT_EQ(cmp.mi.arch_opcode, s[cmp.expected_size - 1]->arch_opcode());
+     EXPECT_EQ(2U, s[0]->InputCount());
+     EXPECT_EQ(1U, s[0]->OutputCount());
+   }
+-- 
+2.35.1
+

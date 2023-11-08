@@ -1,0 +1,3160 @@
+From 974721c66131d208571b8759a1caadf7f995c54c Mon Sep 17 00:00:00 2001
+From: bmeurer <bmeurer@chromium.org>
+Date: Wed, 6 Apr 2016 01:37:09 -0700
+Subject: [PATCH] [generators] Decouple generator resume from fullcodegen.
+
+Introduce a ResumeGeneratorTrampoline, which does the actual stack state
+reconstruction (currently always restores a fullcodegen frame), and
+introduce appropriate TurboFan builtins for %GeneratorPrototype%.next,
+%GeneratorPrototype%.return and %GeneratorPrototype%.throw based on
+this native builtin.
+
+Also unify the flooding in case of step-in to always work based on
+JSFunction and remove the special casing for JSGeneratorObject.
+
+R=mstarzinger@chromium.org, neis@chromium.org
+TBR=rossberg@chromium.org
+BUG=chromium:513471
+LOG=n
+
+Review URL: https://codereview.chromium.org/1865833002
+
+Cr-Commit-Position: refs/heads/master@{#35283}
+---
+ BUILD.gn                                      |   2 -
+ src/arm/builtins-arm.cc                       | 110 ++++++++++++
+ src/arm/interface-descriptors-arm.cc          |  10 ++
+ src/arm/macro-assembler-arm.cc                |  11 ++
+ src/arm/macro-assembler-arm.h                 |   4 +
+ src/arm64/builtins-arm64.cc                   | 107 ++++++++++++
+ src/arm64/interface-descriptors-arm64.cc      |   9 +
+ src/arm64/macro-assembler-arm64.cc            |  11 ++
+ src/arm64/macro-assembler-arm64.h             |   4 +
+ src/bailout-reason.h                          |   5 +-
+ src/bootstrapper.cc                           | 163 ++++++++----------
+ src/builtins.cc                               | 106 +++++++++++-
+ src/builtins.h                                |  29 +++-
+ src/code-factory.cc                           |   6 +
+ src/code-factory.h                            |   2 +
+ src/compiler.cc                               |  16 --
+ src/compiler/code-stub-assembler.cc           |  15 ++
+ src/compiler/code-stub-assembler.h            |   4 +
+ src/deoptimizer.cc                            |   4 +-
+ src/frames.cc                                 |  10 --
+ src/frames.h                                  |   1 -
+ src/full-codegen/arm/full-codegen-arm.cc      | 121 ++-----------
+ src/full-codegen/arm64/full-codegen-arm64.cc  | 116 +------------
+ src/full-codegen/full-codegen.cc              |  21 ---
+ src/full-codegen/full-codegen.h               |   8 -
+ src/full-codegen/ia32/full-codegen-ia32.cc    | 109 ++----------
+ src/full-codegen/mips/full-codegen-mips.cc    | 108 +-----------
+ .../mips64/full-codegen-mips64.cc             | 110 +-----------
+ src/full-codegen/x64/full-codegen-x64.cc      | 108 +-----------
+ src/ia32/builtins-ia32.cc                     | 113 ++++++++++++
+ src/ia32/interface-descriptors-ia32.cc        |  10 ++
+ src/ia32/macro-assembler-ia32.cc              |  10 ++
+ src/ia32/macro-assembler-ia32.h               |   4 +
+ src/interface-descriptors.h                   |   8 +-
+ src/js/generator.js                           | 119 -------------
+ src/js/macros.py                              |   1 -
+ src/mips/builtins-mips.cc                     | 109 ++++++++++++
+ src/mips/interface-descriptors-mips.cc        |  10 ++
+ src/mips/macro-assembler-mips.cc              |  10 ++
+ src/mips/macro-assembler-mips.h               |   4 +
+ src/mips64/builtins-mips64.cc                 | 110 ++++++++++++
+ src/mips64/interface-descriptors-mips64.cc    |  10 ++
+ src/mips64/macro-assembler-mips64.cc          |  10 ++
+ src/mips64/macro-assembler-mips64.h           |   4 +
+ src/objects.h                                 |   5 +-
+ src/parsing/parser.cc                         |  14 +-
+ src/runtime/runtime-debug.cc                  |  13 +-
+ src/runtime/runtime-generator.cc              |  75 --------
+ src/runtime/runtime-internal.cc               |  15 ++
+ src/runtime/runtime.h                         |   9 +-
+ src/x64/builtins-x64.cc                       | 116 +++++++++++++
+ src/x64/interface-descriptors-x64.cc          |  10 ++
+ src/x64/macro-assembler-x64.cc                |  10 ++
+ src/x64/macro-assembler-x64.h                 |   4 +
+ test/mjsunit/mjsunit.status                   |   3 -
+ tools/gyp/v8.gyp                              |   2 -
+ 56 files changed, 1132 insertions(+), 1006 deletions(-)
+ delete mode 100644 src/js/generator.js
+
+diff --git a/BUILD.gn b/BUILD.gn
+index a6bded62244..7dca682b5c2 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -257,7 +257,6 @@ action("js2c") {
+     "src/js/arraybuffer.js",
+     "src/js/typedarray.js",
+     "src/js/iterator-prototype.js",
+-    "src/js/generator.js",
+     "src/js/object-observe.js",
+     "src/js/collection.js",
+     "src/js/weak-collection.js",
+@@ -312,7 +311,6 @@ action("js2c_experimental") {
+   sources = [
+     "src/js/macros.py",
+     "src/messages.h",
+-    "src/js/generator.js",
+     "src/js/harmony-atomics.js",
+     "src/js/harmony-regexp-exec.js",
+     "src/js/harmony-object-observe.js",
+diff --git a/src/arm/builtins-arm.cc b/src/arm/builtins-arm.cc
+index 1fffcb67e59..feb12319f84 100644
+--- a/src/arm/builtins-arm.cc
++++ b/src/arm/builtins-arm.cc
+@@ -704,6 +704,116 @@ void Builtins::Generate_JSBuiltinsConstructStubForDerived(
+   Generate_JSConstructStubHelper(masm, false, false, true);
+ }
+ 
++// static
++void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
++  // ----------- S t a t e -------------
++  //  -- r0 : the value to pass to the generator
++  //  -- r1 : the JSGeneratorObject to resume
++  //  -- r2 : the resume mode (tagged)
++  //  -- lr : return address
++  // -----------------------------------
++  __ AssertGeneratorObject(r1);
++
++  // Store input value into generator object.
++  __ str(r0, FieldMemOperand(r1, JSGeneratorObject::kInputOffset));
++  __ RecordWriteField(r1, JSGeneratorObject::kInputOffset, r0, r3,
++                      kLRHasNotBeenSaved, kDontSaveFPRegs);
++
++  // Load suspended function and context.
++  __ ldr(cp, FieldMemOperand(r1, JSGeneratorObject::kContextOffset));
++  __ ldr(r4, FieldMemOperand(r1, JSGeneratorObject::kFunctionOffset));
++
++  // Flood function if we are stepping.
++  Label skip_flooding;
++  ExternalReference step_in_enabled =
++      ExternalReference::debug_step_in_enabled_address(masm->isolate());
++  __ mov(ip, Operand(step_in_enabled));
++  __ ldrb(ip, MemOperand(ip));
++  __ cmp(ip, Operand(0));
++  __ b(eq, &skip_flooding);
++  {
++    FrameAndConstantPoolScope scope(masm, StackFrame::INTERNAL);
++    __ Push(r1, r2, r4);
++    __ CallRuntime(Runtime::kDebugPrepareStepInIfStepping);
++    __ Pop(r1, r2);
++    __ ldr(r4, FieldMemOperand(r1, JSGeneratorObject::kFunctionOffset));
++  }
++  __ bind(&skip_flooding);
++
++  // Push receiver.
++  __ ldr(ip, FieldMemOperand(r1, JSGeneratorObject::kReceiverOffset));
++  __ Push(ip);
++
++  // ----------- S t a t e -------------
++  //  -- r1    : the JSGeneratorObject to resume
++  //  -- r2    : the resume mode (tagged)
++  //  -- r4    : generator function
++  //  -- cp    : generator context
++  //  -- lr    : return address
++  //  -- sp[0] : generator receiver
++  // -----------------------------------
++
++  // Push holes for arguments to generator function. Since the parser forced
++  // context allocation for any variables in generators, the actual argument
++  // values have already been copied into the context and these dummy values
++  // will never be used.
++  __ ldr(r3, FieldMemOperand(r4, JSFunction::kSharedFunctionInfoOffset));
++  __ ldr(r3,
++         FieldMemOperand(r3, SharedFunctionInfo::kFormalParameterCountOffset));
++  {
++    Label done_loop, loop;
++    __ bind(&loop);
++    __ sub(r3, r3, Operand(Smi::FromInt(1)), SetCC);
++    __ b(mi, &done_loop);
++    __ PushRoot(Heap::kTheHoleValueRootIndex);
++    __ b(&loop);
++    __ bind(&done_loop);
++  }
++
++  // Enter a new JavaScript frame, and initialize its slots as they were when
++  // the generator was suspended.
++  DCHECK(!FLAG_enable_embedded_constant_pool);
++  FrameScope scope(masm, StackFrame::MANUAL);
++  __ Push(lr, fp);
++  __ Move(fp, sp);
++  __ Push(cp, r4);
++
++  // Restore the operand stack.
++  __ ldr(r0, FieldMemOperand(r1, JSGeneratorObject::kOperandStackOffset));
++  __ ldr(r3, FieldMemOperand(r0, FixedArray::kLengthOffset));
++  __ add(r0, r0, Operand(FixedArray::kHeaderSize - kHeapObjectTag));
++  __ add(r3, r0, Operand(r3, LSL, kPointerSizeLog2 - 1));
++  {
++    Label done_loop, loop;
++    __ bind(&loop);
++    __ cmp(r0, r3);
++    __ b(eq, &done_loop);
++    __ ldr(ip, MemOperand(r0, kPointerSize, PostIndex));
++    __ Push(ip);
++    __ b(&loop);
++    __ bind(&done_loop);
++  }
++
++  // Push resume mode (consumed in continuation).
++  __ Push(r2);
++
++  // Reset operand stack so we don't leak.
++  __ LoadRoot(ip, Heap::kEmptyFixedArrayRootIndex);
++  __ str(ip, FieldMemOperand(r1, JSGeneratorObject::kOperandStackOffset));
++
++  // Restore value.
++  __ ldr(r0, FieldMemOperand(r1, JSGeneratorObject::kInputOffset));
++
++  // Resume the generator function at the continuation.
++  __ ldr(r3, FieldMemOperand(r4, JSFunction::kSharedFunctionInfoOffset));
++  __ ldr(r3, FieldMemOperand(r3, SharedFunctionInfo::kCodeOffset));
++  __ add(r3, r3, Operand(Code::kHeaderSize - kHeapObjectTag));
++  __ ldr(r2, FieldMemOperand(r1, JSGeneratorObject::kContinuationOffset));
++  __ add(r3, r3, Operand(r2, ASR, 1));
++  __ mov(r2, Operand(Smi::FromInt(JSGeneratorObject::kGeneratorExecuting)));
++  __ str(r2, FieldMemOperand(r1, JSGeneratorObject::kContinuationOffset));
++  __ Jump(r3);
++}
+ 
+ void Builtins::Generate_ConstructedNonConstructable(MacroAssembler* masm) {
+   FrameScope scope(masm, StackFrame::INTERNAL);
+diff --git a/src/arm/interface-descriptors-arm.cc b/src/arm/interface-descriptors-arm.cc
+index b6cac760b2e..22fc6b0af58 100644
+--- a/src/arm/interface-descriptors-arm.cc
++++ b/src/arm/interface-descriptors-arm.cc
+@@ -435,6 +435,16 @@ void InterpreterCEntryDescriptor::InitializePlatformSpecific(
+   data->InitializePlatformSpecific(arraysize(registers), registers);
+ }
+ 
++void ResumeGeneratorDescriptor::InitializePlatformSpecific(
++    CallInterfaceDescriptorData* data) {
++  Register registers[] = {
++      r0,  // the value to pass to the generator
++      r1,  // the JSGeneratorObject to resume
++      r2   // the resume mode (tagged)
++  };
++  data->InitializePlatformSpecific(arraysize(registers), registers);
++}
++
+ }  // namespace internal
+ }  // namespace v8
+ 
+diff --git a/src/arm/macro-assembler-arm.cc b/src/arm/macro-assembler-arm.cc
+index 6af3d6c20cb..a4e1fa0cf34 100644
+--- a/src/arm/macro-assembler-arm.cc
++++ b/src/arm/macro-assembler-arm.cc
+@@ -3129,6 +3129,17 @@ void MacroAssembler::AssertBoundFunction(Register object) {
+   }
+ }
+ 
++void MacroAssembler::AssertGeneratorObject(Register object) {
++  if (emit_debug_code()) {
++    STATIC_ASSERT(kSmiTag == 0);
++    tst(object, Operand(kSmiTagMask));
++    Check(ne, kOperandIsASmiAndNotAGeneratorObject);
++    push(object);
++    CompareObjectType(object, object, object, JS_GENERATOR_OBJECT_TYPE);
++    pop(object);
++    Check(eq, kOperandIsNotAGeneratorObject);
++  }
++}
+ 
+ void MacroAssembler::AssertReceiver(Register object) {
+   if (emit_debug_code()) {
+diff --git a/src/arm/macro-assembler-arm.h b/src/arm/macro-assembler-arm.h
+index f32630444e3..d55d33cb016 100644
+--- a/src/arm/macro-assembler-arm.h
++++ b/src/arm/macro-assembler-arm.h
+@@ -1326,6 +1326,10 @@ class MacroAssembler: public Assembler {
+   // enabled via --debug-code.
+   void AssertBoundFunction(Register object);
+ 
++  // Abort execution if argument is not a JSGeneratorObject,
++  // enabled via --debug-code.
++  void AssertGeneratorObject(Register object);
++
+   // Abort execution if argument is not a JSReceiver, enabled via --debug-code.
+   void AssertReceiver(Register object);
+ 
+diff --git a/src/arm64/builtins-arm64.cc b/src/arm64/builtins-arm64.cc
+index 44bfc1762d8..d139cd8e660 100644
+--- a/src/arm64/builtins-arm64.cc
++++ b/src/arm64/builtins-arm64.cc
+@@ -711,6 +711,113 @@ void Builtins::Generate_ConstructedNonConstructable(MacroAssembler* masm) {
+   __ CallRuntime(Runtime::kThrowConstructedNonConstructable);
+ }
+ 
++// static
++void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
++  // ----------- S t a t e -------------
++  //  -- x0 : the value to pass to the generator
++  //  -- x1 : the JSGeneratorObject to resume
++  //  -- x2 : the resume mode (tagged)
++  //  -- lr : return address
++  // -----------------------------------
++  __ AssertGeneratorObject(x1);
++
++  // Store input value into generator object.
++  __ Str(x0, FieldMemOperand(x1, JSGeneratorObject::kInputOffset));
++  __ RecordWriteField(x1, JSGeneratorObject::kInputOffset, x0, x3,
++                      kLRHasNotBeenSaved, kDontSaveFPRegs);
++
++  // Load suspended function and context.
++  __ Ldr(cp, FieldMemOperand(x1, JSGeneratorObject::kContextOffset));
++  __ Ldr(x4, FieldMemOperand(x1, JSGeneratorObject::kFunctionOffset));
++
++  // Flood function if we are stepping.
++  Label skip_flooding;
++  ExternalReference step_in_enabled =
++      ExternalReference::debug_step_in_enabled_address(masm->isolate());
++  __ Mov(x10, Operand(step_in_enabled));
++  __ Ldrb(x10, MemOperand(x10));
++  __ CompareAndBranch(x10, Operand(0), eq, &skip_flooding);
++  {
++    FrameScope scope(masm, StackFrame::INTERNAL);
++    __ Push(x1, x2, x4);
++    __ CallRuntime(Runtime::kDebugPrepareStepInIfStepping);
++    __ Pop(x2, x1);
++    __ Ldr(x4, FieldMemOperand(x1, JSGeneratorObject::kFunctionOffset));
++  }
++  __ bind(&skip_flooding);
++
++  // Push receiver.
++  __ Ldr(x5, FieldMemOperand(x1, JSGeneratorObject::kReceiverOffset));
++  __ Push(x5);
++
++  // ----------- S t a t e -------------
++  //  -- x1      : the JSGeneratorObject to resume
++  //  -- x2      : the resume mode (tagged)
++  //  -- x4      : generator function
++  //  -- cp      : generator context
++  //  -- lr      : return address
++  //  -- jssp[0] : generator receiver
++  // -----------------------------------
++
++  // Push holes for arguments to generator function. Since the parser forced
++  // context allocation for any variables in generators, the actual argument
++  // values have already been copied into the context and these dummy values
++  // will never be used.
++  __ Ldr(x10, FieldMemOperand(x4, JSFunction::kSharedFunctionInfoOffset));
++
++  // Push holes for arguments to generator function. Since the parser forced
++  // context allocation for any variables in generators, the actual argument
++  // values have already been copied into the context and these dummy values
++  // will never be used.
++  __ Ldr(w10,
++         FieldMemOperand(x10, SharedFunctionInfo::kFormalParameterCountOffset));
++  __ LoadRoot(x11, Heap::kTheHoleValueRootIndex);
++  __ PushMultipleTimes(x11, w10);
++
++  // Enter a new JavaScript frame, and initialize its slots as they were when
++  // the generator was suspended.
++  FrameScope scope(masm, StackFrame::MANUAL);
++  __ Push(lr, fp);
++  __ Move(fp, jssp);
++  __ Push(cp, x4);
++
++  // Restore the operand stack.
++  __ Ldr(x0, FieldMemOperand(x1, JSGeneratorObject::kOperandStackOffset));
++  __ Ldr(w3, UntagSmiFieldMemOperand(x0, FixedArray::kLengthOffset));
++  __ Add(x0, x0, Operand(FixedArray::kHeaderSize - kHeapObjectTag));
++  __ Add(x3, x0, Operand(x3, LSL, kPointerSizeLog2));
++  {
++    Label done_loop, loop;
++    __ Bind(&loop);
++    __ Cmp(x0, x3);
++    __ B(eq, &done_loop);
++    __ Ldr(x10, MemOperand(x0, kPointerSize, PostIndex));
++    __ Push(x10);
++    __ B(&loop);
++    __ Bind(&done_loop);
++  }
++
++  // Push resume mode (consumed in continuation).
++  __ Push(x2);
++
++  // Reset operand stack so we don't leak.
++  __ LoadRoot(x10, Heap::kEmptyFixedArrayRootIndex);
++  __ Str(x10, FieldMemOperand(x1, JSGeneratorObject::kOperandStackOffset));
++
++  // Restore value.
++  __ Ldr(x0, FieldMemOperand(x1, JSGeneratorObject::kInputOffset));
++
++  // Resume the generator function at the continuation.
++  __ Ldr(x10, FieldMemOperand(x4, JSFunction::kSharedFunctionInfoOffset));
++  __ Ldr(x10, FieldMemOperand(x10, SharedFunctionInfo::kCodeOffset));
++  __ Add(x10, x10, Code::kHeaderSize - kHeapObjectTag);
++  __ Ldrsw(x11,
++           UntagSmiFieldMemOperand(x1, JSGeneratorObject::kContinuationOffset));
++  __ Add(x10, x10, x11);
++  __ Mov(x12, Smi::FromInt(JSGeneratorObject::kGeneratorExecuting));
++  __ Str(x12, FieldMemOperand(x1, JSGeneratorObject::kContinuationOffset));
++  __ Br(x10);
++}
+ 
+ enum IsTagged { kArgcIsSmiTagged, kArgcIsUntaggedInt };
+ 
+diff --git a/src/arm64/interface-descriptors-arm64.cc b/src/arm64/interface-descriptors-arm64.cc
+index f307aeb6d48..f5e0fa8206f 100644
+--- a/src/arm64/interface-descriptors-arm64.cc
++++ b/src/arm64/interface-descriptors-arm64.cc
+@@ -467,6 +467,15 @@ void InterpreterCEntryDescriptor::InitializePlatformSpecific(
+   data->InitializePlatformSpecific(arraysize(registers), registers);
+ }
+ 
++void ResumeGeneratorDescriptor::InitializePlatformSpecific(
++    CallInterfaceDescriptorData* data) {
++  Register registers[] = {
++      x0,  // the value to pass to the generator
++      x1,  // the JSGeneratorObject to resume
++      x2   // the resume mode (tagged)
++  };
++  data->InitializePlatformSpecific(arraysize(registers), registers);
++}
+ 
+ }  // namespace internal
+ }  // namespace v8
+diff --git a/src/arm64/macro-assembler-arm64.cc b/src/arm64/macro-assembler-arm64.cc
+index 12ddd8145e3..bd7ff3d7210 100644
+--- a/src/arm64/macro-assembler-arm64.cc
++++ b/src/arm64/macro-assembler-arm64.cc
+@@ -1659,6 +1659,17 @@ void MacroAssembler::AssertBoundFunction(Register object) {
+   }
+ }
+ 
++void MacroAssembler::AssertGeneratorObject(Register object) {
++  if (emit_debug_code()) {
++    AssertNotSmi(object, kOperandIsASmiAndNotAGeneratorObject);
++
++    UseScratchRegisterScope temps(this);
++    Register temp = temps.AcquireX();
++
++    CompareObjectType(object, temp, temp, JS_GENERATOR_OBJECT_TYPE);
++    Check(eq, kOperandIsNotAGeneratorObject);
++  }
++}
+ 
+ void MacroAssembler::AssertReceiver(Register object) {
+   if (emit_debug_code()) {
+diff --git a/src/arm64/macro-assembler-arm64.h b/src/arm64/macro-assembler-arm64.h
+index 4b6b3c0fb17..4354b662db1 100644
+--- a/src/arm64/macro-assembler-arm64.h
++++ b/src/arm64/macro-assembler-arm64.h
+@@ -970,6 +970,10 @@ class MacroAssembler : public Assembler {
+   // Abort execution if argument is not a JSFunction, enabled via --debug-code.
+   void AssertFunction(Register object);
+ 
++  // Abort execution if argument is not a JSGeneratorObject,
++  // enabled via --debug-code.
++  void AssertGeneratorObject(Register object);
++
+   // Abort execution if argument is not a JSBoundFunction,
+   // enabled via --debug-code.
+   void AssertBoundFunction(Register object);
+diff --git a/src/bailout-reason.h b/src/bailout-reason.h
+index 92929cf38c2..d8d2fe585d6 100644
+--- a/src/bailout-reason.h
++++ b/src/bailout-reason.h
+@@ -85,8 +85,6 @@ namespace internal {
+   V(kFunctionDataShouldBeBytecodeArrayOnInterpreterEntry,                      \
+     "The function_data field should be a BytecodeArray on interpreter entry")  \
+   V(kGeneratedCodeIsTooLarge, "Generated code is too large")                   \
+-  V(kGeneratorFailedToResume, "Generator failed to resume")                    \
+-  V(kGeneratorResumeMethod, "Generator resume method is being called")         \
+   V(kGenerator, "Generator")                                                   \
+   V(kGlobalFunctionsMustHaveInitialMap,                                        \
+     "Global functions must have initial map")                                  \
+@@ -143,6 +141,8 @@ namespace internal {
+   V(kOperandIsASmiAndNotABoundFunction,                                        \
+     "Operand is a smi and not a bound function")                               \
+   V(kOperandIsASmiAndNotAFunction, "Operand is a smi and not a function")      \
++  V(kOperandIsASmiAndNotAGeneratorObject,                                      \
++    "Operand is a smi and not a generator object")                             \
+   V(kOperandIsASmiAndNotAName, "Operand is a smi and not a name")              \
+   V(kOperandIsASmiAndNotAReceiver, "Operand is a smi and not a receiver")      \
+   V(kOperandIsASmiAndNotAString, "Operand is a smi and not a string")          \
+@@ -150,6 +150,7 @@ namespace internal {
+   V(kOperandIsNotADate, "Operand is not a date")                               \
+   V(kOperandIsNotABoundFunction, "Operand is not a bound function")            \
+   V(kOperandIsNotAFunction, "Operand is not a function")                       \
++  V(kOperandIsNotAGeneratorObject, "Operand is not a generator object")        \
+   V(kOperandIsNotAName, "Operand is not a name")                               \
+   V(kOperandIsNotANumber, "Operand is not a number")                           \
+   V(kOperandIsNotAReceiver, "Operand is not a receiver")                       \
+diff --git a/src/bootstrapper.cc b/src/bootstrapper.cc
+index 993aba448ed..0d1c070e47e 100644
+--- a/src/bootstrapper.cc
++++ b/src/bootstrapper.cc
+@@ -157,7 +157,7 @@ class Genesis BASE_EMBEDDED {
+   Handle<JSFunction> GetThrowTypeErrorIntrinsic(Builtins::Name builtin_name);
+ 
+   void CreateStrictModeFunctionMaps(Handle<JSFunction> empty);
+-  void CreateIteratorMaps();
++  void CreateIteratorMaps(Handle<JSFunction> empty);
+   void CreateJSProxyMaps();
+ 
+   // Make the "arguments" and "caller" properties throw a TypeError on access.
+@@ -354,7 +354,6 @@ void Bootstrapper::DetachGlobal(Handle<Context> env) {
+   }
+ }
+ 
+-
+ namespace {
+ 
+ void InstallFunction(Handle<JSObject> target, Handle<Name> property_name,
+@@ -367,20 +366,18 @@ void InstallFunction(Handle<JSObject> target, Handle<Name> property_name,
+   function->shared()->set_native(true);
+ }
+ 
+-
+-static void InstallFunction(Handle<JSObject> target,
+-                            Handle<JSFunction> function, Handle<Name> name,
+-                            PropertyAttributes attributes = DONT_ENUM) {
++void InstallFunction(Handle<JSObject> target, Handle<JSFunction> function,
++                     Handle<Name> name,
++                     PropertyAttributes attributes = DONT_ENUM) {
+   Handle<String> name_string = Name::ToFunctionName(name).ToHandleChecked();
+   InstallFunction(target, name, function, name_string, attributes);
+ }
+ 
+-
+-static Handle<JSFunction> CreateFunction(Isolate* isolate, Handle<String> name,
+-                                         InstanceType type, int instance_size,
+-                                         MaybeHandle<JSObject> maybe_prototype,
+-                                         Builtins::Name call,
+-                                         bool strict_function_map = false) {
++Handle<JSFunction> CreateFunction(Isolate* isolate, Handle<String> name,
++                                  InstanceType type, int instance_size,
++                                  MaybeHandle<JSObject> maybe_prototype,
++                                  Builtins::Name call,
++                                  bool strict_function_map = false) {
+   Factory* factory = isolate->factory();
+   Handle<Code> call_code(isolate->builtins()->builtin(call));
+   Handle<JSObject> prototype;
+@@ -394,7 +391,6 @@ static Handle<JSFunction> CreateFunction(Isolate* isolate, Handle<String> name,
+                                                     strict_function_map);
+ }
+ 
+-
+ Handle<JSFunction> InstallFunction(Handle<JSObject> target, Handle<Name> name,
+                                    InstanceType type, int instance_size,
+                                    MaybeHandle<JSObject> maybe_prototype,
+@@ -409,7 +405,6 @@ Handle<JSFunction> InstallFunction(Handle<JSObject> target, Handle<Name> name,
+   return function;
+ }
+ 
+-
+ Handle<JSFunction> InstallFunction(Handle<JSObject> target, const char* name,
+                                    InstanceType type, int instance_size,
+                                    MaybeHandle<JSObject> maybe_prototype,
+@@ -422,8 +417,40 @@ Handle<JSFunction> InstallFunction(Handle<JSObject> target, const char* name,
+                          strict_function_map);
+ }
+ 
+-}  // namespace
++Handle<JSFunction> SimpleCreateFunction(Isolate* isolate, Handle<String> name,
++                                        Builtins::Name call, int len,
++                                        bool adapt) {
++  Handle<JSFunction> fun =
++      CreateFunction(isolate, name, JS_OBJECT_TYPE, JSObject::kHeaderSize,
++                     MaybeHandle<JSObject>(), call);
++  if (adapt) {
++    fun->shared()->set_internal_formal_parameter_count(len);
++  } else {
++    fun->shared()->DontAdaptArguments();
++  }
++  fun->shared()->set_length(len);
++  return fun;
++}
+ 
++Handle<JSFunction> SimpleInstallFunction(Handle<JSObject> base,
++                                         Handle<String> name,
++                                         Builtins::Name call, int len,
++                                         bool adapt) {
++  Handle<JSFunction> fun =
++      SimpleCreateFunction(base->GetIsolate(), name, call, len, adapt);
++  InstallFunction(base, fun, name, DONT_ENUM);
++  return fun;
++}
++
++Handle<JSFunction> SimpleInstallFunction(Handle<JSObject> base,
++                                         const char* name, Builtins::Name call,
++                                         int len, bool adapt) {
++  Factory* const factory = base->GetIsolate()->factory();
++  return SimpleInstallFunction(base, factory->InternalizeUtf8String(name), call,
++                               len, adapt);
++}
++
++}  // namespace
+ 
+ void Genesis::SetFunctionInstanceDescriptor(Handle<Map> map,
+                                             FunctionMode function_mode) {
+@@ -709,22 +736,41 @@ void Genesis::CreateStrictModeFunctionMaps(Handle<JSFunction> empty) {
+       CreateStrictFunctionMap(FUNCTION_WITH_WRITEABLE_PROTOTYPE, empty);
+ }
+ 
+-
+-void Genesis::CreateIteratorMaps() {
++void Genesis::CreateIteratorMaps(Handle<JSFunction> empty) {
+   // Create iterator-related meta-objects.
+   Handle<JSObject> iterator_prototype =
+       factory()->NewJSObject(isolate()->object_function(), TENURED);
+   Handle<JSObject> generator_object_prototype =
+       factory()->NewJSObject(isolate()->object_function(), TENURED);
++  SetObjectPrototype(generator_object_prototype, iterator_prototype);
+   Handle<JSObject> generator_function_prototype =
+       factory()->NewJSObject(isolate()->object_function(), TENURED);
+-  SetObjectPrototype(generator_object_prototype, iterator_prototype);
++  SetObjectPrototype(generator_function_prototype, empty);
+ 
++  JSObject::AddProperty(
++      generator_function_prototype, factory()->to_string_tag_symbol(),
++      factory()->NewStringFromAsciiChecked("GeneratorFunction"),
++      static_cast<PropertyAttributes>(DONT_ENUM | READ_ONLY));
+   JSObject::AddProperty(generator_function_prototype,
+-                        factory()->InternalizeUtf8String("prototype"),
++                        factory()->prototype_string(),
+                         generator_object_prototype,
+                         static_cast<PropertyAttributes>(DONT_ENUM | READ_ONLY));
+ 
++  JSObject::AddProperty(generator_object_prototype,
++                        factory()->constructor_string(),
++                        generator_function_prototype,
++                        static_cast<PropertyAttributes>(DONT_ENUM | READ_ONLY));
++  JSObject::AddProperty(generator_object_prototype,
++                        factory()->to_string_tag_symbol(),
++                        factory()->NewStringFromAsciiChecked("Generator"),
++                        static_cast<PropertyAttributes>(DONT_ENUM | READ_ONLY));
++  SimpleInstallFunction(generator_object_prototype, "next",
++                        Builtins::kGeneratorPrototypeNext, 1, true);
++  SimpleInstallFunction(generator_object_prototype, "return",
++                        Builtins::kGeneratorPrototypeReturn, 1, true);
++  SimpleInstallFunction(generator_object_prototype, "throw",
++                        Builtins::kGeneratorPrototypeThrow, 1, true);
++
+   // Create maps for generator functions and their prototypes.  Store those
+   // maps in the native context. The "prototype" property descriptor is
+   // writable, non-enumerable, and non-configurable (as per ES6 draft
+@@ -971,45 +1017,6 @@ void Genesis::HookUpGlobalObject(Handle<JSGlobalObject> global_object) {
+   TransferIndexedProperties(global_object_from_snapshot, global_object);
+ }
+ 
+-
+-static Handle<JSFunction> SimpleCreateFunction(Isolate* isolate,
+-                                               Handle<String> name,
+-                                               Builtins::Name call, int len,
+-                                               bool adapt) {
+-  Handle<JSFunction> fun =
+-      CreateFunction(isolate, name, JS_OBJECT_TYPE, JSObject::kHeaderSize,
+-                     MaybeHandle<JSObject>(), call);
+-  if (adapt) {
+-    fun->shared()->set_internal_formal_parameter_count(len);
+-  } else {
+-    fun->shared()->DontAdaptArguments();
+-  }
+-  fun->shared()->set_length(len);
+-  return fun;
+-}
+-
+-
+-static Handle<JSFunction> SimpleInstallFunction(Handle<JSObject> base,
+-                                                Handle<String> name,
+-                                                Builtins::Name call, int len,
+-                                                bool adapt) {
+-  Handle<JSFunction> fun =
+-      SimpleCreateFunction(base->GetIsolate(), name, call, len, adapt);
+-  InstallFunction(base, fun, name, DONT_ENUM);
+-  return fun;
+-}
+-
+-
+-static Handle<JSFunction> SimpleInstallFunction(Handle<JSObject> base,
+-                                                const char* name,
+-                                                Builtins::Name call, int len,
+-                                                bool adapt) {
+-  Factory* const factory = base->GetIsolate()->factory();
+-  return SimpleInstallFunction(base, factory->InternalizeUtf8String(name), call,
+-                               len, adapt);
+-}
+-
+-
+ static void InstallWithIntrinsicDefaultProto(Isolate* isolate,
+                                              Handle<JSFunction> function,
+                                              int context_index) {
+@@ -2165,6 +2172,13 @@ void Bootstrapper::ExportFromRuntime(Isolate* isolate,
+         isolate, generator_function_function,
+         Context::GENERATOR_FUNCTION_FUNCTION_INDEX);
+ 
++    SetObjectPrototype(generator_function_function,
++                       isolate->function_function());
++    JSObject::AddProperty(
++        generator_function_prototype, factory->constructor_string(),
++        generator_function_function,
++        static_cast<PropertyAttributes>(DONT_ENUM | READ_ONLY));
++
+     native_context->sloppy_generator_function_map()->SetConstructor(
+         *generator_function_function);
+     native_context->strict_generator_function_map()->SetConstructor(
+@@ -2720,37 +2734,6 @@ bool Genesis::InstallNatives(GlobalContextType context_type) {
+ 
+   InstallBuiltinFunctionIds();
+ 
+-  // Also install builtin function ids to some generator object methods. These
+-  // three methods use the three resume operations (Runtime_GeneratorNext,
+-  // Runtime_GeneratorReturn, Runtime_GeneratorThrow) respectively. Those
+-  // operations are not supported by Crankshaft, TurboFan, nor Ignition.
+-  {
+-    Handle<JSObject> generator_object_prototype(JSObject::cast(
+-        native_context()->generator_object_prototype_map()->prototype()));
+-
+-    {  // GeneratorObject.prototype.next
+-      Handle<String> key = factory()->next_string();
+-      Handle<JSFunction> function = Handle<JSFunction>::cast(
+-          JSReceiver::GetProperty(generator_object_prototype, key)
+-              .ToHandleChecked());
+-      function->shared()->set_builtin_function_id(kGeneratorObjectNext);
+-    }
+-    {  // GeneratorObject.prototype.return
+-      Handle<String> key = factory()->NewStringFromAsciiChecked("return");
+-      Handle<JSFunction> function = Handle<JSFunction>::cast(
+-          JSReceiver::GetProperty(generator_object_prototype, key)
+-              .ToHandleChecked());
+-      function->shared()->set_builtin_function_id(kGeneratorObjectReturn);
+-    }
+-    {  // GeneratorObject.prototype.throw
+-      Handle<String> key = factory()->throw_string();
+-      Handle<JSFunction> function = Handle<JSFunction>::cast(
+-          JSReceiver::GetProperty(generator_object_prototype, key)
+-              .ToHandleChecked());
+-      function->shared()->set_builtin_function_id(kGeneratorObjectThrow);
+-    }
+-  }
+-
+   // Create a map for accessor property descriptors (a variant of JSObject
+   // that predefines four properties get, set, configurable and enumerable).
+   {
+@@ -3555,7 +3538,7 @@ Genesis::Genesis(Isolate* isolate,
+     CreateRoots();
+     Handle<JSFunction> empty_function = CreateEmptyFunction(isolate);
+     CreateStrictModeFunctionMaps(empty_function);
+-    CreateIteratorMaps();
++    CreateIteratorMaps(empty_function);
+     Handle<JSGlobalObject> global_object =
+         CreateNewGlobals(global_proxy_template, global_proxy);
+     HookUpGlobalProxy(global_object, global_proxy);
+diff --git a/src/builtins.cc b/src/builtins.cc
+index 3be314ed2b4..60e16322504 100644
+--- a/src/builtins.cc
++++ b/src/builtins.cc
+@@ -2313,8 +2313,112 @@ void Builtins::Generate_MathTrunc(compiler::CodeStubAssembler* assembler) {
+ }
+ 
+ // -----------------------------------------------------------------------------
+-// ES6 section 26.1 The Reflect Object
++// ES6 section 25.3 Generator Objects
++
++namespace {
++
++void Generate_GeneratorPrototypeResume(
++    compiler::CodeStubAssembler* assembler,
++    JSGeneratorObject::ResumeMode resume_mode, char const* const method_name) {
++  typedef compiler::CodeStubAssembler::Label Label;
++  typedef compiler::Node Node;
++
++  Node* receiver = assembler->Parameter(0);
++  Node* value = assembler->Parameter(1);
++  Node* context = assembler->Parameter(4);
++  Node* zero = assembler->SmiConstant(Smi::FromInt(0));
++
++  // Check if the {receiver} is actually a JSGeneratorObject.
++  Label if_receiverisincompatible(assembler, Label::kDeferred);
++  assembler->GotoIf(assembler->WordIsSmi(receiver), &if_receiverisincompatible);
++  Node* receiver_instance_type = assembler->LoadInstanceType(receiver);
++  assembler->GotoUnless(assembler->Word32Equal(
++                            receiver_instance_type,
++                            assembler->Int32Constant(JS_GENERATOR_OBJECT_TYPE)),
++                        &if_receiverisincompatible);
++
++  // Check if the {receiver} is running or already closed.
++  Node* receiver_continuation = assembler->LoadObjectField(
++      receiver, JSGeneratorObject::kContinuationOffset);
++  Label if_receiverisclosed(assembler, Label::kDeferred),
++      if_receiverisrunning(assembler, Label::kDeferred);
++  assembler->GotoIf(assembler->SmiEqual(receiver_continuation, zero),
++                    &if_receiverisclosed);
++  assembler->GotoIf(assembler->SmiLessThan(receiver_continuation, zero),
++                    &if_receiverisrunning);
++
++  // Resume the {receiver} using our trampoline.
++  Node* result = assembler->CallStub(
++      CodeFactory::ResumeGenerator(assembler->isolate()), context, value,
++      receiver, assembler->SmiConstant(Smi::FromInt(resume_mode)));
++  assembler->Return(result);
++
++  assembler->Bind(&if_receiverisincompatible);
++  {
++    // The {receiver} is not a valid JSGeneratorObject.
++    Node* result = assembler->CallRuntime(
++        Runtime::kThrowIncompatibleMethodReceiver, context,
++        assembler->HeapConstant(assembler->factory()->NewStringFromAsciiChecked(
++            method_name, TENURED)),
++        receiver);
++    assembler->Return(result);  // Never reached.
++  }
++
++  assembler->Bind(&if_receiverisclosed);
++  {
++    // The {receiver} is closed already.
++    Node* result = nullptr;
++    switch (resume_mode) {
++      case JSGeneratorObject::kNext:
++        result = assembler->CallRuntime(Runtime::kCreateIterResultObject,
++                                        context, assembler->UndefinedConstant(),
++                                        assembler->BooleanConstant(true));
++        break;
++      case JSGeneratorObject::kReturn:
++        result =
++            assembler->CallRuntime(Runtime::kCreateIterResultObject, context,
++                                   value, assembler->BooleanConstant(true));
++        break;
++      case JSGeneratorObject::kThrow:
++        result = assembler->CallRuntime(Runtime::kThrow, context, value);
++        break;
++    }
++    assembler->Return(result);
++  }
++
++  assembler->Bind(&if_receiverisrunning);
++  {
++    Node* result =
++        assembler->CallRuntime(Runtime::kThrowGeneratorRunning, context);
++    assembler->Return(result);  // Never reached.
++  }
++}
++
++}  // namespace
+ 
++// ES6 section 25.3.1.2 Generator.prototype.next ( value )
++void Builtins::Generate_GeneratorPrototypeNext(
++    compiler::CodeStubAssembler* assembler) {
++  Generate_GeneratorPrototypeResume(assembler, JSGeneratorObject::kNext,
++                                    "[Generator].prototype.next");
++}
++
++// ES6 section 25.3.1.3 Generator.prototype.return ( value )
++void Builtins::Generate_GeneratorPrototypeReturn(
++    compiler::CodeStubAssembler* assembler) {
++  Generate_GeneratorPrototypeResume(assembler, JSGeneratorObject::kReturn,
++                                    "[Generator].prototype.return");
++}
++
++// ES6 section 25.3.1.4 Generator.prototype.throw ( exception )
++void Builtins::Generate_GeneratorPrototypeThrow(
++    compiler::CodeStubAssembler* assembler) {
++  Generate_GeneratorPrototypeResume(assembler, JSGeneratorObject::kThrow,
++                                    "[Generator].prototype.throw");
++}
++
++// -----------------------------------------------------------------------------
++// ES6 section 26.1 The Reflect Object
+ 
+ // ES6 section 26.1.3 Reflect.defineProperty
+ BUILTIN(ReflectDefineProperty) {
+diff --git a/src/builtins.h b/src/builtins.h
+index ac4d7890dc4..190508e79bf 100644
+--- a/src/builtins.h
++++ b/src/builtins.h
+@@ -217,6 +217,7 @@ inline bool operator&(BuiltinExtraArguments lhs, BuiltinExtraArguments rhs) {
+   V(JSConstructStubApi, BUILTIN, UNINITIALIZED, kNoExtraICState)               \
+   V(JSEntryTrampoline, BUILTIN, UNINITIALIZED, kNoExtraICState)                \
+   V(JSConstructEntryTrampoline, BUILTIN, UNINITIALIZED, kNoExtraICState)       \
++  V(ResumeGeneratorTrampoline, BUILTIN, UNINITIALIZED, kNoExtraICState)        \
+   V(CompileLazy, BUILTIN, UNINITIALIZED, kNoExtraICState)                      \
+   V(CompileOptimized, BUILTIN, UNINITIALIZED, kNoExtraICState)                 \
+   V(CompileOptimizedConcurrent, BUILTIN, UNINITIALIZED, kNoExtraICState)       \
+@@ -306,13 +307,16 @@ inline bool operator&(BuiltinExtraArguments lhs, BuiltinExtraArguments rhs) {
+   CODE_AGE_LIST_WITH_ARG(DECLARE_CODE_AGE_BUILTIN, V)
+ 
+ // Define list of builtins implemented in TurboFan (with JS linkage).
+-#define BUILTIN_LIST_T(V) \
+-  V(MathCeil, 2)          \
+-  V(MathClz32, 2)         \
+-  V(MathFloor, 2)         \
+-  V(MathRound, 2)         \
+-  V(MathSqrt, 2)          \
+-  V(MathTrunc, 2)         \
++#define BUILTIN_LIST_T(V)        \
++  V(GeneratorPrototypeNext, 2)   \
++  V(GeneratorPrototypeReturn, 2) \
++  V(GeneratorPrototypeThrow, 2)  \
++  V(MathCeil, 2)                 \
++  V(MathClz32, 2)                \
++  V(MathFloor, 2)                \
++  V(MathRound, 2)                \
++  V(MathSqrt, 2)                 \
++  V(MathTrunc, 2)                \
+   V(ObjectHasOwnProperty, 2)
+ 
+ // Define list of builtin handlers implemented in assembly.
+@@ -448,6 +452,7 @@ class Builtins {
+   static void Generate_JSConstructStubApi(MacroAssembler* masm);
+   static void Generate_JSEntryTrampoline(MacroAssembler* masm);
+   static void Generate_JSConstructEntryTrampoline(MacroAssembler* masm);
++  static void Generate_ResumeGeneratorTrampoline(MacroAssembler* masm);
+   static void Generate_NotifyDeoptimized(MacroAssembler* masm);
+   static void Generate_NotifySoftDeoptimized(MacroAssembler* masm);
+   static void Generate_NotifyLazyDeoptimized(MacroAssembler* masm);
+@@ -614,6 +619,16 @@ class Builtins {
+   // ES6 section 20.1.1.1 Number ( [ value ] ) for the [[Construct]] case.
+   static void Generate_NumberConstructor_ConstructStub(MacroAssembler* masm);
+ 
++  // ES6 section 25.3.1.2 Generator.prototype.next ( value )
++  static void Generate_GeneratorPrototypeNext(
++      compiler::CodeStubAssembler* assembler);
++  // ES6 section 25.3.1.3 Generator.prototype.return ( value )
++  static void Generate_GeneratorPrototypeReturn(
++      compiler::CodeStubAssembler* assembler);
++  // ES6 section 25.3.1.4 Generator.prototype.throw ( exception )
++  static void Generate_GeneratorPrototypeThrow(
++      compiler::CodeStubAssembler* assembler);
++
+   // ES6 section 19.1.3.2 Object.prototype.hasOwnProperty
+   static void Generate_ObjectHasOwnProperty(
+       compiler::CodeStubAssembler* assembler);
+diff --git a/src/code-factory.cc b/src/code-factory.cc
+index fbfdd5f644c..77da009a3fe 100644
+--- a/src/code-factory.cc
++++ b/src/code-factory.cc
+@@ -370,6 +370,12 @@ Callable CodeFactory::StoreInterceptor(Isolate* isolate) {
+   return Callable(stub.GetCode(), stub.GetCallInterfaceDescriptor());
+ }
+ 
++// static
++Callable CodeFactory::ResumeGenerator(Isolate* isolate) {
++  return Callable(isolate->builtins()->ResumeGeneratorTrampoline(),
++                  ResumeGeneratorDescriptor(isolate));
++}
++
+ // static
+ Callable CodeFactory::Typeof(Isolate* isolate) {
+   TypeofStub stub(isolate);
+diff --git a/src/code-factory.h b/src/code-factory.h
+index deb125f224d..698cad19c4e 100644
+--- a/src/code-factory.h
++++ b/src/code-factory.h
+@@ -56,6 +56,8 @@ class CodeFactory final {
+ 
+   static Callable StoreInterceptor(Isolate* isolate);
+ 
++  static Callable ResumeGenerator(Isolate* isolate);
++
+   static Callable CompareIC(Isolate* isolate, Token::Value op);
+   static Callable CompareNilIC(Isolate* isolate, NilValue nil_value);
+ 
+diff --git a/src/compiler.cc b/src/compiler.cc
+index af51d276ce9..9d942c6846d 100644
+--- a/src/compiler.cc
++++ b/src/compiler.cc
+@@ -375,14 +375,6 @@ OptimizedCompileJob::Status OptimizedCompileJob::CreateGraph() {
+     return AbortOptimization(kFunctionBeingDebugged);
+   }
+ 
+-  // Resuming a suspended frame is not supported by Crankshaft/TurboFan.
+-  if (info()->shared_info()->HasBuiltinFunctionId() &&
+-      (info()->shared_info()->builtin_function_id() == kGeneratorObjectNext ||
+-       info()->shared_info()->builtin_function_id() == kGeneratorObjectReturn ||
+-       info()->shared_info()->builtin_function_id() == kGeneratorObjectThrow)) {
+-    return AbortOptimization(kGeneratorResumeMethod);
+-  }
+-
+   // Limit the number of times we try to optimize functions.
+   const int kMaxOptCount =
+       FLAG_deopt_every_n_times == 0 ? FLAG_max_opt_count : 1000;
+@@ -801,14 +793,6 @@ bool UseIgnition(CompilationInfo* info) {
+     return false;
+   }
+ 
+-  // TODO(4681): Resuming a suspended frame is not supported.
+-  if (info->shared_info()->HasBuiltinFunctionId() &&
+-      (info->shared_info()->builtin_function_id() == kGeneratorObjectNext ||
+-       info->shared_info()->builtin_function_id() == kGeneratorObjectReturn ||
+-       info->shared_info()->builtin_function_id() == kGeneratorObjectThrow)) {
+-    return false;
+-  }
+-
+   // Checks whether top level functions should be passed by the filter.
+   if (info->shared_info()->is_toplevel()) {
+     Vector<const char> filter = CStrVector(FLAG_ignition_filter);
+diff --git a/src/compiler/code-stub-assembler.cc b/src/compiler/code-stub-assembler.cc
+index bbb4d6353bf..f50fa1a14ba 100644
+--- a/src/compiler/code-stub-assembler.cc
++++ b/src/compiler/code-stub-assembler.cc
+@@ -1026,6 +1026,21 @@ Node* CodeStubAssembler::CallStub(Callable const& callable, Node* context,
+   return CallStub(callable.descriptor(), target, context, arg1, result_size);
+ }
+ 
++Node* CodeStubAssembler::CallStub(Callable const& callable, Node* context,
++                                  Node* arg1, Node* arg2, size_t result_size) {
++  Node* target = HeapConstant(callable.code());
++  return CallStub(callable.descriptor(), target, context, arg1, arg2,
++                  result_size);
++}
++
++Node* CodeStubAssembler::CallStub(Callable const& callable, Node* context,
++                                  Node* arg1, Node* arg2, Node* arg3,
++                                  size_t result_size) {
++  Node* target = HeapConstant(callable.code());
++  return CallStub(callable.descriptor(), target, context, arg1, arg2, arg3,
++                  result_size);
++}
++
+ Node* CodeStubAssembler::CallStub(const CallInterfaceDescriptor& descriptor,
+                                   Node* target, Node* context, Node* arg1,
+                                   size_t result_size) {
+diff --git a/src/compiler/code-stub-assembler.h b/src/compiler/code-stub-assembler.h
+index 9fcb8906069..2ed7cacdfce 100644
+--- a/src/compiler/code-stub-assembler.h
++++ b/src/compiler/code-stub-assembler.h
+@@ -234,6 +234,10 @@ class CodeStubAssembler {
+ 
+   Node* CallStub(Callable const& callable, Node* context, Node* arg1,
+                  size_t result_size = 1);
++  Node* CallStub(Callable const& callable, Node* context, Node* arg1,
++                 Node* arg2, size_t result_size = 1);
++  Node* CallStub(Callable const& callable, Node* context, Node* arg1,
++                 Node* arg2, Node* arg3, size_t result_size = 1);
+ 
+   Node* CallStub(const CallInterfaceDescriptor& descriptor, Node* target,
+                  Node* context, Node* arg1, size_t result_size = 1);
+diff --git a/src/deoptimizer.cc b/src/deoptimizer.cc
+index a8405daee32..d69a292f0a8 100644
+--- a/src/deoptimizer.cc
++++ b/src/deoptimizer.cc
+@@ -296,7 +296,9 @@ void Deoptimizer::DeoptimizeMarkedCodeForContext(Context* context) {
+                          !FLAG_turbo_asm_deoptimization;
+       bool safe_to_deopt =
+           deopt_index != Safepoint::kNoDeoptimizationIndex || turbofanned;
+-      CHECK(topmost_optimized_code == NULL || safe_to_deopt || turbofanned);
++      bool builtin = code->kind() == Code::BUILTIN;
++      CHECK(topmost_optimized_code == NULL || safe_to_deopt || turbofanned ||
++            builtin);
+       if (topmost_optimized_code == NULL) {
+         topmost_optimized_code = code;
+         safe_to_deopt_topmost_optimized_code = safe_to_deopt;
+diff --git a/src/frames.cc b/src/frames.cc
+index 0e57429ea30..de3ab3026ec 100644
+--- a/src/frames.cc
++++ b/src/frames.cc
+@@ -944,16 +944,6 @@ void JavaScriptFrame::SaveOperandStack(FixedArray* store) const {
+   }
+ }
+ 
+-
+-void JavaScriptFrame::RestoreOperandStack(FixedArray* store) {
+-  int operands_count = store->length();
+-  DCHECK_LE(operands_count, ComputeOperandsCount());
+-  for (int i = 0; i < operands_count; i++) {
+-    DCHECK_EQ(GetOperand(i), isolate()->heap()->the_hole_value());
+-    Memory::Object_at(GetOperandSlot(i)) = store->get(i);
+-  }
+-}
+-
+ namespace {
+ 
+ bool CannotDeoptFromAsmCode(Code* code, JSFunction* function) {
+diff --git a/src/frames.h b/src/frames.h
+index f6806d7563b..e112f52ff85 100644
+--- a/src/frames.h
++++ b/src/frames.h
+@@ -747,7 +747,6 @@ class JavaScriptFrame : public StandardFrame {
+ 
+   // Generator support to preserve operand stack.
+   void SaveOperandStack(FixedArray* store) const;
+-  void RestoreOperandStack(FixedArray* store);
+ 
+   // Debugger access.
+   void SetParameterValue(int index, Object* value) const;
+diff --git a/src/full-codegen/arm/full-codegen-arm.cc b/src/full-codegen/arm/full-codegen-arm.cc
+index 27985fbe490..c0385042871 100644
+--- a/src/full-codegen/arm/full-codegen-arm.cc
++++ b/src/full-codegen/arm/full-codegen-arm.cc
+@@ -1840,7 +1840,7 @@ void FullCodeGenerator::VisitYield(Yield* expr) {
+   // this.  It stays on the stack while we update the iterator.
+   VisitForStackValue(expr->expression());
+ 
+-  Label suspend, continuation, post_runtime, resume;
++  Label suspend, continuation, post_runtime, resume, exception;
+ 
+   __ jmp(&suspend);
+   __ bind(&continuation);
+@@ -1849,12 +1849,18 @@ void FullCodeGenerator::VisitYield(Yield* expr) {
+   // respective resume operation).
+   __ RecordGeneratorContinuation();
+   __ pop(r1);
+-  __ cmp(r1, Operand(Smi::FromInt(JSGeneratorObject::RETURN)));
+-  __ b(ne, &resume);
+-  __ push(result_register());
++  STATIC_ASSERT(JSGeneratorObject::kNext < JSGeneratorObject::kReturn);
++  STATIC_ASSERT(JSGeneratorObject::kThrow > JSGeneratorObject::kReturn);
++  __ cmp(r1, Operand(Smi::FromInt(JSGeneratorObject::kReturn)));
++  __ b(lt, &resume);
++  __ Push(result_register());
++  __ b(gt, &exception);
+   EmitCreateIteratorResult(true);
+   EmitUnwindAndReturn();
+ 
++  __ bind(&exception);
++  __ CallRuntime(Runtime::kThrow);
++
+   __ bind(&suspend);
+   OperandStackDepthIncrement(1);  // Not popped on this path.
+   VisitForAccumulatorValue(expr->generator_object());
+@@ -1879,113 +1885,6 @@ void FullCodeGenerator::VisitYield(Yield* expr) {
+   context()->Plug(result_register());
+ }
+ 
+-
+-void FullCodeGenerator::EmitGeneratorResume(Expression *generator,
+-    Expression *value,
+-    JSGeneratorObject::ResumeMode resume_mode) {
+-  // The value stays in r0, and is ultimately read by the resumed generator, as
+-  // if CallRuntime(Runtime::kSuspendJSGeneratorObject) returned it. Or it
+-  // is read to throw the value when the resumed generator is already closed.
+-  // r1 will hold the generator object until the activation has been resumed.
+-  VisitForStackValue(generator);
+-  VisitForAccumulatorValue(value);
+-  PopOperand(r1);
+-
+-  // Store input value into generator object.
+-  __ str(result_register(),
+-         FieldMemOperand(r1, JSGeneratorObject::kInputOffset));
+-  __ mov(r2, result_register());
+-  __ RecordWriteField(r1, JSGeneratorObject::kInputOffset, r2, r3,
+-                      kLRHasBeenSaved, kDontSaveFPRegs);
+-
+-  // Load suspended function and context.
+-  __ ldr(cp, FieldMemOperand(r1, JSGeneratorObject::kContextOffset));
+-  __ ldr(r4, FieldMemOperand(r1, JSGeneratorObject::kFunctionOffset));
+-
+-  // Load receiver and store as the first argument.
+-  __ ldr(r2, FieldMemOperand(r1, JSGeneratorObject::kReceiverOffset));
+-  __ push(r2);
+-
+-  // Push holes for arguments to generator function. Since the parser forced
+-  // context allocation for any variables in generators, the actual argument
+-  // values have already been copied into the context and these dummy values
+-  // will never be used.
+-  __ ldr(r3, FieldMemOperand(r4, JSFunction::kSharedFunctionInfoOffset));
+-  __ ldr(r3,
+-         FieldMemOperand(r3, SharedFunctionInfo::kFormalParameterCountOffset));
+-  __ LoadRoot(r2, Heap::kTheHoleValueRootIndex);
+-  Label push_argument_holes, push_frame;
+-  __ bind(&push_argument_holes);
+-  __ sub(r3, r3, Operand(Smi::FromInt(1)), SetCC);
+-  __ b(mi, &push_frame);
+-  __ push(r2);
+-  __ jmp(&push_argument_holes);
+-
+-  // Enter a new JavaScript frame, and initialize its slots as they were when
+-  // the generator was suspended.
+-  Label resume_frame, done;
+-  __ bind(&push_frame);
+-  __ bl(&resume_frame);
+-  __ jmp(&done);
+-  __ bind(&resume_frame);
+-  // lr = return address.
+-  // fp = caller's frame pointer.
+-  // pp = caller's constant pool (if FLAG_enable_embedded_constant_pool),
+-  // cp = callee's context,
+-  // r4 = callee's JS function.
+-  __ PushStandardFrame(r4);
+-
+-  // Load the operand stack size.
+-  __ ldr(r3, FieldMemOperand(r1, JSGeneratorObject::kOperandStackOffset));
+-  __ ldr(r3, FieldMemOperand(r3, FixedArray::kLengthOffset));
+-  __ SmiUntag(r3);
+-
+-  // If we are sending a value and there is no operand stack, we can jump back
+-  // in directly.
+-  if (resume_mode == JSGeneratorObject::NEXT) {
+-    Label slow_resume;
+-    __ cmp(r3, Operand(0));
+-    __ b(ne, &slow_resume);
+-    __ ldr(r3, FieldMemOperand(r4, JSFunction::kCodeEntryOffset));
+-
+-    { ConstantPoolUnavailableScope constant_pool_unavailable(masm_);
+-      if (FLAG_enable_embedded_constant_pool) {
+-        // Load the new code object's constant pool pointer.
+-        __ LoadConstantPoolPointerRegisterFromCodeTargetAddress(r3);
+-      }
+-
+-      __ ldr(r2, FieldMemOperand(r1, JSGeneratorObject::kContinuationOffset));
+-      __ SmiUntag(r2);
+-      __ add(r3, r3, r2);
+-      __ mov(r2, Operand(Smi::FromInt(JSGeneratorObject::kGeneratorExecuting)));
+-      __ str(r2, FieldMemOperand(r1, JSGeneratorObject::kContinuationOffset));
+-      __ Push(Smi::FromInt(resume_mode));  // Consumed in continuation.
+-      __ Jump(r3);
+-    }
+-    __ bind(&slow_resume);
+-  }
+-
+-  // Otherwise, we push holes for the operand stack and call the runtime to fix
+-  // up the stack and the handlers.
+-  Label push_operand_holes, call_resume;
+-  __ bind(&push_operand_holes);
+-  __ sub(r3, r3, Operand(1), SetCC);
+-  __ b(mi, &call_resume);
+-  __ push(r2);
+-  __ b(&push_operand_holes);
+-  __ bind(&call_resume);
+-  __ Push(Smi::FromInt(resume_mode));  // Consumed in continuation.
+-  DCHECK(!result_register().is(r1));
+-  __ Push(r1, result_register());
+-  __ Push(Smi::FromInt(resume_mode));
+-  __ CallRuntime(Runtime::kResumeJSGeneratorObject);
+-  // Not reached: the runtime call returns elsewhere.
+-  __ stop("not-reached");
+-
+-  __ bind(&done);
+-  context()->Plug(result_register());
+-}
+-
+ void FullCodeGenerator::PushOperands(Register reg1, Register reg2) {
+   OperandStackDepthIncrement(2);
+   __ Push(reg1, reg2);
+diff --git a/src/full-codegen/arm64/full-codegen-arm64.cc b/src/full-codegen/arm64/full-codegen-arm64.cc
+index eb044dbfd9d..fbd653e9ecc 100644
+--- a/src/full-codegen/arm64/full-codegen-arm64.cc
++++ b/src/full-codegen/arm64/full-codegen-arm64.cc
+@@ -3744,7 +3744,7 @@ void FullCodeGenerator::VisitYield(Yield* expr) {
+   // and suchlike. The implementation changes a little by bleeding_edge so I
+   // don't want to spend too much time on it now.
+ 
+-  Label suspend, continuation, post_runtime, resume;
++  Label suspend, continuation, post_runtime, resume, exception;
+ 
+   __ B(&suspend);
+   // TODO(jbramley): This label is bound here because the following code
+@@ -3756,12 +3756,18 @@ void FullCodeGenerator::VisitYield(Yield* expr) {
+   // respective resume operation).
+   __ RecordGeneratorContinuation();
+   __ Pop(x1);
+-  __ Cmp(x1, Smi::FromInt(JSGeneratorObject::RETURN));
+-  __ B(ne, &resume);
++  STATIC_ASSERT(JSGeneratorObject::kNext < JSGeneratorObject::kReturn);
++  STATIC_ASSERT(JSGeneratorObject::kThrow > JSGeneratorObject::kReturn);
++  __ Cmp(x1, Operand(Smi::FromInt(JSGeneratorObject::kReturn)));
++  __ B(lt, &resume);
+   __ Push(result_register());
++  __ B(gt, &exception);
+   EmitCreateIteratorResult(true);
+   EmitUnwindAndReturn();
+ 
++  __ Bind(&exception);
++  __ CallRuntime(Runtime::kThrow);
++
+   __ Bind(&suspend);
+   OperandStackDepthIncrement(1);  // Not popped on this path.
+   VisitForAccumulatorValue(expr->generator_object());
+@@ -3786,110 +3792,6 @@ void FullCodeGenerator::VisitYield(Yield* expr) {
+   context()->Plug(result_register());
+ }
+ 
+-
+-void FullCodeGenerator::EmitGeneratorResume(Expression *generator,
+-    Expression *value,
+-    JSGeneratorObject::ResumeMode resume_mode) {
+-  ASM_LOCATION("FullCodeGenerator::EmitGeneratorResume");
+-  Register generator_object = x1;
+-  Register the_hole = x2;
+-  Register operand_stack_size = w3;
+-  Register function = x4;
+-
+-  // The value stays in x0, and is ultimately read by the resumed generator, as
+-  // if CallRuntime(Runtime::kSuspendJSGeneratorObject) returned it. Or it
+-  // is read to throw the value when the resumed generator is already closed. x1
+-  // will hold the generator object until the activation has been resumed.
+-  VisitForStackValue(generator);
+-  VisitForAccumulatorValue(value);
+-  PopOperand(generator_object);
+-
+-  // Store input value into generator object.
+-  __ Str(result_register(),
+-         FieldMemOperand(x1, JSGeneratorObject::kInputOffset));
+-  __ Mov(x2, result_register());
+-  __ RecordWriteField(x1, JSGeneratorObject::kInputOffset, x2, x3,
+-                      kLRHasBeenSaved, kDontSaveFPRegs);
+-
+-  // Load suspended function and context.
+-  __ Ldr(cp, FieldMemOperand(generator_object,
+-                             JSGeneratorObject::kContextOffset));
+-  __ Ldr(function, FieldMemOperand(generator_object,
+-                                   JSGeneratorObject::kFunctionOffset));
+-
+-  // Load receiver and store as the first argument.
+-  __ Ldr(x10, FieldMemOperand(generator_object,
+-                              JSGeneratorObject::kReceiverOffset));
+-  __ Push(x10);
+-
+-  // Push holes for arguments to generator function. Since the parser forced
+-  // context allocation for any variables in generators, the actual argument
+-  // values have already been copied into the context and these dummy values
+-  // will never be used.
+-  __ Ldr(x10, FieldMemOperand(function, JSFunction::kSharedFunctionInfoOffset));
+-
+-  // The number of arguments is stored as an int32_t, and -1 is a marker
+-  // (SharedFunctionInfo::kDontAdaptArgumentsSentinel), so we need sign
+-  // extension to correctly handle it. However, in this case, we operate on
+-  // 32-bit W registers, so extension isn't required.
+-  __ Ldr(w10, FieldMemOperand(x10,
+-                              SharedFunctionInfo::kFormalParameterCountOffset));
+-  __ LoadRoot(the_hole, Heap::kTheHoleValueRootIndex);
+-  __ PushMultipleTimes(the_hole, w10);
+-
+-  // Enter a new JavaScript frame, and initialize its slots as they were when
+-  // the generator was suspended.
+-  Label resume_frame, done;
+-  __ Bl(&resume_frame);
+-  __ B(&done);
+-
+-  __ Bind(&resume_frame);
+-  __ Push(lr,           // Return address.
+-          fp,           // Caller's frame pointer.
+-          cp,           // Callee's context.
+-          function);    // Callee's JS Function.
+-  __ Add(fp, __ StackPointer(), kPointerSize * 2);
+-
+-  // Load and untag the operand stack size.
+-  __ Ldr(x10, FieldMemOperand(generator_object,
+-                              JSGeneratorObject::kOperandStackOffset));
+-  __ Ldr(operand_stack_size,
+-         UntagSmiFieldMemOperand(x10, FixedArray::kLengthOffset));
+-
+-  // If we are sending a value and there is no operand stack, we can jump back
+-  // in directly.
+-  if (resume_mode == JSGeneratorObject::NEXT) {
+-    Label slow_resume;
+-    __ Cbnz(operand_stack_size, &slow_resume);
+-    __ Ldr(x10, FieldMemOperand(function, JSFunction::kCodeEntryOffset));
+-    __ Ldrsw(x11,
+-             UntagSmiFieldMemOperand(generator_object,
+-                                     JSGeneratorObject::kContinuationOffset));
+-    __ Add(x10, x10, x11);
+-    __ Mov(x12, Smi::FromInt(JSGeneratorObject::kGeneratorExecuting));
+-    __ Str(x12, FieldMemOperand(generator_object,
+-                                JSGeneratorObject::kContinuationOffset));
+-    __ Push(Smi::FromInt(resume_mode));  // Consumed in continuation.
+-    __ Br(x10);
+-
+-    __ Bind(&slow_resume);
+-  }
+-
+-  // Otherwise, we push holes for the operand stack and call the runtime to fix
+-  // up the stack and the handlers.
+-  __ PushMultipleTimes(the_hole, operand_stack_size);
+-
+-  __ Mov(x10, Smi::FromInt(resume_mode));
+-  __ Push(Smi::FromInt(resume_mode));  // Consumed in continuation.
+-  __ Push(generator_object, result_register(), x10);
+-  __ CallRuntime(Runtime::kResumeJSGeneratorObject);
+-  // Not reached: the runtime call returns elsewhere.
+-  __ Unreachable();
+-
+-  __ Bind(&done);
+-  context()->Plug(result_register());
+-}
+-
+ void FullCodeGenerator::PushOperands(Register reg1, Register reg2) {
+   OperandStackDepthIncrement(2);
+   __ Push(reg1, reg2);
+diff --git a/src/full-codegen/full-codegen.cc b/src/full-codegen/full-codegen.cc
+index 8c0cddc0d01..1ac118ca916 100644
+--- a/src/full-codegen/full-codegen.cc
++++ b/src/full-codegen/full-codegen.cc
+@@ -696,27 +696,6 @@ void FullCodeGenerator::VisitSuperCallReference(SuperCallReference* super) {
+ }
+ 
+ 
+-void FullCodeGenerator::EmitGeneratorNext(CallRuntime* expr) {
+-  ZoneList<Expression*>* args = expr->arguments();
+-  DCHECK(args->length() == 2);
+-  EmitGeneratorResume(args->at(0), args->at(1), JSGeneratorObject::NEXT);
+-}
+-
+-
+-void FullCodeGenerator::EmitGeneratorReturn(CallRuntime* expr) {
+-  ZoneList<Expression*>* args = expr->arguments();
+-  DCHECK(args->length() == 2);
+-  EmitGeneratorResume(args->at(0), args->at(1), JSGeneratorObject::RETURN);
+-}
+-
+-
+-void FullCodeGenerator::EmitGeneratorThrow(CallRuntime* expr) {
+-  ZoneList<Expression*>* args = expr->arguments();
+-  DCHECK(args->length() == 2);
+-  EmitGeneratorResume(args->at(0), args->at(1), JSGeneratorObject::THROW);
+-}
+-
+-
+ void FullCodeGenerator::EmitDebugBreakInOptimizedCode(CallRuntime* expr) {
+   context()->Plug(handle(Smi::FromInt(0), isolate()));
+ }
+diff --git a/src/full-codegen/full-codegen.h b/src/full-codegen/full-codegen.h
+index b41de6dbeda..4f4b520c255 100644
+--- a/src/full-codegen/full-codegen.h
++++ b/src/full-codegen/full-codegen.h
+@@ -514,9 +514,6 @@ class FullCodeGenerator: public AstVisitor {
+   F(HasCachedArrayIndex)                \
+   F(GetCachedArrayIndex)                \
+   F(GetSuperConstructor)                \
+-  F(GeneratorNext)                      \
+-  F(GeneratorReturn)                    \
+-  F(GeneratorThrow)                     \
+   F(DebugBreakInOptimizedCode)          \
+   F(ClassOf)                            \
+   F(StringCharCodeAt)                   \
+@@ -540,11 +537,6 @@ class FullCodeGenerator: public AstVisitor {
+ 
+   void EmitIntrinsicAsStubCall(CallRuntime* expr, const Callable& callable);
+ 
+-  // Platform-specific code for resuming generators.
+-  void EmitGeneratorResume(Expression *generator,
+-                           Expression *value,
+-                           JSGeneratorObject::ResumeMode resume_mode);
+-
+   // Platform-specific code for loading variables.
+   void EmitLoadGlobalCheckExtensions(VariableProxy* proxy,
+                                      TypeofMode typeof_mode, Label* slow);
+diff --git a/src/full-codegen/ia32/full-codegen-ia32.cc b/src/full-codegen/ia32/full-codegen-ia32.cc
+index 4dfe9023866..101e0c336a0 100644
+--- a/src/full-codegen/ia32/full-codegen-ia32.cc
++++ b/src/full-codegen/ia32/full-codegen-ia32.cc
+@@ -1756,7 +1756,7 @@ void FullCodeGenerator::VisitYield(Yield* expr) {
+   // this.  It stays on the stack while we update the iterator.
+   VisitForStackValue(expr->expression());
+ 
+-  Label suspend, continuation, post_runtime, resume;
++  Label suspend, continuation, post_runtime, resume, exception;
+ 
+   __ jmp(&suspend);
+   __ bind(&continuation);
+@@ -1765,12 +1765,18 @@ void FullCodeGenerator::VisitYield(Yield* expr) {
+   // respective resume operation).
+   __ RecordGeneratorContinuation();
+   __ pop(ebx);
+-  __ cmp(ebx, Immediate(Smi::FromInt(JSGeneratorObject::RETURN)));
+-  __ j(not_equal, &resume);
+-  __ push(result_register());
++  STATIC_ASSERT(JSGeneratorObject::kNext < JSGeneratorObject::kReturn);
++  STATIC_ASSERT(JSGeneratorObject::kThrow > JSGeneratorObject::kReturn);
++  __ cmp(ebx, Immediate(Smi::FromInt(JSGeneratorObject::kReturn)));
++  __ j(less, &resume);
++  __ Push(result_register());
++  __ j(greater, &exception);
+   EmitCreateIteratorResult(true);
+   EmitUnwindAndReturn();
+ 
++  __ bind(&exception);
++  __ CallRuntime(Runtime::kThrow);
++
+   __ bind(&suspend);
+   OperandStackDepthIncrement(1);  // Not popped on this path.
+   VisitForAccumulatorValue(expr->generator_object());
+@@ -1796,101 +1802,6 @@ void FullCodeGenerator::VisitYield(Yield* expr) {
+   context()->Plug(result_register());
+ }
+ 
+-
+-void FullCodeGenerator::EmitGeneratorResume(Expression *generator,
+-    Expression *value,
+-    JSGeneratorObject::ResumeMode resume_mode) {
+-  // The value stays in eax, and is ultimately read by the resumed generator, as
+-  // if CallRuntime(Runtime::kSuspendJSGeneratorObject) returned it. Or it
+-  // is read to throw the value when the resumed generator is already closed.
+-  // ebx will hold the generator object until the activation has been resumed.
+-  VisitForStackValue(generator);
+-  VisitForAccumulatorValue(value);
+-  PopOperand(ebx);
+-
+-  // Store input value into generator object.
+-  __ mov(FieldOperand(ebx, JSGeneratorObject::kInputOffset), result_register());
+-  __ mov(ecx, result_register());
+-  __ RecordWriteField(ebx, JSGeneratorObject::kInputOffset, ecx, edx,
+-                      kDontSaveFPRegs);
+-
+-  // Load suspended function and context.
+-  __ mov(esi, FieldOperand(ebx, JSGeneratorObject::kContextOffset));
+-  __ mov(edi, FieldOperand(ebx, JSGeneratorObject::kFunctionOffset));
+-
+-  // Push receiver.
+-  __ push(FieldOperand(ebx, JSGeneratorObject::kReceiverOffset));
+-
+-  // Push holes for arguments to generator function. Since the parser forced
+-  // context allocation for any variables in generators, the actual argument
+-  // values have already been copied into the context and these dummy values
+-  // will never be used.
+-  __ mov(edx, FieldOperand(edi, JSFunction::kSharedFunctionInfoOffset));
+-  __ mov(edx,
+-         FieldOperand(edx, SharedFunctionInfo::kFormalParameterCountOffset));
+-  __ mov(ecx, isolate()->factory()->the_hole_value());
+-  Label push_argument_holes, push_frame;
+-  __ bind(&push_argument_holes);
+-  __ sub(edx, Immediate(Smi::FromInt(1)));
+-  __ j(carry, &push_frame);
+-  __ push(ecx);
+-  __ jmp(&push_argument_holes);
+-
+-  // Enter a new JavaScript frame, and initialize its slots as they were when
+-  // the generator was suspended.
+-  Label resume_frame, done;
+-  __ bind(&push_frame);
+-  __ call(&resume_frame);
+-  __ jmp(&done);
+-  __ bind(&resume_frame);
+-  __ push(ebp);  // Caller's frame pointer.
+-  __ mov(ebp, esp);
+-  __ push(esi);  // Callee's context.
+-  __ push(edi);  // Callee's JS Function.
+-
+-  // Load the operand stack size.
+-  __ mov(edx, FieldOperand(ebx, JSGeneratorObject::kOperandStackOffset));
+-  __ mov(edx, FieldOperand(edx, FixedArray::kLengthOffset));
+-  __ SmiUntag(edx);
+-
+-  // If we are sending a value and there is no operand stack, we can jump back
+-  // in directly.
+-  if (resume_mode == JSGeneratorObject::NEXT) {
+-    Label slow_resume;
+-    __ cmp(edx, Immediate(0));
+-    __ j(not_zero, &slow_resume);
+-    __ mov(edx, FieldOperand(edi, JSFunction::kCodeEntryOffset));
+-    __ mov(ecx, FieldOperand(ebx, JSGeneratorObject::kContinuationOffset));
+-    __ SmiUntag(ecx);
+-    __ add(edx, ecx);
+-    __ mov(FieldOperand(ebx, JSGeneratorObject::kContinuationOffset),
+-           Immediate(Smi::FromInt(JSGeneratorObject::kGeneratorExecuting)));
+-    __ Push(Smi::FromInt(resume_mode));  // Consumed in continuation.
+-    __ jmp(edx);
+-    __ bind(&slow_resume);
+-  }
+-
+-  // Otherwise, we push holes for the operand stack and call the runtime to fix
+-  // up the stack and the handlers.
+-  Label push_operand_holes, call_resume;
+-  __ bind(&push_operand_holes);
+-  __ sub(edx, Immediate(1));
+-  __ j(carry, &call_resume);
+-  __ push(ecx);
+-  __ jmp(&push_operand_holes);
+-  __ bind(&call_resume);
+-  __ Push(Smi::FromInt(resume_mode));  // Consumed in continuation.
+-  __ push(ebx);
+-  __ push(result_register());
+-  __ Push(Smi::FromInt(resume_mode));
+-  __ CallRuntime(Runtime::kResumeJSGeneratorObject);
+-  // Not reached: the runtime call returns elsewhere.
+-  __ Abort(kGeneratorFailedToResume);
+-
+-  __ bind(&done);
+-  context()->Plug(result_register());
+-}
+-
+ void FullCodeGenerator::PushOperand(MemOperand operand) {
+   OperandStackDepthIncrement(1);
+   __ Push(operand);
+diff --git a/src/full-codegen/mips/full-codegen-mips.cc b/src/full-codegen/mips/full-codegen-mips.cc
+index d84678040ed..99b23555839 100644
+--- a/src/full-codegen/mips/full-codegen-mips.cc
++++ b/src/full-codegen/mips/full-codegen-mips.cc
+@@ -1838,7 +1838,7 @@ void FullCodeGenerator::VisitYield(Yield* expr) {
+   // this.  It stays on the stack while we update the iterator.
+   VisitForStackValue(expr->expression());
+ 
+-  Label suspend, continuation, post_runtime, resume;
++  Label suspend, continuation, post_runtime, resume, exception;
+ 
+   __ jmp(&suspend);
+   __ bind(&continuation);
+@@ -1847,11 +1847,16 @@ void FullCodeGenerator::VisitYield(Yield* expr) {
+   // respective resume operation).
+   __ RecordGeneratorContinuation();
+   __ pop(a1);
+-  __ Branch(&resume, ne, a1, Operand(Smi::FromInt(JSGeneratorObject::RETURN)));
+-  __ push(result_register());
++  __ Branch(&resume, eq, a1, Operand(Smi::FromInt(JSGeneratorObject::kNext)));
++  __ Push(result_register());
++  __ Branch(&exception, eq, a1,
++            Operand(Smi::FromInt(JSGeneratorObject::kThrow)));
+   EmitCreateIteratorResult(true);
+   EmitUnwindAndReturn();
+ 
++  __ bind(&exception);
++  __ CallRuntime(Runtime::kThrow);
++
+   __ bind(&suspend);
+   OperandStackDepthIncrement(1);  // Not popped on this path.
+   VisitForAccumulatorValue(expr->generator_object());
+@@ -1875,103 +1880,6 @@ void FullCodeGenerator::VisitYield(Yield* expr) {
+   context()->Plug(result_register());
+ }
+ 
+-
+-void FullCodeGenerator::EmitGeneratorResume(Expression *generator,
+-    Expression *value,
+-    JSGeneratorObject::ResumeMode resume_mode) {
+-  // The value stays in a0, and is ultimately read by the resumed generator, as
+-  // if CallRuntime(Runtime::kSuspendJSGeneratorObject) returned it. Or it
+-  // is read to throw the value when the resumed generator is already closed.
+-  // a1 will hold the generator object until the activation has been resumed.
+-  VisitForStackValue(generator);
+-  VisitForAccumulatorValue(value);
+-  PopOperand(a1);
+-
+-  // Store input value into generator object.
+-  __ sw(result_register(),
+-        FieldMemOperand(a1, JSGeneratorObject::kInputOffset));
+-  __ mov(a2, result_register());
+-  __ RecordWriteField(a1, JSGeneratorObject::kInputOffset, a2, a3,
+-                      kRAHasBeenSaved, kDontSaveFPRegs);
+-
+-  // Load suspended function and context.
+-  __ lw(cp, FieldMemOperand(a1, JSGeneratorObject::kContextOffset));
+-  __ lw(t0, FieldMemOperand(a1, JSGeneratorObject::kFunctionOffset));
+-
+-  // Load receiver and store as the first argument.
+-  __ lw(a2, FieldMemOperand(a1, JSGeneratorObject::kReceiverOffset));
+-  __ push(a2);
+-
+-  // Push holes for arguments to generator function. Since the parser forced
+-  // context allocation for any variables in generators, the actual argument
+-  // values have already been copied into the context and these dummy values
+-  // will never be used.
+-  __ lw(a3, FieldMemOperand(t0, JSFunction::kSharedFunctionInfoOffset));
+-  __ lw(a3,
+-        FieldMemOperand(a3, SharedFunctionInfo::kFormalParameterCountOffset));
+-  __ LoadRoot(a2, Heap::kTheHoleValueRootIndex);
+-  Label push_argument_holes, push_frame;
+-  __ bind(&push_argument_holes);
+-  __ Subu(a3, a3, Operand(Smi::FromInt(1)));
+-  __ Branch(&push_frame, lt, a3, Operand(zero_reg));
+-  __ push(a2);
+-  __ jmp(&push_argument_holes);
+-
+-  // Enter a new JavaScript frame, and initialize its slots as they were when
+-  // the generator was suspended.
+-  Label resume_frame, done;
+-  __ bind(&push_frame);
+-  __ Call(&resume_frame);
+-  __ jmp(&done);
+-  __ bind(&resume_frame);
+-  // ra = return address.
+-  // fp = caller's frame pointer.
+-  // cp = callee's context,
+-  // t0 = callee's JS function.
+-  __ PushStandardFrame(t0);
+-
+-  // Load the operand stack size.
+-  __ lw(a3, FieldMemOperand(a1, JSGeneratorObject::kOperandStackOffset));
+-  __ lw(a3, FieldMemOperand(a3, FixedArray::kLengthOffset));
+-  __ SmiUntag(a3);
+-
+-  // If we are sending a value and there is no operand stack, we can jump back
+-  // in directly.
+-  if (resume_mode == JSGeneratorObject::NEXT) {
+-    Label slow_resume;
+-    __ Branch(&slow_resume, ne, a3, Operand(zero_reg));
+-    __ lw(a3, FieldMemOperand(t0, JSFunction::kCodeEntryOffset));
+-    __ lw(a2, FieldMemOperand(a1, JSGeneratorObject::kContinuationOffset));
+-    __ SmiUntag(a2);
+-    __ Addu(a3, a3, Operand(a2));
+-    __ li(a2, Operand(Smi::FromInt(JSGeneratorObject::kGeneratorExecuting)));
+-    __ sw(a2, FieldMemOperand(a1, JSGeneratorObject::kContinuationOffset));
+-    __ Push(Smi::FromInt(resume_mode));  // Consumed in continuation.
+-    __ Jump(a3);
+-    __ bind(&slow_resume);
+-  }
+-
+-  // Otherwise, we push holes for the operand stack and call the runtime to fix
+-  // up the stack and the handlers.
+-  Label push_operand_holes, call_resume;
+-  __ bind(&push_operand_holes);
+-  __ Subu(a3, a3, Operand(1));
+-  __ Branch(&call_resume, lt, a3, Operand(zero_reg));
+-  __ push(a2);
+-  __ Branch(&push_operand_holes);
+-  __ bind(&call_resume);
+-  __ Push(Smi::FromInt(resume_mode));  // Consumed in continuation.
+-  DCHECK(!result_register().is(a1));
+-  __ Push(a1, result_register());
+-  __ Push(Smi::FromInt(resume_mode));
+-  __ CallRuntime(Runtime::kResumeJSGeneratorObject);
+-  // Not reached: the runtime call returns elsewhere.
+-  __ stop("not-reached");
+-
+-  __ bind(&done);
+-  context()->Plug(result_register());
+-}
+-
+ void FullCodeGenerator::PushOperands(Register reg1, Register reg2) {
+   OperandStackDepthIncrement(2);
+   __ Push(reg1, reg2);
+diff --git a/src/full-codegen/mips64/full-codegen-mips64.cc b/src/full-codegen/mips64/full-codegen-mips64.cc
+index c9075f5f517..91f9b6cd5a3 100644
+--- a/src/full-codegen/mips64/full-codegen-mips64.cc
++++ b/src/full-codegen/mips64/full-codegen-mips64.cc
+@@ -1839,7 +1839,7 @@ void FullCodeGenerator::VisitYield(Yield* expr) {
+   // this.  It stays on the stack while we update the iterator.
+   VisitForStackValue(expr->expression());
+ 
+-  Label suspend, continuation, post_runtime, resume;
++  Label suspend, continuation, post_runtime, resume, exception;
+ 
+   __ jmp(&suspend);
+   __ bind(&continuation);
+@@ -1848,11 +1848,16 @@ void FullCodeGenerator::VisitYield(Yield* expr) {
+   // respective resume operation).
+   __ RecordGeneratorContinuation();
+   __ pop(a1);
+-  __ Branch(&resume, ne, a1, Operand(Smi::FromInt(JSGeneratorObject::RETURN)));
+-  __ push(result_register());
++  __ Branch(&resume, eq, a1, Operand(Smi::FromInt(JSGeneratorObject::kNext)));
++  __ Push(result_register());
++  __ Branch(&exception, eq, a1,
++            Operand(Smi::FromInt(JSGeneratorObject::kThrow)));
+   EmitCreateIteratorResult(true);
+   EmitUnwindAndReturn();
+ 
++  __ bind(&exception);
++  __ CallRuntime(Runtime::kThrow);
++
+   __ bind(&suspend);
+   OperandStackDepthIncrement(1);  // Not popped on this path.
+   VisitForAccumulatorValue(expr->generator_object());
+@@ -1876,105 +1881,6 @@ void FullCodeGenerator::VisitYield(Yield* expr) {
+   context()->Plug(result_register());
+ }
+ 
+-
+-void FullCodeGenerator::EmitGeneratorResume(Expression *generator,
+-    Expression *value,
+-    JSGeneratorObject::ResumeMode resume_mode) {
+-  // The value stays in a0, and is ultimately read by the resumed generator, as
+-  // if CallRuntime(Runtime::kSuspendJSGeneratorObject) returned it. Or it
+-  // is read to throw the value when the resumed generator is already closed.
+-  // a1 will hold the generator object until the activation has been resumed.
+-  VisitForStackValue(generator);
+-  VisitForAccumulatorValue(value);
+-  PopOperand(a1);
+-
+-  // Store input value into generator object.
+-  __ sd(result_register(),
+-        FieldMemOperand(a1, JSGeneratorObject::kInputOffset));
+-  __ mov(a2, result_register());
+-  __ RecordWriteField(a1, JSGeneratorObject::kInputOffset, a2, a3,
+-                      kRAHasBeenSaved, kDontSaveFPRegs);
+-
+-  // Load suspended function and context.
+-  __ ld(cp, FieldMemOperand(a1, JSGeneratorObject::kContextOffset));
+-  __ ld(a4, FieldMemOperand(a1, JSGeneratorObject::kFunctionOffset));
+-
+-  // Load receiver and store as the first argument.
+-  __ ld(a2, FieldMemOperand(a1, JSGeneratorObject::kReceiverOffset));
+-  __ push(a2);
+-
+-  // Push holes for arguments to generator function. Since the parser forced
+-  // context allocation for any variables in generators, the actual argument
+-  // values have already been copied into the context and these dummy values
+-  // will never be used.
+-  __ ld(a3, FieldMemOperand(a4, JSFunction::kSharedFunctionInfoOffset));
+-  // The argument count is stored as int32_t on 64-bit platforms.
+-  // TODO(plind): Smi on 32-bit platforms.
+-  __ lw(a3,
+-        FieldMemOperand(a3, SharedFunctionInfo::kFormalParameterCountOffset));
+-  __ LoadRoot(a2, Heap::kTheHoleValueRootIndex);
+-  Label push_argument_holes, push_frame;
+-  __ bind(&push_argument_holes);
+-  __ Dsubu(a3, a3, Operand(1));
+-  __ Branch(&push_frame, lt, a3, Operand(zero_reg));
+-  __ push(a2);
+-  __ jmp(&push_argument_holes);
+-
+-  // Enter a new JavaScript frame, and initialize its slots as they were when
+-  // the generator was suspended.
+-  Label resume_frame, done;
+-  __ bind(&push_frame);
+-  __ Call(&resume_frame);
+-  __ jmp(&done);
+-  __ bind(&resume_frame);
+-  // ra = return address.
+-  // fp = caller's frame pointer.
+-  // cp = callee's context,
+-  // a4 = callee's JS function.
+-  __ PushStandardFrame(a4);
+-
+-  // Load the operand stack size.
+-  __ ld(a3, FieldMemOperand(a1, JSGeneratorObject::kOperandStackOffset));
+-  __ ld(a3, FieldMemOperand(a3, FixedArray::kLengthOffset));
+-  __ SmiUntag(a3);
+-
+-  // If we are sending a value and there is no operand stack, we can jump back
+-  // in directly.
+-  if (resume_mode == JSGeneratorObject::NEXT) {
+-    Label slow_resume;
+-    __ Branch(&slow_resume, ne, a3, Operand(zero_reg));
+-    __ ld(a3, FieldMemOperand(a4, JSFunction::kCodeEntryOffset));
+-    __ ld(a2, FieldMemOperand(a1, JSGeneratorObject::kContinuationOffset));
+-    __ SmiUntag(a2);
+-    __ Daddu(a3, a3, Operand(a2));
+-    __ li(a2, Operand(Smi::FromInt(JSGeneratorObject::kGeneratorExecuting)));
+-    __ sd(a2, FieldMemOperand(a1, JSGeneratorObject::kContinuationOffset));
+-    __ Push(Smi::FromInt(resume_mode));  // Consumed in continuation.
+-    __ Jump(a3);
+-    __ bind(&slow_resume);
+-  }
+-
+-  // Otherwise, we push holes for the operand stack and call the runtime to fix
+-  // up the stack and the handlers.
+-  Label push_operand_holes, call_resume;
+-  __ bind(&push_operand_holes);
+-  __ Dsubu(a3, a3, Operand(1));
+-  __ Branch(&call_resume, lt, a3, Operand(zero_reg));
+-  __ push(a2);
+-  __ Branch(&push_operand_holes);
+-  __ bind(&call_resume);
+-  __ Push(Smi::FromInt(resume_mode));  // Consumed in continuation.
+-  DCHECK(!result_register().is(a1));
+-  __ Push(a1, result_register());
+-  __ Push(Smi::FromInt(resume_mode));
+-  __ CallRuntime(Runtime::kResumeJSGeneratorObject);
+-  // Not reached: the runtime call returns elsewhere.
+-  __ stop("not-reached");
+-
+-  __ bind(&done);
+-  context()->Plug(result_register());
+-}
+-
+ void FullCodeGenerator::PushOperands(Register reg1, Register reg2) {
+   OperandStackDepthIncrement(2);
+   __ Push(reg1, reg2);
+diff --git a/src/full-codegen/x64/full-codegen-x64.cc b/src/full-codegen/x64/full-codegen-x64.cc
+index b7e7cdd2ef8..e4050689c49 100644
+--- a/src/full-codegen/x64/full-codegen-x64.cc
++++ b/src/full-codegen/x64/full-codegen-x64.cc
+@@ -1780,7 +1780,7 @@ void FullCodeGenerator::VisitYield(Yield* expr) {
+   // this.  It stays on the stack while we update the iterator.
+   VisitForStackValue(expr->expression());
+ 
+-  Label suspend, continuation, post_runtime, resume;
++  Label suspend, continuation, post_runtime, resume, exception;
+ 
+   __ jmp(&suspend);
+   __ bind(&continuation);
+@@ -1789,12 +1789,18 @@ void FullCodeGenerator::VisitYield(Yield* expr) {
+   // respective resume operation).
+   __ RecordGeneratorContinuation();
+   __ Pop(rbx);
+-  __ SmiCompare(rbx, Smi::FromInt(JSGeneratorObject::RETURN));
+-  __ j(not_equal, &resume);
++  STATIC_ASSERT(JSGeneratorObject::kNext < JSGeneratorObject::kReturn);
++  STATIC_ASSERT(JSGeneratorObject::kThrow > JSGeneratorObject::kReturn);
++  __ SmiCompare(rbx, Smi::FromInt(JSGeneratorObject::kReturn));
++  __ j(less, &resume);
+   __ Push(result_register());
++  __ j(greater, &exception);
+   EmitCreateIteratorResult(true);
+   EmitUnwindAndReturn();
+ 
++  __ bind(&exception);
++  __ CallRuntime(Runtime::kThrow);
++
+   __ bind(&suspend);
+   OperandStackDepthIncrement(1);  // Not popped on this path.
+   VisitForAccumulatorValue(expr->generator_object());
+@@ -1821,102 +1827,6 @@ void FullCodeGenerator::VisitYield(Yield* expr) {
+   context()->Plug(result_register());
+ }
+ 
+-
+-void FullCodeGenerator::EmitGeneratorResume(
+-    Expression* generator, Expression* value,
+-    JSGeneratorObject::ResumeMode resume_mode) {
+-  // The value stays in rax, and is ultimately read by the resumed generator, as
+-  // if CallRuntime(Runtime::kSuspendJSGeneratorObject) returned it. Or it
+-  // is read to throw the value when the resumed generator is already closed.
+-  // rbx will hold the generator object until the activation has been resumed.
+-  VisitForStackValue(generator);
+-  VisitForAccumulatorValue(value);
+-  PopOperand(rbx);
+-
+-  // Store input value into generator object.
+-  __ movp(FieldOperand(rbx, JSGeneratorObject::kInputOffset),
+-          result_register());
+-  __ movp(rcx, result_register());
+-  __ RecordWriteField(rbx, JSGeneratorObject::kInputOffset, rcx, rdx,
+-                      kDontSaveFPRegs);
+-
+-  // Load suspended function and context.
+-  __ movp(rsi, FieldOperand(rbx, JSGeneratorObject::kContextOffset));
+-  __ movp(rdi, FieldOperand(rbx, JSGeneratorObject::kFunctionOffset));
+-
+-  // Push receiver.
+-  __ Push(FieldOperand(rbx, JSGeneratorObject::kReceiverOffset));
+-
+-  // Push holes for arguments to generator function. Since the parser forced
+-  // context allocation for any variables in generators, the actual argument
+-  // values have already been copied into the context and these dummy values
+-  // will never be used.
+-  __ movp(rdx, FieldOperand(rdi, JSFunction::kSharedFunctionInfoOffset));
+-  __ LoadSharedFunctionInfoSpecialField(rdx, rdx,
+-      SharedFunctionInfo::kFormalParameterCountOffset);
+-  __ LoadRoot(rcx, Heap::kTheHoleValueRootIndex);
+-  Label push_argument_holes, push_frame;
+-  __ bind(&push_argument_holes);
+-  __ subp(rdx, Immediate(1));
+-  __ j(carry, &push_frame);
+-  __ Push(rcx);
+-  __ jmp(&push_argument_holes);
+-
+-  // Enter a new JavaScript frame, and initialize its slots as they were when
+-  // the generator was suspended.
+-  Label resume_frame, done;
+-  __ bind(&push_frame);
+-  __ call(&resume_frame);
+-  __ jmp(&done);
+-  __ bind(&resume_frame);
+-  __ pushq(rbp);  // Caller's frame pointer.
+-  __ movp(rbp, rsp);
+-  __ Push(rsi);  // Callee's context.
+-  __ Push(rdi);  // Callee's JS Function.
+-
+-  // Load the operand stack size.
+-  __ movp(rdx, FieldOperand(rbx, JSGeneratorObject::kOperandStackOffset));
+-  __ movp(rdx, FieldOperand(rdx, FixedArray::kLengthOffset));
+-  __ SmiToInteger32(rdx, rdx);
+-
+-  // If we are sending a value and there is no operand stack, we can jump back
+-  // in directly.
+-  if (resume_mode == JSGeneratorObject::NEXT) {
+-    Label slow_resume;
+-    __ cmpp(rdx, Immediate(0));
+-    __ j(not_zero, &slow_resume);
+-    __ movp(rdx, FieldOperand(rdi, JSFunction::kCodeEntryOffset));
+-    __ SmiToInteger64(rcx,
+-        FieldOperand(rbx, JSGeneratorObject::kContinuationOffset));
+-    __ addp(rdx, rcx);
+-    __ Move(FieldOperand(rbx, JSGeneratorObject::kContinuationOffset),
+-            Smi::FromInt(JSGeneratorObject::kGeneratorExecuting));
+-    __ Push(Smi::FromInt(resume_mode));  // Consumed in continuation.
+-    __ jmp(rdx);
+-    __ bind(&slow_resume);
+-  }
+-
+-  // Otherwise, we push holes for the operand stack and call the runtime to fix
+-  // up the stack and the handlers.
+-  Label push_operand_holes, call_resume;
+-  __ bind(&push_operand_holes);
+-  __ subp(rdx, Immediate(1));
+-  __ j(carry, &call_resume);
+-  __ Push(rcx);
+-  __ jmp(&push_operand_holes);
+-  __ bind(&call_resume);
+-  __ Push(Smi::FromInt(resume_mode));  // Consumed in continuation.
+-  __ Push(rbx);
+-  __ Push(result_register());
+-  __ Push(Smi::FromInt(resume_mode));
+-  __ CallRuntime(Runtime::kResumeJSGeneratorObject);
+-  // Not reached: the runtime call returns elsewhere.
+-  __ Abort(kGeneratorFailedToResume);
+-
+-  __ bind(&done);
+-  context()->Plug(result_register());
+-}
+-
+ void FullCodeGenerator::PushOperand(MemOperand operand) {
+   OperandStackDepthIncrement(1);
+   __ Push(operand);
+diff --git a/src/ia32/builtins-ia32.cc b/src/ia32/builtins-ia32.cc
+index b7e33d9a74f..9623f115db4 100644
+--- a/src/ia32/builtins-ia32.cc
++++ b/src/ia32/builtins-ia32.cc
+@@ -391,6 +391,119 @@ void Builtins::Generate_JSConstructEntryTrampoline(MacroAssembler* masm) {
+   Generate_JSEntryTrampolineHelper(masm, true);
+ }
+ 
++// static
++void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
++  // ----------- S t a t e -------------
++  //  -- eax    : the value to pass to the generator
++  //  -- ebx    : the JSGeneratorObject to resume
++  //  -- edx    : the resume mode (tagged)
++  //  -- esp[0] : return address
++  // -----------------------------------
++  __ AssertGeneratorObject(ebx);
++
++  // Store input value into generator object.
++  __ mov(FieldOperand(ebx, JSGeneratorObject::kInputOffset), eax);
++  __ RecordWriteField(ebx, JSGeneratorObject::kInputOffset, eax, ecx,
++                      kDontSaveFPRegs);
++
++  // Load suspended function and context.
++  __ mov(esi, FieldOperand(ebx, JSGeneratorObject::kContextOffset));
++  __ mov(edi, FieldOperand(ebx, JSGeneratorObject::kFunctionOffset));
++
++  // Flood function if we are stepping.
++  Label skip_flooding;
++  ExternalReference step_in_enabled =
++      ExternalReference::debug_step_in_enabled_address(masm->isolate());
++  __ cmpb(Operand::StaticVariable(step_in_enabled), Immediate(0));
++  __ j(equal, &skip_flooding);
++  {
++    FrameScope scope(masm, StackFrame::INTERNAL);
++    __ Push(ebx);
++    __ Push(edx);
++    __ Push(edi);
++    __ CallRuntime(Runtime::kDebugPrepareStepInIfStepping);
++    __ Pop(edx);
++    __ Pop(ebx);
++    __ mov(edi, FieldOperand(ebx, JSGeneratorObject::kFunctionOffset));
++  }
++  __ bind(&skip_flooding);
++
++  // Pop return address.
++  __ PopReturnAddressTo(eax);
++
++  // Push receiver.
++  __ Push(FieldOperand(ebx, JSGeneratorObject::kReceiverOffset));
++
++  // ----------- S t a t e -------------
++  //  -- eax    : return address
++  //  -- ebx    : the JSGeneratorObject to resume
++  //  -- edx    : the resume mode (tagged)
++  //  -- edi    : generator function
++  //  -- esi    : generator context
++  //  -- esp[0] : generator receiver
++  // -----------------------------------
++
++  // Push holes for arguments to generator function. Since the parser forced
++  // context allocation for any variables in generators, the actual argument
++  // values have already been copied into the context and these dummy values
++  // will never be used.
++  __ mov(ecx, FieldOperand(edi, JSFunction::kSharedFunctionInfoOffset));
++  __ mov(ecx,
++         FieldOperand(ecx, SharedFunctionInfo::kFormalParameterCountOffset));
++  {
++    Label done_loop, loop;
++    __ bind(&loop);
++    __ sub(ecx, Immediate(Smi::FromInt(1)));
++    __ j(carry, &done_loop, Label::kNear);
++    __ PushRoot(Heap::kTheHoleValueRootIndex);
++    __ jmp(&loop);
++    __ bind(&done_loop);
++  }
++
++  // Enter a new JavaScript frame, and initialize its slots as they were when
++  // the generator was suspended.
++  FrameScope scope(masm, StackFrame::MANUAL);
++  __ PushReturnAddressFrom(eax);  // Return address.
++  __ Push(ebp);                   // Caller's frame pointer.
++  __ Move(ebp, esp);
++  __ Push(esi);  // Callee's context.
++  __ Push(edi);  // Callee's JS Function.
++
++  // Restore the operand stack.
++  __ mov(eax, FieldOperand(ebx, JSGeneratorObject::kOperandStackOffset));
++  {
++    Label done_loop, loop;
++    __ Move(ecx, Smi::FromInt(0));
++    __ bind(&loop);
++    __ cmp(ecx, FieldOperand(eax, FixedArray::kLengthOffset));
++    __ j(equal, &done_loop, Label::kNear);
++    __ Push(FieldOperand(eax, ecx, times_half_pointer_size,
++                         FixedArray::kHeaderSize));
++    __ add(ecx, Immediate(Smi::FromInt(1)));
++    __ jmp(&loop);
++    __ bind(&done_loop);
++  }
++
++  // Push resume mode (consumed in continuation).
++  __ Push(edx);
++
++  // Reset operand stack so we don't leak.
++  __ mov(FieldOperand(ebx, JSGeneratorObject::kOperandStackOffset),
++         Immediate(masm->isolate()->factory()->empty_fixed_array()));
++
++  // Restore value.
++  __ mov(eax, FieldOperand(ebx, JSGeneratorObject::kInputOffset));
++
++  // Resume the generator function at the continuation.
++  __ mov(edx, FieldOperand(edi, JSFunction::kSharedFunctionInfoOffset));
++  __ mov(edx, FieldOperand(edx, SharedFunctionInfo::kCodeOffset));
++  __ mov(ecx, FieldOperand(ebx, JSGeneratorObject::kContinuationOffset));
++  __ SmiUntag(ecx);
++  __ lea(edx, FieldOperand(edx, ecx, times_1, Code::kHeaderSize));
++  __ mov(FieldOperand(ebx, JSGeneratorObject::kContinuationOffset),
++         Immediate(Smi::FromInt(JSGeneratorObject::kGeneratorExecuting)));
++  __ jmp(edx);
++}
+ 
+ // Generate code for entering a JS function with the interpreter.
+ // On entry to the function the receiver and arguments have been pushed on the
+diff --git a/src/ia32/interface-descriptors-ia32.cc b/src/ia32/interface-descriptors-ia32.cc
+index 2748f907ac9..1dcb9395363 100644
+--- a/src/ia32/interface-descriptors-ia32.cc
++++ b/src/ia32/interface-descriptors-ia32.cc
+@@ -418,6 +418,16 @@ void InterpreterCEntryDescriptor::InitializePlatformSpecific(
+   data->InitializePlatformSpecific(arraysize(registers), registers);
+ }
+ 
++void ResumeGeneratorDescriptor::InitializePlatformSpecific(
++    CallInterfaceDescriptorData* data) {
++  Register registers[] = {
++      eax,  // the value to pass to the generator
++      ebx,  // the JSGeneratorObject to resume
++      edx   // the resume mode (tagged)
++  };
++  data->InitializePlatformSpecific(arraysize(registers), registers);
++}
++
+ }  // namespace internal
+ }  // namespace v8
+ 
+diff --git a/src/ia32/macro-assembler-ia32.cc b/src/ia32/macro-assembler-ia32.cc
+index f9fd8d6a401..2f013c8b55f 100644
+--- a/src/ia32/macro-assembler-ia32.cc
++++ b/src/ia32/macro-assembler-ia32.cc
+@@ -1025,6 +1025,16 @@ void MacroAssembler::AssertBoundFunction(Register object) {
+   }
+ }
+ 
++void MacroAssembler::AssertGeneratorObject(Register object) {
++  if (emit_debug_code()) {
++    test(object, Immediate(kSmiTagMask));
++    Check(not_equal, kOperandIsASmiAndNotAGeneratorObject);
++    Push(object);
++    CmpObjectType(object, JS_GENERATOR_OBJECT_TYPE, object);
++    Pop(object);
++    Check(equal, kOperandIsNotAGeneratorObject);
++  }
++}
+ 
+ void MacroAssembler::AssertReceiver(Register object) {
+   if (emit_debug_code()) {
+diff --git a/src/ia32/macro-assembler-ia32.h b/src/ia32/macro-assembler-ia32.h
+index be11f662027..436e7be521a 100644
+--- a/src/ia32/macro-assembler-ia32.h
++++ b/src/ia32/macro-assembler-ia32.h
+@@ -566,6 +566,10 @@ class MacroAssembler: public Assembler {
+   // enabled via --debug-code.
+   void AssertBoundFunction(Register object);
+ 
++  // Abort execution if argument is not a JSGeneratorObject,
++  // enabled via --debug-code.
++  void AssertGeneratorObject(Register object);
++
+   // Abort execution if argument is not a JSReceiver, enabled via --debug-code.
+   void AssertReceiver(Register object);
+ 
+diff --git a/src/interface-descriptors.h b/src/interface-descriptors.h
+index dcce0afe5c9..12f56182050 100644
+--- a/src/interface-descriptors.h
++++ b/src/interface-descriptors.h
+@@ -90,7 +90,8 @@ class PlatformInterfaceDescriptor;
+   V(InterpreterDispatch)                      \
+   V(InterpreterPushArgsAndCall)               \
+   V(InterpreterPushArgsAndConstruct)          \
+-  V(InterpreterCEntry)
++  V(InterpreterCEntry)                        \
++  V(ResumeGenerator)
+ 
+ class CallInterfaceDescriptorData {
+  public:
+@@ -822,6 +823,11 @@ class InterpreterCEntryDescriptor : public CallInterfaceDescriptor {
+   DECLARE_DESCRIPTOR(InterpreterCEntryDescriptor, CallInterfaceDescriptor)
+ };
+ 
++class ResumeGeneratorDescriptor final : public CallInterfaceDescriptor {
++ public:
++  DECLARE_DESCRIPTOR(ResumeGeneratorDescriptor, CallInterfaceDescriptor)
++};
++
+ #undef DECLARE_DESCRIPTOR_WITH_BASE
+ #undef DECLARE_DESCRIPTOR
+ #undef DECLARE_DESCRIPTOR_WITH_CUSTOM_FUNCTION_TYPE
+diff --git a/src/js/generator.js b/src/js/generator.js
+deleted file mode 100644
+index 3dcdcc0ffa1..00000000000
+--- a/src/js/generator.js
++++ /dev/null
+@@ -1,119 +0,0 @@
+-// Copyright 2013 the V8 project authors. All rights reserved.
+-// Use of this source code is governed by a BSD-style license that can be
+-// found in the LICENSE file.
+-
+-(function(global, utils) {
+-
+-"use strict";
+-
+-%CheckIsBootstrapping();
+-
+-// -------------------------------------------------------------------
+-// Imports
+-
+-var GeneratorFunctionPrototype = utils.ImportNow("GeneratorFunctionPrototype");
+-var GeneratorFunction = utils.ImportNow("GeneratorFunction");
+-var GlobalFunction = global.Function;
+-var MakeTypeError;
+-var toStringTagSymbol = utils.ImportNow("to_string_tag_symbol");
+-
+-utils.Import(function(from) {
+-  MakeTypeError = from.MakeTypeError;
+-});
+-
+-// ----------------------------------------------------------------------------
+-
+-// Generator functions and objects are specified by ES6, sections 15.19.3 and
+-// 15.19.4.
+-
+-function GeneratorObjectNext(value) {
+-  if (!IS_GENERATOR(this)) {
+-    throw MakeTypeError(kIncompatibleMethodReceiver,
+-                        '[Generator].prototype.next', this);
+-  }
+-
+-  var continuation = %GeneratorGetContinuation(this);
+-  if (continuation > 0) {
+-    // Generator is suspended.
+-    DEBUG_PREPARE_STEP_IN_IF_STEPPING(this);
+-    return %_GeneratorNext(this, value);
+-  } else if (continuation == 0) {
+-    // Generator is already closed.
+-    return %_CreateIterResultObject(UNDEFINED, true);
+-  } else {
+-    // Generator is running.
+-    throw MakeTypeError(kGeneratorRunning);
+-  }
+-}
+-
+-
+-function GeneratorObjectReturn(value) {
+-  if (!IS_GENERATOR(this)) {
+-    throw MakeTypeError(kIncompatibleMethodReceiver,
+-                        '[Generator].prototype.return', this);
+-  }
+-
+-  var continuation = %GeneratorGetContinuation(this);
+-  if (continuation > 0) {
+-    // Generator is suspended.
+-    DEBUG_PREPARE_STEP_IN_IF_STEPPING(this);
+-    return %_GeneratorReturn(this, value);
+-  } else if (continuation == 0) {
+-    // Generator is already closed.
+-    return %_CreateIterResultObject(value, true);
+-  } else {
+-    // Generator is running.
+-    throw MakeTypeError(kGeneratorRunning);
+-  }
+-}
+-
+-
+-function GeneratorObjectThrow(exn) {
+-  if (!IS_GENERATOR(this)) {
+-    throw MakeTypeError(kIncompatibleMethodReceiver,
+-                        '[Generator].prototype.throw', this);
+-  }
+-
+-  var continuation = %GeneratorGetContinuation(this);
+-  if (continuation > 0) {
+-    // Generator is suspended.
+-    DEBUG_PREPARE_STEP_IN_IF_STEPPING(this);
+-    return %_GeneratorThrow(this, exn);
+-  } else if (continuation == 0) {
+-    // Generator is already closed.
+-    throw exn;
+-  } else {
+-    // Generator is running.
+-    throw MakeTypeError(kGeneratorRunning);
+-  }
+-}
+-
+-// ----------------------------------------------------------------------------
+-
+-// None of the three resume operations (Runtime_GeneratorNext,
+-// Runtime_GeneratorReturn, Runtime_GeneratorThrow) is supported by
+-// Crankshaft or TurboFan.  Disable optimization of wrappers here.
+-%NeverOptimizeFunction(GeneratorObjectNext);
+-%NeverOptimizeFunction(GeneratorObjectReturn);
+-%NeverOptimizeFunction(GeneratorObjectThrow);
+-
+-// Set up non-enumerable functions on the generator prototype object.
+-var GeneratorObjectPrototype = GeneratorFunctionPrototype.prototype;
+-utils.InstallFunctions(GeneratorObjectPrototype,
+-                       DONT_ENUM,
+-                      ["next", GeneratorObjectNext,
+-                       "return", GeneratorObjectReturn,
+-                       "throw", GeneratorObjectThrow]);
+-
+-%AddNamedProperty(GeneratorObjectPrototype, "constructor",
+-    GeneratorFunctionPrototype, DONT_ENUM | READ_ONLY);
+-%AddNamedProperty(GeneratorObjectPrototype,
+-    toStringTagSymbol, "Generator", DONT_ENUM | READ_ONLY);
+-%InternalSetPrototype(GeneratorFunctionPrototype, GlobalFunction.prototype);
+-%AddNamedProperty(GeneratorFunctionPrototype,
+-    toStringTagSymbol, "GeneratorFunction", DONT_ENUM | READ_ONLY);
+-%AddNamedProperty(GeneratorFunctionPrototype, "constructor",
+-    GeneratorFunction, DONT_ENUM | READ_ONLY);
+-%InternalSetPrototype(GeneratorFunction, GlobalFunction);
+-
+-})
+diff --git a/src/js/macros.py b/src/js/macros.py
+index a4c7f532937..5efb6b4b843 100644
+--- a/src/js/macros.py
++++ b/src/js/macros.py
+@@ -238,7 +238,6 @@ define NOT_FOUND = -1;
+ 
+ # Check whether debug is active.
+ define DEBUG_IS_ACTIVE = (%_DebugIsActive() != 0);
+-macro DEBUG_PREPARE_STEP_IN_IF_STEPPING(function) = if (%_DebugIsActive() != 0) %DebugPrepareStepInIfStepping(function);
+ 
+ # SharedFlag equivalents
+ define kNotShared = false;
+diff --git a/src/mips/builtins-mips.cc b/src/mips/builtins-mips.cc
+index 9693a52697a..cb5655f0f1b 100644
+--- a/src/mips/builtins-mips.cc
++++ b/src/mips/builtins-mips.cc
+@@ -825,6 +825,115 @@ void Builtins::Generate_JSConstructEntryTrampoline(MacroAssembler* masm) {
+   Generate_JSEntryTrampolineHelper(masm, true);
+ }
+ 
++// static
++void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
++  // ----------- S t a t e -------------
++  //  -- v0 : the value to pass to the generator
++  //  -- a1 : the JSGeneratorObject to resume
++  //  -- a2 : the resume mode (tagged)
++  //  -- ra : return address
++  // -----------------------------------
++  __ AssertGeneratorObject(a1);
++
++  // Store input value into generator object.
++  __ sw(v0, FieldMemOperand(a1, JSGeneratorObject::kInputOffset));
++  __ RecordWriteField(a1, JSGeneratorObject::kInputOffset, v0, a3,
++                      kRAHasNotBeenSaved, kDontSaveFPRegs);
++
++  // Load suspended function and context.
++  __ lw(cp, FieldMemOperand(a1, JSGeneratorObject::kContextOffset));
++  __ lw(t0, FieldMemOperand(a1, JSGeneratorObject::kFunctionOffset));
++
++  // Flood function if we are stepping.
++  Label skip_flooding;
++  ExternalReference step_in_enabled =
++      ExternalReference::debug_step_in_enabled_address(masm->isolate());
++  __ li(t1, Operand(step_in_enabled));
++  __ lb(t1, MemOperand(t1));
++  __ Branch(&skip_flooding, eq, t1, Operand(zero_reg));
++  {
++    FrameScope scope(masm, StackFrame::INTERNAL);
++    __ Push(a1, a2, t0);
++    __ CallRuntime(Runtime::kDebugPrepareStepInIfStepping);
++    __ Pop(a1, a2);
++    __ lw(t0, FieldMemOperand(a1, JSGeneratorObject::kFunctionOffset));
++  }
++  __ bind(&skip_flooding);
++
++  // Push receiver.
++  __ lw(t1, FieldMemOperand(a1, JSGeneratorObject::kReceiverOffset));
++  __ Push(t1);
++
++  // ----------- S t a t e -------------
++  //  -- a1    : the JSGeneratorObject to resume
++  //  -- a2    : the resume mode (tagged)
++  //  -- t0    : generator function
++  //  -- cp    : generator context
++  //  -- ra    : return address
++  //  -- sp[0] : generator receiver
++  // -----------------------------------
++
++  // Push holes for arguments to generator function. Since the parser forced
++  // context allocation for any variables in generators, the actual argument
++  // values have already been copied into the context and these dummy values
++  // will never be used.
++  __ lw(a3, FieldMemOperand(t0, JSFunction::kSharedFunctionInfoOffset));
++  __ lw(a3,
++        FieldMemOperand(a3, SharedFunctionInfo::kFormalParameterCountOffset));
++  {
++    Label done_loop, loop;
++    __ bind(&loop);
++    __ Subu(a3, a3, Operand(Smi::FromInt(1)));
++    __ Branch(&done_loop, lt, a3, Operand(zero_reg));
++    __ PushRoot(Heap::kTheHoleValueRootIndex);
++    __ Branch(&loop);
++    __ bind(&done_loop);
++  }
++
++  // Enter a new JavaScript frame, and initialize its slots as they were when
++  // the generator was suspended.
++  FrameScope scope(masm, StackFrame::MANUAL);
++  __ Push(ra, fp);
++  __ Move(fp, sp);
++  __ Push(cp, t0);
++
++  // Restore the operand stack.
++  __ lw(a0, FieldMemOperand(a1, JSGeneratorObject::kOperandStackOffset));
++  __ lw(a3, FieldMemOperand(a0, FixedArray::kLengthOffset));
++  __ Addu(a0, a0, Operand(FixedArray::kHeaderSize - kHeapObjectTag));
++  __ Lsa(a3, a0, a3, kPointerSizeLog2 - 1);
++  {
++    Label done_loop, loop;
++    __ bind(&loop);
++    __ Branch(&done_loop, eq, a0, Operand(a3));
++    __ lw(t1, MemOperand(a0));
++    __ Push(t1);
++    __ Branch(USE_DELAY_SLOT, &loop);
++    __ addiu(a0, a0, kPointerSize);  // In delay slot.
++    __ bind(&done_loop);
++  }
++
++  // Push resume mode (consumed in continuation).
++  __ Push(a2);
++
++  // Reset operand stack so we don't leak.
++  __ LoadRoot(t1, Heap::kEmptyFixedArrayRootIndex);
++  __ sw(t1, FieldMemOperand(a1, JSGeneratorObject::kOperandStackOffset));
++
++  // Restore value.
++  __ lw(v0, FieldMemOperand(a1, JSGeneratorObject::kInputOffset));
++
++  // Resume the generator function at the continuation.
++  __ lw(a3, FieldMemOperand(t0, JSFunction::kSharedFunctionInfoOffset));
++  __ lw(a3, FieldMemOperand(a3, SharedFunctionInfo::kCodeOffset));
++  __ Addu(a3, a3, Operand(Code::kHeaderSize - kHeapObjectTag));
++  __ lw(a2, FieldMemOperand(a1, JSGeneratorObject::kContinuationOffset));
++  __ SmiUntag(a2);
++  __ Addu(a3, a3, Operand(a2));
++  __ li(a2, Operand(Smi::FromInt(JSGeneratorObject::kGeneratorExecuting)));
++  __ sw(a2, FieldMemOperand(a1, JSGeneratorObject::kContinuationOffset));
++  __ Jump(a3);
++}
+ 
+ // Generate code for entering a JS function with the interpreter.
+ // On entry to the function the receiver and arguments have been pushed on the
+diff --git a/src/mips/interface-descriptors-mips.cc b/src/mips/interface-descriptors-mips.cc
+index 06e3b77aea1..940c9b9a7d9 100644
+--- a/src/mips/interface-descriptors-mips.cc
++++ b/src/mips/interface-descriptors-mips.cc
+@@ -414,6 +414,16 @@ void InterpreterCEntryDescriptor::InitializePlatformSpecific(
+   data->InitializePlatformSpecific(arraysize(registers), registers);
+ }
+ 
++void ResumeGeneratorDescriptor::InitializePlatformSpecific(
++    CallInterfaceDescriptorData* data) {
++  Register registers[] = {
++      v0,  // the value to pass to the generator
++      a1,  // the JSGeneratorObject to resume
++      a2   // the resume mode (tagged)
++  };
++  data->InitializePlatformSpecific(arraysize(registers), registers);
++}
++
+ }  // namespace internal
+ }  // namespace v8
+ 
+diff --git a/src/mips/macro-assembler-mips.cc b/src/mips/macro-assembler-mips.cc
+index 7cbbd3ae2f1..fc78eeca3bb 100644
+--- a/src/mips/macro-assembler-mips.cc
++++ b/src/mips/macro-assembler-mips.cc
+@@ -5615,6 +5615,16 @@ void MacroAssembler::AssertBoundFunction(Register object) {
+   }
+ }
+ 
++void MacroAssembler::AssertGeneratorObject(Register object) {
++  if (emit_debug_code()) {
++    STATIC_ASSERT(kSmiTag == 0);
++    SmiTst(object, t8);
++    Check(ne, kOperandIsASmiAndNotAGeneratorObject, t8, Operand(zero_reg));
++    GetObjectType(object, t8, t8);
++    Check(eq, kOperandIsNotAGeneratorObject, t8,
++          Operand(JS_GENERATOR_OBJECT_TYPE));
++  }
++}
+ 
+ void MacroAssembler::AssertReceiver(Register object) {
+   if (emit_debug_code()) {
+diff --git a/src/mips/macro-assembler-mips.h b/src/mips/macro-assembler-mips.h
+index 2f028658f4f..caaed83b928 100644
+--- a/src/mips/macro-assembler-mips.h
++++ b/src/mips/macro-assembler-mips.h
+@@ -1546,6 +1546,10 @@ const Operand& rt = Operand(zero_reg), BranchDelaySlot bd = PROTECT
+   // enabled via --debug-code.
+   void AssertBoundFunction(Register object);
+ 
++  // Abort execution if argument is not a JSGeneratorObject,
++  // enabled via --debug-code.
++  void AssertGeneratorObject(Register object);
++
+   // Abort execution if argument is not a JSReceiver, enabled via --debug-code.
+   void AssertReceiver(Register object);
+ 
+diff --git a/src/mips64/builtins-mips64.cc b/src/mips64/builtins-mips64.cc
+index b55b77c5115..b086780ae36 100644
+--- a/src/mips64/builtins-mips64.cc
++++ b/src/mips64/builtins-mips64.cc
+@@ -690,6 +690,116 @@ void Builtins::Generate_JSBuiltinsConstructStubForDerived(
+   Generate_JSConstructStubHelper(masm, false, false, true);
+ }
+ 
++// static
++void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
++  // ----------- S t a t e -------------
++  //  -- v0 : the value to pass to the generator
++  //  -- a1 : the JSGeneratorObject to resume
++  //  -- a2 : the resume mode (tagged)
++  //  -- ra : return address
++  // -----------------------------------
++  __ AssertGeneratorObject(a1);
++
++  // Store input value into generator object.
++  __ sd(v0, FieldMemOperand(a1, JSGeneratorObject::kInputOffset));
++  __ RecordWriteField(a1, JSGeneratorObject::kInputOffset, v0, a3,
++                      kRAHasNotBeenSaved, kDontSaveFPRegs);
++
++  // Load suspended function and context.
++  __ ld(cp, FieldMemOperand(a1, JSGeneratorObject::kContextOffset));
++  __ ld(a4, FieldMemOperand(a1, JSGeneratorObject::kFunctionOffset));
++
++  // Flood function if we are stepping.
++  Label skip_flooding;
++  ExternalReference step_in_enabled =
++      ExternalReference::debug_step_in_enabled_address(masm->isolate());
++  __ li(t1, Operand(step_in_enabled));
++  __ lb(t1, MemOperand(t1));
++  __ Branch(&skip_flooding, eq, t1, Operand(zero_reg));
++  {
++    FrameScope scope(masm, StackFrame::INTERNAL);
++    __ Push(a1, a2, t0);
++    __ CallRuntime(Runtime::kDebugPrepareStepInIfStepping);
++    __ Pop(a1, a2);
++    __ ld(t0, FieldMemOperand(a1, JSGeneratorObject::kFunctionOffset));
++  }
++  __ bind(&skip_flooding);
++
++  // Push receiver.
++  __ ld(a5, FieldMemOperand(a1, JSGeneratorObject::kReceiverOffset));
++  __ Push(a5);
++
++  // ----------- S t a t e -------------
++  //  -- a1    : the JSGeneratorObject to resume
++  //  -- a2    : the resume mode (tagged)
++  //  -- a4    : generator function
++  //  -- cp    : generator context
++  //  -- ra    : return address
++  //  -- sp[0] : generator receiver
++  // -----------------------------------
++
++  // Push holes for arguments to generator function. Since the parser forced
++  // context allocation for any variables in generators, the actual argument
++  // values have already been copied into the context and these dummy values
++  // will never be used.
++  __ ld(a3, FieldMemOperand(a4, JSFunction::kSharedFunctionInfoOffset));
++  __ lw(a3,
++        FieldMemOperand(a3, SharedFunctionInfo::kFormalParameterCountOffset));
++  {
++    Label done_loop, loop;
++    __ bind(&loop);
++    __ Dsubu(a3, a3, Operand(1));
++    __ Branch(&done_loop, lt, a3, Operand(zero_reg));
++    __ PushRoot(Heap::kTheHoleValueRootIndex);
++    __ Branch(&loop);
++    __ bind(&done_loop);
++  }
++
++  // Enter a new JavaScript frame, and initialize its slots as they were when
++  // the generator was suspended.
++  FrameScope scope(masm, StackFrame::MANUAL);
++  __ Push(ra, fp);
++  __ Move(fp, sp);
++  __ Push(cp, a4);
++
++  // Restore the operand stack.
++  __ ld(a0, FieldMemOperand(a1, JSGeneratorObject::kOperandStackOffset));
++  __ ld(a3, FieldMemOperand(a0, FixedArray::kLengthOffset));
++  __ SmiUntag(a3);
++  __ Daddu(a0, a0, Operand(FixedArray::kHeaderSize - kHeapObjectTag));
++  __ Lsa(a3, a0, a3, kPointerSizeLog2);
++  {
++    Label done_loop, loop;
++    __ bind(&loop);
++    __ Branch(&done_loop, eq, a0, Operand(a3));
++    __ ld(a5, MemOperand(a0));
++    __ Push(a5);
++    __ Branch(USE_DELAY_SLOT, &loop);
++    __ daddiu(a0, a0, kPointerSize);  // In delay slot.
++    __ bind(&done_loop);
++  }
++
++  // Push resume mode (consumed in continuation).
++  __ Push(a2);
++
++  // Reset operand stack so we don't leak.
++  __ LoadRoot(a5, Heap::kEmptyFixedArrayRootIndex);
++  __ sd(a5, FieldMemOperand(a1, JSGeneratorObject::kOperandStackOffset));
++
++  // Restore value.
++  __ ld(v0, FieldMemOperand(a1, JSGeneratorObject::kInputOffset));
++
++  // Resume the generator function at the continuation.
++  __ ld(a3, FieldMemOperand(a4, JSFunction::kSharedFunctionInfoOffset));
++  __ ld(a3, FieldMemOperand(a3, SharedFunctionInfo::kCodeOffset));
++  __ Daddu(a3, a3, Operand(Code::kHeaderSize - kHeapObjectTag));
++  __ ld(a2, FieldMemOperand(a1, JSGeneratorObject::kContinuationOffset));
++  __ SmiUntag(a2);
++  __ Daddu(a3, a3, Operand(a2));
++  __ li(a2, Operand(Smi::FromInt(JSGeneratorObject::kGeneratorExecuting)));
++  __ sd(a2, FieldMemOperand(a1, JSGeneratorObject::kContinuationOffset));
++  __ Jump(a3);
++}
+ 
+ void Builtins::Generate_ConstructedNonConstructable(MacroAssembler* masm) {
+   FrameScope scope(masm, StackFrame::INTERNAL);
+diff --git a/src/mips64/interface-descriptors-mips64.cc b/src/mips64/interface-descriptors-mips64.cc
+index 7695d0b694e..8be58e9718b 100644
+--- a/src/mips64/interface-descriptors-mips64.cc
++++ b/src/mips64/interface-descriptors-mips64.cc
+@@ -413,6 +413,16 @@ void InterpreterCEntryDescriptor::InitializePlatformSpecific(
+   data->InitializePlatformSpecific(arraysize(registers), registers);
+ }
+ 
++void ResumeGeneratorDescriptor::InitializePlatformSpecific(
++    CallInterfaceDescriptorData* data) {
++  Register registers[] = {
++      v0,  // the value to pass to the generator
++      a1,  // the JSGeneratorObject to resume
++      a2   // the resume mode (tagged)
++  };
++  data->InitializePlatformSpecific(arraysize(registers), registers);
++}
++
+ }  // namespace internal
+ }  // namespace v8
+ 
+diff --git a/src/mips64/macro-assembler-mips64.cc b/src/mips64/macro-assembler-mips64.cc
+index fb83fe9b768..ef3ba9876ec 100644
+--- a/src/mips64/macro-assembler-mips64.cc
++++ b/src/mips64/macro-assembler-mips64.cc
+@@ -6225,6 +6225,16 @@ void MacroAssembler::AssertBoundFunction(Register object) {
+   }
+ }
+ 
++void MacroAssembler::AssertGeneratorObject(Register object) {
++  if (emit_debug_code()) {
++    STATIC_ASSERT(kSmiTag == 0);
++    SmiTst(object, t8);
++    Check(ne, kOperandIsASmiAndNotAGeneratorObject, t8, Operand(zero_reg));
++    GetObjectType(object, t8, t8);
++    Check(eq, kOperandIsNotAGeneratorObject, t8,
++          Operand(JS_GENERATOR_OBJECT_TYPE));
++  }
++}
+ 
+ void MacroAssembler::AssertReceiver(Register object) {
+   if (emit_debug_code()) {
+diff --git a/src/mips64/macro-assembler-mips64.h b/src/mips64/macro-assembler-mips64.h
+index 401112d1009..47581f3362b 100644
+--- a/src/mips64/macro-assembler-mips64.h
++++ b/src/mips64/macro-assembler-mips64.h
+@@ -1714,6 +1714,10 @@ const Operand& rt = Operand(zero_reg), BranchDelaySlot bd = PROTECT
+   // enabled via --debug-code.
+   void AssertBoundFunction(Register object);
+ 
++  // Abort execution if argument is not a JSGeneratorObject,
++  // enabled via --debug-code.
++  void AssertGeneratorObject(Register object);
++
+   // Abort execution if argument is not a JSReceiver, enabled via --debug-code.
+   void AssertReceiver(Register object);
+ 
+diff --git a/src/objects.h b/src/objects.h
+index 01d8f6b5796..ba54fc94b36 100644
+--- a/src/objects.h
++++ b/src/objects.h
+@@ -6648,9 +6648,6 @@ class Script: public Struct {
+ 
+ enum BuiltinFunctionId {
+   kArrayCode,
+-  kGeneratorObjectNext,
+-  kGeneratorObjectReturn,
+-  kGeneratorObjectThrow,
+ #define DECLARE_FUNCTION_ID(ignored1, ignore2, name)    \
+   k##name,
+   FUNCTIONS_WITH_ID_LIST(DECLARE_FUNCTION_ID)
+@@ -7401,7 +7398,7 @@ class JSGeneratorObject: public JSObject {
+   static const int kSize = kOperandStackOffset + kPointerSize;
+ 
+   // Resume mode, for use by runtime functions.
+-  enum ResumeMode { NEXT, RETURN, THROW };
++  enum ResumeMode { kNext, kReturn, kThrow };
+ 
+  private:
+   DISALLOW_IMPLICIT_CONSTRUCTORS(JSGeneratorObject);
+diff --git a/src/parsing/parser.cc b/src/parsing/parser.cc
+index 09f405704b1..f564602fc1e 100644
+--- a/src/parsing/parser.cc
++++ b/src/parsing/parser.cc
+@@ -5785,7 +5785,7 @@ Expression* ParserTraits::RewriteYieldStar(
+   Statement* initialize_mode;
+   {
+     Expression* mode_proxy = factory->NewVariableProxy(var_mode);
+-    Expression* knext = factory->NewSmiLiteral(JSGeneratorObject::NEXT, nopos);
++    Expression* knext = factory->NewSmiLiteral(JSGeneratorObject::kNext, nopos);
+     Expression* assignment =
+         factory->NewAssignment(Token::ASSIGN, mode_proxy, knext, nopos);
+     initialize_mode = factory->NewExpressionStatement(assignment, nopos);
+@@ -5983,7 +5983,7 @@ Expression* ParserTraits::RewriteYieldStar(
+   {
+     Expression* mode_proxy = factory->NewVariableProxy(var_mode);
+     Expression* kreturn =
+-        factory->NewSmiLiteral(JSGeneratorObject::RETURN, nopos);
++        factory->NewSmiLiteral(JSGeneratorObject::kReturn, nopos);
+     Expression* assignment =
+         factory->NewAssignment(Token::ASSIGN, mode_proxy, kreturn, nopos);
+     set_mode_return = factory->NewExpressionStatement(assignment, nopos);
+@@ -6002,7 +6002,7 @@ Expression* ParserTraits::RewriteYieldStar(
+   Statement* set_mode_next;
+   {
+     Expression* mode_proxy = factory->NewVariableProxy(var_mode);
+-    Expression* knext = factory->NewSmiLiteral(JSGeneratorObject::NEXT, nopos);
++    Expression* knext = factory->NewSmiLiteral(JSGeneratorObject::kNext, nopos);
+     Expression* assignment =
+         factory->NewAssignment(Token::ASSIGN, mode_proxy, knext, nopos);
+     set_mode_next = factory->NewExpressionStatement(assignment, nopos);
+@@ -6014,7 +6014,7 @@ Expression* ParserTraits::RewriteYieldStar(
+   {
+     Expression* mode_proxy = factory->NewVariableProxy(var_mode);
+     Expression* kthrow =
+-        factory->NewSmiLiteral(JSGeneratorObject::THROW, nopos);
++        factory->NewSmiLiteral(JSGeneratorObject::kThrow, nopos);
+     Expression* assignment =
+         factory->NewAssignment(Token::ASSIGN, mode_proxy, kthrow, nopos);
+     set_mode_throw = factory->NewExpressionStatement(assignment, nopos);
+@@ -6102,11 +6102,11 @@ Expression* ParserTraits::RewriteYieldStar(
+     case_throw->Add(factory->NewBreakStatement(switch_mode, nopos), zone);
+ 
+     auto cases = new (zone) ZoneList<CaseClause*>(3, zone);
+-    Expression* knext = factory->NewSmiLiteral(JSGeneratorObject::NEXT, nopos);
++    Expression* knext = factory->NewSmiLiteral(JSGeneratorObject::kNext, nopos);
+     Expression* kreturn =
+-        factory->NewSmiLiteral(JSGeneratorObject::RETURN, nopos);
++        factory->NewSmiLiteral(JSGeneratorObject::kReturn, nopos);
+     Expression* kthrow =
+-        factory->NewSmiLiteral(JSGeneratorObject::THROW, nopos);
++        factory->NewSmiLiteral(JSGeneratorObject::kThrow, nopos);
+     cases->Add(factory->NewCaseClause(knext, case_next, nopos), zone);
+     cases->Add(factory->NewCaseClause(kreturn, case_return, nopos), zone);
+     cases->Add(factory->NewCaseClause(kthrow, case_throw, nopos), zone);
+diff --git a/src/runtime/runtime-debug.cc b/src/runtime/runtime-debug.cc
+index ad8375a8d48..a2144ebe714 100644
+--- a/src/runtime/runtime-debug.cc
++++ b/src/runtime/runtime-debug.cc
+@@ -1598,18 +1598,9 @@ RUNTIME_FUNCTION(Runtime_GetScript) {
+ // built-in function such as Array.forEach to enable stepping into the callback,
+ // if we are indeed stepping and the callback is subject to debugging.
+ RUNTIME_FUNCTION(Runtime_DebugPrepareStepInIfStepping) {
+-  DCHECK(args.length() == 1);
+   HandleScope scope(isolate);
+-  CONVERT_ARG_HANDLE_CHECKED(Object, object, 0);
+-  RUNTIME_ASSERT(object->IsJSFunction() || object->IsJSGeneratorObject());
+-  Handle<JSFunction> fun;
+-  if (object->IsJSFunction()) {
+-    fun = Handle<JSFunction>::cast(object);
+-  } else {
+-    fun = Handle<JSFunction>(
+-        Handle<JSGeneratorObject>::cast(object)->function(), isolate);
+-  }
+-
++  DCHECK_EQ(1, args.length());
++  CONVERT_ARG_HANDLE_CHECKED(JSFunction, fun, 0);
+   isolate->debug()->PrepareStepIn(fun);
+   return isolate->heap()->undefined_value();
+ }
+diff --git a/src/runtime/runtime-generator.cc b/src/runtime/runtime-generator.cc
+index 181b5f95400..5e64a477bc9 100644
+--- a/src/runtime/runtime-generator.cc
++++ b/src/runtime/runtime-generator.cc
+@@ -72,63 +72,6 @@ RUNTIME_FUNCTION(Runtime_SuspendJSGeneratorObject) {
+   return isolate->heap()->undefined_value();
+ }
+ 
+-
+-// Note that this function is the slow path for resuming generators.  It is only
+-// called if the suspended activation had operands on the stack, stack handlers
+-// needing rewinding, or if the resume should throw an exception.  The fast path
+-// is handled directly in FullCodeGenerator::EmitGeneratorResume(), which is
+-// inlined into GeneratorNext, GeneratorReturn, and GeneratorThrow.
+-// EmitGeneratorResume is called in any case, as it needs to reconstruct the
+-// stack frame and make space for arguments and operands.
+-RUNTIME_FUNCTION(Runtime_ResumeJSGeneratorObject) {
+-  SealHandleScope shs(isolate);
+-  DCHECK(args.length() == 3);
+-  CONVERT_ARG_CHECKED(JSGeneratorObject, generator_object, 0);
+-  CONVERT_ARG_CHECKED(Object, value, 1);
+-  CONVERT_SMI_ARG_CHECKED(resume_mode_int, 2);
+-  JavaScriptFrameIterator stack_iterator(isolate);
+-  JavaScriptFrame* frame = stack_iterator.frame();
+-
+-  DCHECK_EQ(frame->function(), generator_object->function());
+-  DCHECK(frame->function()->shared()->is_compiled());
+-  DCHECK(!frame->function()->IsOptimized());
+-
+-  STATIC_ASSERT(JSGeneratorObject::kGeneratorExecuting < 0);
+-  STATIC_ASSERT(JSGeneratorObject::kGeneratorClosed == 0);
+-
+-  Code* code = generator_object->function()->shared()->code();
+-  int offset = generator_object->continuation();
+-  DCHECK_GT(offset, 0);
+-  frame->set_pc(code->instruction_start() + offset);
+-  if (FLAG_enable_embedded_constant_pool) {
+-    frame->set_constant_pool(code->constant_pool());
+-  }
+-  generator_object->set_continuation(JSGeneratorObject::kGeneratorExecuting);
+-
+-  FixedArray* operand_stack = generator_object->operand_stack();
+-  int operands_count = operand_stack->length();
+-  if (operands_count != 0) {
+-    frame->RestoreOperandStack(operand_stack);
+-    generator_object->set_operand_stack(isolate->heap()->empty_fixed_array());
+-  }
+-
+-  JSGeneratorObject::ResumeMode resume_mode =
+-      static_cast<JSGeneratorObject::ResumeMode>(resume_mode_int);
+-  switch (resume_mode) {
+-    // Note: this looks like NEXT and RETURN are the same but RETURN receives
+-    // special treatment in the generator code (to which we return here).
+-    case JSGeneratorObject::NEXT:
+-    case JSGeneratorObject::RETURN:
+-      return value;
+-    case JSGeneratorObject::THROW:
+-      return isolate->Throw(value);
+-  }
+-
+-  UNREACHABLE();
+-  return isolate->ThrowIllegalOperation();
+-}
+-
+-
+ RUNTIME_FUNCTION(Runtime_GeneratorClose) {
+   HandleScope scope(isolate);
+   DCHECK(args.length() == 1);
+@@ -195,23 +138,5 @@ RUNTIME_FUNCTION(Runtime_GeneratorGetSourcePosition) {
+   return isolate->heap()->undefined_value();
+ }
+ 
+-// Optimization for builtins calling any of the following three functions is
+-// disabled in js/generator.js and compiler.cc, hence they are unreachable.
+-
+-RUNTIME_FUNCTION(Runtime_GeneratorNext) {
+-  UNREACHABLE();
+-  return nullptr;
+-}
+-
+-RUNTIME_FUNCTION(Runtime_GeneratorReturn) {
+-  UNREACHABLE();
+-  return nullptr;
+-}
+-
+-RUNTIME_FUNCTION(Runtime_GeneratorThrow) {
+-  UNREACHABLE();
+-  return nullptr;
+-}
+-
+ }  // namespace internal
+ }  // namespace v8
+diff --git a/src/runtime/runtime-internal.cc b/src/runtime/runtime-internal.cc
+index d871fc7f5aa..8a5bdeb60dc 100644
+--- a/src/runtime/runtime-internal.cc
++++ b/src/runtime/runtime-internal.cc
+@@ -160,6 +160,15 @@ RUNTIME_FUNCTION(Runtime_ThrowIllegalInvocation) {
+       isolate, NewTypeError(MessageTemplate::kIllegalInvocation));
+ }
+ 
++RUNTIME_FUNCTION(Runtime_ThrowIncompatibleMethodReceiver) {
++  HandleScope scope(isolate);
++  DCHECK_EQ(2, args.length());
++  CONVERT_ARG_HANDLE_CHECKED(Object, arg0, 0);
++  CONVERT_ARG_HANDLE_CHECKED(Object, arg1, 1);
++  THROW_NEW_ERROR_RETURN_FAILURE(
++      isolate,
++      NewTypeError(MessageTemplate::kIncompatibleMethodReceiver, arg0, arg1));
++}
+ 
+ RUNTIME_FUNCTION(Runtime_ThrowIteratorResultNotAnObject) {
+   HandleScope scope(isolate);
+@@ -170,6 +179,12 @@ RUNTIME_FUNCTION(Runtime_ThrowIteratorResultNotAnObject) {
+       NewTypeError(MessageTemplate::kIteratorResultNotAnObject, value));
+ }
+ 
++RUNTIME_FUNCTION(Runtime_ThrowGeneratorRunning) {
++  HandleScope scope(isolate);
++  DCHECK_EQ(0, args.length());
++  THROW_NEW_ERROR_RETURN_FAILURE(
++      isolate, NewTypeError(MessageTemplate::kGeneratorRunning));
++}
+ 
+ RUNTIME_FUNCTION(Runtime_ThrowApplyNonFunction) {
+   HandleScope scope(isolate);
+diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
+index a55deddb7d2..367a2cdc6e8 100644
+--- a/src/runtime/runtime.h
++++ b/src/runtime/runtime.h
+@@ -233,17 +233,12 @@ namespace internal {
+ #define FOR_EACH_INTRINSIC_GENERATOR(F) \
+   F(CreateJSGeneratorObject, 0, 1)      \
+   F(SuspendJSGeneratorObject, 1, 1)     \
+-  F(ResumeJSGeneratorObject, 3, 1)      \
+   F(GeneratorClose, 1, 1)               \
+   F(GeneratorGetFunction, 1, 1)         \
+   F(GeneratorGetReceiver, 1, 1)         \
+   F(GeneratorGetInput, 1, 1)            \
+   F(GeneratorGetContinuation, 1, 1)     \
+-  F(GeneratorGetSourcePosition, 1, 1)   \
+-  F(GeneratorNext, 2, 1)                \
+-  F(GeneratorReturn, 2, 1)              \
+-  F(GeneratorThrow, 2, 1)
+-
++  F(GeneratorGetSourcePosition, 1, 1)
+ 
+ #ifdef V8_I18N_SUPPORT
+ #define FOR_EACH_INTRINSIC_I18N(F)           \
+@@ -289,7 +284,9 @@ namespace internal {
+   F(NewSyntaxError, 2, 1)                           \
+   F(NewReferenceError, 2, 1)                        \
+   F(ThrowIllegalInvocation, 0, 1)                   \
++  F(ThrowIncompatibleMethodReceiver, 2, 1)          \
+   F(ThrowIteratorResultNotAnObject, 1, 1)           \
++  F(ThrowGeneratorRunning, 0, 1)                    \
+   F(ThrowStackOverflow, 0, 1)                       \
+   F(PromiseRejectEvent, 3, 1)                       \
+   F(PromiseRevokeReject, 1, 1)                      \
+diff --git a/src/x64/builtins-x64.cc b/src/x64/builtins-x64.cc
+index 316378348c2..d743d1c0972 100644
+--- a/src/x64/builtins-x64.cc
++++ b/src/x64/builtins-x64.cc
+@@ -464,6 +464,122 @@ void Builtins::Generate_JSConstructEntryTrampoline(MacroAssembler* masm) {
+   Generate_JSEntryTrampolineHelper(masm, true);
+ }
+ 
++// static
++void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
++  // ----------- S t a t e -------------
++  //  -- rax    : the value to pass to the generator
++  //  -- rbx    : the JSGeneratorObject to resume
++  //  -- rdx    : the resume mode (tagged)
++  //  -- rsp[0] : return address
++  // -----------------------------------
++  __ AssertGeneratorObject(rbx);
++
++  // Store input value into generator object.
++  __ movp(FieldOperand(rbx, JSGeneratorObject::kInputOffset), rax);
++  __ RecordWriteField(rbx, JSGeneratorObject::kInputOffset, rax, rcx,
++                      kDontSaveFPRegs);
++
++  // Load suspended function and context.
++  __ movp(rsi, FieldOperand(rbx, JSGeneratorObject::kContextOffset));
++  __ movp(rdi, FieldOperand(rbx, JSGeneratorObject::kFunctionOffset));
++
++  // Flood function if we are stepping.
++  Label skip_flooding;
++  ExternalReference step_in_enabled =
++      ExternalReference::debug_step_in_enabled_address(masm->isolate());
++  Operand step_in_enabled_operand = masm->ExternalOperand(step_in_enabled);
++  __ cmpb(step_in_enabled_operand, Immediate(0));
++  __ j(equal, &skip_flooding);
++  {
++    FrameScope scope(masm, StackFrame::INTERNAL);
++    __ Push(rbx);
++    __ Push(rdx);
++    __ Push(rdi);
++    __ CallRuntime(Runtime::kDebugPrepareStepInIfStepping);
++    __ Pop(rdx);
++    __ Pop(rbx);
++    __ movp(rdi, FieldOperand(rbx, JSGeneratorObject::kFunctionOffset));
++  }
++  __ bind(&skip_flooding);
++
++  // Pop return address.
++  __ PopReturnAddressTo(rax);
++
++  // Push receiver.
++  __ Push(FieldOperand(rbx, JSGeneratorObject::kReceiverOffset));
++
++  // ----------- S t a t e -------------
++  //  -- rax    : return address
++  //  -- rbx    : the JSGeneratorObject to resume
++  //  -- rdx    : the resume mode (tagged)
++  //  -- rdi    : generator function
++  //  -- rsi    : generator context
++  //  -- rsp[0] : generator receiver
++  // -----------------------------------
++
++  // Push holes for arguments to generator function. Since the parser forced
++  // context allocation for any variables in generators, the actual argument
++  // values have already been copied into the context and these dummy values
++  // will never be used.
++  __ movp(rcx, FieldOperand(rdi, JSFunction::kSharedFunctionInfoOffset));
++  __ LoadSharedFunctionInfoSpecialField(
++      rcx, rcx, SharedFunctionInfo::kFormalParameterCountOffset);
++  {
++    Label done_loop, loop;
++    __ bind(&loop);
++    __ subl(rcx, Immediate(1));
++    __ j(carry, &done_loop, Label::kNear);
++    __ PushRoot(Heap::kTheHoleValueRootIndex);
++    __ jmp(&loop);
++    __ bind(&done_loop);
++  }
++
++  // Enter a new JavaScript frame, and initialize its slots as they were when
++  // the generator was suspended.
++  FrameScope scope(masm, StackFrame::MANUAL);
++  __ PushReturnAddressFrom(rax);  // Return address.
++  __ Push(rbp);                   // Caller's frame pointer.
++  __ Move(rbp, rsp);
++  __ Push(rsi);  // Callee's context.
++  __ Push(rdi);  // Callee's JS Function.
++
++  // Restore the operand stack.
++  __ movp(rsi, FieldOperand(rbx, JSGeneratorObject::kOperandStackOffset));
++  __ SmiToInteger32(rax, FieldOperand(rsi, FixedArray::kLengthOffset));
++  {
++    Label done_loop, loop;
++    __ Set(rcx, 0);
++    __ bind(&loop);
++    __ cmpl(rcx, rax);
++    __ j(equal, &done_loop, Label::kNear);
++    __ Push(
++        FieldOperand(rsi, rcx, times_pointer_size, FixedArray::kHeaderSize));
++    __ addl(rcx, Immediate(1));
++    __ jmp(&loop);
++    __ bind(&done_loop);
++  }
++
++  // Push resume mode (consumed in continuation).
++  __ Push(rdx);
++
++  // Reset operand stack so we don't leak.
++  __ LoadRoot(FieldOperand(rbx, JSGeneratorObject::kOperandStackOffset),
++              Heap::kEmptyFixedArrayRootIndex);
++
++  // Restore context and value.
++  __ movp(rsi, FieldOperand(rbx, JSGeneratorObject::kContextOffset));
++  __ movp(rax, FieldOperand(rbx, JSGeneratorObject::kInputOffset));
++
++  // Resume the generator function at the continuation.
++  __ movp(rdx, FieldOperand(rdi, JSFunction::kSharedFunctionInfoOffset));
++  __ movp(rdx, FieldOperand(rdx, SharedFunctionInfo::kCodeOffset));
++  __ SmiToInteger64(rcx,
++                    FieldOperand(rbx, JSGeneratorObject::kContinuationOffset));
++  __ leap(rdx, FieldOperand(rdx, rcx, times_1, Code::kHeaderSize));
++  __ Move(FieldOperand(rbx, JSGeneratorObject::kContinuationOffset),
++          Smi::FromInt(JSGeneratorObject::kGeneratorExecuting));
++  __ jmp(rdx);
++}
+ 
+ // Generate code for entering a JS function with the interpreter.
+ // On entry to the function the receiver and arguments have been pushed on the
+diff --git a/src/x64/interface-descriptors-x64.cc b/src/x64/interface-descriptors-x64.cc
+index b10b52298bc..d131f0f7df2 100644
+--- a/src/x64/interface-descriptors-x64.cc
++++ b/src/x64/interface-descriptors-x64.cc
+@@ -410,6 +410,16 @@ void InterpreterCEntryDescriptor::InitializePlatformSpecific(
+   data->InitializePlatformSpecific(arraysize(registers), registers);
+ }
+ 
++void ResumeGeneratorDescriptor::InitializePlatformSpecific(
++    CallInterfaceDescriptorData* data) {
++  Register registers[] = {
++      rax,  // the value to pass to the generator
++      rbx,  // the JSGeneratorObject to resume
++      rdx   // the resume mode (tagged)
++  };
++  data->InitializePlatformSpecific(arraysize(registers), registers);
++}
++
+ }  // namespace internal
+ }  // namespace v8
+ 
+diff --git a/src/x64/macro-assembler-x64.cc b/src/x64/macro-assembler-x64.cc
+index 566091df4e2..5de65989fec 100644
+--- a/src/x64/macro-assembler-x64.cc
++++ b/src/x64/macro-assembler-x64.cc
+@@ -3970,6 +3970,16 @@ void MacroAssembler::AssertBoundFunction(Register object) {
+   }
+ }
+ 
++void MacroAssembler::AssertGeneratorObject(Register object) {
++  if (emit_debug_code()) {
++    testb(object, Immediate(kSmiTagMask));
++    Check(not_equal, kOperandIsASmiAndNotAGeneratorObject);
++    Push(object);
++    CmpObjectType(object, JS_GENERATOR_OBJECT_TYPE, object);
++    Pop(object);
++    Check(equal, kOperandIsNotAGeneratorObject);
++  }
++}
+ 
+ void MacroAssembler::AssertReceiver(Register object) {
+   if (emit_debug_code()) {
+diff --git a/src/x64/macro-assembler-x64.h b/src/x64/macro-assembler-x64.h
+index af3dd031ca1..7a7de23fe0e 100644
+--- a/src/x64/macro-assembler-x64.h
++++ b/src/x64/macro-assembler-x64.h
+@@ -1224,6 +1224,10 @@ class MacroAssembler: public Assembler {
+   // enabled via --debug-code.
+   void AssertBoundFunction(Register object);
+ 
++  // Abort execution if argument is not a JSGeneratorObject,
++  // enabled via --debug-code.
++  void AssertGeneratorObject(Register object);
++
+   // Abort execution if argument is not a JSReceiver, enabled via --debug-code.
+   void AssertReceiver(Register object);
+ 
+diff --git a/test/mjsunit/mjsunit.status b/test/mjsunit/mjsunit.status
+index 3afc3897de3..a79dbbd6659 100644
+--- a/test/mjsunit/mjsunit.status
++++ b/test/mjsunit/mjsunit.status
+@@ -821,9 +821,6 @@
+   # TODO(rmcilroy,4680): Crash on windows nosnap shared.
+   'regress/regress-crbug-352058': [PASS, ['no_snap == True', SKIP]],
+ 
+-  # TODO(513471): Attempting to optimize generator hits unreachable path.
+-  'regress/regress-crbug-513471': [PASS, ['no_snap == True', SKIP]],
+-
+   # TODO(rmcilroy,4680): Fails on win32 debug.
+   'div-mod': [PASS, ['arch == ia32', SKIP]],
+ }],  # ignition == True and system == windows
+diff --git a/tools/gyp/v8.gyp b/tools/gyp/v8.gyp
+index e0fd8ebebe9..4175b734581 100644
+--- a/tools/gyp/v8.gyp
++++ b/tools/gyp/v8.gyp
+@@ -2050,7 +2050,6 @@
+           '../../src/js/arraybuffer.js',
+           '../../src/js/typedarray.js',
+           '../../src/js/iterator-prototype.js',
+-          '../../src/js/generator.js',
+           '../../src/js/object-observe.js',
+           '../../src/js/collection.js',
+           '../../src/js/weak-collection.js',
+@@ -2070,7 +2069,6 @@
+         'experimental_library_files': [
+           '../../src/js/macros.py',
+           '../../src/messages.h',
+-          '../../src/js/generator.js',
+           '../../src/js/harmony-atomics.js',
+           '../../src/js/harmony-regexp-exec.js',
+           '../../src/js/harmony-object-observe.js',
+-- 
+2.35.1
+

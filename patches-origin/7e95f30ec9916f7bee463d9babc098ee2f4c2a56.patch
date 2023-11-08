@@ -1,0 +1,124 @@
+From 7e95f30ec9916f7bee463d9babc098ee2f4c2a56 Mon Sep 17 00:00:00 2001
+From: QiuJi <qiuji@iscas.ac.cn>
+Date: Mon, 9 Aug 2021 20:47:37 +0800
+Subject: [PATCH] [riscv64][baseline] Port Sparkplug on heap compilation
+
+1. Adds EmbeddedObjectMatches
+   Port 6bf0b70490445623286c23409923d521fd7de8f4
+2. Fallback to handle references on heap compilation
+   Port 642a467338921ab2a19fb15d07fd87c4398c1e29
+3. Remove initial relocation when compiling on heap
+   Port 7ac3b55a2038a0c6d46816cb6cb9175e341733ad
+4. Retry compiling on-heap when growing buffer
+   Port fb4f89aede6f7acc219e964ac294a291d2280d4e
+5. 208854bb1433f96ed4fb2bd93f39cf20d4e1780f
+   Port 208854bb1433f96ed4fb2bd93f39cf20d4e1780f
+
+Bug: v8:11872
+Change-Id: I43118c3acea1d174d2b826e5ed2823ec5388569c
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3081606
+Reviewed-by: Ji Qiu <qiuji@iscas.ac.cn>
+Reviewed-by: Brice Dobry <brice.dobry@futurewei.com>
+Commit-Queue: Ji Qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/master@{#76185}
+---
+ src/codegen/riscv64/assembler-riscv64.cc      | 28 +++++++++++++++++--
+ src/codegen/riscv64/assembler-riscv64.h       |  8 ++++++
+ .../riscv64/macro-assembler-riscv64.cc        | 11 ++++++++
+ 3 files changed, 45 insertions(+), 2 deletions(-)
+
+diff --git a/src/codegen/riscv64/assembler-riscv64.cc b/src/codegen/riscv64/assembler-riscv64.cc
+index 596e568d9df..fba4a7a8006 100644
+--- a/src/codegen/riscv64/assembler-riscv64.cc
++++ b/src/codegen/riscv64/assembler-riscv64.cc
+@@ -2787,13 +2787,27 @@ void Assembler::RelocateRelativeReference(RelocInfo::Mode rmode, Address pc,
+ }
+ 
+ void Assembler::FixOnHeapReferences(bool update_embedded_objects) {
+-  UNIMPLEMENTED();
++  if (!update_embedded_objects) return;
++  for (auto p : saved_handles_for_raw_object_ptr_) {
++    Address address = reinterpret_cast<Address>(buffer_->start() + p.first);
++    Handle<HeapObject> object(reinterpret_cast<Address*>(p.second));
++    set_target_value_at(address, object->ptr());
++  }
+ }
+ 
+-void Assembler::FixOnHeapReferencesToHandles() { UNIMPLEMENTED(); }
++void Assembler::FixOnHeapReferencesToHandles() {
++  for (auto p : saved_handles_for_raw_object_ptr_) {
++    Address address = reinterpret_cast<Address>(buffer_->start() + p.first);
++    set_target_value_at(address, p.second);
++  }
++  saved_handles_for_raw_object_ptr_.clear();
++}
+ 
+ void Assembler::GrowBuffer() {
+   DEBUG_PRINTF("GrowBuffer: %p -> ", buffer_start_);
++  bool previously_on_heap = buffer_->IsOnHeap();
++  int previous_on_heap_gc_count = OnHeapGCCount();
++
+   // Compute new buffer size.
+   int old_size = buffer_->size();
+   int new_size = std::min(2 * old_size, old_size + 1 * MB);
+@@ -2835,6 +2849,16 @@ void Assembler::GrowBuffer() {
+       RelocateInternalReference(rmode, it.rinfo()->pc(), pc_delta);
+     }
+   }
++
++  // Fix on-heap references.
++  if (previously_on_heap) {
++    if (buffer_->IsOnHeap()) {
++      FixOnHeapReferences(previous_on_heap_gc_count != OnHeapGCCount());
++    } else {
++      FixOnHeapReferencesToHandles();
++    }
++  }
++
+   DCHECK(!overflow());
+ }
+ 
+diff --git a/src/codegen/riscv64/assembler-riscv64.h b/src/codegen/riscv64/assembler-riscv64.h
+index 3fd9a556e1b..02c3873420d 100644
+--- a/src/codegen/riscv64/assembler-riscv64.h
++++ b/src/codegen/riscv64/assembler-riscv64.h
+@@ -1028,6 +1028,14 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+     }
+   }
+ 
++#ifdef DEBUG
++  bool EmbeddedObjectMatches(int pc_offset, Handle<Object> object) {
++    return target_address_at(
++               reinterpret_cast<Address>(buffer_->start() + pc_offset)) ==
++           (IsOnHeap() ? object->ptr() : object.address());
++  }
++#endif
++
+  private:
+   // Avoid overflows for displacements etc.
+   static const int kMaximalBufferSize = 512 * MB;
+diff --git a/src/codegen/riscv64/macro-assembler-riscv64.cc b/src/codegen/riscv64/macro-assembler-riscv64.cc
+index 37313dbd271..3baa71d1a2e 100644
+--- a/src/codegen/riscv64/macro-assembler-riscv64.cc
++++ b/src/codegen/riscv64/macro-assembler-riscv64.cc
+@@ -1660,6 +1660,17 @@ void TurboAssembler::li(Register rd, Operand j, LiFlags mode) {
+         Li(rd, j.immediate());
+       }
+     }
++  } else if (IsOnHeap() && RelocInfo::IsEmbeddedObjectMode(j.rmode())) {
++    BlockGrowBufferScope block_growbuffer(this);
++    int offset = pc_offset();
++    Address address = j.immediate();
++    saved_handles_for_raw_object_ptr_.push_back(
++        std::make_pair(offset, address));
++    Handle<HeapObject> object(reinterpret_cast<Address*>(address));
++    int64_t immediate = object->ptr();
++    RecordRelocInfo(j.rmode(), immediate);
++    li_ptr(rd, immediate);
++    DCHECK(EmbeddedObjectMatches(offset, object));
+   } else if (MustUseReg(j.rmode())) {
+     int64_t immediate;
+     if (j.IsHeapObjectRequest()) {
+-- 
+2.35.1
+

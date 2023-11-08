@@ -1,0 +1,107 @@
+From d4fa48b72667e28539282df49a6b7f4667692502 Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Wed, 21 Sep 2022 15:34:25 +0800
+Subject: [PATCH] [riscv] Port 3904233: Remove unused
+ RelocInfo::Mode::RUNTIME_ENTRY
+
+Port commit 3f998527960184044f5f7db39454ee9aa917545c
+
+Change-Id: Ic82f9d08fbc6c6df524e0361141c9a5d22e8924e
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3905856
+Auto-Submit: Yahan Lu <yahan@iscas.ac.cn>
+Reviewed-by: ji qiu <qiuji@iscas.ac.cn>
+Commit-Queue: ji qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#83352}
+---
+ src/codegen/riscv/assembler-riscv-inl.h    | 21 +++------------------
+ src/codegen/riscv/assembler-riscv.cc       |  4 +++-
+ src/codegen/riscv/macro-assembler-riscv.cc |  4 ++--
+ 3 files changed, 8 insertions(+), 21 deletions(-)
+
+diff --git a/src/codegen/riscv/assembler-riscv-inl.h b/src/codegen/riscv/assembler-riscv-inl.h
+index 820326ab383..b8d3ededcd1 100644
+--- a/src/codegen/riscv/assembler-riscv-inl.h
++++ b/src/codegen/riscv/assembler-riscv-inl.h
+@@ -65,8 +65,7 @@ void RelocInfo::apply(intptr_t delta) {
+ }
+ 
+ Address RelocInfo::target_address() {
+-  DCHECK(IsCodeTargetMode(rmode_) || IsRuntimeEntry(rmode_) ||
+-         IsWasmCall(rmode_));
++  DCHECK(IsCodeTargetMode(rmode_) || IsWasmCall(rmode_));
+   return Assembler::target_address_at(pc_, constant_pool_);
+ }
+ 
+@@ -247,19 +246,6 @@ Handle<Code> Assembler::relative_code_target_object_handle_at(
+ 
+ Builtin RelocInfo::target_builtin_at(Assembler* origin) { UNREACHABLE(); }
+ 
+-Address RelocInfo::target_runtime_entry(Assembler* origin) {
+-  DCHECK(IsRuntimeEntry(rmode_));
+-  return target_address();
+-}
+-
+-void RelocInfo::set_target_runtime_entry(Address target,
+-                                         WriteBarrierMode write_barrier_mode,
+-                                         ICacheFlushMode icache_flush_mode) {
+-  DCHECK(IsRuntimeEntry(rmode_));
+-  if (target_address() != target)
+-    set_target_address(target, write_barrier_mode, icache_flush_mode);
+-}
+-
+ Address RelocInfo::target_off_heap_target() {
+   DCHECK(IsOffHeapTarget(rmode_));
+   return Assembler::target_address_at(pc_, constant_pool_);
+@@ -267,9 +253,8 @@ Address RelocInfo::target_off_heap_target() {
+ 
+ void RelocInfo::WipeOut() {
+   DCHECK(IsFullEmbeddedObject(rmode_) || IsCodeTarget(rmode_) ||
+-         IsRuntimeEntry(rmode_) || IsExternalReference(rmode_) ||
+-         IsInternalReference(rmode_) || IsInternalReferenceEncoded(rmode_) ||
+-         IsOffHeapTarget(rmode_));
++         IsExternalReference(rmode_) || IsInternalReference(rmode_) ||
++         IsInternalReferenceEncoded(rmode_) || IsOffHeapTarget(rmode_));
+   if (IsInternalReference(rmode_)) {
+     Memory<Address>(pc_) = kNullAddress;
+   } else if (IsInternalReferenceEncoded(rmode_)) {
+diff --git a/src/codegen/riscv/assembler-riscv.cc b/src/codegen/riscv/assembler-riscv.cc
+index cb55d986b32..178303d31c2 100644
+--- a/src/codegen/riscv/assembler-riscv.cc
++++ b/src/codegen/riscv/assembler-riscv.cc
+@@ -132,8 +132,10 @@ Register ToRegister(int num) {
+ 
+ const int RelocInfo::kApplyMask =
+     RelocInfo::ModeMask(RelocInfo::INTERNAL_REFERENCE) |
++    RelocInfo::ModeMask(RelocInfo::NEAR_BUILTIN_ENTRY) |
+     RelocInfo::ModeMask(RelocInfo::INTERNAL_REFERENCE_ENCODED) |
+-    RelocInfo::ModeMask(RelocInfo::RELATIVE_CODE_TARGET);
++    RelocInfo::ModeMask(RelocInfo::RELATIVE_CODE_TARGET) |
++    RelocInfo::ModeMask(RelocInfo::CODE_TARGET);
+ 
+ bool RelocInfo::IsCodedSpecially() {
+   // The deserializer needs to know whether a pointer is specially coded.  Being
+diff --git a/src/codegen/riscv/macro-assembler-riscv.cc b/src/codegen/riscv/macro-assembler-riscv.cc
+index 4f4b443c514..f7a775c6740 100644
+--- a/src/codegen/riscv/macro-assembler-riscv.cc
++++ b/src/codegen/riscv/macro-assembler-riscv.cc
+@@ -4392,7 +4392,7 @@ void TurboAssembler::CallBuiltin(Builtin builtin) {
+       break;
+     }
+     case BuiltinCallJumpMode::kPCRelative:
+-      Call(BuiltinEntry(builtin), RelocInfo::RUNTIME_ENTRY);
++      Call(BuiltinEntry(builtin), RelocInfo::NEAR_BUILTIN_ENTRY);
+       break;
+     case BuiltinCallJumpMode::kIndirect: {
+       LoadEntryFromBuiltin(builtin, t6);
+@@ -4426,7 +4426,7 @@ void TurboAssembler::TailCallBuiltin(Builtin builtin) {
+       break;
+     }
+     case BuiltinCallJumpMode::kPCRelative:
+-      Jump(BuiltinEntry(builtin), RelocInfo::RUNTIME_ENTRY);
++      Jump(BuiltinEntry(builtin), RelocInfo::NEAR_BUILTIN_ENTRY);
+       break;
+     case BuiltinCallJumpMode::kIndirect: {
+       LoadEntryFromBuiltin(builtin, t6);
+-- 
+2.35.1
+

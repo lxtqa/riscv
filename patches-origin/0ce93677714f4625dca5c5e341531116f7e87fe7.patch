@@ -1,0 +1,534 @@
+From 0ce93677714f4625dca5c5e341531116f7e87fe7 Mon Sep 17 00:00:00 2001
+From: Andreas Haas <ahaas@chromium.org>
+Date: Mon, 3 Jul 2023 17:02:54 +0200
+Subject: [PATCH] [wasm][x64] Generic wasm-to-js wrapper for 0 parameters and 0
+ returns
+
+This CL provides a first step in the implementation of the generic
+wasm-to-js wrapper. Most important is the setup, parameters and return
+values are not supported yet.
+
+R=thibaudm@chromium.org
+
+Bug: v8:14035
+Change-Id: I4dfda26bf0b24a4bb7fa7a36b292c0536da953e3
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4660406
+Reviewed-by: Thibaud Michaud <thibaudm@chromium.org>
+Commit-Queue: Andreas Haas <ahaas@chromium.org>
+Reviewed-by: Nico Hartmann <nicohartmann@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#88626}
+---
+ BUILD.bazel                              |  1 +
+ BUILD.gn                                 |  1 +
+ src/builtins/arm/builtins-arm.cc         |  2 ++
+ src/builtins/arm64/builtins-arm64.cc     |  2 ++
+ src/builtins/builtins-definitions.h      |  2 ++
+ src/builtins/builtins-wasm-gen.cc        |  7 +++-
+ src/builtins/ia32/builtins-ia32.cc       |  2 ++
+ src/builtins/js-to-wasm.tq               |  1 -
+ src/builtins/loong64/builtins-loong64.cc |  2 ++
+ src/builtins/mips64/builtins-mips64.cc   |  2 ++
+ src/builtins/ppc/builtins-ppc.cc         |  2 ++
+ src/builtins/riscv/builtins-riscv.cc     |  2 ++
+ src/builtins/s390/builtins-s390.cc       |  2 ++
+ src/builtins/wasm-to-js.tq               | 44 ++++++++++++++++++++++++
+ src/builtins/x64/builtins-x64.cc         |  6 ++++
+ src/codegen/interface-descriptors-inl.h  | 31 +++++++++++++++++
+ src/codegen/interface-descriptors.h      | 19 ++++++++++
+ src/compiler/code-assembler.cc           |  6 ++++
+ src/compiler/code-assembler.h            |  2 ++
+ src/flags/flag-definitions.h             |  3 ++
+ src/wasm/module-instantiate.cc           | 22 +++++++++++-
+ src/wasm/wasm-objects.cc                 | 15 ++++++++
+ src/wasm/wasm-objects.h                  |  3 ++
+ test/mjsunit/wasm/wasm-to-js.js          | 29 ++++++++++++++++
+ 24 files changed, 205 insertions(+), 3 deletions(-)
+ create mode 100644 src/builtins/wasm-to-js.tq
+ create mode 100644 test/mjsunit/wasm/wasm-to-js.js
+
+diff --git a/BUILD.bazel b/BUILD.bazel
+index 55eae3f23d1..6b5a85803c9 100644
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -1022,6 +1022,7 @@ filegroup(
+         ":is_v8_enable_webassembly": [
+             "src/builtins/js-to-wasm.tq",
+             "src/builtins/wasm.tq",
++            "src/builtins/wasm-to-js.tq",
+             "src/debug/debug-wasm-objects.tq",
+             "src/wasm/wasm-objects.tq",
+         ],
+diff --git a/BUILD.gn b/BUILD.gn
+index 5d330cfd213..a3a7a83d962 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -2036,6 +2036,7 @@ if (v8_enable_webassembly) {
+   torque_files += [
+     "src/builtins/js-to-wasm.tq",
+     "src/builtins/wasm.tq",
++    "src/builtins/wasm-to-js.tq",
+     "src/debug/debug-wasm-objects.tq",
+     "src/wasm/wasm-objects.tq",
+   ]
+diff --git a/src/builtins/arm/builtins-arm.cc b/src/builtins/arm/builtins-arm.cc
+index fb4e68ff218..1c4b795cd1f 100644
+--- a/src/builtins/arm/builtins-arm.cc
++++ b/src/builtins/arm/builtins-arm.cc
+@@ -2727,6 +2727,8 @@ void Builtins::Generate_WasmReturnPromiseOnSuspend(MacroAssembler* masm) {
+   __ Trap();
+ }
+ 
++void Builtins::Generate_WasmToJsWrapperAsm(MacroAssembler* masm) { __ Trap(); }
++
+ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
+   // TODO(v8:12191): Implement for this platform.
+   __ Trap();
+diff --git a/src/builtins/arm64/builtins-arm64.cc b/src/builtins/arm64/builtins-arm64.cc
+index 6c4559145cc..8053eceb31c 100644
+--- a/src/builtins/arm64/builtins-arm64.cc
++++ b/src/builtins/arm64/builtins-arm64.cc
+@@ -4566,6 +4566,8 @@ void Builtins::Generate_WasmReturnPromiseOnSuspend(MacroAssembler* masm) {
+   GenericJSToWasmWrapperHelper(masm, true);
+ }
+ 
++void Builtins::Generate_WasmToJsWrapperAsm(MacroAssembler* masm) { __ Trap(); }
++
+ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
+   auto regs = RegisterAllocator::WithAllocatableGeneralRegisters();
+   // Set up the stackframe.
+diff --git a/src/builtins/builtins-definitions.h b/src/builtins/builtins-definitions.h
+index 1563f8c4a3f..662d9803bcd 100644
+--- a/src/builtins/builtins-definitions.h
++++ b/src/builtins/builtins-definitions.h
+@@ -997,6 +997,8 @@ namespace internal {
+   /* Wasm */                                                                   \
+   IF_WASM(ASM, GenericJSToWasmWrapper, WasmDummy)                              \
+   IF_WASM(ASM, NewGenericJSToWasmWrapper, WasmNewJSToWasmWrapper)              \
++  IF_WASM(ASM, WasmToJsWrapperAsm, WasmDummy)                                  \
++  IF_WASM(TFC, WasmToJsWrapperCSA, WasmToJSWrapper)                            \
+   IF_WASM(ASM, WasmReturnPromiseOnSuspend, WasmDummy)                          \
+   IF_WASM(ASM, WasmSuspend, WasmSuspend)                                       \
+   IF_WASM(ASM, WasmResume, WasmDummy)                                          \
+diff --git a/src/builtins/builtins-wasm-gen.cc b/src/builtins/builtins-wasm-gen.cc
+index c4d3ad1a4b8..d86750165ca 100644
+--- a/src/builtins/builtins-wasm-gen.cc
++++ b/src/builtins/builtins-wasm-gen.cc
+@@ -115,6 +115,11 @@ TF_BUILTIN(JSToWasmLazyDeoptContinuation, WasmBuiltinsAssembler) {
+   auto value = Parameter<Object>(Descriptor::kArgument);
+   Return(value);
+ }
+-
++TF_BUILTIN(WasmToJsWrapperCSA, WasmBuiltinsAssembler) {
++  TorqueStructWasmToJSResult result = WasmToJSWrapper(
++      UncheckedParameter<WasmApiFunctionRef>(Descriptor::kWasmApiFunctionRef));
++  PopAndReturn(result.popCount, result.result0, result.result1, result.result2,
++               result.result3);
++}
+ }  // namespace internal
+ }  // namespace v8
+diff --git a/src/builtins/ia32/builtins-ia32.cc b/src/builtins/ia32/builtins-ia32.cc
+index 0b6c20496f3..9d1eb5d1e54 100644
+--- a/src/builtins/ia32/builtins-ia32.cc
++++ b/src/builtins/ia32/builtins-ia32.cc
+@@ -3127,6 +3127,8 @@ void Builtins::Generate_WasmReturnPromiseOnSuspend(MacroAssembler* masm) {
+   __ Trap();
+ }
+ 
++void Builtins::Generate_WasmToJsWrapperAsm(MacroAssembler* masm) { __ Trap(); }
++
+ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
+   // TODO(v8:12191): Implement for this platform.
+   __ Trap();
+diff --git a/src/builtins/js-to-wasm.tq b/src/builtins/js-to-wasm.tq
+index 4a28e9f07d5..1449a58f97c 100644
+--- a/src/builtins/js-to-wasm.tq
++++ b/src/builtins/js-to-wasm.tq
+@@ -826,5 +826,4 @@ builtin JSToWasmHandleReturns(
+ 
+   return resultArray;
+ }
+-
+ }  // namespace wasm
+diff --git a/src/builtins/loong64/builtins-loong64.cc b/src/builtins/loong64/builtins-loong64.cc
+index acad3e0bf82..12bff7a795d 100644
+--- a/src/builtins/loong64/builtins-loong64.cc
++++ b/src/builtins/loong64/builtins-loong64.cc
+@@ -2801,6 +2801,8 @@ void Builtins::Generate_WasmReturnPromiseOnSuspend(MacroAssembler* masm) {
+   __ Trap();
+ }
+ 
++void Builtins::Generate_WasmToJsWrapperAsm(MacroAssembler* masm) { __ Trap(); }
++
+ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
+   // TODO(v8:12191): Implement for this platform.
+   __ Trap();
+diff --git a/src/builtins/mips64/builtins-mips64.cc b/src/builtins/mips64/builtins-mips64.cc
+index 4e36450d980..692e9e828fc 100644
+--- a/src/builtins/mips64/builtins-mips64.cc
++++ b/src/builtins/mips64/builtins-mips64.cc
+@@ -2774,6 +2774,8 @@ void Builtins::Generate_WasmReturnPromiseOnSuspend(MacroAssembler* masm) {
+   __ Trap();
+ }
+ 
++void Builtins::Generate_WasmToJsWrapperAsm(MacroAssembler* masm) { __ Trap(); }
++
+ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
+   // TODO(v8:12191): Implement for this platform.
+   __ Trap();
+diff --git a/src/builtins/ppc/builtins-ppc.cc b/src/builtins/ppc/builtins-ppc.cc
+index 418fcf756b7..1329ab5a559 100644
+--- a/src/builtins/ppc/builtins-ppc.cc
++++ b/src/builtins/ppc/builtins-ppc.cc
+@@ -2951,6 +2951,8 @@ void Builtins::Generate_WasmReturnPromiseOnSuspend(MacroAssembler* masm) {
+   __ Trap();
+ }
+ 
++void Builtins::Generate_WasmToJsWrapperAsm(MacroAssembler* masm) { __ Trap(); }
++
+ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
+   // TODO(v8:12191): Implement for this platform.
+   __ Trap();
+diff --git a/src/builtins/riscv/builtins-riscv.cc b/src/builtins/riscv/builtins-riscv.cc
+index 7e8bf630a50..eb4e3385f34 100644
+--- a/src/builtins/riscv/builtins-riscv.cc
++++ b/src/builtins/riscv/builtins-riscv.cc
+@@ -3093,6 +3093,8 @@ void Builtins::Generate_WasmReturnPromiseOnSuspend(MacroAssembler* masm) {
+   __ Trap();
+ }
+ 
++void Builtins::Generate_WasmToJsWrapperAsm(MacroAssembler* masm) { __ Trap(); }
++
+ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
+   // TODO(v8:12191): Implement for this platform.
+   __ Trap();
+diff --git a/src/builtins/s390/builtins-s390.cc b/src/builtins/s390/builtins-s390.cc
+index 4d82baf0113..ec481123751 100644
+--- a/src/builtins/s390/builtins-s390.cc
++++ b/src/builtins/s390/builtins-s390.cc
+@@ -2935,6 +2935,8 @@ void Builtins::Generate_WasmReturnPromiseOnSuspend(MacroAssembler* masm) {
+   __ Trap();
+ }
+ 
++void Builtins::Generate_WasmToJsWrapperAsm(MacroAssembler* masm) { __ Trap(); }
++
+ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
+   // TODO(v8:12191): Implement for this platform.
+   __ Trap();
+diff --git a/src/builtins/wasm-to-js.tq b/src/builtins/wasm-to-js.tq
+new file mode 100644
+index 00000000000..e402471530f
+--- /dev/null
++++ b/src/builtins/wasm-to-js.tq
+@@ -0,0 +1,44 @@
++// Copyright 2023 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++namespace wasm {
++@export
++struct WasmToJSResult {
++  popCount: int32;
++  result0: intptr;
++  result1: intptr;
++  result2: float64;
++  result3: float64;
++}
++
++extern builtin CallVarargs(
++    Context,
++    JSAny,  // target rdi
++    int32,  // actual arguments count rax (number of arguments already on the
++            // stack)
++    int32,  // arguments length rcx
++    FixedArray  // arguments list rbx
++    ): JSAny;
++
++@export
++transitioning macro WasmToJSWrapper(ref: WasmApiFunctionRef): WasmToJSResult {
++  const target = ref.callable;
++  // Set the receiver to `Undefined` as the default. If the receiver would be
++  // different, e.g. the global proxy for sloppy functions, then the CallVarargs
++  // builtin takes care of it automatically
++  const receiver = Undefined;
++  const context = ref.native_context;
++  const params = WasmAllocateFixedArray(1);
++  params.objects[0] = receiver;
++  const _result = CallVarargs(context, target, 0, 1, params);
++  // TODO(ahaas): Provide actual return values here.
++  return WasmToJSResult{
++    popCount: 0,
++    result0: 0,
++    result1: 0,
++    result2: 0.0,
++    result3: 0.0
++  };
++}
++}  // namespace wasm
+diff --git a/src/builtins/x64/builtins-x64.cc b/src/builtins/x64/builtins-x64.cc
+index 27e0945ebac..2ad231046a6 100644
+--- a/src/builtins/x64/builtins-x64.cc
++++ b/src/builtins/x64/builtins-x64.cc
+@@ -4269,6 +4269,12 @@ void Builtins::Generate_NewGenericJSToWasmWrapper(MacroAssembler* masm) {
+   __ ret(0);
+ }
+ 
++void Builtins::Generate_WasmToJsWrapperAsm(MacroAssembler* masm) {
++  // TODO(ahaas): For now we just tail call to the CSA builtin. Eventually
++  // parameter registers will be pushed here.
++  __ TailCallBuiltin(Builtin::kWasmToJsWrapperCSA);
++}
++
+ void Builtins::Generate_WasmSuspend(MacroAssembler* masm) {
+   // Set up the stackframe.
+   __ EnterFrame(StackFrame::STACK_SWITCH);
+diff --git a/src/codegen/interface-descriptors-inl.h b/src/codegen/interface-descriptors-inl.h
+index cfb924c15ef..da443f2602c 100644
+--- a/src/codegen/interface-descriptors-inl.h
++++ b/src/codegen/interface-descriptors-inl.h
+@@ -10,6 +10,9 @@
+ #include "src/base/logging.h"
+ #include "src/codegen/interface-descriptors.h"
+ #include "src/codegen/register.h"
++#if V8_ENABLE_WEBASSEMBLY
++#include "src/wasm/wasm-linkage.h"
++#endif
+ 
+ #if V8_TARGET_ARCH_X64
+ #include "src/codegen/x64/interface-descriptors-x64-inl.h"
+@@ -681,6 +684,34 @@ WasmNewJSToWasmWrapperDescriptor::WrapperBufferRegister() {
+   return std::get<kWrapperBuffer>(registers());
+ }
+ 
++constexpr auto WasmToJSWrapperDescriptor::registers() {
++#if V8_ENABLE_WEBASSEMBLY
++  return RegisterArray(wasm::kGpParamRegisters[0]);
++#else
++  return EmptyRegisterArray();
++#endif
++}
++
++constexpr auto WasmToJSWrapperDescriptor::return_registers() {
++#if V8_ENABLE_WEBASSEMBLY
++  return RegisterArray(wasm::kGpReturnRegisters[0], wasm::kGpReturnRegisters[1],
++                       no_reg, no_reg);
++#else
++  // An arbitrary register array so that the code compiles.
++  return CallInterfaceDescriptor::DefaultRegisterArray();
++#endif
++}
++
++constexpr auto WasmToJSWrapperDescriptor::return_double_registers() {
++#if V8_ENABLE_WEBASSEMBLY
++  return DoubleRegisterArray(no_dreg, no_dreg, wasm::kFpReturnRegisters[0],
++                             wasm::kFpReturnRegisters[1]);
++#else
++  // An arbitrary register array so that the code compiles.
++  return CallInterfaceDescriptor::DefaultDoubleRegisterArray();
++#endif
++}
++
+ #define DEFINE_STATIC_BUILTIN_DESCRIPTOR_GETTER(Name, DescriptorName) \
+   template <>                                                         \
+   struct CallInterfaceDescriptorFor<Builtin::k##Name> {               \
+diff --git a/src/codegen/interface-descriptors.h b/src/codegen/interface-descriptors.h
+index 326353b6ae0..9564202f32a 100644
+--- a/src/codegen/interface-descriptors.h
++++ b/src/codegen/interface-descriptors.h
+@@ -138,6 +138,7 @@ namespace internal {
+   V(WasmFloat32ToNumber)                             \
+   V(WasmFloat64ToTagged)                             \
+   V(WasmNewJSToWasmWrapper)                          \
++  V(WasmToJSWrapper)                                 \
+   V(WasmSuspend)                                     \
+   V(WriteBarrier)                                    \
+   IF_TSAN(V, TSANLoad)                               \
+@@ -2111,6 +2112,24 @@ class WasmNewJSToWasmWrapperDescriptor final
+   static constexpr inline Register WrapperBufferRegister();
+ };
+ 
++class WasmToJSWrapperDescriptor final
++    : public StaticCallInterfaceDescriptor<WasmToJSWrapperDescriptor> {
++ public:
++  DEFINE_RESULT_AND_PARAMETERS_NO_CONTEXT(4, kWasmApiFunctionRef)
++  DEFINE_RESULT_AND_PARAMETER_TYPES(
++      MachineType::IntPtr(),     // GP return 1
++      MachineType::IntPtr(),     // GP return 2
++      MachineType::Float64(),    // FP return 1
++      MachineType::Float64(),    // FP return 2
++      MachineType::AnyTagged())  // WasmApiFunctionRef
++  DECLARE_DESCRIPTOR(WasmToJSWrapperDescriptor)
++
++  static constexpr int kMaxRegisterParams = 1;
++  static constexpr inline auto registers();
++  static constexpr inline auto return_registers();
++  static constexpr inline auto return_double_registers();
++};
++
+ class WasmSuspendDescriptor final
+     : public StaticCallInterfaceDescriptor<WasmSuspendDescriptor> {
+  public:
+diff --git a/src/compiler/code-assembler.cc b/src/compiler/code-assembler.cc
+index 56c459e3c14..7e2a64dbdee 100644
+--- a/src/compiler/code-assembler.cc
++++ b/src/compiler/code-assembler.cc
+@@ -493,6 +493,12 @@ void CodeAssembler::PopAndReturn(Node* pop, Node* value) {
+   return raw_assembler()->PopAndReturn(pop, value);
+ }
+ 
++void CodeAssembler::PopAndReturn(Node* pop, Node* value1, Node* value2,
++                                 Node* value3, Node* value4) {
++  DCHECK_EQ(4, raw_assembler()->call_descriptor()->ReturnCount());
++  return raw_assembler()->PopAndReturn(pop, value1, value2, value3, value4);
++}
++
+ void CodeAssembler::ReturnIf(TNode<BoolT> condition, TNode<Object> value) {
+   Label if_return(this), if_continue(this);
+   Branch(condition, &if_return, &if_continue);
+diff --git a/src/compiler/code-assembler.h b/src/compiler/code-assembler.h
+index 3fa252ddded..c88e46527d4 100644
+--- a/src/compiler/code-assembler.h
++++ b/src/compiler/code-assembler.h
+@@ -632,6 +632,8 @@ class V8_EXPORT_PRIVATE CodeAssembler {
+   void Return(TNode<WordT> value1, TNode<WordT> value2);
+   void Return(TNode<WordT> value1, TNode<Object> value2);
+   void PopAndReturn(Node* pop, Node* value);
++  void PopAndReturn(Node* pop, Node* value1, Node* value2, Node* value3,
++                    Node* value4);
+ 
+   void ReturnIf(TNode<BoolT> condition, TNode<Object> value);
+ 
+diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
+index 925c74193cd..ec1309ec2b9 100644
+--- a/src/flags/flag-definitions.h
++++ b/src/flags/flag-definitions.h
+@@ -1196,6 +1196,9 @@ DEFINE_VALUE_IMPLICATION(optimize_for_size, max_semi_space_size, size_t{1})
+ DEFINE_BOOL(wasm_generic_wrapper, true,
+             "allow use of the generic js-to-wasm wrapper instead of "
+             "per-signature wrappers")
++DEFINE_BOOL(wasm_to_js_generic_wrapper, false,
++            "allow use of the generic wasm-to-js wrapper instead of "
++            "per-signature wrappers")
+ DEFINE_BOOL(enable_wasm_arm64_generic_wrapper, true,
+             "allow use of the generic js-to-wasm wrapper instead of "
+             "per-signature wrappers on arm64")
+diff --git a/src/wasm/module-instantiate.cc b/src/wasm/module-instantiate.cc
+index 9d4bf0dd3e9..303c77834d4 100644
+--- a/src/wasm/module-instantiate.cc
++++ b/src/wasm/module-instantiate.cc
+@@ -1504,6 +1504,20 @@ MaybeHandle<WasmMemoryObject> InstanceBuilder::FindImportedMemory(
+   return {};
+ }
+ 
++namespace {
++bool UseGenericWrapper(const wasm::FunctionSig* sig, Suspend suspend) {
++#if !V8_TARGET_ARCH_X64
++  return false;
++#else
++  if (sig->return_count() > 0) return false;
++  if (sig->parameter_count() > 0) return false;
++  if (suspend == kSuspend) return false;
++
++  return v8_flags.wasm_to_js_generic_wrapper;
++#endif
++}
++}  // namespace
++
+ bool InstanceBuilder::ProcessImportedFunction(
+     Handle<WasmInstanceObject> instance, int import_index, int func_index,
+     Handle<String> module_name, Handle<String> import_name,
+@@ -1599,7 +1613,13 @@ bool InstanceBuilder::ProcessImportedFunction(
+     }
+     default: {
+       // The imported function is a callable.
+-
++      if (UseGenericWrapper(expected_sig, resolved.suspend()) &&
++          (kind == ImportCallKind::kJSFunctionArityMatch ||
++           kind == ImportCallKind::kJSFunctionArityMismatch)) {
++        ImportedFunctionEntry entry(instance, func_index);
++        entry.SetWasmToJs(isolate_, js_receiver, resolved.suspend());
++        break;
++      }
+       int expected_arity = static_cast<int>(expected_sig->parameter_count());
+       if (kind == ImportCallKind::kJSFunctionArityMismatch) {
+         Handle<JSFunction> function = Handle<JSFunction>::cast(js_receiver);
+diff --git a/src/wasm/wasm-objects.cc b/src/wasm/wasm-objects.cc
+index e53b97962ef..a2e00e5150e 100644
+--- a/src/wasm/wasm-objects.cc
++++ b/src/wasm/wasm-objects.cc
+@@ -1044,6 +1044,21 @@ FunctionTargetAndRef::FunctionTargetAndRef(
+   }
+ }
+ 
++void ImportedFunctionEntry::SetWasmToJs(Isolate* isolate,
++                                        Handle<JSReceiver> callable,
++                                        wasm::Suspend suspend) {
++  Address wrapper = isolate->builtins()
++                        ->code(Builtin::kWasmToJsWrapperAsm)
++                        .instruction_start();
++  TRACE_IFT("Import callable 0x%" PRIxPTR "[%d] = {callable=0x%" PRIxPTR
++            ", target=0x%" PRIxPTR "}\n",
++            instance_->ptr(), index_, callable->ptr(), wrapper);
++  Handle<WasmApiFunctionRef> ref =
++      isolate->factory()->NewWasmApiFunctionRef(callable, suspend, instance_);
++  instance_->imported_function_refs().set(index_, *ref);
++  instance_->imported_function_targets().set(index_, wrapper);
++}
++
+ void ImportedFunctionEntry::SetWasmToJs(
+     Isolate* isolate, Handle<JSReceiver> callable,
+     const wasm::WasmCode* wasm_to_js_wrapper, wasm::Suspend suspend) {
+diff --git a/src/wasm/wasm-objects.h b/src/wasm/wasm-objects.h
+index 1ba04dcc0a5..2f045b2f8a2 100644
+--- a/src/wasm/wasm-objects.h
++++ b/src/wasm/wasm-objects.h
+@@ -98,9 +98,12 @@ class ImportedFunctionEntry {
+ 
+   // Initialize this entry as a Wasm to JS call. This accepts the isolate as a
+   // parameter, since it must allocate a tuple.
++  void SetWasmToJs(Isolate*, Handle<JSReceiver> callable,
++                   wasm::Suspend suspend);
+   V8_EXPORT_PRIVATE void SetWasmToJs(Isolate*, Handle<JSReceiver> callable,
+                                      const wasm::WasmCode* wasm_to_js_wrapper,
+                                      wasm::Suspend suspend);
++
+   // Initialize this entry as a Wasm to Wasm call.
+   void SetWasmToWasm(WasmInstanceObject target_instance, Address call_target);
+ 
+diff --git a/test/mjsunit/wasm/wasm-to-js.js b/test/mjsunit/wasm/wasm-to-js.js
+new file mode 100644
+index 00000000000..42f5a051ada
+--- /dev/null
++++ b/test/mjsunit/wasm/wasm-to-js.js
+@@ -0,0 +1,29 @@
++// Copyright 2023 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Flags: --wasm-to-js-generic-wrapper
++
++d8.file.execute('test/mjsunit/wasm/wasm-module-builder.js');
++
++const builder = new WasmModuleBuilder();
++
++let sig = makeSig([], []);
++const imp_index = builder.addImport('imp', 'foo', sig);
++builder.addFunction('main', sig)
++    .addBody([
++      kExprCallFunction,
++      imp_index,
++    ])
++    .exportFunc();
++
++let called = false;
++function foo() {
++  called = true;
++}
++
++assertTrue(!called);
++const instance =
++    builder.instantiate({imp: {foo: foo}});
++instance.exports.main();
++assertTrue(called);
+-- 
+2.35.1
+

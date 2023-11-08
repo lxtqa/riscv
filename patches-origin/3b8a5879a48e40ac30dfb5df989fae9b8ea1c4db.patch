@@ -1,0 +1,686 @@
+From 3b8a5879a48e40ac30dfb5df989fae9b8ea1c4db Mon Sep 17 00:00:00 2001
+From: Peter Marshall <petermarshall@chromium.org>
+Date: Wed, 7 Feb 2018 16:50:03 +0100
+Subject: [PATCH] [cleanup] Remove builtin wrappers and use ThrowError helpers
+ in CSA.
+
+Cleanup CL that removes unnecessary builtins that were just wrapping
+the throwing of errors. Use the ThrowTypeError and ThrowRangeError
+helpers more consistently from CSA.
+
+Change-Id: I2d0c3647340c88c457b27e16c0a81567869b7ec7
+Reviewed-on: https://chromium-review.googlesource.com/906769
+Commit-Queue: Peter Marshall <petermarshall@chromium.org>
+Reviewed-by: Franziska Hinkelmann <franzih@chromium.org>
+Cr-Commit-Position: refs/heads/master@{#51150}
+---
+ src/builtins/builtins-array-gen.cc       | 11 ++---
+ src/builtins/builtins-collections-gen.cc |  6 ++-
+ src/builtins/builtins-conversion-gen.cc  |  8 ++--
+ src/builtins/builtins-date-gen.cc        | 16 ++-----
+ src/builtins/builtins-generator-gen.cc   | 10 ++--
+ src/builtins/builtins-iterator-gen.cc    |  8 +---
+ src/builtins/builtins-regexp-gen.cc      | 22 ++-------
+ src/builtins/builtins-string-gen.cc      | 16 +++----
+ src/builtins/builtins-typedarray-gen.cc  | 43 ++++-------------
+ src/code-stub-assembler.cc               | 26 +++--------
+ src/code-stub-assembler.h                |  4 --
+ src/debug/debug-evaluate.cc              |  4 --
+ src/ic/keyed-store-generic.cc            | 10 ++--
+ src/runtime/runtime-date.cc              |  9 ----
+ src/runtime/runtime-internal.cc          | 59 ------------------------
+ src/runtime/runtime.h                    | 11 +----
+ 16 files changed, 53 insertions(+), 210 deletions(-)
+
+diff --git a/src/builtins/builtins-array-gen.cc b/src/builtins/builtins-array-gen.cc
+index a02dbde51dc..5096e8f490c 100644
+--- a/src/builtins/builtins-array-gen.cc
++++ b/src/builtins/builtins-array-gen.cc
+@@ -3163,8 +3163,7 @@ TF_BUILTIN(ArrayPrototypeKeys, ArrayPrototypeIterationAssembler) {
+ }
+ 
+ TF_BUILTIN(ArrayIteratorPrototypeNext, CodeStubAssembler) {
+-  Handle<String> operation = factory()->NewStringFromAsciiChecked(
+-      "Array Iterator.prototype.next", TENURED);
++  const char* method_name = "Array Iterator.prototype.next";
+ 
+   Node* context = Parameter(Descriptor::kContext);
+   Node* iterator = Parameter(Descriptor::kReceiver);
+@@ -3558,14 +3557,12 @@ TF_BUILTIN(ArrayIteratorPrototypeNext, CodeStubAssembler) {
+   BIND(&throw_bad_receiver);
+   {
+     // The {receiver} is not a valid JSArrayIterator.
+-    CallRuntime(Runtime::kThrowIncompatibleMethodReceiver, context,
+-                HeapConstant(operation), iterator);
+-    Unreachable();
++    ThrowTypeError(context, MessageTemplate::kIncompatibleMethodReceiver,
++                   StringConstant(method_name), iterator);
+   }
+ 
+   BIND(&if_isdetached);
+-  ThrowTypeError(context, MessageTemplate::kDetachedOperation,
+-                 HeapConstant(operation));
++  ThrowTypeError(context, MessageTemplate::kDetachedOperation, method_name);
+ }
+ 
+ }  // namespace internal
+diff --git a/src/builtins/builtins-collections-gen.cc b/src/builtins/builtins-collections-gen.cc
+index 082a208a88a..5edf8d5721e 100644
+--- a/src/builtins/builtins-collections-gen.cc
++++ b/src/builtins/builtins-collections-gen.cc
+@@ -1761,7 +1761,8 @@ TF_BUILTIN(MapIteratorPrototypeNext, CollectionsBuiltinsAssembler) {
+   Branch(InstanceTypeEqual(receiver_instance_type, JS_MAP_VALUE_ITERATOR_TYPE),
+          &if_receiver_valid, &if_receiver_invalid);
+   BIND(&if_receiver_invalid);
+-  ThrowIncompatibleMethodReceiver(context, kMethodName, receiver);
++  ThrowTypeError(context, MessageTemplate::kIncompatibleMethodReceiver,
++                 StringConstant(kMethodName), receiver);
+   BIND(&if_receiver_valid);
+ 
+   // Check if the {receiver} is exhausted.
+@@ -1974,7 +1975,8 @@ TF_BUILTIN(SetIteratorPrototypeNext, CollectionsBuiltinsAssembler) {
+       InstanceTypeEqual(receiver_instance_type, JS_SET_KEY_VALUE_ITERATOR_TYPE),
+       &if_receiver_valid, &if_receiver_invalid);
+   BIND(&if_receiver_invalid);
+-  ThrowIncompatibleMethodReceiver(context, kMethodName, receiver);
++  ThrowTypeError(context, MessageTemplate::kIncompatibleMethodReceiver,
++                 StringConstant(kMethodName), receiver);
+   BIND(&if_receiver_valid);
+ 
+   // Check if the {receiver} is exhausted.
+diff --git a/src/builtins/builtins-conversion-gen.cc b/src/builtins/builtins-conversion-gen.cc
+index 98e0f2c8b2b..58de8f8b265 100644
+--- a/src/builtins/builtins-conversion-gen.cc
++++ b/src/builtins/builtins-conversion-gen.cc
+@@ -62,7 +62,7 @@ void ConversionBuiltinsAssembler::Generate_NonPrimitiveToPrimitive(
+     BIND(&if_resultisnotprimitive);
+     {
+       // Somehow the @@toPrimitive method on {input} didn't yield a primitive.
+-      TailCallRuntime(Runtime::kThrowCannotConvertToPrimitive, context);
++      ThrowTypeError(context, MessageTemplate::kCannotConvertToPrimitive);
+     }
+   }
+ 
+@@ -208,7 +208,7 @@ void ConversionBuiltinsAssembler::Generate_OrdinaryToPrimitive(
+     BIND(&if_methodisnotcallable);
+   }
+ 
+-  TailCallRuntime(Runtime::kThrowCannotConvertToPrimitive, context);
++  ThrowTypeError(context, MessageTemplate::kCannotConvertToPrimitive);
+ 
+   BIND(&return_result);
+   Return(var_result.value());
+@@ -383,8 +383,8 @@ TF_BUILTIN(ToObject, CodeStubAssembler) {
+   Return(js_value);
+ 
+   BIND(&if_noconstructor);
+-  TailCallRuntime(Runtime::kThrowUndefinedOrNullToObject, context,
+-                  StringConstant("ToObject"));
++  ThrowTypeError(context, MessageTemplate::kUndefinedOrNullToObject,
++                 "ToObject");
+ 
+   BIND(&if_jsreceiver);
+   Return(object);
+diff --git a/src/builtins/builtins-date-gen.cc b/src/builtins/builtins-date-gen.cc
+index f6f3563d551..8b58c1ec800 100644
+--- a/src/builtins/builtins-date-gen.cc
++++ b/src/builtins/builtins-date-gen.cc
+@@ -61,10 +61,7 @@ void DateBuiltinsAssembler::Generate_DatePrototype_GetField(Node* context,
+ 
+   // Raise a TypeError if the receiver is not a date.
+   BIND(&receiver_not_date);
+-  {
+-    CallRuntime(Runtime::kThrowNotDateError, context);
+-    Unreachable();
+-  }
++  { ThrowTypeError(context, MessageTemplate::kNotDateObject); }
+ }
+ 
+ TF_BUILTIN(DatePrototypeGetDate, DateBuiltinsAssembler) {
+@@ -240,17 +237,14 @@ TF_BUILTIN(DatePrototypeToPrimitive, CodeStubAssembler) {
+ 
+   // Raise a TypeError if the {hint} is invalid.
+   BIND(&hint_is_invalid);
+-  {
+-    CallRuntime(Runtime::kThrowInvalidHint, context, hint);
+-    Unreachable();
+-  }
++  { ThrowTypeError(context, MessageTemplate::kInvalidHint, hint); }
+ 
+   // Raise a TypeError if the {receiver} is not a JSReceiver instance.
+   BIND(&receiver_is_invalid);
+   {
+-    CallRuntime(Runtime::kThrowIncompatibleMethodReceiver, context,
+-                StringConstant("Date.prototype [ @@toPrimitive ]"), receiver);
+-    Unreachable();
++    ThrowTypeError(context, MessageTemplate::kIncompatibleMethodReceiver,
++                   StringConstant("Date.prototype [ @@toPrimitive ]"),
++                   receiver);
+   }
+ }
+ 
+diff --git a/src/builtins/builtins-generator-gen.cc b/src/builtins/builtins-generator-gen.cc
+index b063b314b5e..07a56c86eda 100644
+--- a/src/builtins/builtins-generator-gen.cc
++++ b/src/builtins/builtins-generator-gen.cc
+@@ -84,9 +84,8 @@ void GeneratorBuiltinsAssembler::GeneratorPrototypeResume(
+   BIND(&if_receiverisincompatible);
+   {
+     // The {receiver} is not a valid JSGeneratorObject.
+-    CallRuntime(Runtime::kThrowIncompatibleMethodReceiver, context,
+-                StringConstant(method_name), receiver);
+-    Unreachable();
++    ThrowTypeError(context, MessageTemplate::kIncompatibleMethodReceiver,
++                   StringConstant(method_name), receiver);
+   }
+ 
+   BIND(&if_receiverisclosed);
+@@ -110,10 +109,7 @@ void GeneratorBuiltinsAssembler::GeneratorPrototypeResume(
+   }
+ 
+   BIND(&if_receiverisrunning);
+-  {
+-    CallRuntime(Runtime::kThrowGeneratorRunning, context);
+-    Unreachable();
+-  }
++  { ThrowTypeError(context, MessageTemplate::kGeneratorRunning); }
+ 
+   BIND(&if_exception);
+   {
+diff --git a/src/builtins/builtins-iterator-gen.cc b/src/builtins/builtins-iterator-gen.cc
+index f76fa30338b..8e3d90cf363 100644
+--- a/src/builtins/builtins-iterator-gen.cc
++++ b/src/builtins/builtins-iterator-gen.cc
+@@ -35,13 +35,7 @@ IteratorRecord IteratorBuiltinsAssembler::GetIterator(Node* context,
+   Branch(IsJSReceiver(iterator), &get_next, &if_notobject);
+ 
+   BIND(&if_notobject);
+-  {
+-    Node* ret =
+-        CallRuntime(Runtime::kThrowTypeError, context,
+-                    SmiConstant(MessageTemplate::kNotAnIterator), iterator);
+-    GotoIfException(ret, if_exception, exception);
+-    Unreachable();
+-  }
++  { ThrowTypeError(context, MessageTemplate::kNotAnIterator, iterator); }
+ 
+   BIND(&get_next);
+   Node* const next = GetProperty(context, iterator, factory()->next_string());
+diff --git a/src/builtins/builtins-regexp-gen.cc b/src/builtins/builtins-regexp-gen.cc
+index d0e373e7839..08f96978834 100644
+--- a/src/builtins/builtins-regexp-gen.cc
++++ b/src/builtins/builtins-regexp-gen.cc
+@@ -1385,8 +1385,7 @@ TF_BUILTIN(RegExpPrototypeCompile, RegExpBuiltinsAssembler) {
+       Label next(this);
+       GotoIf(IsUndefined(maybe_flags), &next);
+ 
+-      Node* const message_id = SmiConstant(MessageTemplate::kRegExpFlags);
+-      TailCallRuntime(Runtime::kThrowTypeError, context, message_id);
++      ThrowTypeError(context, MessageTemplate::kRegExpFlags);
+ 
+       BIND(&next);
+     }
+@@ -1451,12 +1450,8 @@ TF_BUILTIN(RegExpPrototypeSourceGetter, RegExpBuiltinsAssembler) {
+ 
+     BIND(&if_isnotprototype);
+     {
+-      Node* const message_id = SmiConstant(MessageTemplate::kRegExpNonRegExp);
+-      Node* const method_name_str =
+-          HeapConstant(isolate->factory()->NewStringFromAsciiChecked(
+-              "RegExp.prototype.source"));
+-      TailCallRuntime(Runtime::kThrowTypeError, context, message_id,
+-                      method_name_str);
++      ThrowTypeError(context, MessageTemplate::kRegExpNonRegExp,
++                     "RegExp.prototype.source");
+     }
+   }
+ }
+@@ -1534,8 +1529,6 @@ Node* RegExpBuiltinsAssembler::FlagGetter(Node* const context,
+ void RegExpBuiltinsAssembler::FlagGetter(Node* context, Node* receiver,
+                                          JSRegExp::Flag flag, int counter,
+                                          const char* method_name) {
+-  Isolate* isolate = this->isolate();
+-
+   // Check whether we have an unmodified regexp instance.
+   Label if_isunmodifiedjsregexp(this),
+       if_isnotunmodifiedjsregexp(this, Label::kDeferred);
+@@ -1574,14 +1567,7 @@ void RegExpBuiltinsAssembler::FlagGetter(Node* context, Node* receiver,
+     }
+ 
+     BIND(&if_isnotprototype);
+-    {
+-      Node* const message_id = SmiConstant(MessageTemplate::kRegExpNonRegExp);
+-      Node* const method_name_str = HeapConstant(
+-          isolate->factory()->NewStringFromAsciiChecked(method_name));
+-      CallRuntime(Runtime::kThrowTypeError, context, message_id,
+-                  method_name_str);
+-      Unreachable();
+-    }
++    { ThrowTypeError(context, MessageTemplate::kRegExpNonRegExp, method_name); }
+   }
+ }
+ 
+diff --git a/src/builtins/builtins-string-gen.cc b/src/builtins/builtins-string-gen.cc
+index 19d5306e61c..38451f53ecf 100644
+--- a/src/builtins/builtins-string-gen.cc
++++ b/src/builtins/builtins-string-gen.cc
+@@ -1011,8 +1011,8 @@ void StringBuiltinsAssembler::RequireObjectCoercible(Node* const context,
+   Branch(IsNullOrUndefined(value), &throw_exception, &out);
+ 
+   BIND(&throw_exception);
+-  TailCallRuntime(Runtime::kThrowCalledOnNullOrUndefined, context,
+-                  StringConstant(method_name));
++  ThrowTypeError(context, MessageTemplate::kCalledOnNullOrUndefined,
++                 method_name);
+ 
+   BIND(&out);
+ }
+@@ -1209,11 +1209,10 @@ TF_BUILTIN(StringPrototypeRepeat, StringBuiltinsAssembler) {
+ 
+   BIND(&invalid_count);
+   {
+-    CallRuntime(Runtime::kThrowRangeError, context,
+-                SmiConstant(MessageTemplate::kInvalidCountValue),
+-                var_count.value());
+-    Unreachable();
++    ThrowRangeError(context, MessageTemplate::kInvalidCountValue,
++                    var_count.value());
+   }
++
+   BIND(&invalid_string_length);
+   {
+     CallRuntime(Runtime::kThrowInvalidStringLength, context);
+@@ -2318,9 +2317,8 @@ TF_BUILTIN(StringIteratorPrototypeNext, StringBuiltinsAssembler) {
+   BIND(&throw_bad_receiver);
+   {
+     // The {receiver} is not a valid JSGeneratorObject.
+-    CallRuntime(Runtime::kThrowIncompatibleMethodReceiver, context,
+-                StringConstant("String Iterator.prototype.next"), iterator);
+-    Unreachable();
++    ThrowTypeError(context, MessageTemplate::kIncompatibleMethodReceiver,
++                   StringConstant("String Iterator.prototype.next"), iterator);
+   }
+ }
+ 
+diff --git a/src/builtins/builtins-typedarray-gen.cc b/src/builtins/builtins-typedarray-gen.cc
+index 71206867149..9f71faabf81 100644
+--- a/src/builtins/builtins-typedarray-gen.cc
++++ b/src/builtins/builtins-typedarray-gen.cc
+@@ -312,10 +312,8 @@ void TypedArrayBuiltinsAssembler::ConstructByLength(TNode<Context> context,
+ 
+   BIND(&invalid_length);
+   {
+-    CallRuntime(Runtime::kThrowRangeError, context,
+-                SmiConstant(MessageTemplate::kInvalidTypedArrayLength),
+-                converted_length);
+-    Unreachable();
++    ThrowRangeError(context, MessageTemplate::kInvalidTypedArrayLength,
++                    converted_length);
+   }
+ 
+   BIND(&done);
+@@ -422,11 +420,7 @@ void TypedArrayBuiltinsAssembler::ConstructByArrayBuffer(
+   }
+ 
+   BIND(&invalid_offset_error);
+-  {
+-    CallRuntime(Runtime::kThrowRangeError, context,
+-                SmiConstant(MessageTemplate::kInvalidOffset), byte_offset);
+-    Unreachable();
+-  }
++  { ThrowRangeError(context, MessageTemplate::kInvalidOffset, byte_offset); }
+ 
+   BIND(&start_offset_error);
+   {
+@@ -450,9 +444,7 @@ void TypedArrayBuiltinsAssembler::ConstructByArrayBuffer(
+ 
+   BIND(&invalid_length);
+   {
+-    CallRuntime(Runtime::kThrowRangeError, context,
+-                SmiConstant(MessageTemplate::kInvalidTypedArrayLength), length);
+-    Unreachable();
++    ThrowRangeError(context, MessageTemplate::kInvalidTypedArrayLength, length);
+   }
+ 
+   BIND(&detached_error);
+@@ -615,10 +607,8 @@ void TypedArrayBuiltinsAssembler::ConstructByArrayLike(
+ 
+   BIND(&invalid_length);
+   {
+-    CallRuntime(Runtime::kThrowRangeError, context,
+-                SmiConstant(MessageTemplate::kInvalidTypedArrayLength),
+-                initial_length);
+-    Unreachable();
++    ThrowRangeError(context, MessageTemplate::kInvalidTypedArrayLength,
++                    initial_length);
+   }
+ 
+   BIND(&done);
+@@ -806,9 +796,8 @@ void TypedArrayBuiltinsAssembler::GenerateTypedArrayPrototypeGetter(
+   BIND(&receiver_is_incompatible);
+   {
+     // The {receiver} is not a valid JSTypedArray.
+-    CallRuntime(Runtime::kThrowIncompatibleMethodReceiver, context,
+-                StringConstant(method_name), receiver);
+-    Unreachable();
++    ThrowTypeError(context, MessageTemplate::kIncompatibleMethodReceiver,
++                   StringConstant(method_name), receiver);
+   }
+ }
+ 
+@@ -1488,7 +1477,6 @@ void TypedArrayBuiltinsAssembler::GenerateTypedArrayPrototypeIterationMethod(
+     Node* context, Node* receiver, const char* method_name,
+     IterationKind iteration_kind) {
+   Label throw_bad_receiver(this, Label::kDeferred);
+-  Label throw_typeerror(this, Label::kDeferred);
+ 
+   GotoIf(TaggedIsSmi(receiver), &throw_bad_receiver);
+ 
+@@ -1506,22 +1494,11 @@ void TypedArrayBuiltinsAssembler::GenerateTypedArrayPrototypeIterationMethod(
+   Return(CreateArrayIterator(receiver, map, instance_type, context,
+                              iteration_kind));
+ 
+-  VARIABLE(var_message, MachineRepresentation::kTagged);
+   BIND(&throw_bad_receiver);
+-  var_message.Bind(SmiConstant(MessageTemplate::kNotTypedArray));
+-  Goto(&throw_typeerror);
++  ThrowTypeError(context, MessageTemplate::kNotTypedArray, method_name);
+ 
+   BIND(&if_receiverisneutered);
+-  var_message.Bind(SmiConstant(MessageTemplate::kDetachedOperation));
+-  Goto(&throw_typeerror);
+-
+-  BIND(&throw_typeerror);
+-  {
+-    Node* method_arg = StringConstant(method_name);
+-    Node* result = CallRuntime(Runtime::kThrowTypeError, context,
+-                               var_message.value(), method_arg);
+-    Return(result);
+-  }
++  ThrowTypeError(context, MessageTemplate::kDetachedOperation, method_name);
+ }
+ 
+ // ES6 #sec-%typedarray%.prototype.values
+diff --git a/src/code-stub-assembler.cc b/src/code-stub-assembler.cc
+index 967e173e32a..eb93021028d 100644
+--- a/src/code-stub-assembler.cc
++++ b/src/code-stub-assembler.cc
+@@ -3873,9 +3873,8 @@ TNode<String> CodeStubAssembler::ToThisString(Node* context, Node* value,
+       BIND(&if_valueisnullorundefined);
+       {
+         // The {value} is either null or undefined.
+-        CallRuntime(Runtime::kThrowCalledOnNullOrUndefined, context,
+-                    StringConstant(method_name));
+-        Unreachable();
++        ThrowTypeError(context, MessageTemplate::kCalledOnNullOrUndefined,
++                       method_name);
+       }
+     }
+   }
+@@ -4018,14 +4017,6 @@ Node* CodeStubAssembler::ToThisValue(Node* context, Node* value,
+   return var_value.value();
+ }
+ 
+-void CodeStubAssembler::ThrowIncompatibleMethodReceiver(Node* context,
+-                                                        const char* method_name,
+-                                                        Node* receiver) {
+-  CallRuntime(Runtime::kThrowIncompatibleMethodReceiver, context,
+-              StringConstant(method_name), receiver);
+-  Unreachable();
+-}
+-
+ Node* CodeStubAssembler::ThrowIfNotInstanceType(Node* context, Node* value,
+                                                 InstanceType instance_type,
+                                                 char const* method_name) {
+@@ -4043,7 +4034,8 @@ Node* CodeStubAssembler::ThrowIfNotInstanceType(Node* context, Node* value,
+ 
+   // The {value} is not a compatible receiver for this method.
+   BIND(&throw_exception);
+-  ThrowIncompatibleMethodReceiver(context, method_name, value);
++  ThrowTypeError(context, MessageTemplate::kIncompatibleMethodReceiver,
++                 StringConstant(method_name), value);
+ 
+   BIND(&out);
+   return var_value_map.value();
+@@ -10069,16 +10061,10 @@ Node* CodeStubAssembler::InstanceOf(Node* object, Node* callable,
+   }
+ 
+   BIND(&if_notcallable);
+-  {
+-    CallRuntime(Runtime::kThrowNonCallableInInstanceOfCheck, context);
+-    Unreachable();
+-  }
++  { ThrowTypeError(context, MessageTemplate::kNonCallableInInstanceOfCheck); }
+ 
+   BIND(&if_notreceiver);
+-  {
+-    CallRuntime(Runtime::kThrowNonObjectInInstanceOfCheck, context);
+-    Unreachable();
+-  }
++  { ThrowTypeError(context, MessageTemplate::kNonObjectInInstanceOfCheck); }
+ 
+   BIND(&return_true);
+   var_result.Bind(TrueConstant());
+diff --git a/src/code-stub-assembler.h b/src/code-stub-assembler.h
+index c06d13380d7..901fa249ab9 100644
+--- a/src/code-stub-assembler.h
++++ b/src/code-stub-assembler.h
+@@ -1035,10 +1035,6 @@ class V8_EXPORT_PRIVATE CodeStubAssembler : public compiler::CodeAssembler {
+   Node* ToThisValue(Node* context, Node* value, PrimitiveType primitive_type,
+                     char const* method_name);
+ 
+-  // Throws a TypeError for {method_name}. Terminates the current block.
+-  void ThrowIncompatibleMethodReceiver(Node* context, char const* method_name,
+-                                       Node* receiver);
+-
+   // Throws a TypeError for {method_name} if {value} is not of the given
+   // instance type. Returns {value}'s map.
+   Node* ThrowIfNotInstanceType(Node* context, Node* value,
+diff --git a/src/debug/debug-evaluate.cc b/src/debug/debug-evaluate.cc
+index 677ac46fdf0..a84d658d29e 100644
+--- a/src/debug/debug-evaluate.cc
++++ b/src/debug/debug-evaluate.cc
+@@ -348,10 +348,6 @@ bool IntrinsicHasNoSideEffect(Runtime::FunctionId id) {
+   V(ArrayIncludes_Slow)                  \
+   V(ArrayIsArray)                        \
+   V(ThrowTypeError)                      \
+-  V(ThrowCalledOnNullOrUndefined)        \
+-  V(ThrowIncompatibleMethodReceiver)     \
+-  V(ThrowInvalidHint)                    \
+-  V(ThrowNotDateError)                   \
+   V(ThrowRangeError)                     \
+   V(ToName)                              \
+   V(GetOwnPropertyDescriptor)            \
+diff --git a/src/ic/keyed-store-generic.cc b/src/ic/keyed-store-generic.cc
+index b9a11c2ec72..a007ed0ded9 100644
+--- a/src/ic/keyed-store-generic.cc
++++ b/src/ic/keyed-store-generic.cc
+@@ -911,9 +911,8 @@ void KeyedStoreGenericAssembler::EmitGenericPropertyStore(
+ 
+       BIND(&strict);
+       {
+-        Node* message = SmiConstant(MessageTemplate::kNoSetterInCallback);
+-        TailCallRuntime(Runtime::kThrowTypeError, p->context, message, p->name,
+-                        var_accessor_holder.value());
++        ThrowTypeError(p->context, MessageTemplate::kNoSetterInCallback,
++                       p->name, var_accessor_holder.value());
+       }
+     }
+   }
+@@ -926,10 +925,9 @@ void KeyedStoreGenericAssembler::EmitGenericPropertyStore(
+ 
+     BIND(&strict);
+     {
+-      Node* message = SmiConstant(MessageTemplate::kStrictReadOnlyProperty);
+       Node* type = Typeof(p->receiver);
+-      TailCallRuntime(Runtime::kThrowTypeError, p->context, message, p->name,
+-                      type, p->receiver);
++      ThrowTypeError(p->context, MessageTemplate::kStrictReadOnlyProperty,
++                     p->name, type, p->receiver);
+     }
+   }
+ 
+diff --git a/src/runtime/runtime-date.cc b/src/runtime/runtime-date.cc
+index 96292ad1c5f..d149af652b5 100644
+--- a/src/runtime/runtime-date.cc
++++ b/src/runtime/runtime-date.cc
+@@ -21,15 +21,6 @@ RUNTIME_FUNCTION(Runtime_IsDate) {
+   return isolate->heap()->ToBoolean(obj->IsJSDate());
+ }
+ 
+-
+-RUNTIME_FUNCTION(Runtime_ThrowNotDateError) {
+-  HandleScope scope(isolate);
+-  DCHECK_EQ(0, args.length());
+-  THROW_NEW_ERROR_RETURN_FAILURE(isolate,
+-                                 NewTypeError(MessageTemplate::kNotDateObject));
+-}
+-
+-
+ RUNTIME_FUNCTION(Runtime_DateCurrentTime) {
+   HandleScope scope(isolate);
+   DCHECK_EQ(0, args.length());
+diff --git a/src/runtime/runtime-internal.cc b/src/runtime/runtime-internal.cc
+index 80373ed95fc..3c9f03f36d6 100644
+--- a/src/runtime/runtime-internal.cc
++++ b/src/runtime/runtime-internal.cc
+@@ -206,30 +206,6 @@ RUNTIME_FUNCTION(Runtime_NewSyntaxError) {
+   return *isolate->factory()->NewSyntaxError(message_template, arg0);
+ }
+ 
+-RUNTIME_FUNCTION(Runtime_ThrowCannotConvertToPrimitive) {
+-  HandleScope scope(isolate);
+-  THROW_NEW_ERROR_RETURN_FAILURE(
+-      isolate, NewTypeError(MessageTemplate::kCannotConvertToPrimitive));
+-}
+-
+-RUNTIME_FUNCTION(Runtime_ThrowIncompatibleMethodReceiver) {
+-  HandleScope scope(isolate);
+-  DCHECK_EQ(2, args.length());
+-  CONVERT_ARG_HANDLE_CHECKED(Object, arg0, 0);
+-  CONVERT_ARG_HANDLE_CHECKED(Object, arg1, 1);
+-  THROW_NEW_ERROR_RETURN_FAILURE(
+-      isolate,
+-      NewTypeError(MessageTemplate::kIncompatibleMethodReceiver, arg0, arg1));
+-}
+-
+-RUNTIME_FUNCTION(Runtime_ThrowInvalidHint) {
+-  HandleScope scope(isolate);
+-  DCHECK_EQ(1, args.length());
+-  CONVERT_ARG_HANDLE_CHECKED(Object, hint, 0);
+-  THROW_NEW_ERROR_RETURN_FAILURE(
+-      isolate, NewTypeError(MessageTemplate::kInvalidHint, hint));
+-}
+-
+ RUNTIME_FUNCTION(Runtime_ThrowInvalidStringLength) {
+   HandleScope scope(isolate);
+   THROW_NEW_ERROR_RETURN_FAILURE(isolate, NewInvalidStringLengthError());
+@@ -258,18 +234,6 @@ RUNTIME_FUNCTION(Runtime_ThrowSymbolIteratorInvalid) {
+       isolate, NewTypeError(MessageTemplate::kSymbolIteratorInvalid));
+ }
+ 
+-RUNTIME_FUNCTION(Runtime_ThrowNonCallableInInstanceOfCheck) {
+-  HandleScope scope(isolate);
+-  THROW_NEW_ERROR_RETURN_FAILURE(
+-      isolate, NewTypeError(MessageTemplate::kNonCallableInInstanceOfCheck));
+-}
+-
+-RUNTIME_FUNCTION(Runtime_ThrowNonObjectInInstanceOfCheck) {
+-  HandleScope scope(isolate);
+-  THROW_NEW_ERROR_RETURN_FAILURE(
+-      isolate, NewTypeError(MessageTemplate::kNonObjectInInstanceOfCheck));
+-}
+-
+ RUNTIME_FUNCTION(Runtime_ThrowNotConstructor) {
+   HandleScope scope(isolate);
+   DCHECK_EQ(1, args.length());
+@@ -278,13 +242,6 @@ RUNTIME_FUNCTION(Runtime_ThrowNotConstructor) {
+       isolate, NewTypeError(MessageTemplate::kNotConstructor, object));
+ }
+ 
+-RUNTIME_FUNCTION(Runtime_ThrowGeneratorRunning) {
+-  HandleScope scope(isolate);
+-  DCHECK_EQ(0, args.length());
+-  THROW_NEW_ERROR_RETURN_FAILURE(
+-      isolate, NewTypeError(MessageTemplate::kGeneratorRunning));
+-}
+-
+ RUNTIME_FUNCTION(Runtime_ThrowApplyNonFunction) {
+   HandleScope scope(isolate);
+   DCHECK_EQ(1, args.length());
+@@ -454,14 +411,6 @@ RUNTIME_FUNCTION(Runtime_ThrowCalledNonCallable) {
+   THROW_NEW_ERROR_RETURN_FAILURE(isolate, NewTypeError(id, callsite));
+ }
+ 
+-RUNTIME_FUNCTION(Runtime_ThrowCalledOnNullOrUndefined) {
+-  HandleScope scope(isolate);
+-  DCHECK_EQ(1, args.length());
+-  CONVERT_ARG_HANDLE_CHECKED(String, name, 0);
+-  THROW_NEW_ERROR_RETURN_FAILURE(
+-      isolate, NewTypeError(MessageTemplate::kCalledOnNullOrUndefined, name));
+-}
+-
+ RUNTIME_FUNCTION(Runtime_ThrowConstructedNonConstructable) {
+   HandleScope scope(isolate);
+   DCHECK_EQ(1, args.length());
+@@ -486,14 +435,6 @@ RUNTIME_FUNCTION(Runtime_ThrowConstructorReturnedNonObject) {
+       NewTypeError(MessageTemplate::kDerivedConstructorReturnedNonObject));
+ }
+ 
+-RUNTIME_FUNCTION(Runtime_ThrowUndefinedOrNullToObject) {
+-  HandleScope scope(isolate);
+-  DCHECK_EQ(1, args.length());
+-  CONVERT_ARG_HANDLE_CHECKED(String, name, 0);
+-  THROW_NEW_ERROR_RETURN_FAILURE(
+-      isolate, NewTypeError(MessageTemplate::kUndefinedOrNullToObject, name));
+-}
+-
+ // ES6 section 7.3.17 CreateListFromArrayLike (obj)
+ RUNTIME_FUNCTION(Runtime_CreateListFromArrayLike) {
+   HandleScope scope(isolate);
+diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
+index 65f5b7b9602..a4daaca76b3 100644
+--- a/src/runtime/runtime.h
++++ b/src/runtime/runtime.h
+@@ -127,8 +127,7 @@ namespace internal {
+ 
+ #define FOR_EACH_INTRINSIC_DATE(F) \
+   F(IsDate, 1, 1)                  \
+-  F(DateCurrentTime, 0, 1)         \
+-  F(ThrowNotDateError, 0, 1)
++  F(DateCurrentTime, 0, 1)
+ 
+ #define FOR_EACH_INTRINSIC_DEBUG(F)             \
+   F(HandleDebuggerStatement, 0, 1)              \
+@@ -310,28 +309,20 @@ namespace internal {
+   F(StackGuard, 0, 1)                                                \
+   F(Throw, 1, 1)                                                     \
+   F(ThrowApplyNonFunction, 1, 1)                                     \
+-  F(ThrowCannotConvertToPrimitive, 0, 1)                             \
+   F(ThrowCalledNonCallable, 1, 1)                                    \
+-  F(ThrowCalledOnNullOrUndefined, 1, 1)                              \
+   F(ThrowConstructedNonConstructable, 1, 1)                          \
+   F(ThrowConstructorReturnedNonObject, 0, 1)                         \
+-  F(ThrowGeneratorRunning, 0, 1)                                     \
+-  F(ThrowIncompatibleMethodReceiver, 2, 1)                           \
+-  F(ThrowInvalidHint, 1, 1)                                          \
+   F(ThrowInvalidStringLength, 0, 1)                                  \
+   F(ThrowInvalidTypedArrayAlignment, 2, 1)                           \
+   F(ThrowIteratorResultNotAnObject, 1, 1)                            \
+   F(ThrowThrowMethodMissing, 0, 1)                                   \
+   F(ThrowSymbolIteratorInvalid, 0, 1)                                \
+-  F(ThrowNonCallableInInstanceOfCheck, 0, 1)                         \
+-  F(ThrowNonObjectInInstanceOfCheck, 0, 1)                           \
+   F(ThrowNotConstructor, 1, 1)                                       \
+   F(ThrowRangeError, -1 /* >= 1 */, 1)                               \
+   F(ThrowReferenceError, 1, 1)                                       \
+   F(ThrowStackOverflow, 0, 1)                                        \
+   F(ThrowSymbolAsyncIteratorInvalid, 0, 1)                           \
+   F(ThrowTypeError, -1 /* >= 1 */, 1)                                \
+-  F(ThrowUndefinedOrNullToObject, 1, 1)                              \
+   F(Typeof, 1, 1)                                                    \
+   F(UnwindAndFindExceptionHandler, 0, 1)                             \
+   F(AllowDynamicFunction, 1, 1)                                      \
+-- 
+2.35.1
+

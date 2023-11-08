@@ -1,0 +1,1213 @@
+From 1fa779c9bcda6452644379cb46ecb5d6c1816ea8 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Samuel=20Gro=C3=9F?= <saelo@chromium.org>
+Date: Thu, 28 Sep 2023 13:43:24 +0000
+Subject: [PATCH] [sandbox] Fold V8_CODE_POINTER_SANDBOXING into
+ V8_ENABLE_SANDBOX
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Code pointer sandboxing has been enabled by default for a few months now
+and so the ability to turn it off individually is likely no longer
+required. As it is a fundamental part of the sandbox, the feature should
+be part of V8_ENABLE_SANDBOX.
+
+Bug: chromium:1395058
+Change-Id: I4f9c81122c91082ca1cb64949ac296da5d574809
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4898687
+Commit-Queue: Samuel Groß <saelo@chromium.org>
+Reviewed-by: Igor Sheludko <ishell@chromium.org>
+Reviewed-by: Michael Lippautz <mlippautz@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#90186}
+---
+ BUILD.gn                                   | 15 -----------
+ src/builtins/builtins-internal-gen.cc      |  2 +-
+ src/codegen/arm64/macro-assembler-arm64.cc | 18 ++++++-------
+ src/codegen/assembler.h                    |  2 +-
+ src/codegen/code-stub-assembler.cc         | 30 +++++++++++-----------
+ src/codegen/code-stub-assembler.h          |  2 +-
+ src/codegen/external-reference.cc          |  6 -----
+ src/codegen/riscv/macro-assembler-riscv.cc |  4 +--
+ src/codegen/x64/macro-assembler-x64.cc     | 20 +++++++--------
+ src/common/globals.h                       |  6 -----
+ src/compiler/access-builder.cc             |  2 +-
+ src/compiler/wasm-compiler.cc              |  4 +--
+ src/deoptimizer/translated-state.cc        |  4 +--
+ src/diagnostics/objects-debug.cc           |  4 +--
+ src/execution/isolate.cc                   |  6 ++---
+ src/heap/heap-write-barrier-inl.h          |  2 +-
+ src/heap/heap.h                            |  8 +++---
+ src/heap/mark-compact.cc                   |  8 +++---
+ src/heap/marking-visitor-inl.h             |  8 +++---
+ src/heap/read-only-heap.cc                 |  4 +--
+ src/heap/read-only-heap.h                  |  6 ++---
+ src/heap/read-only-promotion.cc            |  2 +-
+ src/init/v8.cc                             |  2 --
+ src/objects/code-inl.h                     | 10 ++++----
+ src/objects/code.h                         |  3 +--
+ src/objects/js-function-inl.h              | 16 ++++++------
+ src/objects/js-function.tq                 |  4 +--
+ src/objects/objects-body-descriptors-inl.h |  4 +--
+ src/objects/slots-inl.h                    | 12 ++++-----
+ src/objects/slots.h                        | 10 ++++----
+ src/objects/trusted-object.h               |  6 ++---
+ src/sandbox/code-pointer-inl.h             | 12 ++++-----
+ src/sandbox/indirect-pointer-inl.h         |  4 +--
+ src/snapshot/serializer.cc                 |  6 ++---
+ src/torque/torque-parser.cc                |  2 --
+ src/wasm/turboshaft-graph-interface.cc     |  4 +--
+ 36 files changed, 113 insertions(+), 145 deletions(-)
+
+diff --git a/BUILD.gn b/BUILD.gn
+index d1e245a4813..025203d66c7 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -337,10 +337,6 @@ declare_args() {
+   # Sets -DV8_ENABLE_SANDBOX.
+   v8_enable_sandbox = ""
+ 
+-  # Enable experimental code pointer sandboxing for the V8 sandbox.
+-  # Sets -DV8_CODE_POINTER_SANDBOXING
+-  v8_code_pointer_sandboxing = ""
+-
+   # Expose the memory corruption API to JavaScript. Useful for testing the sandbox.
+   # WARNING This will expose builtins that (by design) cause memory corruption.
+   # Sets -DV8_EXPOSE_MEMORY_CORRUPTION_API
+@@ -568,11 +564,6 @@ if (v8_enable_sandbox == "") {
+                       v8_enable_external_code_space && target_os != "fuchsia"
+ }
+ 
+-if (v8_code_pointer_sandboxing == "") {
+-  # By default, enable code pointer sandboxing if the sandbox is enabled.
+-  v8_code_pointer_sandboxing = v8_enable_sandbox
+-}
+-
+ if (v8_enable_static_roots == "") {
+   # Static roots are only valid for builds with pointer compression and a
+   # shared read-only heap.
+@@ -677,9 +668,6 @@ assert(!v8_enable_sandbox || v8_enable_external_code_space,
+ assert(!v8_enable_sandbox || !v8_enable_third_party_heap,
+        "The sandbox is incompatible with the third-party heap")
+ 
+-assert(!v8_code_pointer_sandboxing || v8_enable_sandbox,
+-       "Code pointer sandboxing requires the sandbox")
+-
+ assert(!v8_expose_memory_corruption_api || v8_enable_sandbox,
+        "The Memory Corruption API requires the sandbox")
+ 
+@@ -1213,9 +1201,6 @@ config("features") {
+   if (v8_enable_wasm_simd256_revec) {
+     defines += [ "V8_ENABLE_WASM_SIMD256_REVEC" ]
+   }
+-  if (v8_code_pointer_sandboxing) {
+-    defines += [ "V8_CODE_POINTER_SANDBOXING" ]
+-  }
+   if (v8_enable_maglev_graph_printer) {
+     defines += [ "V8_ENABLE_MAGLEV_GRAPH_PRINTER" ]
+   }
+diff --git a/src/builtins/builtins-internal-gen.cc b/src/builtins/builtins-internal-gen.cc
+index 9073cc4e71e..4cbff5d060d 100644
+--- a/src/builtins/builtins-internal-gen.cc
++++ b/src/builtins/builtins-internal-gen.cc
+@@ -566,7 +566,7 @@ class WriteBarrierCodeStubAssembler : public CodeStubAssembler {
+       return;
+     }
+ 
+-    if (!V8_CODE_POINTER_SANDBOXING_BOOL) {
++    if (!V8_ENABLE_SANDBOX_BOOL) {
+       Unreachable();
+       return;
+     }
+diff --git a/src/codegen/arm64/macro-assembler-arm64.cc b/src/codegen/arm64/macro-assembler-arm64.cc
+index dae6f73b069..6903a94de7a 100644
+--- a/src/codegen/arm64/macro-assembler-arm64.cc
++++ b/src/codegen/arm64/macro-assembler-arm64.cc
+@@ -2450,7 +2450,7 @@ void MacroAssembler::TailCallBuiltin(Builtin builtin, Condition cond) {
+ void MacroAssembler::LoadCodeInstructionStart(Register destination,
+                                               Register code_object) {
+   ASM_CODE_COMMENT(this);
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   LoadCodeEntrypointViaIndirectPointer(
+       destination,
+       FieldMemOperand(code_object, Code::kSelfIndirectPointerOffset));
+@@ -2480,7 +2480,7 @@ void MacroAssembler::JumpCodeObject(Register code_object, JumpMode jump_mode) {
+ 
+ void MacroAssembler::CallJSFunction(Register function_object) {
+   Register code = kJavaScriptCallCodeStartRegister;
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   // When the sandbox is enabled, we can directly fetch the entrypoint pointer
+   // from the code pointer table instead of going through the Code object. In
+   // this way, we avoid one memory load on this code path.
+@@ -2497,7 +2497,7 @@ void MacroAssembler::CallJSFunction(Register function_object) {
+ void MacroAssembler::JumpJSFunction(Register function_object,
+                                     JumpMode jump_mode) {
+   Register code = kJavaScriptCallCodeStartRegister;
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   // When the sandbox is enabled, we can directly fetch the entrypoint pointer
+   // from the code pointer table instead of going through the Code object. In
+   // this way, we avoid one memory load on this code path.
+@@ -3549,7 +3549,7 @@ void MacroAssembler::LoadExternalPointerField(Register destination,
+ void MacroAssembler::LoadIndirectPointerField(Register destination,
+                                               MemOperand field_operand,
+                                               IndirectPointerTag tag) {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   ASM_CODE_COMMENT(this);
+   UseScratchRegisterScope temps(this);
+   Register table = temps.AcquireX();
+@@ -3573,12 +3573,12 @@ void MacroAssembler::LoadIndirectPointerField(Register destination,
+   Orr(destination, destination, Immediate(kHeapObjectTag));
+ #else
+   UNREACHABLE();
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+ }
+ 
+ void MacroAssembler::StoreIndirectPointerField(Register value,
+                                                MemOperand dst_field_operand) {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   UseScratchRegisterScope temps(this);
+   Register scratch = temps.AcquireX();
+   Ldr(scratch.W(),
+@@ -3591,7 +3591,7 @@ void MacroAssembler::StoreIndirectPointerField(Register value,
+ 
+ void MacroAssembler::StoreMaybeIndirectPointerField(
+     Register value, MemOperand dst_field_operand) {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   StoreIndirectPointerField(value, dst_field_operand);
+ #else
+   StoreTaggedField(value, dst_field_operand);
+@@ -3601,7 +3601,7 @@ void MacroAssembler::StoreMaybeIndirectPointerField(
+ void MacroAssembler::LoadCodeEntrypointViaIndirectPointer(
+     Register destination, MemOperand field_operand) {
+   ASM_CODE_COMMENT(this);
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   UseScratchRegisterScope temps(this);
+   Register table = temps.AcquireX();
+   Mov(table, ExternalReference::code_pointer_table_address());
+@@ -3612,7 +3612,7 @@ void MacroAssembler::LoadCodeEntrypointViaIndirectPointer(
+   Ldr(destination, MemOperand(table, destination));
+ #else
+   UNREACHABLE();
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+ }
+ 
+ void MacroAssembler::MaybeSaveRegisters(RegList registers) {
+diff --git a/src/codegen/assembler.h b/src/codegen/assembler.h
+index 86cc872024f..e06ff1ac6ca 100644
+--- a/src/codegen/assembler.h
++++ b/src/codegen/assembler.h
+@@ -293,7 +293,7 @@ class SlotDescriptor {
+   }
+ 
+   static SlotDescriptor ForMaybeIndirectPointerSlot(IndirectPointerTag tag) {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+     return ForIndirectPointerSlot(tag);
+ #else
+     return ForDirectPointerSlot();
+diff --git a/src/codegen/code-stub-assembler.cc b/src/codegen/code-stub-assembler.cc
+index 889028c3cf7..cb143909a29 100644
+--- a/src/codegen/code-stub-assembler.cc
++++ b/src/codegen/code-stub-assembler.cc
+@@ -1806,7 +1806,7 @@ void CodeStubAssembler::StoreExternalPointerToObject(TNode<HeapObject> object,
+ #endif  // V8_ENABLE_SANDBOX
+ }
+ 
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+ TNode<UintPtrT> CodeStubAssembler::ComputeCodePointerTableEntryOffset(
+     TNode<HeapObject> object, TNode<IntPtrT> field_offset) {
+   TNode<IndirectPointerHandleT> handle =
+@@ -1823,11 +1823,11 @@ TNode<UintPtrT> CodeStubAssembler::ComputeCodePointerTableEntryOffset(
+       Word32Shl(index, UniqueUint32Constant(kCodePointerTableEntrySizeLog2)));
+   return offset;
+ }
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+ 
+ TNode<RawPtrT> CodeStubAssembler::LoadCodeEntrypointViaIndirectPointerField(
+     TNode<HeapObject> object, TNode<IntPtrT> field_offset) {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   TNode<RawPtrT> table =
+       ExternalConstant(ExternalReference::code_pointer_table_address());
+   TNode<UintPtrT> offset =
+@@ -1835,12 +1835,12 @@ TNode<RawPtrT> CodeStubAssembler::LoadCodeEntrypointViaIndirectPointerField(
+   return Load<RawPtrT>(table, offset);
+ #else
+   UNREACHABLE();
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+ }
+ 
+ TNode<HeapObject> CodeStubAssembler::LoadIndirectPointerFromObject(
+     TNode<HeapObject> object, int field_offset) {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   TNode<RawPtrT> table =
+       ExternalConstant(ExternalReference::code_pointer_table_address());
+   TNode<UintPtrT> offset =
+@@ -1855,16 +1855,16 @@ TNode<HeapObject> CodeStubAssembler::LoadIndirectPointerFromObject(
+   return UncheckedCast<HeapObject>(BitcastWordToTagged(value));
+ #else
+   UNREACHABLE();
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+ }
+ 
+ TNode<HeapObject> CodeStubAssembler::LoadMaybeIndirectPointerFromObject(
+     TNode<HeapObject> object, int field_offset) {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   return LoadIndirectPointerFromObject(object, field_offset);
+ #else
+   return LoadObjectField<HeapObject>(object, field_offset);
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+ }
+ 
+ TNode<Object> CodeStubAssembler::LoadFromParentFrame(int offset) {
+@@ -3375,35 +3375,35 @@ void CodeStubAssembler::StoreObjectField(TNode<HeapObject> object,
+ void CodeStubAssembler::StoreIndirectPointerField(
+     TNode<HeapObject> object, int offset, IndirectPointerTag tag,
+     TNode<ExposedTrustedObject> value) {
+-  DCHECK(V8_CODE_POINTER_SANDBOXING_BOOL);
++  DCHECK(V8_ENABLE_SANDBOX_BOOL);
+   OptimizedStoreIndirectPointerField(object, offset, tag, value);
+ }
+ 
+ void CodeStubAssembler::StoreIndirectPointerFieldNoWriteBarrier(
+     TNode<HeapObject> object, int offset, IndirectPointerTag tag,
+     TNode<ExposedTrustedObject> value) {
+-  DCHECK(V8_CODE_POINTER_SANDBOXING_BOOL);
++  DCHECK(V8_ENABLE_SANDBOX_BOOL);
+   OptimizedStoreIndirectPointerFieldNoWriteBarrier(object, offset, tag, value);
+ }
+ 
+ void CodeStubAssembler::StoreMaybeIndirectPointerField(
+     TNode<HeapObject> object, int offset, IndirectPointerTag tag,
+     TNode<ExposedTrustedObject> value) {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   StoreIndirectPointerField(object, offset, tag, value);
+ #else
+   StoreObjectField(object, offset, value);
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+ }
+ 
+ void CodeStubAssembler::StoreMaybeIndirectPointerFieldNoWriteBarrier(
+     TNode<HeapObject> object, int offset, IndirectPointerTag tag,
+     TNode<ExposedTrustedObject> value) {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   StoreIndirectPointerFieldNoWriteBarrier(object, offset, tag, value);
+ #else
+   StoreObjectFieldNoWriteBarrier(object, offset, value);
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+ }
+ 
+ void CodeStubAssembler::UnsafeStoreObjectFieldNoWriteBarrier(
+@@ -16065,7 +16065,7 @@ TNode<Code> CodeStubAssembler::GetSharedFunctionInfoCode(
+ }
+ 
+ TNode<RawPtrT> CodeStubAssembler::LoadCodeInstructionStart(TNode<Code> code) {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   // In this case, the entrypoint is stored in the code pointer table entry
+   // referenced via the Code object's 'self' indirect pointer.
+   return LoadCodeEntrypointViaIndirectPointerField(
+diff --git a/src/codegen/code-stub-assembler.h b/src/codegen/code-stub-assembler.h
+index 51b3cb997cf..4b5b31434f4 100644
+--- a/src/codegen/code-stub-assembler.h
++++ b/src/codegen/code-stub-assembler.h
+@@ -1197,7 +1197,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
+   TNode<RawPtrT> LoadCodeEntrypointViaIndirectPointerField(
+       TNode<HeapObject> object, TNode<IntPtrT> offset);
+ 
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   // Helper function to load a CodePointerHandle from an object and compute the
+   // offset into the code pointer table from it.
+   TNode<UintPtrT> ComputeCodePointerTableEntryOffset(
+diff --git a/src/codegen/external-reference.cc b/src/codegen/external-reference.cc
+index 6e8096f970b..610821cacce 100644
+--- a/src/codegen/external-reference.cc
++++ b/src/codegen/external-reference.cc
+@@ -259,13 +259,7 @@ ExternalReference ExternalReference::indirect_pointer_table_base_address(
+ 
+ ExternalReference ExternalReference::code_pointer_table_address() {
+   // TODO(saelo): maybe rename to code_pointer_table_base_address?
+-  // TODO(saelo) remove this ifdef when merging V8_CODE_POINTER_SANDBOXING into
+-  // V8_ENABLE_SANDBOX
+-#ifdef V8_CODE_POINTER_SANDBOXING
+   return ExternalReference(GetProcessWideCodePointerTable()->base_address());
+-#else
+-  return ExternalReference(kNullAddress);
+-#endif
+ }
+ 
+ #endif  // V8_ENABLE_SANDBOX
+diff --git a/src/codegen/riscv/macro-assembler-riscv.cc b/src/codegen/riscv/macro-assembler-riscv.cc
+index cd0dcfb6876..8287f8ae7f1 100644
+--- a/src/codegen/riscv/macro-assembler-riscv.cc
++++ b/src/codegen/riscv/macro-assembler-riscv.cc
+@@ -6453,7 +6453,7 @@ void MacroAssembler::JumpCodeObject(Register code, JumpMode jump_mode) {
+ 
+ void MacroAssembler::CallJSFunction(Register function_object) {
+   Register code = kJavaScriptCallCodeStartRegister;
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   // When the sandbox is enabled, we can directly fetch the entrypoint pointer
+   // from the code pointer table instead of going through the Code object. In
+   // this way, we avoid one memory load on this code path.
+@@ -6470,7 +6470,7 @@ void MacroAssembler::CallJSFunction(Register function_object) {
+ void MacroAssembler::JumpJSFunction(Register function_object,
+                                     JumpMode jump_mode) {
+   Register code = kJavaScriptCallCodeStartRegister;
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   // When the sandbox is enabled, we can directly fetch the entrypoint pointer
+   // from the code pointer table instead of going through the Code object. In
+   // this way, we avoid one memory load on this code path.
+diff --git a/src/codegen/x64/macro-assembler-x64.cc b/src/codegen/x64/macro-assembler-x64.cc
+index 28a341883b7..9fc9cb846fd 100644
+--- a/src/codegen/x64/macro-assembler-x64.cc
++++ b/src/codegen/x64/macro-assembler-x64.cc
+@@ -497,7 +497,7 @@ void MacroAssembler::LoadIndirectPointerField(Register destination,
+                                               Operand field_operand,
+                                               IndirectPointerTag tag,
+                                               Register scratch) {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   DCHECK(!AreAliased(destination, scratch));
+   DCHECK(!field_operand.AddressUsesRegister(scratch));
+ 
+@@ -526,12 +526,12 @@ void MacroAssembler::LoadIndirectPointerField(Register destination,
+   orq(destination, Immediate(kHeapObjectTag));
+ #else
+   UNREACHABLE();
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+ }
+ 
+ void MacroAssembler::StoreIndirectPointerField(Operand dst_field_operand,
+                                                Register value) {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   movl(kScratchRegister,
+        FieldOperand(value, ExposedTrustedObject::kSelfIndirectPointerOffset));
+   movl(dst_field_operand, kScratchRegister);
+@@ -542,17 +542,17 @@ void MacroAssembler::StoreIndirectPointerField(Operand dst_field_operand,
+ 
+ void MacroAssembler::StoreMaybeIndirectPointerField(Operand dst_field_operand,
+                                                     Register value) {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   StoreIndirectPointerField(dst_field_operand, value);
+ #else
+   StoreTaggedField(dst_field_operand, value);
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+ }
+ 
+ void MacroAssembler::LoadCodeEntrypointViaIndirectPointer(
+     Register destination, Operand field_operand) {
+   DCHECK(!AreAliased(destination, kScratchRegister));
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   DCHECK(!field_operand.AddressUsesRegister(kScratchRegister));
+   LoadAddress(kScratchRegister,
+               ExternalReference::code_pointer_table_address());
+@@ -562,7 +562,7 @@ void MacroAssembler::LoadCodeEntrypointViaIndirectPointer(
+   movq(destination, Operand(kScratchRegister, destination, times_1, 0));
+ #else
+   UNREACHABLE();
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+ }
+ 
+ void MacroAssembler::CallEphemeronKeyBarrier(Register object,
+@@ -2708,7 +2708,7 @@ void MacroAssembler::TailCallBuiltin(Builtin builtin, Condition cc) {
+ void MacroAssembler::LoadCodeInstructionStart(Register destination,
+                                               Register code_object) {
+   ASM_CODE_COMMENT(this);
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   LoadCodeEntrypointViaIndirectPointer(
+       destination, FieldOperand(code_object, Code::kSelfIndirectPointerOffset));
+ #else
+@@ -2736,7 +2736,7 @@ void MacroAssembler::JumpCodeObject(Register code_object, JumpMode jump_mode) {
+ 
+ void MacroAssembler::CallJSFunction(Register function_object) {
+   static_assert(kJavaScriptCallCodeStartRegister == rcx, "ABI mismatch");
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   // When the sandbox is enabled, we can directly fetch the entrypoint pointer
+   // from the code pointer table instead of going through the Code object. In
+   // this way, we avoid one memory load on this code path.
+@@ -2752,7 +2752,7 @@ void MacroAssembler::CallJSFunction(Register function_object) {
+ void MacroAssembler::JumpJSFunction(Register function_object,
+                                     JumpMode jump_mode) {
+   static_assert(kJavaScriptCallCodeStartRegister == rcx, "ABI mismatch");
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   // When the sandbox is enabled, we can directly fetch the entrypoint pointer
+   // from the code pointer table instead of going through the Code object. In
+   // this way, we avoid one memory load on this code path.
+diff --git a/src/common/globals.h b/src/common/globals.h
+index 7992d36e67e..aed9336fdcf 100644
+--- a/src/common/globals.h
++++ b/src/common/globals.h
+@@ -140,12 +140,6 @@ namespace internal {
+ #define V8_ENABLE_SANDBOX_BOOL false
+ #endif
+ 
+-#ifdef V8_CODE_POINTER_SANDBOXING
+-#define V8_CODE_POINTER_SANDBOXING_BOOL true
+-#else
+-#define V8_CODE_POINTER_SANDBOXING_BOOL false
+-#endif
+-
+ // D8's MultiMappedAllocator is only available on Linux, and only if the sandbox
+ // is not enabled.
+ #if V8_OS_LINUX && !V8_ENABLE_SANDBOX_BOOL
+diff --git a/src/compiler/access-builder.cc b/src/compiler/access-builder.cc
+index 3a94c04713c..36db2befb31 100644
+--- a/src/compiler/access-builder.cc
++++ b/src/compiler/access-builder.cc
+@@ -204,7 +204,7 @@ FieldAccess AccessBuilder::ForJSFunctionContext() {
+   return access;
+ }
+ 
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+ // static
+ FieldAccess AccessBuilder::ForJSFunctionCode() {
+   FieldAccess access = {kTaggedBase,
+diff --git a/src/compiler/wasm-compiler.cc b/src/compiler/wasm-compiler.cc
+index 3d92c4d97bf..d3ca47d4c94 100644
+--- a/src/compiler/wasm-compiler.cc
++++ b/src/compiler/wasm-compiler.cc
+@@ -3040,7 +3040,7 @@ Node* WasmGraphBuilder::BuildIndirectCall(uint32_t table_index,
+ }
+ 
+ Node* WasmGraphBuilder::BuildLoadCodeEntrypoint(Node* code_object) {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   // In this case, the entrypoint is stored in the code pointer table entry
+   // referenced via the Code object's 'self' indirect pointer.
+   Node* handle = gasm_->LoadFromObject(
+@@ -3058,7 +3058,7 @@ Node* WasmGraphBuilder::BuildLoadCodeEntrypoint(Node* code_object) {
+   return gasm_->LoadFromObject(
+       MachineType::Pointer(), code_object,
+       wasm::ObjectAccess::ToTagged(Code::kInstructionStartOffset));
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+ }
+ 
+ Node* WasmGraphBuilder::BuildLoadCallTargetFromExportedFunctionData(
+diff --git a/src/deoptimizer/translated-state.cc b/src/deoptimizer/translated-state.cc
+index 2af81c007f2..eae4bce200b 100644
+--- a/src/deoptimizer/translated-state.cc
++++ b/src/deoptimizer/translated-state.cc
+@@ -2221,7 +2221,7 @@ void TranslatedState::InitializeJSObjectAt(
+     // should be fully initialized by now).
+     int offset = i * kTaggedSize;
+     uint8_t marker = object_storage->ReadField<uint8_t>(offset);
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+     if (InstanceTypeChecker::IsJSFunction(map->instance_type()) &&
+         offset == JSFunction::kCodeOffset) {
+       // We're materializing a JSFunction's reference to a Code object. This is
+@@ -2238,7 +2238,7 @@ void TranslatedState::InitializeJSObjectAt(
+     } else if (marker == kStoreHeapObject) {
+ #else
+     if (marker == kStoreHeapObject) {
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+       Handle<HeapObject> field_value = slot->storage();
+       WRITE_FIELD(*object_storage, offset, *field_value);
+       WRITE_BARRIER(*object_storage, offset, *field_value);
+diff --git a/src/diagnostics/objects-debug.cc b/src/diagnostics/objects-debug.cc
+index 462a61bf789..a5e9a6adb57 100644
+--- a/src/diagnostics/objects-debug.cc
++++ b/src/diagnostics/objects-debug.cc
+@@ -1206,7 +1206,7 @@ void PropertyCell::PropertyCellVerify(Isolate* isolate) {
+ }
+ 
+ void TrustedObject::TrustedObjectVerify(Isolate* isolate) {
+-#if defined(V8_CODE_POINTER_SANDBOXING)
++#if defined(V8_ENABLE_SANDBOX)
+   // TODO(saelo): check here that the object lives in trusted space once we
+   // actually allocate them there. If possible, also check (elsewhere in this
+   // file) that no other type of object lives in trusted space.
+@@ -1215,7 +1215,7 @@ void TrustedObject::TrustedObjectVerify(Isolate* isolate) {
+ 
+ void ExposedTrustedObject::ExposedTrustedObjectVerify(Isolate* isolate) {
+   TrustedObjectVerify(isolate);
+-#if defined(V8_CODE_POINTER_SANDBOXING)
++#if defined(V8_ENABLE_SANDBOX)
+   // Check that the self indirect pointer is consistent, i.e. points back to
+   // this object.
+   InstanceType instance_type = map()->instance_type();
+diff --git a/src/execution/isolate.cc b/src/execution/isolate.cc
+index 2dbdc3eb996..eadfa89775e 100644
+--- a/src/execution/isolate.cc
++++ b/src/execution/isolate.cc
+@@ -451,7 +451,7 @@ size_t Isolate::HashIsolateForEmbeddedBlob() {
+     // instruction_start, but other data fields must remain the same.
+     static_assert(Code::kEndOfStrongFieldsOffset ==
+                   Code::kInstructionStartOffset);
+-#ifndef V8_CODE_POINTER_SANDBOXING
++#ifndef V8_ENABLE_SANDBOX
+     static_assert(Code::kInstructionStartOffsetEnd + 1 == Code::kFlagsOffset);
+ #endif
+     static_assert(Code::kFlagsOffsetEnd + 1 == Code::kInstructionSizeOffset);
+@@ -3851,7 +3851,7 @@ void Isolate::Deinit() {
+   indirect_pointer_table().TearDown();
+ #endif  // V8_COMPRESS_POINTERS
+ 
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   GetProcessWideCodePointerTable()->TearDownSpace(heap()->code_pointer_space());
+ #endif
+ 
+@@ -4633,7 +4633,7 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
+   }
+ #endif  // V8_COMPRESS_POINTERS
+ 
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   GetProcessWideCodePointerTable()->InitializeSpace(
+       heap()->code_pointer_space());
+ #endif
+diff --git a/src/heap/heap-write-barrier-inl.h b/src/heap/heap-write-barrier-inl.h
+index eab81cdab64..4cb9c39acf0 100644
+--- a/src/heap/heap-write-barrier-inl.h
++++ b/src/heap/heap-write-barrier-inl.h
+@@ -231,7 +231,7 @@ inline void IndirectPointerWriteBarrier(Tagged<HeapObject> host,
+                                         Tagged<HeapObject> value,
+                                         WriteBarrierMode mode) {
+   // Indirect pointers are only used when the sandbox is enabled.
+-  DCHECK(V8_CODE_POINTER_SANDBOXING_BOOL);
++  DCHECK(V8_ENABLE_SANDBOX_BOOL);
+ 
+   if (mode == SKIP_WRITE_BARRIER) {
+     SLOW_DCHECK(!WriteBarrier::IsRequired(host, value));
+diff --git a/src/heap/heap.h b/src/heap/heap.h
+index 02453349f77..f48e47e3c18 100644
+--- a/src/heap/heap.h
++++ b/src/heap/heap.h
+@@ -791,9 +791,9 @@ class Heap final {
+   }
+ #endif  // V8_COMPRESS_POINTERS
+ 
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   CodePointerTable::Space* code_pointer_space() { return &code_pointer_space_; }
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+ 
+   // ===========================================================================
+   // Getters to other components. ==============================================
+@@ -2140,10 +2140,10 @@ class Heap final {
+   IndirectPointerTable::Space indirect_pointer_space_;
+ #endif  // V8_COMPRESS_POINTERS
+ 
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   // The space in the process-wide code pointer table managed by this heap.
+   CodePointerTable::Space code_pointer_space_;
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+ 
+   LocalHeap* main_thread_local_heap_ = nullptr;
+ 
+diff --git a/src/heap/mark-compact.cc b/src/heap/mark-compact.cc
+index 19230ab2de1..f76de1e5da5 100644
+--- a/src/heap/mark-compact.cc
++++ b/src/heap/mark-compact.cc
+@@ -1303,7 +1303,7 @@ class RecordMigratedSlotVisitor : public ObjectVisitorWithCageBases {
+ 
+   inline void VisitIndirectPointerTableEntry(Tagged<HeapObject> host,
+                                              IndirectPointerSlot slot) final {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+     // When an object owning an indirect pointer table entry is relocated, it
+     // needs to update the entry to point to its new location.
+     // TODO(saelo): This is probably not quite the right place for this code,
+@@ -2825,13 +2825,13 @@ void MarkCompactCollector::ClearNonLiveReferences() {
+   }
+ #endif  // V8_ENABLE_SANDBOX
+ 
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   {
+     TRACE_GC(heap_->tracer(), GCTracer::Scope::MC_SWEEP_CODE_POINTER_TABLE);
+     GetProcessWideCodePointerTable()->Sweep(heap_->code_pointer_space(),
+                                             isolate->counters());
+   }
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+ 
+   {
+     TRACE_GC(heap_->tracer(), GCTracer::Scope::MC_CLEAR_JOIN_JOB);
+@@ -3116,7 +3116,7 @@ void MarkCompactCollector::ProcessFlushedBaselineCandidates() {
+     };
+     flushed_js_function->ResetIfCodeFlushed(gc_notify_updated_slot);
+ 
+-#ifndef V8_CODE_POINTER_SANDBOXING
++#ifndef V8_ENABLE_SANDBOX
+     // Record the code slot that has been updated either to CompileLazy,
+     // InterpreterEntryTrampoline or baseline code.
+     // This is only necessary when the sandbox is not enabled. If it is, the
+diff --git a/src/heap/marking-visitor-inl.h b/src/heap/marking-visitor-inl.h
+index f21bfb04e62..770bb282edb 100644
+--- a/src/heap/marking-visitor-inl.h
++++ b/src/heap/marking-visitor-inl.h
+@@ -172,7 +172,7 @@ template <typename ConcreteVisitor>
+ void MarkingVisitorBase<ConcreteVisitor>::VisitIndirectPointer(
+     Tagged<HeapObject> host, IndirectPointerSlot slot,
+     IndirectPointerMode mode) {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   if (mode == IndirectPointerMode::kStrong) {
+     // Load the referenced object (if the slot is initialized) and mark it as
+     // alive if necessary. Indirect pointers never have to be added to a
+@@ -195,7 +195,7 @@ void MarkingVisitorBase<ConcreteVisitor>::VisitIndirectPointer(
+ template <typename ConcreteVisitor>
+ void MarkingVisitorBase<ConcreteVisitor>::VisitIndirectPointerTableEntry(
+     Tagged<HeapObject> host, IndirectPointerSlot slot) {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   IndirectPointerHandle handle = slot.Relaxed_LoadHandle();
+ 
+   if (slot.tag() == kCodeIndirectPointerTag) {
+@@ -234,14 +234,14 @@ int MarkingVisitorBase<ConcreteVisitor>::VisitJSFunction(
+     DCHECK(IsBaselineCodeFlushingEnabled(code_flush_mode_));
+     local_weak_objects_->baseline_flushing_candidates_local.Push(js_function);
+   } else {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+     VisitIndirectPointer(js_function,
+                          js_function->RawIndirectPointerField(
+                              JSFunction::kCodeOffset, kCodeIndirectPointerTag),
+                          IndirectPointerMode::kStrong);
+ #else
+     VisitPointer(js_function, js_function->RawField(JSFunction::kCodeOffset));
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+     // TODO(mythria): Consider updating the check for ShouldFlushBaselineCode to
+     // also include cases where there is old bytecode even when there is no
+     // baseline code and remove this check here.
+diff --git a/src/heap/read-only-heap.cc b/src/heap/read-only-heap.cc
+index d39e5c3c711..06e1875538b 100644
+--- a/src/heap/read-only-heap.cc
++++ b/src/heap/read-only-heap.cc
+@@ -49,7 +49,7 @@ std::shared_ptr<ReadOnlyArtifacts> InitializeSharedReadOnlyArtifacts() {
+ }  // namespace
+ 
+ ReadOnlyHeap::~ReadOnlyHeap() {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   GetProcessWideCodePointerTable()->TearDownSpace(&code_pointer_space_);
+ #endif
+ }
+@@ -239,7 +239,7 @@ void ReadOnlyHeap::InitFromIsolate(Isolate* isolate) {
+ 
+ ReadOnlyHeap::ReadOnlyHeap(ReadOnlySpace* ro_space)
+     : read_only_space_(ro_space) {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   GetProcessWideCodePointerTable()->InitializeSpace(&code_pointer_space_);
+ #endif
+ }
+diff --git a/src/heap/read-only-heap.h b/src/heap/read-only-heap.h
+index 0906ad8f5d0..c4235b56c08 100644
+--- a/src/heap/read-only-heap.h
++++ b/src/heap/read-only-heap.h
+@@ -84,7 +84,7 @@ class ReadOnlyHeap {
+ 
+   ReadOnlySpace* read_only_space() const { return read_only_space_; }
+ 
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   CodePointerTable::Space* code_pointer_space() { return &code_pointer_space_; }
+ #endif
+ 
+@@ -123,11 +123,11 @@ class ReadOnlyHeap {
+   bool roots_init_complete_ = false;
+   ReadOnlySpace* read_only_space_ = nullptr;
+ 
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   // The read-only heap has its own code pointer space. Entries in this space
+   // are never deallocated.
+   CodePointerTable::Space code_pointer_space_;
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+ 
+   // Returns whether shared memory can be allocated and then remapped to
+   // additional addresses.
+diff --git a/src/heap/read-only-promotion.cc b/src/heap/read-only-promotion.cc
+index 29ea86ae6aa..ffb9fd056d7 100644
+--- a/src/heap/read-only-promotion.cc
++++ b/src/heap/read-only-promotion.cc
+@@ -386,7 +386,7 @@ class ReadOnlyPromotionImpl final : public AllStatic {
+                               IndirectPointerMode mode) final {}
+     void VisitIndirectPointerTableEntry(Tagged<HeapObject> host,
+                                         IndirectPointerSlot slot) final {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+       // When an object owning an indirect pointer table entry is relocated, it
+       // needs to update the entry to point to its new location. Currently, only
+       // Code objects are referenced through indirect pointers, and they use the
+diff --git a/src/init/v8.cc b/src/init/v8.cc
+index 7200df07078..96165df8771 100644
+--- a/src/init/v8.cc
++++ b/src/init/v8.cc
+@@ -257,10 +257,8 @@ void V8::Initialize() {
+   GetProcessWideSandbox()->Initialize(GetPlatformVirtualAddressSpace());
+   CHECK_EQ(kSandboxSize, GetProcessWideSandbox()->size());
+ 
+-#if defined(V8_CODE_POINTER_SANDBOXING)
+   GetProcessWideCodePointerTable()->Initialize();
+ #endif
+-#endif
+ 
+ #if defined(V8_USE_PERFETTO)
+   if (perfetto::Tracing::IsInitialized()) TrackEvent::Register();
+diff --git a/src/objects/code-inl.h b/src/objects/code-inl.h
+index 7032744f9c1..62031456310 100644
+--- a/src/objects/code-inl.h
++++ b/src/objects/code-inl.h
+@@ -593,7 +593,7 @@ Tagged<Object> Code::raw_instruction_stream(PtrComprCageBase cage_base,
+ }
+ 
+ DEF_GETTER(Code, instruction_start, Address) {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   return ReadCodeEntrypointViaIndirectPointerField(kSelfIndirectPointerOffset);
+ #else
+   return ReadField<Address>(kInstructionStartOffset);
+@@ -601,7 +601,7 @@ DEF_GETTER(Code, instruction_start, Address) {
+ }
+ 
+ void Code::init_instruction_start(Isolate* isolate, Address value) {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   // In this case, the instruction_start is stored in this Code's code pointer
+   // table entry, so initialize that instead.
+   InitCodePointerTableEntryField(kSelfIndirectPointerOffset, isolate, *this,
+@@ -612,7 +612,7 @@ void Code::init_instruction_start(Isolate* isolate, Address value) {
+ }
+ 
+ void Code::set_instruction_start(Isolate* isolate, Address value) {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   WriteCodeEntrypointViaIndirectPointerField(kSelfIndirectPointerOffset, value);
+ #else
+   WriteField<Address>(kInstructionStartOffset, value);
+@@ -633,13 +633,13 @@ void Code::SetInstructionStartForOffHeapBuiltin(Isolate* isolate_for_sandbox,
+ }
+ 
+ void Code::ClearInstructionStartForSerialization(Isolate* isolate) {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   // The instruction start is stored in this object's code pointer table.
+   WriteField<CodePointerHandle>(kSelfIndirectPointerOffset,
+                                 kNullCodePointerHandle);
+ #else
+   set_instruction_start(isolate, kNullAddress);
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+ }
+ 
+ void Code::UpdateInstructionStart(Isolate* isolate_for_sandbox,
+diff --git a/src/objects/code.h b/src/objects/code.h
+index 75c12c11b38..cce88aef88a 100644
+--- a/src/objects/code.h
++++ b/src/objects/code.h
+@@ -326,8 +326,7 @@ class Code : public ExposedTrustedObject {
+   /* If the sandbox is on, this field does not exist. Instead, the */         \
+   /* instruction_start is stored in this Code's code pointer table entry */   \
+   /* referenced via the kSelfIndirectPointerOffset field */                   \
+-  V(kInstructionStartOffset,                                                  \
+-    V8_CODE_POINTER_SANDBOXING_BOOL ? 0 : kSystemPointerSize)                 \
++  V(kInstructionStartOffset, V8_ENABLE_SANDBOX_BOOL ? 0 : kSystemPointerSize) \
+   /* The serializer needs to copy bytes starting from here verbatim. */       \
+   V(kFlagsOffset, kUInt32Size)                                                \
+   V(kInstructionSizeOffset, kIntSize)                                         \
+diff --git a/src/objects/js-function-inl.h b/src/objects/js-function-inl.h
+index 921531c695c..cf0aebfd459 100644
+--- a/src/objects/js-function-inl.h
++++ b/src/objects/js-function-inl.h
+@@ -82,7 +82,7 @@ Tagged<Code> JSFunction::code(PtrComprCageBase cage_base) const {
+ }
+ 
+ void JSFunction::set_code(Tagged<Code> value, WriteBarrierMode mode) {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   RawIndirectPointerField(kCodeOffset, kCodeIndirectPointerTag)
+       .Relaxed_Store(value);
+   CONDITIONAL_INDIRECT_POINTER_WRITE_BARRIER(
+@@ -90,7 +90,7 @@ void JSFunction::set_code(Tagged<Code> value, WriteBarrierMode mode) {
+ #else
+   TaggedField<Code, kCodeOffset>::Relaxed_Store(*this, value);
+   CONDITIONAL_WRITE_BARRIER(*this, kCodeOffset, value, mode);
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+ }
+ 
+ Tagged<Code> JSFunction::code(AcquireLoadTag tag) const {
+@@ -99,7 +99,7 @@ Tagged<Code> JSFunction::code(AcquireLoadTag tag) const {
+ 
+ void JSFunction::set_code(Tagged<Code> value, ReleaseStoreTag,
+                           WriteBarrierMode mode) {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   RawIndirectPointerField(kCodeOffset, kCodeIndirectPointerTag)
+       .Release_Store(value);
+   CONDITIONAL_INDIRECT_POINTER_WRITE_BARRIER(
+@@ -107,28 +107,28 @@ void JSFunction::set_code(Tagged<Code> value, ReleaseStoreTag,
+ #else
+   TaggedField<Code, kCodeOffset>::Release_Store(*this, value);
+   CONDITIONAL_WRITE_BARRIER(*this, kCodeOffset, value, mode);
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+   if (V8_UNLIKELY(v8_flags.log_function_events && has_feedback_vector())) {
+     feedback_vector()->set_log_next_execution(true);
+   }
+ }
+ 
+ Tagged<Object> JSFunction::raw_code() const {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   return RawIndirectPointerField(kCodeOffset, kCodeIndirectPointerTag)
+       .Relaxed_Load(nullptr);
+ #else
+   return RELAXED_READ_FIELD(*this, JSFunction::kCodeOffset);
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+ }
+ 
+ Tagged<Object> JSFunction::raw_code(AcquireLoadTag tag) const {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   return RawIndirectPointerField(kCodeOffset, kCodeIndirectPointerTag)
+       .Acquire_Load(nullptr);
+ #else
+   return ACQUIRE_READ_FIELD(*this, JSFunction::kCodeOffset);
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+ }
+ 
+ RELEASE_ACQUIRE_ACCESSORS(JSFunction, context, Tagged<Context>, kContextOffset)
+diff --git a/src/objects/js-function.tq b/src/objects/js-function.tq
+index 8d233a29efe..b2746646226 100644
+--- a/src/objects/js-function.tq
++++ b/src/objects/js-function.tq
+@@ -31,8 +31,8 @@ extern class JSWrappedFunction extends
+ extern class JSFunction extends JSFunctionOrBoundFunctionOrWrappedFunction {
+   // When the sandbox is enabled, the Code object is referenced through an
+   // indirect pointer. Otherwise, it is a regular tagged pointer.
+-  @if(V8_CODE_POINTER_SANDBOXING) code: IndirectPointer<Code>;
+-  @ifnot(V8_CODE_POINTER_SANDBOXING) code: Code;
++  @if(V8_ENABLE_SANDBOX) code: IndirectPointer<Code>;
++  @ifnot(V8_ENABLE_SANDBOX) code: Code;
+   shared_function_info: SharedFunctionInfo;
+   context: Context;
+   feedback_cell: FeedbackCell;
+diff --git a/src/objects/objects-body-descriptors-inl.h b/src/objects/objects-body-descriptors-inl.h
+index 6053bad825b..10e5ee13fa2 100644
+--- a/src/objects/objects-body-descriptors-inl.h
++++ b/src/objects/objects-body-descriptors-inl.h
+@@ -157,7 +157,7 @@ void BodyDescriptorBase::IterateMaybeIndirectPointer(Tagged<HeapObject> obj,
+                                                      ObjectVisitor* v,
+                                                      IndirectPointerMode mode,
+                                                      IndirectPointerTag tag) {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   v->VisitIndirectPointer(obj, obj->RawIndirectPointerField(offset, tag), mode);
+ #else
+   if (mode == IndirectPointerMode::kStrong) {
+@@ -943,7 +943,7 @@ class Code::BodyDescriptor final : public BodyDescriptorBase {
+     v->VisitInstructionStreamPointer(
+         Code::cast(obj),
+         obj->RawInstructionStreamField(kInstructionStreamOffset));
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+     v->VisitIndirectPointerTableEntry(
+         obj, obj->RawIndirectPointerField(kSelfIndirectPointerOffset,
+                                           kCodeIndirectPointerTag));
+diff --git a/src/objects/slots-inl.h b/src/objects/slots-inl.h
+index af6dfccfc69..41a3eae99a3 100644
+--- a/src/objects/slots-inl.h
++++ b/src/objects/slots-inl.h
+@@ -309,24 +309,24 @@ Tagged<Object> IndirectPointerSlot::Acquire_Load(const Isolate* isolate) const {
+ 
+ void IndirectPointerSlot::Relaxed_Store(
+     Tagged<ExposedTrustedObject> value) const {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   IndirectPointerHandle handle = value->ReadField<IndirectPointerHandle>(
+       ExposedTrustedObject::kSelfIndirectPointerOffset);
+   Relaxed_StoreHandle(handle);
+ #else
+   UNREACHABLE();
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+ }
+ 
+ void IndirectPointerSlot::Release_Store(
+     Tagged<ExposedTrustedObject> value) const {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   IndirectPointerHandle handle = value->ReadField<IndirectPointerHandle>(
+       ExposedTrustedObject::kSelfIndirectPointerOffset);
+   Release_StoreHandle(handle);
+ #else
+   UNREACHABLE();
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+ }
+ 
+ IndirectPointerHandle IndirectPointerSlot::Relaxed_LoadHandle() const {
+@@ -349,7 +349,7 @@ void IndirectPointerSlot::Release_StoreHandle(
+ 
+ Tagged<Object> IndirectPointerSlot::ResolveHandle(
+     IndirectPointerHandle handle, const Isolate* isolate) const {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   // TODO(saelo) Maybe come up with a different entry encoding scheme that
+   // returns Smi::zero for kNullCodePointerHandle?
+   if (!handle) return Smi::zero();
+@@ -364,7 +364,7 @@ Tagged<Object> IndirectPointerSlot::ResolveHandle(
+   return Tagged<Object>(table.Get(handle));
+ #else
+   UNREACHABLE();
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+ }
+ 
+ //
+diff --git a/src/objects/slots.h b/src/objects/slots.h
+index f242e3a6707..b02af318dff 100644
+--- a/src/objects/slots.h
++++ b/src/objects/slots.h
+@@ -379,7 +379,7 @@ class IndirectPointerSlot
+  public:
+   IndirectPointerSlot()
+       : SlotBase(kNullAddress)
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+         ,
+         tag_(kIndirectPointerNullTag)
+ #endif
+@@ -388,7 +388,7 @@ class IndirectPointerSlot
+ 
+   explicit IndirectPointerSlot(Address ptr, IndirectPointerTag tag)
+       : SlotBase(ptr)
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+         ,
+         tag_(tag)
+ #endif
+@@ -417,17 +417,17 @@ class IndirectPointerSlot
+   inline void Relaxed_StoreHandle(IndirectPointerHandle handle) const;
+   inline void Release_StoreHandle(IndirectPointerHandle handle) const;
+ 
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   IndirectPointerTag tag() const { return tag_; }
+ #else
+   IndirectPointerTag tag() const { return kIndirectPointerNullTag; }
+ #endif
+ 
+  private:
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   // The tag associated with this slot.
+   IndirectPointerTag tag_;
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+ 
+   inline Tagged<Object> ResolveHandle(IndirectPointerHandle handle,
+                                       const Isolate* isolate) const;
+diff --git a/src/objects/trusted-object.h b/src/objects/trusted-object.h
+index bdefb46b7ae..7d3ce9db848 100644
+--- a/src/objects/trusted-object.h
++++ b/src/objects/trusted-object.h
+@@ -78,7 +78,7 @@ class ExposedTrustedObject : public TrustedObject {
+   DECL_CAST(ExposedTrustedObject)
+   DECL_VERIFIER(ExposedTrustedObject)
+ 
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   // The 'self' indirect pointer is only available when the sandbox is enabled.
+   // Otherwise, these objects are referenced through direct pointers.
+ #define FIELD_LIST(V)                                                   \
+@@ -89,9 +89,9 @@ class ExposedTrustedObject : public TrustedObject {
+ 
+   DEFINE_FIELD_OFFSET_CONSTANTS(TrustedObject::kHeaderSize, FIELD_LIST)
+ #undef FIELD_LIST
+-#else   // V8_CODE_POINTER_SANDBOXING
++#else   // V8_ENABLE_SANDBOX
+   static constexpr int kHeaderSize = TrustedObject::kHeaderSize;
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+ 
+   OBJECT_CONSTRUCTORS(ExposedTrustedObject, TrustedObject);
+ };
+diff --git a/src/sandbox/code-pointer-inl.h b/src/sandbox/code-pointer-inl.h
+index dd56c77b713..671e01746a2 100644
+--- a/src/sandbox/code-pointer-inl.h
++++ b/src/sandbox/code-pointer-inl.h
+@@ -18,7 +18,7 @@ V8_INLINE void InitCodePointerTableEntryField(Address field_address,
+                                               Isolate* isolate,
+                                               Tagged<HeapObject> owning_code,
+                                               Address entrypoint) {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   CodePointerTable::Space* space =
+       ReadOnlyHeap::Contains(field_address)
+           ? isolate->read_only_heap()->code_pointer_space()
+@@ -33,12 +33,12 @@ V8_INLINE void InitCodePointerTableEntryField(Address field_address,
+   base::AsAtomic32::Release_Store(location, handle);
+ #else
+   UNREACHABLE();
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+ }
+ 
+ V8_INLINE Address
+ ReadCodeEntrypointViaIndirectPointerField(Address field_address) {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   // Handles may be written to objects from other threads so the handle needs
+   // to be loaded atomically. We assume that the load from the table cannot
+   // be reordered before the load of the handle due to the data dependency
+@@ -49,19 +49,19 @@ ReadCodeEntrypointViaIndirectPointerField(Address field_address) {
+   return GetProcessWideCodePointerTable()->GetEntrypoint(handle);
+ #else
+   UNREACHABLE();
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+ }
+ 
+ V8_INLINE void WriteCodeEntrypointViaIndirectPointerField(Address field_address,
+                                                           Address value) {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+   // See comment above for why this is a Relaxed_Load.
+   auto location = reinterpret_cast<CodePointerHandle*>(field_address);
+   CodePointerHandle handle = base::AsAtomic32::Relaxed_Load(location);
+   GetProcessWideCodePointerTable()->SetEntrypoint(handle, value);
+ #else
+   UNREACHABLE();
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+ }
+ 
+ }  // namespace internal
+diff --git a/src/sandbox/indirect-pointer-inl.h b/src/sandbox/indirect-pointer-inl.h
+index 00e509a4396..a0d37d3c784 100644
+--- a/src/sandbox/indirect-pointer-inl.h
++++ b/src/sandbox/indirect-pointer-inl.h
+@@ -15,7 +15,7 @@
+ namespace v8 {
+ namespace internal {
+ 
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+ 
+ template <IndirectPointerTag tag>
+ V8_INLINE Tagged<Object> ReadIndirectPointerField(Address field_address,
+@@ -39,7 +39,7 @@ V8_INLINE Tagged<Object> ReadIndirectPointerField(Address field_address,
+   return Tagged<Object>(table.Get(handle));
+ }
+ 
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+         //
+ }  // namespace internal
+ }  // namespace v8
+diff --git a/src/snapshot/serializer.cc b/src/snapshot/serializer.cc
+index f6b4ad8c67d..26ae2606b83 100644
+--- a/src/snapshot/serializer.cc
++++ b/src/snapshot/serializer.cc
+@@ -1121,7 +1121,7 @@ void Serializer::ObjectSerializer::VisitExternalPointer(
+ void Serializer::ObjectSerializer::VisitIndirectPointer(
+     Tagged<HeapObject> host, IndirectPointerSlot slot,
+     IndirectPointerMode mode) {
+-  DCHECK(V8_CODE_POINTER_SANDBOXING_BOOL);
++  DCHECK(V8_ENABLE_SANDBOX_BOOL);
+ 
+   // The slot must be properly initialized at this point, so will always contain
+   // a reference to a HeapObject.
+@@ -1210,7 +1210,7 @@ void Serializer::ObjectSerializer::OutputRawData(Address up_to) {
+                                sizeof(field_value),
+                                reinterpret_cast<const uint8_t*>(&field_value));
+     } else if (IsCode(*object_, cage_base)) {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+       // When the sandbox is enabled, this field contains the handle to this
+       // Code object's code pointer table entry. This will be recomputed after
+       // deserialization.
+@@ -1226,7 +1226,7 @@ void Serializer::ObjectSerializer::OutputRawData(Address up_to) {
+       OutputRawWithCustomField(sink_, object_start, base, bytes_to_output,
+                                Code::kInstructionStartOffset,
+                                sizeof(field_value), field_value);
+-#endif  // V8_CODE_POINTER_SANDBOXING
++#endif  // V8_ENABLE_SANDBOX
+     } else if (IsSeqString(*object_)) {
+       // SeqStrings may contain padding. Serialize the padding bytes as 0s to
+       // make the snapshot content deterministic.
+diff --git a/src/torque/torque-parser.cc b/src/torque/torque-parser.cc
+index 3c3ebec2e69..a5491a8cc25 100644
+--- a/src/torque/torque-parser.cc
++++ b/src/torque/torque-parser.cc
+@@ -70,8 +70,6 @@ class BuildFlags : public base::ContextualClass<BuildFlags> {
+     build_flags_["V8_ENABLE_WEBASSEMBLY"] = false;
+ #endif
+     build_flags_["V8_ENABLE_SANDBOX"] = V8_ENABLE_SANDBOX_BOOL;
+-    build_flags_["V8_CODE_POINTER_SANDBOXING"] =
+-        V8_CODE_POINTER_SANDBOXING_BOOL;
+     build_flags_["DEBUG"] = DEBUG_BOOL;
+   }
+   static bool GetFlag(const std::string& name, const char* production) {
+diff --git a/src/wasm/turboshaft-graph-interface.cc b/src/wasm/turboshaft-graph-interface.cc
+index e2e64454440..73f62aff3d2 100644
+--- a/src/wasm/turboshaft-graph-interface.cc
++++ b/src/wasm/turboshaft-graph-interface.cc
+@@ -4409,7 +4409,7 @@ class TurboshaftGraphBuildingInterface {
+       V<Code> wrapper_code = __ Load(func_ref, LoadOp::Kind::TaggedBase(),
+                                      MemoryRepresentation::TaggedPointer(),
+                                      WasmInternalFunction::kCodeOffset);
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+       V<Word32> call_target_handle = __ Load(
+           wrapper_code, LoadOp::Kind::TaggedBase(),
+           MemoryRepresentation::Uint32(), Code::kSelfIndirectPointerOffset);
+@@ -4687,7 +4687,7 @@ class TurboshaftGraphBuildingInterface {
+   }
+ 
+   V<WordPtr> BuildDecodeExternalCodePointer(V<Word32> handle) {
+-#ifdef V8_CODE_POINTER_SANDBOXING
++#ifdef V8_ENABLE_SANDBOX
+     V<Word32> index =
+         __ Word32ShiftRightLogical(handle, kCodePointerHandleShift);
+     V<WordPtr> offset = __ ChangeUint32ToUintPtr(
+-- 
+2.35.1
+

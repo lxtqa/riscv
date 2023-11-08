@@ -1,0 +1,1641 @@
+From 04b057dbe629faa4cd8a6df1c116807c7aeaea98 Mon Sep 17 00:00:00 2001
+From: Igor Sheludko <ishell@chromium.org>
+Date: Wed, 12 Jul 2023 15:08:56 +0200
+Subject: [PATCH] [api][compiler] Introduce NoProfilingProtector
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+... which is invalidated when Isolate profing or runtime call stats are
+enabled. This allows using a new CallApiCallbackOptimizedNoProfiling
+builtin - a version of CallApiCallbackOptimized without overhead for
+checking if profiling is enabled.
+
+Drive-by: fix double-reporting of the Api callbacks in the sampling
+profiler traces.
+
+Bug: v8:13825, chromium:1445925
+Change-Id: I682130be2fd70739f659c80c013da36e459ec500
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/4678635
+Reviewed-by: Dominik Inführ <dinfuehr@chromium.org>
+Reviewed-by: Camillo Bruni <cbruni@chromium.org>
+Commit-Queue: Igor Sheludko <ishell@chromium.org>
+Cr-Commit-Position: refs/heads/main@{#88872}
+---
+ include/v8-isolate.h                          |   1 +
+ src/api/api.cc                                |   3 +
+ src/builtins/arm/builtins-arm.cc              |  36 +++---
+ src/builtins/arm64/builtins-arm64.cc          |  34 +++---
+ src/builtins/builtins-call-gen.cc             |   6 +
+ src/builtins/builtins-definitions.h           |   1 +
+ src/builtins/ia32/builtins-ia32.cc            |  36 +++---
+ src/builtins/loong64/builtins-loong64.cc      |  36 +++---
+ src/builtins/mips64/builtins-mips64.cc        |  36 +++---
+ src/builtins/ppc/builtins-ppc.cc              |  35 +++---
+ src/builtins/riscv/builtins-riscv.cc          |  58 +++++-----
+ src/builtins/s390/builtins-s390.cc            |  35 +++---
+ src/builtins/x64/builtins-x64.cc              |  44 ++++---
+ src/codegen/external-reference.cc             |   2 +
+ src/common/globals.h                          |  18 ++-
+ src/compiler/compilation-dependencies.cc      |  11 ++
+ src/compiler/compilation-dependencies.h       |   1 +
+ src/compiler/js-call-reducer.cc               |  13 ++-
+ .../js-native-context-specialization.cc       |   8 +-
+ src/execution/isolate.cc                      |  14 +++
+ src/execution/isolate.h                       |   3 +
+ src/execution/protectors.h                    |   1 +
+ src/execution/stack-guard.cc                  |  11 ++
+ src/heap/setup-heap-internal.cc               |   1 +
+ src/maglev/maglev-graph-builder.cc            |  10 +-
+ src/maglev/maglev-ir.cc                       |  19 ++-
+ src/maglev/maglev-ir.h                        |  15 ++-
+ src/profiler/tick-sample.cc                   |  15 ++-
+ src/roots/roots.h                             |   1 +
+ test/cctest/test-cpu-profiler.cc              | 109 ++++++++++++++++++
+ tools/v8heapconst.py                          |  37 +++---
+ 31 files changed, 470 insertions(+), 180 deletions(-)
+
+diff --git a/include/v8-isolate.h b/include/v8-isolate.h
+index d822dc70f55..34b3de7945e 100644
+--- a/include/v8-isolate.h
++++ b/include/v8-isolate.h
+@@ -540,6 +540,7 @@ class V8_EXPORT Isolate {
+     kLocaleInfoObsoletedGetters = 121,
+     kLocaleInfoFunctions = 122,
+     kCompileHintsMagicAll = 123,
++    kInvalidatedNoProfilingProtector = 124,
+ 
+     // If you add new values here, you'll also need to update Chromium's:
+     // web_feature.mojom, use_counter_callback.cc, and enums.xml. V8 changes to
+diff --git a/src/api/api.cc b/src/api/api.cc
+index f96c7d4a4a9..825627db6a3 100644
+--- a/src/api/api.cc
++++ b/src/api/api.cc
+@@ -11442,6 +11442,9 @@ inline void InvokeFunctionCallback(
+       // effects checking in the optimized version of the builtin.
+       DCHECK(!i_isolate->should_check_side_effects());
+       break;
++    case CallApiCallbackMode::kOptimizedNoProfiling:
++      // This mode doesn't call InvokeFunctionCallback.
++      UNREACHABLE();
+   }
+ 
+   Address arg = i_isolate->isolate_data()->api_callback_thunk_argument();
+diff --git a/src/builtins/arm/builtins-arm.cc b/src/builtins/arm/builtins-arm.cc
+index 66a65dc34dd..67181dbc2c8 100644
+--- a/src/builtins/arm/builtins-arm.cc
++++ b/src/builtins/arm/builtins-arm.cc
+@@ -3157,7 +3157,8 @@ namespace {
+ // *stack_space_operand * kSystemPointerSize or stack_space * kSystemPointerSize
+ // (GCed, includes the call JS arguments space and the additional space
+ // allocated for the fast call).
+-void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
++void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
++                              Register function_address,
+                               ExternalReference thunk_ref, Register thunk_arg,
+                               int stack_space, MemOperand* stack_space_operand,
+                               MemOperand return_value_operand) {
+@@ -3207,11 +3208,12 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+   }
+ 
+   Label profiler_or_side_effects_check_enabled, done_api_call;
+-  __ RecordComment("Check if profiler or side effects check is enabled");
+-  __ ldrb(scratch, __ ExternalReferenceAsOperand(
+-                       ER::execution_mode_address(isolate), no_reg));
+-  __ cmp(scratch, Operand(0));
+-  __ b(ne, &profiler_or_side_effects_check_enabled);
++  if (with_profiling) {
++    __ RecordComment("Check if profiler or side effects check is enabled");
++    __ ldrb(scratch, __ ExternalReferenceAsOperand(
++                         ER::execution_mode_address(isolate), no_reg));
++    __ cmp(scratch, Operand(0));
++    __ b(ne, &profiler_or_side_effects_check_enabled);
+ #ifdef V8_RUNTIME_CALL_STATS
+   __ RecordComment("Check if RCS is enabled");
+   __ Move(scratch, ER::address_of_runtime_stats_flag());
+@@ -3219,6 +3221,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+   __ cmp(scratch, Operand(0));
+   __ b(ne, &profiler_or_side_effects_check_enabled);
+ #endif  // V8_RUNTIME_CALL_STATS
++  }
+ 
+   __ RecordComment("Call the api function directly.");
+   __ StoreReturnAddressAndCall(function_address);
+@@ -3286,7 +3289,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+ 
+   __ mov(pc, lr);
+ 
+-  {
++  if (with_profiling) {
+     ASM_CODE_COMMENT_STRING(masm, "Call the api function via thunk wrapper.");
+     __ bind(&profiler_or_side_effects_check_enabled);
+     // Additional parameter is the address of the actual callback function.
+@@ -3337,7 +3340,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+   //  -- r2                  : arguments count (not including the receiver)
+   //  -- r3                  : call handler info
+   //  -- r0                  : holder
+-  // CallApiCallbackMode::kOptimized mode:
++  // CallApiCallbackMode::kOptimizedNoProfiling/kOptimized modes:
+   //  -- r1                  : api function address
+   //  -- r2                  : arguments count (not including the receiver)
+   //  -- r3                  : call data
+@@ -3368,6 +3371,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+       holder = CallApiCallbackGenericDescriptor::HolderRegister();
+       break;
+ 
++    case CallApiCallbackMode::kOptimizedNoProfiling:
+     case CallApiCallbackMode::kOptimized:
+       api_function_address =
+           CallApiCallbackOptimizedDescriptor::ApiFunctionAddressRegister();
+@@ -3425,6 +3429,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+       __ str(scratch2, MemOperand(sp, FCA::kDataIndex * kSystemPointerSize));
+       break;
+ 
++    case CallApiCallbackMode::kOptimizedNoProfiling:
+     case CallApiCallbackMode::kOptimized:
+       __ str(call_data, MemOperand(sp, FCA::kDataIndex * kSystemPointerSize));
+       break;
+@@ -3527,9 +3532,11 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+       FCA::kReturnValueIndex + exit_frame_params_count);
+   static constexpr int kUseStackSpaceOperand = 0;
+ 
+-  CallApiFunctionAndReturn(masm, api_function_address, thunk_ref, thunk_arg,
+-                           kUseStackSpaceOperand, &stack_space_operand,
+-                           return_value_operand);
++  const bool with_profiling =
++      mode != CallApiCallbackMode::kOptimizedNoProfiling;
++  CallApiFunctionAndReturn(masm, with_profiling, api_function_address,
++                           thunk_ref, thunk_arg, kUseStackSpaceOperand,
++                           &stack_space_operand, return_value_operand);
+ }
+ 
+ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+@@ -3624,9 +3631,10 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+       PCA::kReturnValueIndex + kNameOnStackSize);
+   MemOperand* const kUseStackSpaceConstant = nullptr;
+ 
+-  CallApiFunctionAndReturn(masm, api_function_address, thunk_ref, thunk_arg,
+-                           kStackUnwindSpace, kUseStackSpaceConstant,
+-                           return_value_operand);
++  const bool with_profiling = true;
++  CallApiFunctionAndReturn(masm, with_profiling, api_function_address,
++                           thunk_ref, thunk_arg, kStackUnwindSpace,
++                           kUseStackSpaceConstant, return_value_operand);
+ }
+ 
+ void Builtins::Generate_DirectCEntry(MacroAssembler* masm) {
+diff --git a/src/builtins/arm64/builtins-arm64.cc b/src/builtins/arm64/builtins-arm64.cc
+index 3e26dd5fc19..e1de804f8ac 100644
+--- a/src/builtins/arm64/builtins-arm64.cc
++++ b/src/builtins/arm64/builtins-arm64.cc
+@@ -5334,7 +5334,8 @@ namespace {
+ // *stack_space_operand * kSystemPointerSize or stack_space * kSystemPointerSize
+ // (GCed, includes the call JS arguments space and the additional space
+ // allocated for the fast call).
+-void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
++void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
++                              Register function_address,
+                               ExternalReference thunk_ref, Register thunk_arg,
+                               int stack_space, MemOperand* stack_space_operand,
+                               MemOperand return_value_operand) {
+@@ -5385,16 +5386,18 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+   }
+ 
+   Label profiler_or_side_effects_check_enabled, done_api_call;
+-  __ RecordComment("Check if profiler or side effects check is enabled");
+-  __ Ldrb(scratch.W(), __ ExternalReferenceAsOperand(
+-                           ER::execution_mode_address(isolate), no_reg));
+-  __ Cbnz(scratch.W(), &profiler_or_side_effects_check_enabled);
++  if (with_profiling) {
++    __ RecordComment("Check if profiler or side effects check is enabled");
++    __ Ldrb(scratch.W(), __ ExternalReferenceAsOperand(
++                             ER::execution_mode_address(isolate), no_reg));
++    __ Cbnz(scratch.W(), &profiler_or_side_effects_check_enabled);
+ #ifdef V8_RUNTIME_CALL_STATS
+   __ RecordComment("Check if RCS is enabled");
+   __ Mov(scratch, ER::address_of_runtime_stats_flag());
+   __ Ldrsw(scratch.W(), MemOperand(scratch));
+   __ Cbnz(scratch.W(), &profiler_or_side_effects_check_enabled);
+ #endif  // V8_RUNTIME_CALL_STATS
++  }
+ 
+   __ RecordComment("Call the api function directly.");
+   __ StoreReturnAddressAndCall(function_address);
+@@ -5470,7 +5473,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+ 
+   __ Ret();
+ 
+-  {
++  if (with_profiling) {
+     ASM_CODE_COMMENT_STRING(masm, "Call the api function via thunk wrapper.");
+     __ Bind(&profiler_or_side_effects_check_enabled);
+     // Additional parameter is the address of the actual callback function.
+@@ -5521,7 +5524,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+   //  -- x2                  : arguments count (not including the receiver)
+   //  -- x3                  : call handler info
+   //  -- x0                  : holder
+-  // CallApiCallbackMode::kOptimized mode:
++  // CallApiCallbackMode::kOptimizedNoProfiling/kOptimized modes:
+   //  -- x1                  : api function address
+   //  -- x2                  : arguments count (not including the receiver)
+   //  -- x3                  : call data
+@@ -5552,6 +5555,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+       holder = CallApiCallbackGenericDescriptor::HolderRegister();
+       break;
+ 
++    case CallApiCallbackMode::kOptimizedNoProfiling:
+     case CallApiCallbackMode::kOptimized:
+       api_function_address =
+           CallApiCallbackOptimizedDescriptor::ApiFunctionAddressRegister();
+@@ -5612,6 +5616,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+       __ Str(scratch2, MemOperand(sp, FCA::kDataIndex * kSystemPointerSize));
+       break;
+ 
++    case CallApiCallbackMode::kOptimizedNoProfiling:
+     case CallApiCallbackMode::kOptimized:
+       __ Str(call_data, MemOperand(sp, FCA::kDataIndex * kSystemPointerSize));
+       break;
+@@ -5724,9 +5729,11 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+       FCA::kReturnValueIndex + exit_frame_params_count);
+   static constexpr int kUseStackSpaceOperand = 0;
+ 
+-  CallApiFunctionAndReturn(masm, api_function_address, thunk_ref, thunk_arg,
+-                           kUseStackSpaceOperand, &stack_space_operand,
+-                           return_value_operand);
++  const bool with_profiling =
++      mode != CallApiCallbackMode::kOptimizedNoProfiling;
++  CallApiFunctionAndReturn(masm, with_profiling, api_function_address,
++                           thunk_ref, thunk_arg, kUseStackSpaceOperand,
++                           &stack_space_operand, return_value_operand);
+ }
+ 
+ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+@@ -5840,9 +5847,10 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+       ExitFrameCallerStackSlotOperand(kPCAStackIndex + PCA::kReturnValueIndex);
+   MemOperand* const kUseStackSpaceConstant = nullptr;
+ 
+-  CallApiFunctionAndReturn(masm, api_function_address, thunk_ref, thunk_arg,
+-                           kStackUnwindSpace, kUseStackSpaceConstant,
+-                           return_value_operand);
++  const bool with_profiling = true;
++  CallApiFunctionAndReturn(masm, with_profiling, api_function_address,
++                           thunk_ref, thunk_arg, kStackUnwindSpace,
++                           kUseStackSpaceConstant, return_value_operand);
+ }
+ 
+ void Builtins::Generate_DirectCEntry(MacroAssembler* masm) {
+diff --git a/src/builtins/builtins-call-gen.cc b/src/builtins/builtins-call-gen.cc
+index 50d93b60a90..eb04f3c5426 100644
+--- a/src/builtins/builtins-call-gen.cc
++++ b/src/builtins/builtins-call-gen.cc
+@@ -68,6 +68,12 @@ void Builtins::Generate_CallApiCallbackGeneric(MacroAssembler* masm) {
+   Generate_CallApiCallbackImpl(masm, CallApiCallbackMode::kGeneric);
+ }
+ 
++void Builtins::Generate_CallApiCallbackOptimizedNoProfiling(
++    MacroAssembler* masm) {
++  Generate_CallApiCallbackImpl(masm,
++                               CallApiCallbackMode::kOptimizedNoProfiling);
++}
++
+ void Builtins::Generate_CallApiCallbackOptimized(MacroAssembler* masm) {
+   Generate_CallApiCallbackImpl(masm, CallApiCallbackMode::kOptimized);
+ }
+diff --git a/src/builtins/builtins-definitions.h b/src/builtins/builtins-definitions.h
+index 0c4919cef25..09573e301b2 100644
+--- a/src/builtins/builtins-definitions.h
++++ b/src/builtins/builtins-definitions.h
+@@ -238,6 +238,7 @@ namespace internal {
+                                                                                \
+   /* API callback handling */                                                  \
+   ASM(CallApiCallbackGeneric, CallApiCallbackGeneric)                          \
++  ASM(CallApiCallbackOptimizedNoProfiling, CallApiCallbackOptimized)           \
+   ASM(CallApiCallbackOptimized, CallApiCallbackOptimized)                      \
+   ASM(CallApiGetter, ApiGetter)                                                \
+   TFC(HandleApiCallOrConstruct, JSTrampoline)                                  \
+diff --git a/src/builtins/ia32/builtins-ia32.cc b/src/builtins/ia32/builtins-ia32.cc
+index 1e42a2518bd..8cae1a0e182 100644
+--- a/src/builtins/ia32/builtins-ia32.cc
++++ b/src/builtins/ia32/builtins-ia32.cc
+@@ -3408,7 +3408,8 @@ Operand ExitFrameCallerStackSlotOperand(int index) {
+ // registers.  Restores context.  On return removes
+ // *stack_space_operand * kSystemPointerSize or stack_space * kSystemPointerSize
+ // (GCed).
+-void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
++void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
++                              Register function_address,
+                               ExternalReference thunk_ref, Register thunk_arg,
+                               int stack_space, Operand* stack_space_operand,
+                               Operand return_value_operand) {
+@@ -3453,17 +3454,19 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+   }
+ 
+   Label profiler_or_side_effects_check_enabled, done_api_call;
+-  __ RecordComment("Check if profiler or side effects check is enabled");
+-  __ cmpb(__ ExternalReferenceAsOperand(ER::execution_mode_address(isolate),
+-                                        no_reg),
+-          Immediate(0));
+-  __ j(not_zero, &profiler_or_side_effects_check_enabled);
++  if (with_profiling) {
++    __ RecordComment("Check if profiler or side effects check is enabled");
++    __ cmpb(__ ExternalReferenceAsOperand(ER::execution_mode_address(isolate),
++                                          no_reg),
++            Immediate(0));
++    __ j(not_zero, &profiler_or_side_effects_check_enabled);
+ #ifdef V8_RUNTIME_CALL_STATS
+   __ RecordComment("Check if RCS is enabled");
+   __ Move(scratch, Immediate(ER::address_of_runtime_stats_flag()));
+   __ cmp(Operand(scratch, 0), Immediate(0));
+   __ j(not_zero, &profiler_or_side_effects_check_enabled);
+ #endif  // V8_RUNTIME_CALL_STATS
++  }
+ 
+   __ RecordComment("Call the api function directly.");
+   __ call(function_address);
+@@ -3529,7 +3532,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+     __ jmp(scratch);
+   }
+ 
+-  {
++  if (with_profiling) {
+     ASM_CODE_COMMENT_STRING(masm, "Call the api function via thunk wrapper.");
+     __ bind(&profiler_or_side_effects_check_enabled);
+     // Additional parameter is the address of the actual callback function.
+@@ -3571,7 +3574,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+   //  -- ecx                 : arguments count (not including the receiver)
+   //  -- edx                 : call handler info
+   //  -- edi                 : holder
+-  // CallApiCallbackMode::kOptimized mode:
++  // CallApiCallbackMode::kOptimizedNoProfiling/kOptimized modes:
+   //  -- eax                 : api function address
+   //  -- ecx                 : arguments count (not including the receiver)
+   //  -- edx                 : call data
+@@ -3600,6 +3603,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+       holder = CallApiCallbackGenericDescriptor::HolderRegister();
+       break;
+ 
++    case CallApiCallbackMode::kOptimizedNoProfiling:
+     case CallApiCallbackMode::kOptimized:
+       api_function_address =
+           CallApiCallbackOptimizedDescriptor::ApiFunctionAddressRegister();
+@@ -3647,6 +3651,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+       __ push(FieldOperand(callback, CallHandlerInfo::kDataOffset));
+       break;
+ 
++    case CallApiCallbackMode::kOptimizedNoProfiling:
+     case CallApiCallbackMode::kOptimized:
+       __ Push(call_data);
+       break;
+@@ -3755,9 +3760,11 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+   static constexpr int kUseStackSpaceOperand = 0;
+   Operand stack_space_operand = ApiParameterOperand(kApiArgc + 3);
+ 
+-  CallApiFunctionAndReturn(masm, api_function_address, thunk_ref, thunk_arg,
+-                           kUseStackSpaceOperand, &stack_space_operand,
+-                           return_value_operand);
++  const bool with_profiling =
++      mode != CallApiCallbackMode::kOptimizedNoProfiling;
++  CallApiFunctionAndReturn(masm, with_profiling, api_function_address,
++                           thunk_ref, thunk_arg, kUseStackSpaceOperand,
++                           &stack_space_operand, return_value_operand);
+ }
+ 
+ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+@@ -3866,9 +3873,10 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+       PCA::kReturnValueIndex + kNameOnStackSize);
+   Operand* const kUseStackSpaceConstant = nullptr;
+ 
+-  CallApiFunctionAndReturn(masm, api_function_address, thunk_ref, thunk_arg,
+-                           kStackUnwindSpace, kUseStackSpaceConstant,
+-                           return_value_operand);
++  const bool with_profiling = true;
++  CallApiFunctionAndReturn(masm, with_profiling, api_function_address,
++                           thunk_ref, thunk_arg, kStackUnwindSpace,
++                           kUseStackSpaceConstant, return_value_operand);
+ }
+ 
+ void Builtins::Generate_DirectCEntry(MacroAssembler* masm) {
+diff --git a/src/builtins/loong64/builtins-loong64.cc b/src/builtins/loong64/builtins-loong64.cc
+index 4befd18bb3a..c274e481054 100644
+--- a/src/builtins/loong64/builtins-loong64.cc
++++ b/src/builtins/loong64/builtins-loong64.cc
+@@ -3033,7 +3033,8 @@ namespace {
+ // *stack_space_operand * kSystemPointerSize or stack_space * kSystemPointerSize
+ // (GCed, includes the call JS arguments space and the additional space
+ // allocated for the fast call).
+-void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
++void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
++                              Register function_address,
+                               ExternalReference thunk_ref, Register thunk_arg,
+                               int stack_space, MemOperand* stack_space_operand,
+                               MemOperand return_value_operand) {
+@@ -3081,11 +3082,12 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+   }
+ 
+   Label profiler_or_side_effects_check_enabled, done_api_call;
+-  __ RecordComment("Check if profiler or side effects check is enabled");
+-  __ Ld_b(scratch, __ ExternalReferenceAsOperand(
+-                       ER::execution_mode_address(isolate), no_reg));
+-  __ Branch(&profiler_or_side_effects_check_enabled, ne, scratch,
+-            Operand(zero_reg));
++  if (with_profiling) {
++    __ RecordComment("Check if profiler or side effects check is enabled");
++    __ Ld_b(scratch, __ ExternalReferenceAsOperand(
++                         ER::execution_mode_address(isolate), no_reg));
++    __ Branch(&profiler_or_side_effects_check_enabled, ne, scratch,
++              Operand(zero_reg));
+ #ifdef V8_RUNTIME_CALL_STATS
+   __ RecordComment("Check if RCS is enabled");
+   __ li(scratch, ER::address_of_runtime_stats_flag());
+@@ -3093,6 +3095,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+   __ Branch(&profiler_or_side_effects_check_enabled, ne, scratch,
+             Operand(zero_reg));
+ #endif  // V8_RUNTIME_CALL_STATS
++  }
+ 
+   __ RecordComment("Call the api function directly.");
+   __ StoreReturnAddressAndCall(function_address);
+@@ -3160,7 +3163,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+ 
+   __ Ret();
+ 
+-  {
++  if (with_profiling) {
+     ASM_CODE_COMMENT_STRING(masm, "Call the api function via thunk wrapper.");
+     __ bind(&profiler_or_side_effects_check_enabled);
+     // Additional parameter is the address of the actual callback function.
+@@ -3212,7 +3215,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+   //  -- a2                  : arguments count (not including the receiver)
+   //  -- a3                  : call handler info
+   //  -- a0                  : holder
+-  // CallApiCallbackMode::kOptimized mode:
++  // CallApiCallbackMode::kOptimizedNoProfiling/kOptimized modes:
+   //  -- a1                  : api function address
+   //  -- a2                  : arguments count
+   //  -- a3                  : call data
+@@ -3244,6 +3247,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+       holder = CallApiCallbackGenericDescriptor::HolderRegister();
+       break;
+ 
++    case CallApiCallbackMode::kOptimizedNoProfiling:
+     case CallApiCallbackMode::kOptimized:
+       api_function_address =
+           CallApiCallbackOptimizedDescriptor::ApiFunctionAddressRegister();
+@@ -3307,6 +3311,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+       __ St_d(scratch2, MemOperand(sp, FCA::kDataIndex * kSystemPointerSize));
+       break;
+ 
++    case CallApiCallbackMode::kOptimizedNoProfiling:
+     case CallApiCallbackMode::kOptimized:
+       __ St_d(call_data, MemOperand(sp, FCA::kDataIndex * kSystemPointerSize));
+       break;
+@@ -3418,9 +3423,11 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+ 
+   static constexpr int kUseStackSpaceOperand = 0;
+ 
+-  CallApiFunctionAndReturn(masm, api_function_address, thunk_ref, thunk_arg,
+-                           kUseStackSpaceOperand, &stack_space_operand,
+-                           return_value_operand);
++  const bool with_profiling =
++      mode != CallApiCallbackMode::kOptimizedNoProfiling;
++  CallApiFunctionAndReturn(masm, with_profiling, api_function_address,
++                           thunk_ref, thunk_arg, kUseStackSpaceOperand,
++                           &stack_space_operand, return_value_operand);
+ }
+ 
+ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+@@ -3534,9 +3541,10 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+       ExitFrameCallerStackSlotOperand(PCA::kReturnValueIndex + kPCAStackIndex);
+   MemOperand* const kUseStackSpaceConstant = nullptr;
+ 
+-  CallApiFunctionAndReturn(masm, api_function_address, thunk_ref, thunk_arg,
+-                           kStackUnwindSpace, kUseStackSpaceConstant,
+-                           return_value_operand);
++  const bool with_profiling = true;
++  CallApiFunctionAndReturn(masm, with_profiling, api_function_address,
++                           thunk_ref, thunk_arg, kStackUnwindSpace,
++                           kUseStackSpaceConstant, return_value_operand);
+ }
+ 
+ void Builtins::Generate_DirectCEntry(MacroAssembler* masm) {
+diff --git a/src/builtins/mips64/builtins-mips64.cc b/src/builtins/mips64/builtins-mips64.cc
+index 64aadf4f8ae..ae0bece22aa 100644
+--- a/src/builtins/mips64/builtins-mips64.cc
++++ b/src/builtins/mips64/builtins-mips64.cc
+@@ -3068,7 +3068,8 @@ namespace {
+ // *stack_space_operand * kSystemPointerSize or stack_space * kSystemPointerSize
+ // (GCed, includes the call JS arguments space and the additional space
+ // allocated for the fast call).
+-void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
++void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
++                              Register function_address,
+                               ExternalReference thunk_ref, Register thunk_arg,
+                               int stack_space, MemOperand* stack_space_operand,
+                               MemOperand return_value_operand) {
+@@ -3117,11 +3118,12 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+   }
+ 
+   Label profiler_or_side_effects_check_enabled, done_api_call;
+-  __ RecordComment("Check if profiler or side effects check is enabled");
+-  __ Lb(scratch, __ ExternalReferenceAsOperand(
+-                     ER::execution_mode_address(isolate), no_reg));
+-  __ Branch(&profiler_or_side_effects_check_enabled, ne, scratch,
+-            Operand(zero_reg));
++  if (with_profiling) {
++    __ RecordComment("Check if profiler or side effects check is enabled");
++    __ Lb(scratch, __ ExternalReferenceAsOperand(
++                       ER::execution_mode_address(isolate), no_reg));
++    __ Branch(&profiler_or_side_effects_check_enabled, ne, scratch,
++              Operand(zero_reg));
+ #ifdef V8_RUNTIME_CALL_STATS
+   __ RecordComment("Check if RCS is enabled");
+   __ li(scratch, ER::address_of_runtime_stats_flag());
+@@ -3129,6 +3131,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+   __ Branch(&profiler_or_side_effects_check_enabled, ne, scratch,
+             Operand(zero_reg));
+ #endif  // V8_RUNTIME_CALL_STATS
++  }
+ 
+   __ RecordComment("Call the api function directly.");
+   __ StoreReturnAddressAndCall(function_address);
+@@ -3197,7 +3200,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+ 
+   __ Ret();
+ 
+-  {
++  if (with_profiling) {
+     ASM_CODE_COMMENT_STRING(masm, "Call the api function via thunk wrapper.");
+     __ bind(&profiler_or_side_effects_check_enabled);
+     // Additional parameter is the address of the actual callback.
+@@ -3250,7 +3253,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+   //  -- a2                  : arguments count (not including the receiver)
+   //  -- a3                  : call handler info
+   //  -- a0                  : holder
+-  // CallApiCallbackMode::kOptimized mode:
++  // CallApiCallbackMode::kOptimizedNoProfiling/kOptimized modes:
+   //  -- a1                  : api function address
+   //  -- a2                  : arguments count
+   //  -- a3                  : call data
+@@ -3282,6 +3285,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+       holder = CallApiCallbackGenericDescriptor::HolderRegister();
+       break;
+ 
++    case CallApiCallbackMode::kOptimizedNoProfiling:
+     case CallApiCallbackMode::kOptimized:
+       api_function_address =
+           CallApiCallbackOptimizedDescriptor::ApiFunctionAddressRegister();
+@@ -3344,6 +3348,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+       __ Sd(scratch2, MemOperand(sp, FCA::kDataIndex * kSystemPointerSize));
+       break;
+ 
++    case CallApiCallbackMode::kOptimizedNoProfiling:
+     case CallApiCallbackMode::kOptimized:
+       __ Sd(call_data, MemOperand(sp, FCA::kDataIndex * kSystemPointerSize));
+       break;
+@@ -3454,9 +3459,11 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+ 
+   static constexpr int kUseStackSpaceOperand = 0;
+ 
+-  CallApiFunctionAndReturn(masm, api_function_address, thunk_ref, thunk_arg,
+-                           kUseStackSpaceOperand, &stack_space_operand,
+-                           return_value_operand);
++  const bool with_profiling =
++      mode != CallApiCallbackMode::kOptimizedNoProfiling;
++  CallApiFunctionAndReturn(masm, with_profiling, api_function_address,
++                           thunk_ref, thunk_arg, kUseStackSpaceOperand,
++                           &stack_space_operand, return_value_operand);
+ }
+ 
+ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+@@ -3565,9 +3572,10 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+       ExitFrameCallerStackSlotOperand(PCA::kReturnValueIndex + kPCAStackIndex);
+   MemOperand* const kUseStackSpaceConstant = nullptr;
+ 
+-  CallApiFunctionAndReturn(masm, api_function_address, thunk_ref, thunk_arg,
+-                           kStackUnwindSpace, kUseStackSpaceConstant,
+-                           return_value_operand);
++  const bool with_profiling = true;
++  CallApiFunctionAndReturn(masm, with_profiling, api_function_address,
++                           thunk_ref, thunk_arg, kStackUnwindSpace,
++                           kUseStackSpaceConstant, return_value_operand);
+ }
+ 
+ void Builtins::Generate_DirectCEntry(MacroAssembler* masm) {
+diff --git a/src/builtins/ppc/builtins-ppc.cc b/src/builtins/ppc/builtins-ppc.cc
+index dcd23ccc2c2..53a6d7d785c 100644
+--- a/src/builtins/ppc/builtins-ppc.cc
++++ b/src/builtins/ppc/builtins-ppc.cc
+@@ -3275,7 +3275,7 @@ namespace {
+ // *stack_space_operand * kSystemPointerSize or stack_space * kSystemPointerSize
+ // (GCed, includes the call JS arguments space and the additional space
+ // allocated for the fast call).
+-static void CallApiFunctionAndReturn(MacroAssembler* masm,
++static void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
+                                      Register function_address,
+                                      ExternalReference thunk_ref,
+                                      Register thunk_arg, int stack_space,
+@@ -3326,11 +3326,12 @@ static void CallApiFunctionAndReturn(MacroAssembler* masm,
+   }
+ 
+   Label profiler_or_side_effects_check_enabled, done_api_call;
+-  __ RecordComment("Check if profiler or side effects check is enabled");
+-  __ lbz(scratch, __ ExternalReferenceAsOperand(
+-                      ER::execution_mode_address(isolate), no_reg));
+-  __ cmpi(scratch, Operand::Zero());
+-  __ bne(&profiler_or_side_effects_check_enabled);
++  if (with_profiling) {
++    __ RecordComment("Check if profiler or side effects check is enabled");
++    __ lbz(scratch, __ ExternalReferenceAsOperand(
++                        ER::execution_mode_address(isolate), no_reg));
++    __ cmpi(scratch, Operand::Zero());
++    __ bne(&profiler_or_side_effects_check_enabled);
+ #ifdef V8_RUNTIME_CALL_STATS
+   __ RecordComment("Check if RCS is enabled");
+   __ Move(scratch, ER::address_of_runtime_stats_flag());
+@@ -3338,6 +3339,7 @@ static void CallApiFunctionAndReturn(MacroAssembler* masm,
+   __ cmpi(scratch, Operand::Zero());
+   __ bne(&profiler_or_side_effects_check_enabled);
+ #endif  // V8_RUNTIME_CALL_STATS
++  }
+ 
+   __ RecordComment("Call the api function directly.");
+   __ StoreReturnAddressAndCall(function_address);
+@@ -3404,7 +3406,7 @@ static void CallApiFunctionAndReturn(MacroAssembler* masm,
+ 
+   __ blr();
+ 
+-  {
++  if (with_profiling) {
+     ASM_CODE_COMMENT_STRING(masm, "Call the api function via the thunk.");
+     __ bind(&profiler_or_side_effects_check_enabled);
+     // Additional parameter is the address of the actual callback function.
+@@ -3457,7 +3459,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+   //  -- r5                  : arguments count (not including the receiver)
+   //  -- r6                  : call handler info
+   //  -- r3                  : holder
+-  // CallApiCallbackMode::kOptimized mode:
++  // CallApiCallbackMode::kOptimizedNoProfiling/kOptimized modes:
+   //  -- r4                  : api function address
+   //  -- r5                  : arguments count (not including the receiver)
+   //  -- r6                  : call data
+@@ -3488,6 +3490,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+       holder = CallApiCallbackGenericDescriptor::HolderRegister();
+       break;
+ 
++    case CallApiCallbackMode::kOptimizedNoProfiling:
+     case CallApiCallbackMode::kOptimized:
+       api_function_address =
+           CallApiCallbackOptimizedDescriptor::ApiFunctionAddressRegister();
+@@ -3551,6 +3554,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+                   MemOperand(sp, FCA::kDataIndex * kSystemPointerSize));
+       break;
+ 
++    case CallApiCallbackMode::kOptimizedNoProfiling:
+     case CallApiCallbackMode::kOptimized:
+       __ StoreU64(call_data,
+                   MemOperand(sp, FCA::kDataIndex * kSystemPointerSize));
+@@ -3663,9 +3667,11 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+       FCA::kReturnValueIndex + exit_frame_params_count);
+   static constexpr int kUseStackSpaceOperand = 0;
+ 
+-  CallApiFunctionAndReturn(masm, api_function_address, thunk_ref, thunk_arg,
+-                           kUseStackSpaceOperand, &stack_space_operand,
+-                           return_value_operand);
++  const bool with_profiling =
++      mode != CallApiCallbackMode::kOptimizedNoProfiling;
++  CallApiFunctionAndReturn(masm, with_profiling, api_function_address,
++                           thunk_ref, thunk_arg, kUseStackSpaceOperand,
++                           &stack_space_operand, return_value_operand);
+ }
+ 
+ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+@@ -3796,9 +3802,10 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+       PCA::kReturnValueIndex + kNameOnStackSize);
+   MemOperand* const kUseStackSpaceConstant = nullptr;
+ 
+-  CallApiFunctionAndReturn(masm, api_function_address, thunk_ref, thunk_arg,
+-                           kStackUnwindSpace, kUseStackSpaceConstant,
+-                           return_value_operand);
++  const bool with_profiling = true;
++  CallApiFunctionAndReturn(masm, with_profiling, api_function_address,
++                           thunk_ref, thunk_arg, kStackUnwindSpace,
++                           kUseStackSpaceConstant, return_value_operand);
+ }
+ 
+ void Builtins::Generate_DirectCEntry(MacroAssembler* masm) {
+diff --git a/src/builtins/riscv/builtins-riscv.cc b/src/builtins/riscv/builtins-riscv.cc
+index bb1b4a9a0bc..24adaf43376 100644
+--- a/src/builtins/riscv/builtins-riscv.cc
++++ b/src/builtins/riscv/builtins-riscv.cc
+@@ -3125,7 +3125,8 @@ namespace {
+ // *stack_space_operand * kSystemPointerSize or stack_space * kSystemPointerSize
+ // (GCed, includes the call JS arguments space and the additional space
+ // allocated for the fast call).
+-void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
++void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
++                              Register function_address,
+                               ExternalReference thunk_ref, Register thunk_arg,
+                               int stack_space, MemOperand* stack_space_operand,
+                               MemOperand return_value_operand) {
+@@ -3163,18 +3164,18 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+                      scratch, scratch2, prev_next_address_reg, prev_limit_reg));
+   DCHECK(!AreAliased(thunk_arg,  // incoming parameters
+                      scratch, scratch2, prev_next_address_reg, prev_limit_reg));
++  {
++    ASM_CODE_COMMENT_STRING(masm,
++                            "Allocate HandleScope in callee-save registers.");
++    __ LoadWord(prev_next_address_reg, next_mem_op);
++    __ LoadWord(prev_limit_reg, limit_mem_op);
++    __ Lw(prev_level_reg, level_mem_op);
++    __ Add32(scratch, prev_level_reg, Operand(1));
++    __ Sw(scratch, level_mem_op);
++  }
+ 
+   Label profiler_or_side_effects_check_enabled, done_api_call;
+-  {
+-    {
+-      ASM_CODE_COMMENT_STRING(masm,
+-                              "Allocate HandleScope in callee-save registers.");
+-      __ LoadWord(prev_next_address_reg, next_mem_op);
+-      __ LoadWord(prev_limit_reg, limit_mem_op);
+-      __ Lw(prev_level_reg, level_mem_op);
+-      __ Add32(scratch, prev_level_reg, Operand(1));
+-      __ Sw(scratch, level_mem_op);
+-    }
++  if (with_profiling) {
+     __ RecordComment("Check if profiler or side effects check is enabled");
+     __ Lb(scratch, __ ExternalReferenceAsOperand(
+                        ER::execution_mode_address(isolate), no_reg));
+@@ -3187,12 +3188,12 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+     __ Branch(&profiler_or_side_effects_check_enabled, ne, scratch,
+               Operand(zero_reg));
+ #endif  // V8_RUNTIME_CALL_STATS
+-
+-    __ RecordComment("Call the api function directly.");
+-    __ StoreReturnAddressAndCall(function_address);
+-    __ bind(&done_api_call);
+   }
+ 
++  __ RecordComment("Call the api function directly.");
++  __ StoreReturnAddressAndCall(function_address);
++  __ bind(&done_api_call);
++
+   Label promote_scheduled_exception;
+   Label delete_allocated_handles;
+   Label leave_exit_frame;
+@@ -3255,7 +3256,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+ 
+   __ Ret();
+ 
+-  {
++  if (with_profiling) {
+     ASM_CODE_COMMENT_STRING(masm, "Call the api function via thunk wrapper.");
+     __ bind(&profiler_or_side_effects_check_enabled);
+     // Additional parameter is the address of the actual callback function.
+@@ -3267,9 +3268,9 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+     __ Branch(&done_api_call);
+   }
+ 
+-    __ RecordComment("Re-throw by promoting a scheduled exception.");
+-    __ bind(&promote_scheduled_exception);
+-    __ TailCallRuntime(Runtime::kPromoteScheduledException);
++  __ RecordComment("Re-throw by promoting a scheduled exception.");
++  __ bind(&promote_scheduled_exception);
++  __ TailCallRuntime(Runtime::kPromoteScheduledException);
+ 
+   {
+     ASM_CODE_COMMENT_STRING(
+@@ -3305,7 +3306,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+   //  -- a2                  : arguments count (not including the receiver)
+   //  -- a3                  : call handler info
+   //  -- a0                  : holder
+-  // CallApiCallbackMode::kOptimized mode:
++  // CallApiCallbackMode::kOptimizedNoProfiling/kOptimized modes:
+   //  -- a1                  : api function address
+   //  -- a2                  : arguments count
+   //  -- a3                  : call data
+@@ -3335,6 +3336,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+       holder = CallApiCallbackGenericDescriptor::HolderRegister();
+       break;
+ 
++    case CallApiCallbackMode::kOptimizedNoProfiling:
+     case CallApiCallbackMode::kOptimized:
+       api_function_address =
+           CallApiCallbackOptimizedDescriptor::ApiFunctionAddressRegister();
+@@ -3399,6 +3401,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+                    MemOperand(sp, FCA::kDataIndex * kSystemPointerSize));
+       break;
+ 
++    case CallApiCallbackMode::kOptimizedNoProfiling:
+     case CallApiCallbackMode::kOptimized:
+       __ StoreWord(call_data,
+                    MemOperand(sp, FCA::kDataIndex * kSystemPointerSize));
+@@ -3511,9 +3514,11 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+ 
+   static constexpr int kUseStackSpaceOperand = 0;
+ 
+-  CallApiFunctionAndReturn(masm, api_function_address, thunk_ref, thunk_arg,
+-                           kUseStackSpaceOperand, &stack_space_operand,
+-                           return_value_operand);
++  const bool with_profiling =
++      mode != CallApiCallbackMode::kOptimizedNoProfiling;
++  CallApiFunctionAndReturn(masm, with_profiling, api_function_address,
++                           thunk_ref, thunk_arg, kUseStackSpaceOperand,
++                           &stack_space_operand, return_value_operand);
+ }
+ 
+ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+@@ -3635,9 +3640,10 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+       ExitFrameCallerStackSlotOperand(kPCAStackIndex + PCA::kReturnValueIndex);
+   MemOperand* const kUseStackSpaceConstant = nullptr;
+ 
+-  CallApiFunctionAndReturn(masm, api_function_address, thunk_ref, thunk_arg,
+-                           kStackUnwindSpace, kUseStackSpaceConstant,
+-                           return_value_operand);
++  const bool with_profiling = true;
++  CallApiFunctionAndReturn(masm, with_profiling, api_function_address,
++                           thunk_ref, thunk_arg, kStackUnwindSpace,
++                           kUseStackSpaceConstant, return_value_operand);
+ }
+ 
+ void Builtins::Generate_DirectCEntry(MacroAssembler* masm) {
+diff --git a/src/builtins/s390/builtins-s390.cc b/src/builtins/s390/builtins-s390.cc
+index 97f01eab3c0..d48f5630142 100644
+--- a/src/builtins/s390/builtins-s390.cc
++++ b/src/builtins/s390/builtins-s390.cc
+@@ -3255,7 +3255,7 @@ namespace {
+ // *stack_space_operand * kSystemPointerSize or stack_space * kSystemPointerSize
+ // (GCed, includes the call JS arguments space and the additional space
+ // allocated for the fast call).
+-static void CallApiFunctionAndReturn(MacroAssembler* masm,
++static void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
+                                      Register function_address,
+                                      ExternalReference thunk_ref,
+                                      Register thunk_arg, int stack_space,
+@@ -3305,11 +3305,12 @@ static void CallApiFunctionAndReturn(MacroAssembler* masm,
+   }
+ 
+   Label profiler_or_side_effects_check_enabled, done_api_call;
+-  __ RecordComment("Check if profiler or side effects check is enabled");
+-  __ LoadU8(scratch, __ ExternalReferenceAsOperand(
+-                         ER::execution_mode_address(isolate), no_reg));
+-  __ CmpS64(scratch, Operand::Zero());
+-  __ bne(&profiler_or_side_effects_check_enabled, Label::kNear);
++  if (with_profiling) {
++    __ RecordComment("Check if profiler or side effects check is enabled");
++    __ LoadU8(scratch, __ ExternalReferenceAsOperand(
++                           ER::execution_mode_address(isolate), no_reg));
++    __ CmpS64(scratch, Operand::Zero());
++    __ bne(&profiler_or_side_effects_check_enabled, Label::kNear);
+ #ifdef V8_RUNTIME_CALL_STATS
+   __ RecordComment("Check if RCS is enabled");
+   __ Move(scratch, ER::address_of_runtime_stats_flag());
+@@ -3317,6 +3318,7 @@ static void CallApiFunctionAndReturn(MacroAssembler* masm,
+   __ CmpS64(scratch, Operand::Zero());
+   __ bne(&profiler_or_side_effects_check_enabled, Label::kNear);
+ #endif  // V8_RUNTIME_CALL_STATS
++  }
+ 
+   __ RecordComment("Call the api function directly.");
+   __ StoreReturnAddressAndCall(function_address);
+@@ -3383,7 +3385,7 @@ static void CallApiFunctionAndReturn(MacroAssembler* masm,
+ 
+   __ b(r14);
+ 
+-  {
++  if (with_profiling) {
+     ASM_CODE_COMMENT_STRING(masm, "Call the api function via thunk wrapper.");
+     __ bind(&profiler_or_side_effects_check_enabled);
+     // Additional parameter is the address of the actual callback function.
+@@ -3437,7 +3439,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+   //  -- r4                  : arguments count (not including the receiver)
+   //  -- r5                  : call handler info
+   //  -- r2                  : holder
+-  // CallApiCallbackMode::kOptimized mode:
++  // CallApiCallbackMode::kOptimizedNoProfiling/kOptimized modes:
+   //  -- r4                  : api function address
+   //  -- r4                  : arguments count (not including the receiver)
+   //  -- r5                  : call data
+@@ -3468,6 +3470,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+       holder = CallApiCallbackGenericDescriptor::HolderRegister();
+       break;
+ 
++    case CallApiCallbackMode::kOptimizedNoProfiling:
+     case CallApiCallbackMode::kOptimized:
+       api_function_address =
+           CallApiCallbackOptimizedDescriptor::ApiFunctionAddressRegister();
+@@ -3530,6 +3533,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+                   MemOperand(sp, FCA::kDataIndex * kSystemPointerSize));
+       break;
+ 
++    case CallApiCallbackMode::kOptimizedNoProfiling:
+     case CallApiCallbackMode::kOptimized:
+       __ StoreU64(call_data,
+                   MemOperand(sp, FCA::kDataIndex * kSystemPointerSize));
+@@ -3642,9 +3646,11 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+       FCA::kReturnValueIndex + exit_frame_params_count);
+   static constexpr int kUseStackSpaceOperand = 0;
+ 
+-  CallApiFunctionAndReturn(masm, api_function_address, thunk_ref, thunk_arg,
+-                           kUseStackSpaceOperand, &stack_space_operand,
+-                           return_value_operand);
++  const bool with_profiling =
++      mode != CallApiCallbackMode::kOptimizedNoProfiling;
++  CallApiFunctionAndReturn(masm, with_profiling, api_function_address,
++                           thunk_ref, thunk_arg, kUseStackSpaceOperand,
++                           &stack_space_operand, return_value_operand);
+ }
+ 
+ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+@@ -3770,9 +3776,10 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+       PCA::kReturnValueIndex + kNameOnStackSize);
+   MemOperand* const kUseStackSpaceConstant = nullptr;
+ 
+-  CallApiFunctionAndReturn(masm, api_function_address, thunk_ref, thunk_arg,
+-                           kStackUnwindSpace, kUseStackSpaceConstant,
+-                           return_value_operand);
++  const bool with_profiling = true;
++  CallApiFunctionAndReturn(masm, with_profiling, api_function_address,
++                           thunk_ref, thunk_arg, kStackUnwindSpace,
++                           kUseStackSpaceConstant, return_value_operand);
+ }
+ 
+ void Builtins::Generate_DirectCEntry(MacroAssembler* masm) {
+diff --git a/src/builtins/x64/builtins-x64.cc b/src/builtins/x64/builtins-x64.cc
+index 628a306412d..e828c11f3a1 100644
+--- a/src/builtins/x64/builtins-x64.cc
++++ b/src/builtins/x64/builtins-x64.cc
+@@ -4830,7 +4830,8 @@ namespace {
+ // *stack_space_operand * kSystemPointerSize or stack_space * kSystemPointerSize
+ // (GCed, includes the call JS arguments space and the additional space
+ // allocated for the fast call).
+-void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
++void CallApiFunctionAndReturn(MacroAssembler* masm, bool with_profiling,
++                              Register function_address,
+                               ExternalReference thunk_ref, Register thunk_arg,
+                               int stack_space, Operand* stack_space_operand,
+                               Operand return_value_operand) {
+@@ -4882,17 +4883,19 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+   }
+ 
+   Label profiler_or_side_effects_check_enabled, done_api_call;
+-  __ RecordComment("Check if profiler or side effects check is enabled");
+-  __ cmpb(__ ExternalReferenceAsOperand(ER::execution_mode_address(isolate),
+-                                        no_reg),
+-          Immediate(0));
+-  __ j(not_zero, &profiler_or_side_effects_check_enabled);
++  if (with_profiling) {
++    __ RecordComment("Check if profiler or side effects check is enabled");
++    __ cmpb(__ ExternalReferenceAsOperand(ER::execution_mode_address(isolate),
++                                          no_reg),
++            Immediate(0));
++    __ j(not_zero, &profiler_or_side_effects_check_enabled);
+ #ifdef V8_RUNTIME_CALL_STATS
+-  __ RecordComment("Check if RCS is enabled");
+-  __ Move(scratch, ER::address_of_runtime_stats_flag());
+-  __ cmpl(Operand(scratch, 0), Immediate(0));
+-  __ j(not_zero, &profiler_or_side_effects_check_enabled);
++    __ RecordComment("Check if RCS is enabled");
++    __ Move(scratch, ER::address_of_runtime_stats_flag());
++    __ cmpl(Operand(scratch, 0), Immediate(0));
++    __ j(not_zero, &profiler_or_side_effects_check_enabled);
+ #endif  // V8_RUNTIME_CALL_STATS
++  }
+ 
+   __ RecordComment("Call the api function directly.");
+   __ call(function_address);
+@@ -4957,7 +4960,7 @@ void CallApiFunctionAndReturn(MacroAssembler* masm, Register function_address,
+     __ PushReturnAddressFrom(scratch);
+     __ ret(0);
+   }
+-  {
++  if (with_profiling) {
+     ASM_CODE_COMMENT_STRING(masm, "Call the api function via thunk wrapper.");
+     // Call the api function via thunk wrapper.
+     __ bind(&profiler_or_side_effects_check_enabled);
+@@ -5002,7 +5005,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+   //  -- rcx                 : arguments count (not including the receiver)
+   //  -- rbx                 : call handler info
+   //  -- r8                  : holder
+-  // CallApiCallbackMode::kOptimized mode:
++  // CallApiCallbackMode::kOptimizedNoProfiling/kOptimized modes:
+   //  -- rdx                 : api function address
+   //  -- rcx                 : arguments count (not including the receiver)
+   //  -- rbx                 : call data
+@@ -5036,6 +5039,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+       holder = CallApiCallbackGenericDescriptor::HolderRegister();
+       break;
+ 
++    case CallApiCallbackMode::kOptimizedNoProfiling:
+     case CallApiCallbackMode::kOptimized:
+       api_function_address =
+           CallApiCallbackOptimizedDescriptor::ApiFunctionAddressRegister();
+@@ -5083,6 +5087,7 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+                          scratch2);
+       break;
+ 
++    case CallApiCallbackMode::kOptimizedNoProfiling:
+     case CallApiCallbackMode::kOptimized:
+       __ Push(call_data);
+       break;
+@@ -5192,9 +5197,11 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
+   static constexpr int kUseExitFrameStackSlotOperand = 0;
+   Operand stack_space_operand = ExitFrameStackSlotOperand(kBytesToDropOffset);
+ 
+-  CallApiFunctionAndReturn(masm, api_function_address, thunk_ref, thunk_arg,
+-                           kUseExitFrameStackSlotOperand, &stack_space_operand,
+-                           return_value_operand);
++  const bool with_profiling =
++      mode != CallApiCallbackMode::kOptimizedNoProfiling;
++  CallApiFunctionAndReturn(masm, with_profiling, api_function_address,
++                           thunk_ref, thunk_arg, kUseExitFrameStackSlotOperand,
++                           &stack_space_operand, return_value_operand);
+ }
+ 
+ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+@@ -5308,9 +5315,10 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
+       PCA::kReturnValueIndex + kNameOnStackSize);
+   Operand* const kUseStackSpaceConstant = nullptr;
+ 
+-  CallApiFunctionAndReturn(masm, api_function_address, thunk_ref, thunk_arg,
+-                           kStackUnwindSpace, kUseStackSpaceConstant,
+-                           return_value_operand);
++  const bool with_profiling = true;
++  CallApiFunctionAndReturn(masm, with_profiling, api_function_address,
++                           thunk_ref, thunk_arg, kStackUnwindSpace,
++                           kUseStackSpaceConstant, return_value_operand);
+ }
+ 
+ void Builtins::Generate_DirectCEntry(MacroAssembler* masm) {
+diff --git a/src/codegen/external-reference.cc b/src/codegen/external-reference.cc
+index 70171487e98..7fdcba0f444 100644
+--- a/src/codegen/external-reference.cc
++++ b/src/codegen/external-reference.cc
+@@ -840,6 +840,8 @@ ExternalReference ExternalReference::invoke_function_callback(
+       return invoke_function_callback_generic();
+     case CallApiCallbackMode::kOptimized:
+       return invoke_function_callback_optimized();
++    case CallApiCallbackMode::kOptimizedNoProfiling:
++      return ExternalReference();
+   }
+ }
+ 
+diff --git a/src/common/globals.h b/src/common/globals.h
+index 0835089614f..c3fc7ee39d2 100644
+--- a/src/common/globals.h
++++ b/src/common/globals.h
+@@ -691,11 +691,19 @@ enum class CallApiCallbackMode {
+   // side-effects checking by debugger.
+   kGeneric,
+ 
+-  // This version is used for generating calls from optimized code. It doesn't
+-  // need to support side effects checking because function will be deoptimized
+-  // when side effects checking is enabled, and it doesn't get the target
+-  // function because it can be reconstructed from the lazy deopt info in case
+-  // exception is thrown.
++  // The following two versions are used for generating calls from optimized
++  // code. They don't need to support side effects checking because function
++  // will be deoptimized when side effects checking is enabled, and they don't
++  // get the target function because it can be reconstructed from the lazy
++  // deopt info in case exception is thrown.
++
++  // This version is used for compiling code when Isolate profiling or runtime
++  // call stats is disabled. The code that uses this version must be created
++  // with a dependency on NoProfilingProtector.
++  kOptimizedNoProfiling,
++
++  // This version contains a dynamic check for enabled profiler and it supports
++  // runtime call stats.
+   kOptimized,
+ };
+ 
+diff --git a/src/compiler/compilation-dependencies.cc b/src/compiler/compilation-dependencies.cc
+index 3f62224cd2d..85d687193bc 100644
+--- a/src/compiler/compilation-dependencies.cc
++++ b/src/compiler/compilation-dependencies.cc
+@@ -1159,6 +1159,17 @@ bool CompilationDependencies::DependOnMegaDOMProtector() {
+       MakeRef(broker_, broker_->isolate()->factory()->mega_dom_protector()));
+ }
+ 
++bool CompilationDependencies::DependOnNoProfilingProtector() {
++  // A shortcut in case profiling was already enabled but the interrupt
++  // request to invalidate NoProfilingProtector wasn't processed yet.
++#ifdef V8_RUNTIME_CALL_STATS
++  if (TracingFlags::is_runtime_stats_enabled()) return false;
++#endif
++  if (broker_->isolate()->is_profiling()) return false;
++  return DependOnProtector(MakeRef(
++      broker_, broker_->isolate()->factory()->no_profiling_protector()));
++}
++
+ bool CompilationDependencies::DependOnArrayBufferDetachingProtector() {
+   return DependOnProtector(MakeRef(
+       broker_,
+diff --git a/src/compiler/compilation-dependencies.h b/src/compiler/compilation-dependencies.h
+index 3efa9ff8412..30519383628 100644
+--- a/src/compiler/compilation-dependencies.h
++++ b/src/compiler/compilation-dependencies.h
+@@ -95,6 +95,7 @@ class V8_EXPORT_PRIVATE CompilationDependencies : public ZoneObject {
+   bool DependOnPromiseSpeciesProtector();
+   bool DependOnPromiseThenProtector();
+   bool DependOnMegaDOMProtector();
++  bool DependOnNoProfilingProtector();
+ 
+   // Record the assumption that {site}'s {ElementsKind} doesn't change.
+   void DependOnElementsKind(AllocationSiteRef site);
+diff --git a/src/compiler/js-call-reducer.cc b/src/compiler/js-call-reducer.cc
+index e5c5f0caa57..84d76b109e2 100644
+--- a/src/compiler/js-call-reducer.cc
++++ b/src/compiler/js-call-reducer.cc
+@@ -688,8 +688,11 @@ class FastApiCallReducerAssembler : public JSCallReducerAssembler {
+     // holder, receiver, ... JS arguments, context, new frame state]
+     CallHandlerInfoRef call_handler_info =
+         *function_template_info_.call_code(broker());
+-    Callable call_api_callback =
+-        Builtins::CallableFor(isolate(), Builtin::kCallApiCallbackOptimized);
++    bool no_profiling =
++        broker()->dependencies()->DependOnNoProfilingProtector();
++    Callable call_api_callback = Builtins::CallableFor(
++        isolate(), no_profiling ? Builtin::kCallApiCallbackOptimizedNoProfiling
++                                : Builtin::kCallApiCallbackOptimized);
+     CallInterfaceDescriptor cid = call_api_callback.descriptor();
+     CallDescriptor* call_descriptor =
+         Linkage::GetStubCallDescriptor(graph()->zone(), cid, arity_ + kReceiver,
+@@ -4054,8 +4057,10 @@ Reduction JSCallReducer::ReduceCallApiFunction(Node* node,
+ 
+   CallHandlerInfoRef call_handler_info =
+       *function_template_info.call_code(broker());
+-  Callable call_api_callback =
+-      Builtins::CallableFor(isolate(), Builtin::kCallApiCallbackOptimized);
++  bool no_profiling = broker()->dependencies()->DependOnNoProfilingProtector();
++  Callable call_api_callback = Builtins::CallableFor(
++      isolate(), no_profiling ? Builtin::kCallApiCallbackOptimizedNoProfiling
++                              : Builtin::kCallApiCallbackOptimized);
+   CallInterfaceDescriptor cid = call_api_callback.descriptor();
+   auto call_descriptor =
+       Linkage::GetStubCallDescriptor(graph()->zone(), cid, argc + 1 /*
+diff --git a/src/compiler/js-native-context-specialization.cc b/src/compiler/js-native-context-specialization.cc
+index c44760fa018..dfc5608dca8 100644
+--- a/src/compiler/js-native-context-specialization.cc
++++ b/src/compiler/js-native-context-specialization.cc
+@@ -2767,9 +2767,11 @@ Node* JSNativeContextSpecialization::InlineApiCall(
+ 
+   // Only setters have a value.
+   int const argc = value == nullptr ? 0 : 1;
+-  // The stub always expects the receiver as the first param on the stack.
+-  Callable call_api_callback =
+-      Builtins::CallableFor(isolate(), Builtin::kCallApiCallbackOptimized);
++  // The builtin always expects the receiver as the first param on the stack.
++  bool no_profiling = broker()->dependencies()->DependOnNoProfilingProtector();
++  Callable call_api_callback = Builtins::CallableFor(
++      isolate(), no_profiling ? Builtin::kCallApiCallbackOptimizedNoProfiling
++                              : Builtin::kCallApiCallbackOptimized);
+   CallInterfaceDescriptor call_interface_descriptor =
+       call_api_callback.descriptor();
+   auto call_descriptor = Linkage::GetStubCallDescriptor(
+diff --git a/src/execution/isolate.cc b/src/execution/isolate.cc
+index b215b29a1e6..73215e3cc96 100644
+--- a/src/execution/isolate.cc
++++ b/src/execution/isolate.cc
+@@ -1683,6 +1683,20 @@ void Isolate::InvokeApiInterruptCallbacks() {
+   }
+ }
+ 
++void Isolate::RequestInvalidateNoProfilingProtector() {
++  // This request might be triggered from arbitrary thread but protector
++  // invalidation must happen on the main thread, so use Api interrupt
++  // to achieve that.
++  RequestInterrupt(
++      [](v8::Isolate* isolate, void*) {
++        Isolate* i_isolate = reinterpret_cast<Isolate*>(isolate);
++        if (Protectors::IsNoProfilingIntact(i_isolate)) {
++          Protectors::InvalidateNoProfiling(i_isolate);
++        }
++      },
++      nullptr);
++}
++
+ namespace {
+ 
+ void ReportBootstrappingException(Handle<Object> exception,
+diff --git a/src/execution/isolate.h b/src/execution/isolate.h
+index 4e035d983b9..fac5c7689ad 100644
+--- a/src/execution/isolate.h
++++ b/src/execution/isolate.h
+@@ -1070,6 +1070,8 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+   void RequestInterrupt(InterruptCallback callback, void* data);
+   void InvokeApiInterruptCallbacks();
+ 
++  void RequestInvalidateNoProfilingProtector();
++
+   // Administration
+   void Iterate(RootVisitor* v);
+   void Iterate(RootVisitor* v, ThreadLocalTop* t);
+@@ -1347,6 +1349,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+   void SetIsProfiling(bool enabled) {
+     if (enabled) {
+       CollectSourcePositionsForAllBytecodeArrays();
++      RequestInvalidateNoProfilingProtector();
+     }
+     isolate_data_.execution_mode_.set(IsolateExecutionModeFlag::kIsProfiling,
+                                       enabled);
+diff --git a/src/execution/protectors.h b/src/execution/protectors.h
+index 900667c63b8..89ce4a3d214 100644
+--- a/src/execution/protectors.h
++++ b/src/execution/protectors.h
+@@ -27,6 +27,7 @@ class Protectors : public AllStatic {
+   V(NoElements, NoElementsProtector, no_elements_protector)                   \
+                                                                               \
+   V(MegaDOM, MegaDOMProtector, mega_dom_protector)                            \
++  V(NoProfiling, NoProfilingProtector, no_profiling_protector)                \
+                                                                               \
+   /* The MapIterator protector protects the original iteration behaviors   */ \
+   /* of Map.prototype.keys(), Map.prototype.values(), and                  */ \
+diff --git a/src/execution/stack-guard.cc b/src/execution/stack-guard.cc
+index ddb9beb0711..5d2663047f1 100644
+--- a/src/execution/stack-guard.cc
++++ b/src/execution/stack-guard.cc
+@@ -8,6 +8,7 @@
+ #include "src/compiler-dispatcher/optimizing-compile-dispatcher.h"
+ #include "src/execution/interrupts-scope.h"
+ #include "src/execution/isolate.h"
++#include "src/execution/protectors-inl.h"
+ #include "src/execution/simulator.h"
+ #include "src/logging/counters.h"
+ #include "src/objects/backing-store.h"
+@@ -349,6 +350,16 @@ Object StackGuard::HandleInterrupts(InterruptLevel level) {
+     isolate_->InvokeApiInterruptCallbacks();
+   }
+ 
++#ifdef V8_RUNTIME_CALL_STATS
++  // Runtime call stats can be enabled at any via Chrome tracing and since
++  // there's no global list of active Isolates this seems to be the only
++  // simple way to invalidate the protector.
++  if (TracingFlags::is_runtime_stats_enabled() &&
++      Protectors::IsNoProfilingIntact(isolate_)) {
++    Protectors::InvalidateNoProfiling(isolate_);
++  }
++#endif
++
+   isolate_->counters()->stack_interrupts()->Increment();
+ 
+   return ReadOnlyRoots(isolate_).undefined_value();
+diff --git a/src/heap/setup-heap-internal.cc b/src/heap/setup-heap-internal.cc
+index 5056544ca41..dbb0a85f9f6 100644
+--- a/src/heap/setup-heap-internal.cc
++++ b/src/heap/setup-heap-internal.cc
+@@ -1418,6 +1418,7 @@ void Heap::CreateInitialMutableObjects() {
+   set_map_iterator_protector(*factory->NewProtector());
+   set_no_elements_protector(*factory->NewProtector());
+   set_mega_dom_protector(*factory->NewProtector());
++  set_no_profiling_protector(*factory->NewProtector());
+   set_promise_hook_protector(*factory->NewProtector());
+   set_promise_resolve_protector(*factory->NewProtector());
+   set_promise_species_protector(*factory->NewProtector());
+diff --git a/src/maglev/maglev-graph-builder.cc b/src/maglev/maglev-graph-builder.cc
+index db0ce87dd67..35b2fd8eb4b 100644
+--- a/src/maglev/maglev-graph-builder.cc
++++ b/src/maglev/maglev-graph-builder.cc
+@@ -6543,6 +6543,11 @@ ReduceResult MaglevGraphBuilder::ReduceCallForApiFunction(
+     CHECK_NOT_NULL(receiver);
+   }
+ 
++  CallKnownApiFunction::Mode mode =
++      broker()->dependencies()->DependOnNoProfilingProtector()
++          ? CallKnownApiFunction::kNoProfiling
++          : CallKnownApiFunction::kGeneric;
++
+   return AddNewNode<CallKnownApiFunction>(
+       input_count,
+       [&](CallKnownApiFunction* call) {
+@@ -6550,7 +6555,7 @@ ReduceResult MaglevGraphBuilder::ReduceCallForApiFunction(
+           call->set_arg(i, GetTaggedValue(args[i]));
+         }
+       },
+-      api_callback, call_handler_info, data, api_holder, GetContext(),
++      mode, api_callback, call_handler_info, data, api_holder, GetContext(),
+       receiver);
+ }
+ 
+@@ -6627,6 +6632,9 @@ ReduceResult MaglevGraphBuilder::TryBuildCallKnownApiFunction(
+   // that does those checks dynamically. This is still significantly
+   // faster than the generic call sequence.
+   Builtin builtin_name;
++  // TODO(ishell): create no-profiling versions of kCallFunctionTemplate
++  // builtins and use them here based on DependOnNoProfilingProtector()
++  // dependency state.
+   if (function_template_info.accept_any_receiver()) {
+     DCHECK(!function_template_info.is_signature_undefined(broker()));
+     builtin_name = Builtin::kCallFunctionTemplate_CheckCompatibleReceiver;
+diff --git a/src/maglev/maglev-ir.cc b/src/maglev/maglev-ir.cc
+index d928cda3598..2ecba72f83a 100644
+--- a/src/maglev/maglev-ir.cc
++++ b/src/maglev/maglev-ir.cc
+@@ -4794,7 +4794,14 @@ void CallKnownApiFunction::GenerateCode(MaglevAssembler* masm,
+   __ Move(CallApiCallbackOptimizedDescriptor::ApiFunctionAddressRegister(),
+           reference);
+ 
+-  __ CallBuiltin(Builtin::kCallApiCallbackOptimized);
++  switch (mode()) {
++    case kNoProfiling:
++      __ CallBuiltin(Builtin::kCallApiCallbackOptimizedNoProfiling);
++      break;
++    case kGeneric:
++      __ CallBuiltin(Builtin::kCallApiCallbackOptimized);
++      break;
++  }
+   masm->DefineExceptionHandlerAndLazyDeoptPoint(this);
+ }
+ 
+@@ -6056,7 +6063,15 @@ void CallKnownJSFunction::PrintParams(
+ 
+ void CallKnownApiFunction::PrintParams(
+     std::ostream& os, MaglevGraphLabeller* graph_labeller) const {
+-  os << "(" << function_template_info_.object() << ", ";
++  os << "(";
++  switch (mode()) {
++    case kNoProfiling:
++      os << "no profiling, ";
++      break;
++    case kGeneric:
++      break;
++  }
++  os << function_template_info_.object() << ", ";
+   if (api_holder_.has_value()) {
+     os << api_holder_.value().object();
+   } else {
+diff --git a/src/maglev/maglev-ir.h b/src/maglev/maglev-ir.h
+index 6bd053c3464..486190e2a34 100644
+--- a/src/maglev/maglev-ir.h
++++ b/src/maglev/maglev-ir.h
+@@ -7218,6 +7218,13 @@ class CallKnownApiFunction : public ValueNodeT<CallKnownApiFunction> {
+   using Base = ValueNodeT<CallKnownApiFunction>;
+ 
+  public:
++  enum Mode {
++    // Use Builtin::kCallApiCallbackOptimizedNoProfiling.
++    kNoProfiling,
++    // Use Builtin::kCallApiCallbackOptimized.
++    kGeneric,
++  };
++
+   static constexpr int kContextIndex = 0;
+   static constexpr int kReceiverIndex = 1;
+   static constexpr int kFixedInputCount = 2;
+@@ -7228,13 +7235,13 @@ class CallKnownApiFunction : public ValueNodeT<CallKnownApiFunction> {
+ 
+   // This ctor is used when for variable input counts.
+   // Inputs must be initialized manually.
+-  CallKnownApiFunction(uint64_t bitfield,
++  CallKnownApiFunction(uint64_t bitfield, Mode mode,
+                        compiler::FunctionTemplateInfoRef function_template_info,
+                        compiler::CallHandlerInfoRef call_handler_info,
+                        compiler::ObjectRef data,
+                        compiler::OptionalJSObjectRef api_holder,
+                        ValueNode* context, ValueNode* receiver)
+-      : Base(bitfield),
++      : Base(bitfield | ModeField::encode(mode)),
+         function_template_info_(function_template_info),
+         call_handler_info_(call_handler_info),
+         data_(data),
+@@ -7261,6 +7268,8 @@ class CallKnownApiFunction : public ValueNodeT<CallKnownApiFunction> {
+   auto args_begin() { return std::make_reverse_iterator(&arg(-1)); }
+   auto args_end() { return std::make_reverse_iterator(&arg(num_args() - 1)); }
+ 
++  Mode mode() const { return ModeField::decode(bitfield()); }
++
+   compiler::FunctionTemplateInfoRef function_template_info() const {
+     return function_template_info_;
+   }
+@@ -7276,6 +7285,8 @@ class CallKnownApiFunction : public ValueNodeT<CallKnownApiFunction> {
+   void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
+ 
+  private:
++  using ModeField = NextBitField<Mode, 1>;
++
+   const compiler::FunctionTemplateInfoRef function_template_info_;
+   const compiler::CallHandlerInfoRef call_handler_info_;
+   const compiler::ObjectRef data_;
+diff --git a/src/profiler/tick-sample.cc b/src/profiler/tick-sample.cc
+index 38a2ce6120b..9e695954c3c 100644
+--- a/src/profiler/tick-sample.cc
++++ b/src/profiler/tick-sample.cc
+@@ -316,10 +316,17 @@ bool TickSample::GetStackSample(Isolate* v8_isolate, RegisterState* regs,
+   size_t i = 0;
+   if (record_c_entry_frame == kIncludeCEntryFrame &&
+       (it.top_frame_type() == internal::StackFrame::EXIT ||
+-       it.top_frame_type() == internal::StackFrame::BUILTIN_EXIT ||
+-       it.top_frame_type() == internal::StackFrame::API_CALLBACK_EXIT)) {
+-    frames[i] = reinterpret_cast<void*>(isolate->c_function());
+-    i++;
++       it.top_frame_type() == internal::StackFrame::BUILTIN_EXIT)) {
++    // While BUILTIN_EXIT definitely represents a call to CEntry the EXIT frame
++    // might represent either a call to CEntry or an optimized call to
++    // Api callback. In the latter case the ExternalCallbackScope points to
++    // the same function, so skip adding a frame in that case in order to avoid
++    // double-reporting.
++    void* c_function = reinterpret_cast<void*>(isolate->c_function());
++    if (sample_info->external_callback_entry != c_function) {
++      frames[i] = c_function;
++      i++;
++    }
+   }
+ #ifdef V8_RUNTIME_CALL_STATS
+   i::RuntimeCallTimer* timer =
+diff --git a/src/roots/roots.h b/src/roots/roots.h
+index 53ace89bc3d..040614bc20c 100644
+--- a/src/roots/roots.h
++++ b/src/roots/roots.h
+@@ -304,6 +304,7 @@ class Tagged;
+   V(PropertyCell, array_constructor_protector, ArrayConstructorProtector)      \
+   V(PropertyCell, no_elements_protector, NoElementsProtector)                  \
+   V(PropertyCell, mega_dom_protector, MegaDOMProtector)                        \
++  V(PropertyCell, no_profiling_protector, NoProfilingProtector)                \
+   V(PropertyCell, is_concat_spreadable_protector, IsConcatSpreadableProtector) \
+   V(PropertyCell, array_species_protector, ArraySpeciesProtector)              \
+   V(PropertyCell, typed_array_species_protector, TypedArraySpeciesProtector)   \
+diff --git a/test/cctest/test-cpu-profiler.cc b/test/cctest/test-cpu-profiler.cc
+index 1775f415a45..09f339805d3 100644
+--- a/test/cctest/test-cpu-profiler.cc
++++ b/test/cctest/test-cpu-profiler.cc
+@@ -43,6 +43,7 @@
+ #include "src/codegen/source-position-table.h"
+ #include "src/deoptimizer/deoptimize-reason.h"
+ #include "src/execution/embedder-state.h"
++#include "src/execution/protectors-inl.h"
+ #include "src/heap/spaces.h"
+ #include "src/init/v8.h"
+ #include "src/libsampler/sampler.h"
+@@ -4510,6 +4511,110 @@ TEST(CanStartStopProfilerWithTitlesAndIds) {
+   CHECK_EQ(anonymous_id_2, profile_with_id_2->id());
+ }
+ 
++TEST(NoProfilingProtectorCPUProfiler) {
++#if !defined(V8_LITE_MODE) && \
++    (defined(V8_ENABLE_TURBOFAN) || defined(V8_ENABLE_MAGLEV))
++  if (i::v8_flags.jitless) return;
++
++#ifdef V8_ENABLE_TURBOFAN
++  FLAG_SCOPE(turbofan);
++#endif
++#ifdef V8_ENABLE_MAGLEV
++  FLAG_SCOPE(maglev);
++#endif
++  FLAG_SCOPE(allow_natives_syntax);
++
++  CcTest::InitializeVM();
++  LocalContext env;
++  v8::Isolate* isolate = CcTest::isolate();
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
++  i::HandleScope scope(i_isolate);
++
++  Local<v8::FunctionTemplate> receiver_templ = v8::FunctionTemplate::New(
++      isolate,
++      [](const v8::FunctionCallbackInfo<v8::Value>& info) {
++        CHECK(i::ValidateCallbackInfo(info));
++        // Artificially slow down the callback with a predictable amount of
++        // time. This ensures the test has a relatively stable run time on
++        // various platforms and protects it from flakyness.
++        v8::base::OS::Sleep(v8::base::TimeDelta::FromMilliseconds(100));
++      },
++      v8::Local<v8::Value>(), v8::Local<v8::Signature>(), 1,
++      v8::ConstructorBehavior::kThrow, v8::SideEffectType::kHasSideEffect);
++
++  v8::Local<v8::ObjectTemplate> object_template =
++      v8::ObjectTemplate::New(isolate);
++  const char* api_func_str = "api_func";
++  object_template->Set(isolate, api_func_str, receiver_templ);
++
++  v8::Local<v8::Object> object =
++      object_template->NewInstance(env.local()).ToLocalChecked();
++
++  env->Global()->Set(env.local(), v8_str("receiver"), object).Check();
++
++  // Prepare the code.
++  v8::Local<v8::Function> function = CreateApiCode(&env);
++  Handle<JSFunction> i_function =
++      Handle<JSFunction>::cast(v8::Utils::OpenHandle(*function));
++
++  CHECK(!i_function->code().is_optimized_code());
++  CompileRun("foo(42);");
++
++  Handle<Code> code(i_function->code(), i_isolate);
++  CHECK(code->is_optimized_code());
++  CHECK(!code->marked_for_deoptimization());
++  CHECK(Protectors::IsNoProfilingIntact(i_isolate));
++
++  // Setup and start CPU profiler.
++  int num_runs_arg = 100;
++  v8::Local<v8::Value> args[] = {
++      v8::Integer::New(env->GetIsolate(), num_runs_arg)};
++  ProfilerHelper helper(env.local(), kEagerLogging);
++  // Run some code to ensure that interrupt request that should invalidate
++  // NoProfilingProtector is processed.
++  CompileRun("(function () {})();");
++
++  // Enabling of the profiler should trigger code deoptimization.
++  CHECK(!Protectors::IsNoProfilingIntact(i_isolate));
++  CHECK(code->marked_for_deoptimization());
++
++  // Optimize function again, now it should be compiled with support for
++  // Api functions profiling.
++  CompileRun("%OptimizeFunctionOnNextCall(foo); foo(55);");
++
++  unsigned external_samples = 1000;
++  v8::CpuProfile* profile =
++      helper.Run(function, args, arraysize(args), 0, external_samples);
++
++  // Check that generated profile has the expected structure.
++  const v8::CpuProfileNode* root = profile->GetTopDownRoot();
++  const v8::CpuProfileNode* foo_node = GetChild(env.local(), root, "foo");
++  const v8::CpuProfileNode* api_func_node =
++      GetChild(env.local(), foo_node, api_func_str);
++  CHECK_NOT_NULL(api_func_node);
++  CHECK_EQ(api_func_node->GetSourceType(), CpuProfileNode::kCallback);
++  // Ensure the API function frame appears only once in the stack trace.
++  const v8::CpuProfileNode* api_func_node2 =
++      FindChild(env.local(), api_func_node, api_func_str);
++  CHECK_NULL(api_func_node2);
++
++  int foo_ticks = foo_node->GetHitCount();
++  int api_func_ticks = api_func_node->GetHitCount();
++  // Check that at least 80% of the samples in foo hit the fast callback.
++  CHECK_LE(foo_ticks, api_func_ticks * 0.2);
++  // The following constant in the CHECK is because above we expect at least
++  // 1000 samples with EXTERNAL type (see external_samples). Since the only
++  // thing that generates those kind of samples is the fast callback, then
++  // we're supposed to have close to 1000 ticks in its node. Since the CPU
++  // profiler is nondeterministic, we've allowed for some slack, otherwise
++  // this could be 1000 instead of 800.
++  CHECK_GE(api_func_ticks, 800);
++
++  profile->Delete();
++#endif  // !defined(V8_LITE_MODE) &&
++        // (defined(V8_ENABLE_TURBOFAN) || defined(V8_ENABLE_MAGLEV))
++}
++
+ TEST(FastApiCPUProfiler) {
+ #if !defined(V8_LITE_MODE) && !defined(USE_SIMULATOR) && \
+     defined(V8_ENABLE_TURBOFAN)
+@@ -4584,6 +4689,10 @@ TEST(FastApiCPUProfiler) {
+       GetChild(env.local(), foo_node, api_func_str);
+   CHECK_NOT_NULL(api_func_node);
+   CHECK_EQ(api_func_node->GetSourceType(), CpuProfileNode::kCallback);
++  // Ensure the API function frame appears only once in the stack trace.
++  const v8::CpuProfileNode* api_func_node2 =
++      FindChild(env.local(), api_func_node, api_func_str);
++  CHECK_NULL(api_func_node2);
+ 
+   // Check that the CodeEntry is the expected one, i.e. the fast callback.
+   CodeEntry* code_entry =
+diff --git a/tools/v8heapconst.py b/tools/v8heapconst.py
+index 59829af4bdd..169eade2e76 100644
+--- a/tools/v8heapconst.py
++++ b/tools/v8heapconst.py
+@@ -589,24 +589,25 @@ KNOWN_OBJECTS = {
+   ("old_space", 0x02305): "ArrayConstructorProtector",
+   ("old_space", 0x02319): "NoElementsProtector",
+   ("old_space", 0x0232d): "MegaDOMProtector",
+-  ("old_space", 0x02341): "IsConcatSpreadableProtector",
+-  ("old_space", 0x02355): "ArraySpeciesProtector",
+-  ("old_space", 0x02369): "TypedArraySpeciesProtector",
+-  ("old_space", 0x0237d): "PromiseSpeciesProtector",
+-  ("old_space", 0x02391): "RegExpSpeciesProtector",
+-  ("old_space", 0x023a5): "StringLengthProtector",
+-  ("old_space", 0x023b9): "ArrayIteratorProtector",
+-  ("old_space", 0x023cd): "ArrayBufferDetachingProtector",
+-  ("old_space", 0x023e1): "PromiseHookProtector",
+-  ("old_space", 0x023f5): "PromiseResolveProtector",
+-  ("old_space", 0x02409): "MapIteratorProtector",
+-  ("old_space", 0x0241d): "PromiseThenProtector",
+-  ("old_space", 0x02431): "SetIteratorProtector",
+-  ("old_space", 0x02445): "StringIteratorProtector",
+-  ("old_space", 0x02459): "NumberStringNotRegexpLikeProtector",
+-  ("old_space", 0x0246d): "StringSplitCache",
+-  ("old_space", 0x02875): "RegExpMultipleCache",
+-  ("old_space", 0x02c7d): "BuiltinsConstantsTable",
++  ("old_space", 0x02341): "NoProfilingProtector",
++  ("old_space", 0x02355): "IsConcatSpreadableProtector",
++  ("old_space", 0x02369): "ArraySpeciesProtector",
++  ("old_space", 0x0237d): "TypedArraySpeciesProtector",
++  ("old_space", 0x02391): "PromiseSpeciesProtector",
++  ("old_space", 0x023a5): "RegExpSpeciesProtector",
++  ("old_space", 0x023b9): "StringLengthProtector",
++  ("old_space", 0x023cd): "ArrayIteratorProtector",
++  ("old_space", 0x023e1): "ArrayBufferDetachingProtector",
++  ("old_space", 0x023f5): "PromiseHookProtector",
++  ("old_space", 0x02409): "PromiseResolveProtector",
++  ("old_space", 0x0241d): "MapIteratorProtector",
++  ("old_space", 0x02431): "PromiseThenProtector",
++  ("old_space", 0x02445): "SetIteratorProtector",
++  ("old_space", 0x02459): "StringIteratorProtector",
++  ("old_space", 0x0246d): "NumberStringNotRegexpLikeProtector",
++  ("old_space", 0x02481): "StringSplitCache",
++  ("old_space", 0x02889): "RegExpMultipleCache",
++  ("old_space", 0x02c91): "BuiltinsConstantsTable",
+ }
+ 
+ # Lower 32 bits of first page addresses for various heap spaces.
+-- 
+2.35.1
+

@@ -1,0 +1,133 @@
+From 569929c25bfa5fd2b998652f9751a521c61905f5 Mon Sep 17 00:00:00 2001
+From: Lu Yahan <yahan@iscas.ac.cn>
+Date: Mon, 6 Sep 2021 18:09:22 +0800
+Subject: [PATCH] [riscv64] When load imm32, ensure imm32 + 0x800 is int32
+
+If load imm32 using auipc/lui, for example load 0x7FFFFBF9, we should ensure imm32 + 0x800 is int32
+
+Bug: v8:12171
+
+Change-Id: I605ae9cad0b67cfd68d727ebdb3bcefea21904fb
+Reviewed-on: https://chromium-review.googlesource.com/c/v8/v8/+/3141264
+Reviewed-by: Ji Qiu <qiuji@iscas.ac.cn>
+Commit-Queue: Ji Qiu <qiuji@iscas.ac.cn>
+Cr-Commit-Position: refs/heads/main@{#76807}
+---
+ src/baseline/riscv64/baseline-assembler-riscv64-inl.h |  2 +-
+ src/codegen/riscv64/assembler-riscv64.cc              | 10 +++++-----
+ src/codegen/riscv64/macro-assembler-riscv64.cc        |  3 ++-
+ src/codegen/riscv64/macro-assembler-riscv64.h         |  4 ++--
+ 4 files changed, 10 insertions(+), 9 deletions(-)
+
+diff --git a/src/baseline/riscv64/baseline-assembler-riscv64-inl.h b/src/baseline/riscv64/baseline-assembler-riscv64-inl.h
+index 663462fdb56..7bf6bd2f4ec 100644
+--- a/src/baseline/riscv64/baseline-assembler-riscv64-inl.h
++++ b/src/baseline/riscv64/baseline-assembler-riscv64-inl.h
+@@ -434,7 +434,7 @@ void BaselineAssembler::Switch(Register reg, int case_value_base,
+             reg, Operand(int64_t(num_labels)));
+   int64_t imm64;
+   imm64 = __ branch_long_offset(&table);
+-  DCHECK(is_int32(imm64));
++  CHECK(is_int32(imm64 + 0x800));
+   int32_t Hi20 = (((int32_t)imm64 + 0x800) >> 12);
+   int32_t Lo12 = (int32_t)imm64 << 20 >> 20;
+   __ auipc(t6, Hi20);  // Read PC + Hi20 into t6
+diff --git a/src/codegen/riscv64/assembler-riscv64.cc b/src/codegen/riscv64/assembler-riscv64.cc
+index e8191f54227..b892a89068a 100644
+--- a/src/codegen/riscv64/assembler-riscv64.cc
++++ b/src/codegen/riscv64/assembler-riscv64.cc
+@@ -576,7 +576,7 @@ void Assembler::target_at_put(int pos, int target_pos, bool is_internal,
+         instr_at_put(pos, instr);
+         instr_at_put(pos + 4, kNopByte);
+       } else {
+-        DCHECK(is_int32(offset));
++        CHECK(is_int32(offset + 0x800));
+ 
+         int32_t Hi20 = (((int32_t)offset + 0x800) >> 12);
+         int32_t Lo12 = (int32_t)offset << 20 >> 20;
+@@ -766,9 +766,9 @@ int Assembler::PatchBranchlongOffset(Address pc, Instr instr_auipc,
+                                      Instr instr_jalr, int32_t offset) {
+   DCHECK(IsAuipc(instr_auipc));
+   DCHECK(IsJalr(instr_jalr));
++  CHECK(is_int32(offset + 0x800));
+   int32_t Hi20 = (((int32_t)offset + 0x800) >> 12);
+   int32_t Lo12 = (int32_t)offset << 20 >> 20;
+-  CHECK(is_int32(offset));
+   instr_at_put(pc, SetAuipcOffset(Hi20, instr_auipc));
+   instr_at_put(pc + 4, SetJalrOffset(Lo12, instr_jalr));
+   DCHECK(offset ==
+@@ -3584,7 +3584,7 @@ void Assembler::CheckTrampolinePool() {
+       for (int i = 0; i < unbound_labels_count_; i++) {
+         int64_t imm64;
+         imm64 = branch_long_offset(&after_pool);
+-        DCHECK(is_int32(imm64));
++        CHECK(is_int32(imm64 + 0x800));
+         int32_t Hi20 = (((int32_t)imm64 + 0x800) >> 12);
+         int32_t Lo12 = (int32_t)imm64 << 20 >> 20;
+         auipc(t6, Hi20);  // Read PC + Hi20 into t6
+@@ -3628,7 +3628,7 @@ void Assembler::set_target_address_at(Address pc, Address constant_pool,
+       int64_t imm = (int64_t)target - (int64_t)pc;
+       Instr instr = instr_at(pc);
+       Instr instr1 = instr_at(pc + 1 * kInstrSize);
+-      DCHECK(is_int32(imm));
++      DCHECK(is_int32(imm + 0x800));
+       int num = PatchBranchlongOffset(pc, instr, instr1, (int32_t)imm);
+       if (icache_flush_mode != SKIP_ICACHE_FLUSH) {
+         FlushInstructionCache(pc, num * kInstrSize);
+@@ -3830,9 +3830,9 @@ void ConstantPool::SetLoadOffsetToConstPoolEntry(int load_offset,
+   int32_t distance = static_cast<int32_t>(
+       reinterpret_cast<Address>(entry_offset) -
+       reinterpret_cast<Address>(assm_->toAddress(load_offset)));
++  CHECK(is_int32(distance + 0x800));
+   int32_t Hi20 = (((int32_t)distance + 0x800) >> 12);
+   int32_t Lo12 = (int32_t)distance << 20 >> 20;
+-  CHECK(is_int32(distance));
+   assm_->instr_at_put(load_offset, SetAuipcOffset(Hi20, instr_auipc));
+   assm_->instr_at_put(load_offset + 4, SetLdOffset(Lo12, instr_ld));
+ }
+diff --git a/src/codegen/riscv64/macro-assembler-riscv64.cc b/src/codegen/riscv64/macro-assembler-riscv64.cc
+index 0e0d8bda5a8..cc704156dc8 100644
+--- a/src/codegen/riscv64/macro-assembler-riscv64.cc
++++ b/src/codegen/riscv64/macro-assembler-riscv64.cc
+@@ -1633,7 +1633,7 @@ static inline int InstrCountForLiLower32Bit(int64_t value) {
+ }
+ 
+ int TurboAssembler::InstrCountForLi64Bit(int64_t value) {
+-  if (is_int32(value)) {
++  if (is_int32(value + 0x800)) {
+     return InstrCountForLiLower32Bit(value);
+   } else {
+     return li_estimate(value);
+@@ -3491,6 +3491,7 @@ void TurboAssembler::LoadAddress(Register dst, Label* target,
+                                  RelocInfo::Mode rmode) {
+   int32_t offset;
+   if (CalculateOffset(target, &offset, OffsetSize::kOffset32)) {
++    CHECK(is_int32(offset + 0x800));
+     int32_t Hi20 = (((int32_t)offset + 0x800) >> 12);
+     int32_t Lo12 = (int32_t)offset << 20 >> 20;
+     auipc(dst, Hi20);
+diff --git a/src/codegen/riscv64/macro-assembler-riscv64.h b/src/codegen/riscv64/macro-assembler-riscv64.h
+index 53e8543429f..f60f8998387 100644
+--- a/src/codegen/riscv64/macro-assembler-riscv64.h
++++ b/src/codegen/riscv64/macro-assembler-riscv64.h
+@@ -211,7 +211,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   void LoadRootRelative(Register destination, int32_t offset) final;
+ 
+   inline void GenPCRelativeJump(Register rd, int64_t imm32) {
+-    DCHECK(is_int32(imm32));
++    DCHECK(is_int32(imm32 + 0x800));
+     int32_t Hi20 = (((int32_t)imm32 + 0x800) >> 12);
+     int32_t Lo12 = (int32_t)imm32 << 20 >> 20;
+     auipc(rd, Hi20);  // Read PC + Hi20 into scratch.
+@@ -219,7 +219,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
+   }
+ 
+   inline void GenPCRelativeJumpAndLink(Register rd, int64_t imm32) {
+-    DCHECK(is_int32(imm32));
++    DCHECK(is_int32(imm32 + 0x800));
+     int32_t Hi20 = (((int32_t)imm32 + 0x800) >> 12);
+     int32_t Lo12 = (int32_t)imm32 << 20 >> 20;
+     auipc(rd, Hi20);  // Read PC + Hi20 into scratch.
+-- 
+2.35.1
+
