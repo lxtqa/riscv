@@ -21,13 +21,35 @@ def get_cfile(commit_id,src_file1,src_file2,src_file1_):
 
 if __name__ == "__main__":
     # .h文件按照.cc文件处理，挂载到镜像的.cc文件中
-    
-    commit_id = "1ff685d8b1a13794abaca3adf36cfd9838b1f6fc"
+
+    # commit_id = "0a553206a178396e76a95d73f9b9fb941d44e10d"
+    # get_cfile(commit_id=commit_id,
+    #           src_file1="src/codegen/ppc/assembler-ppc.cc",
+    #           src_file2="src/codegen/riscv/assembler-riscv.cc",
+    #           src_file1_="src/codegen/ppc/assembler-ppc.cc",
+    #           )
+
+    # commit_id = "0bc3e0a9720cf775ba032b0c22dcf11ddbf2f72d"
+    # get_cfile(commit_id=commit_id,
+    #           src_file1="src/maglev/x64/maglev-ir-x64.cc",
+    #           src_file2="src/maglev/arm64/maglev-ir-arm64.cc",
+    #           src_file1_="src/maglev/x64/maglev-ir-x64.cc",
+    #           )
+
+    commit_id = "0cd18e7cf8018bc9aa1c7c8e2965a568dd2b4be7"
     get_cfile(commit_id=commit_id,
-              src_file1="src/deoptimizer/x64/deoptimizer-x64.cc",
-              src_file2="src/deoptimizer/riscv64/deoptimizer-riscv64.cc",
-              src_file1_="src/deoptimizer/x64/deoptimizer-x64.cc",
+              src_file1="src/compiler/backend/arm64/code-generator-arm64.cc",
+              src_file2="src/compiler/backend/x64/code-generator-x64.cc",
+              src_file1_="src/compiler/backend/arm64/code-generator-arm64.cc",
               )
+    
+
+    # commit_id = "1ff685d8b1a13794abaca3adf36cfd9838b1f6fc"
+    # get_cfile(commit_id=commit_id,
+    #           src_file1="src/deoptimizer/x64/deoptimizer-x64.cc",
+    #           src_file2="src/deoptimizer/riscv64/deoptimizer-riscv64.cc",
+    #           src_file1_="src/deoptimizer/x64/deoptimizer-x64.cc",
+    #           )
 
     # commit_id = "3ac59282af1ceb1930dd958f00e96fb0b27bcbaa"
     # get_cfile(commit_id=commit_id,

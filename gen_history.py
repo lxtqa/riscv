@@ -11,6 +11,8 @@ res2 = r"[/a-zA-Z0-9_\-]+\.[a-zA-Z0-9]+"
 
 res3 = r".*(mips|risc|ppc|ia32|s390|x86|arm|x64|loong).*"
 
+res4 = r".*(harm).*"
+
 def matchdir(dir1,dir2):
     dir1 = re.split('[\n\-./_]',dir1)
     while "" in dir1:
@@ -35,10 +37,13 @@ def matchdir(dir1,dir2):
 
 def main(patch_path):
     patchname_list = os.listdir(patch_path)
-    savepath = "./classified_patch"
+    savepath = "./related_patch"
+    file = open("related_patch.txt","w")
     if not os.path.exists(savepath):
         os.mkdir(savepath)
     patchname_list.sort()
+    dic = {}
+    matched_dic = {}
     for patchname in patchname_list:
         filename_list = []
         patchfile = codecs.open(patch_path + patchname,"r",errors="ignore")
@@ -48,24 +53,45 @@ def main(patch_path):
                 matched = re.match(res1,line)
                 if matched != None:
                     filename = re.findall(res2,line)[0]
-                    if re.match(res3,filename):
+                    if re.match(res3,filename) and not re.match(res4,filename) :
                         filename_list.append(filename)
             if len(filename_list) != 0:
-                flag = False
                 for i in range(len(filename_list)):
-                    if flag:
-                        break
-                    for j in range(i+1,len(filename_list)):
-                        if flag:
-                            break
+                    if filename_list[i] in dic:
+                        dic[filename_list[i]] += 1
+                    else:
+                        dic[filename_list[i]] = 1
+                    for j in range(0,len(filename_list)):
+                        if i==j:
+                            continue
                         if matchdir(filename_list[i],filename_list[j]):
-                            flag = True
-                if flag:
-                    os.system("cp "+patch_path + patchname+" "+savepath)
+                            if filename_list[i] in matched_dic:
+                                matched_dic[filename_list[i]] += 1
+                            else:
+                                matched_dic[filename_list[i]] = 1
+                os.system("cp "+patch_path + patchname+" "+savepath)
         except:
             pass
+    lst = []
+    match_num = 0
+    for key in dic:
+        if key in matched_dic:
+            match_num += 1
+            lst.append([dic[key],matched_dic[key],key])
+        else:
+            lst.append([dic[key],0,key])
+    lst.sort(reverse=True)
+    total = 0
+    ma = 0
+    for item in lst:
+        file.write("{} changed times = {}, matched times = {}\n".format(item[2],item[0],item[1]))
+        total += item[0]
+        ma += item[1]
+    file.write("total changed times = {}, matched times = {},{}\n".format(total,ma))
+            
+
+    file.close()
 
 
 if __name__=="__main__":
     main("./patches-origin/")
-    # shutil.rmtree("./patches-origin/")

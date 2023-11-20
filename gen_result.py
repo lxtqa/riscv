@@ -185,7 +185,10 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
             #进行简单的映射:先找到1_所有同名变量，进行 1_->1 的映射，再进行 1->2 的映射
             content = map(diffOp,match_dic12,match_dic1_1,file1_String)
             if diffOp.op == "insert-tree" or diffOp.source.value.split(":")[0]=="comment":
-                content =  content + "\n"           
+                if  diffOp.source.value.split(" ")[0] == "argument":
+                    content = content + ", "
+                else:
+                    content =  content + "\n"           
             
             # 删除单行注释
             content = re.sub(r'//.*$', '', content, flags=re.MULTILINE)
