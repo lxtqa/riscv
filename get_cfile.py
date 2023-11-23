@@ -36,12 +36,12 @@ if __name__ == "__main__":
     #           src_file1_="src/maglev/x64/maglev-ir-x64.cc",
     #           )
 
-    commit_id = "0cd18e7cf8018bc9aa1c7c8e2965a568dd2b4be7"
-    get_cfile(commit_id=commit_id,
-              src_file1="src/compiler/backend/arm64/code-generator-arm64.cc",
-              src_file2="src/compiler/backend/x64/code-generator-x64.cc",
-              src_file1_="src/compiler/backend/arm64/code-generator-arm64.cc",
-              )
+    # commit_id = "0cd18e7cf8018bc9aa1c7c8e2965a568dd2b4be7"
+    # get_cfile(commit_id=commit_id,
+    #           src_file1="src/compiler/backend/arm64/code-generator-arm64.cc",
+    #           src_file2="src/compiler/backend/x64/code-generator-x64.cc",
+    #           src_file1_="src/compiler/backend/arm64/code-generator-arm64.cc",
+    #           )
     
 
     # commit_id = "1ff685d8b1a13794abaca3adf36cfd9838b1f6fc"
@@ -83,14 +83,15 @@ if __name__ == "__main__":
     
 
     #有问题
-    # commit_id = "4a97c8c7e94b2aa4353896807079619ea8626892"
-    # get_cfile(commit_id=commit_id,
-    #           src_file1="src/wasm/baseline/x64/liftoff-assembler-x64.h",
-    #           src_file2="src/wasm/baseline/riscv/liftoff-assembler-riscv64.h",
-    #           src_file1_="src/wasm/baseline/x64/liftoff-assembler-x64.h",
-    #           )
+    commit_id = "4a97c8c7e94b2aa4353896807079619ea8626892"
+    get_cfile(commit_id=commit_id,
+              src_file1="src/wasm/baseline/x64/liftoff-assembler-x64.h",
+              src_file2="src/wasm/baseline/riscv/liftoff-assembler-riscv64.h",
+              src_file1_="src/wasm/baseline/x64/liftoff-assembler-x64.h",
+              )
 
-    #匹配失败
+    # 匹配失败
+    
     # commit_id = "4ab70f6b218b719d9ba282a6a733c978216943d6"
     # get_cfile(commit_id=commit_id,
     #           src_file1="src/wasm/baseline/x64/liftoff-assembler-x64.h",

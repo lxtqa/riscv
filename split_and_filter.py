@@ -56,6 +56,8 @@ def split_and_filter(dir):
                         matched = match_pattern(tomatch,patterns[i])
                         if matched:
                             newdir = path + "/patch_type" + str(i)
+                            if os.path.exists(newdir):
+                                shutil.rmtree(newdir)
                             shutil.move(filename,newdir)
                             #os.system("mv " + filename + " " + newdir)
                             #移动到文件夹

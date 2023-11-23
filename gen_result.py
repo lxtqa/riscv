@@ -1,7 +1,8 @@
 import os
 from get_ast import get_ast, TreeNode
 from gumtree_parser import gumtree_parser
-from diff_parser import diff_parser,bfs_search
+from AstDiffParser import diff_parser,bfs_search
+from DiffParser import diff2rank
 from time import time
 import sys
 import re
@@ -82,25 +83,64 @@ def get_newname(node,match_dic12,match_dic1_1):
         return None
 
 
+def simplify(cfile_name1,cfile_name1_,ast1,new_cfile_name1):
+    diff_file_name = "./test/patch.patch"
+    file1String = read_file(cfile_name1)
+    os.system("diff -up {} {} > {}".format(cfile_name1,cfile_name1_,diff_file_name))
+    ranks = diff2rank(diff_file_name,cfile_name1)
+    tmp_string = "\n" * len(file1String)
+    for treeNode in ast1.children:
+        start,end = get_start_end(treeNode.value)
+        flag = False
+        for rank in ranks:
+            if not start > rank["ending"] and not end < rank["begining"]:
+                flag = True
+        if flag:
+            tmp_string = tmp_string[:start] + file1String[start:end] + tmp_string[end:]
+                
+    f = open(new_cfile_name1,"w")
+    f.write(tmp_string)
+    f.close()
+        
 
-def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile):
+def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile,use_docker,simple):
     '''
     cfile_name1为架构a下的文件，cfile2_name2为架构b下的文件，cfile_name1_为cfile_name1修改后的文件
     取cfile1和cfile2的match部分，取cfile1与cfile1_的diff部分
     '''
     start_time = time()
     
-    gumtreefile_name1 = "gumtree_12.txt"
-    gumtreefile_name2 = "gumtree_11_.txt"
-    os.system("docker run -v {}:/left.cc -v {}:/right.cc gumtreediff/gumtree textdiff /left.cc /right.cc -m gumtree-simple-id  > {}".format(
-        cfile_name1, cfile_name2, gumtreefile_name1))
-    os.system("docker run -v {}:/left.cc -v {}:/right.cc gumtreediff/gumtree textdiff /left.cc  /right.cc -m gumtree-simple-id > {}".format(
-        cfile_name1, cfile_name1_, gumtreefile_name2))
-    ast1 = get_ast(cfile_name1,rm_tempfile=rm_tempfile)
-    ast2 = get_ast(cfile_name2,rm_tempfile=rm_tempfile)
-    # ast1_ = get_ast(cfile_name1_,rm_tempfile=rm_tempfile)
-    print("生成ast及diff耗时：{}s".format(time()-start_time))
-    # file1String =  read_file(cfile_name1)
+    gumtreefile_name1 = "./test/gumtree_12.txt"
+    gumtreefile_name2 = "./test/gumtree_11_.txt"
+    
+    ast1 = get_ast(cfile_name1,rm_tempfile=rm_tempfile,use_docker=use_docker)
+    '''
+    选择是否使用简化
+    '''
+    if simple:
+        '''
+        先对1和1_做text级别的diff, 根据diff结果删除无关的节点（目前进行的是简单删除，即删除unit节点下的无关节点）, 再进行astdiff 
+        '''
+        ast1_ = get_ast(cfile_name1_,rm_tempfile=rm_tempfile,use_docker=use_docker)
+
+        simplify(cfile_name1,cfile_name1_,ast1,'./test/tmp1.cc')
+        simplify(cfile_name1_,cfile_name1,ast1_,'./test/tmp1_.cc')
+        cfile_name1 = './test/tmp1.cc'
+        cfile_name1_ = './test/tmp1_.cc'
+
+    ast2 = get_ast(cfile_name2,rm_tempfile=rm_tempfile,use_docker=use_docker)
+    if use_docker:
+        os.system("docker run -v {}:/left.cc -v {}:/right.cc gumtreediff/gumtree textdiff /left.cc  /right.cc -m gumtree-simple-id -g cs-srcml > {}".format(
+            cfile_name1, cfile_name1_, gumtreefile_name2))
+        os.system("docker run -v {}:/left.cc -v {}:/right.cc gumtreediff/gumtree textdiff /left.cc /right.cc -m gumtree-simple-id -g cs-srcml > {}".format(
+            cfile_name1, cfile_name2, gumtreefile_name1))
+    else:
+        os.system("./gumtree/gumtree textdiff {} {} -m gumtree-simple-id -g cs-srcml > {}".format(
+            cfile_name1, cfile_name1_, gumtreefile_name2))
+        os.system("./gumtree/gumtree textdiff {} {} -m gumtree-simple-id -g cs-srcml > {}".format(
+            cfile_name1, cfile_name2, gumtreefile_name1))
+    
+    print("生成ast及diff耗时: {}s".format(time()-start_time))
     file2String = read_file(cfile_name2)
     file1_String = read_file(cfile_name1_)
     file2_ = open(cfile_name2_,"w")
@@ -226,23 +266,29 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile)
         os.system("rm " + gumtreefile_name1)
         os.system("rm " + gumtreefile_name2)
     end_time = time()
-    print("生成修改后代码总耗时：{}s".format(end_time-start_time))
+    print("生成修改后代码总耗时: {}s".format(end_time-start_time))
     
 if __name__ == "__main__":
     rm_tempfile = False
+    use_docker = False
+    simple = False
     if not os.path.exists("./test"):
         os.mkdir("./test")
     
-    # generate_diff("./test/test1.cc",
-    #               "./test/test2.cc",
-    #               "./test/test1_.cc",
-    #               "./test/test2_.cc",
-    #               rm_tempfile,
-    #               )
-    generate_diff(sys.argv[1],
-                  sys.argv[2],
-                  sys.argv[3],
-                  sys.argv[4],
+    generate_diff("./test/test1.cc",
+                  "./test/test2.cc",
+                  "./test/test1_.cc",
+                  "./test/test2_.cc",
                   rm_tempfile,
+                  use_docker,
+                  simple,
                   )
+    # generate_diff(sys.argv[1],
+    #               sys.argv[2],
+    #               sys.argv[3],
+    #               sys.argv[4],
+    #               rm_tempfile,
+    #               use_docker,
+    #               simple,
+    #               )
     

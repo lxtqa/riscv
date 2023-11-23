@@ -55,5 +55,5 @@ def date():
     hash_file.close()
 
 if __name__ == "__main__":
-    # riscv()
-    date()
+    riscv()
+    # date()
