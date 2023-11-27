@@ -1,5 +1,40 @@
 # README
 
+## 运行方法
+
+命令行执行`python script.py`
+
+```
+usage: script.py [-h] [-D] [-s] [-r] [-d] [-o OUTPUT_DIRECTORY] [-m MATCHER_ID] [-g TREE_GENERATOR_ID]
+                 input_directory1 input_directory2 input_directory1_
+
+命令行参数处理程序
+
+positional arguments:
+  input_directory1      输入文件目录1
+  input_directory2      输入文件目录2
+  input_directory1_     输入文件目录1_
+
+options:
+  -h, --help            show this help message and exit
+  -D, --debugging       启用调试模式
+  -s, --simple          使用简单模式
+  -r, --rm_tempfile     删除临时文件
+  -d, --use_docker      使用Docker
+  -o OUTPUT_DIRECTORY, --output_directory OUTPUT_DIRECTORY
+                        指定输出文件目录
+  -m MATCHER_ID, --matcher_id MATCHER_ID
+                        指定MATCHER_ID，默认为gumtree
+  -g TREE_GENERATOR_ID, --tree_generator_id TREE_GENERATOR_ID
+                        指定TREE_GENERATOR_ID，默认为cs-srcml
+```
+
+## 环境部署
+
+本项目python部分使用到的库均为常用库，遇到未安装的库直接使用`pip install XXXX`即可。
+
+下载gumtree docker镜像：`docker pull gumtreediff/gumtree`
+
 ## Javascript V8项目简介
 
 是解析javascript语言的的虚拟机
@@ -17,16 +52,6 @@ V8引擎转换成字节码(bytecode)，此时是可以跨平台的，将字节�
 ![image-20220822154219022](./img/image-20220822154219022.png)
 
 
-
-## 环境部署
-
-本项目python部分使用到的库均为常用库，遇到未安装的库直接使用`pip install xxxx`即可。
-
-下载gumtree docker镜像：`docker pull gumtreediff/gumtree`
-
-## 运行方法
-
-python3 gen_result.py 架构1下代码  架构2下代码  架构1下修改后代码  指定架构2下修改后代码输出目录
 
 ## 程序与脚本
 
@@ -82,9 +107,13 @@ python3 split_and_filter.py ./classified_patch
 
 利用`gumtree parse`命令生成ast到txt文件，并返回一个经过parse的抽象语法树
 
-#### diff_parser.py
+#### AstDiffParser.py
 
 处理diff操作，将原始diff进行合并处理
+
+#### DiffParser.py
+
+对text级别的diff文件进行parse
 
 #### gen_result.py
 
@@ -97,6 +126,10 @@ python3 split_and_filter.py ./classified_patch
 #### show_diff.sh
 
 在http://localhost:4567上展示两个文件的diff结果。
+
+####  script.py
+
+执行脚本
 
 ## 库
 
@@ -117,6 +150,8 @@ OPTIONS are:
 ```
 
 ### gumtree
+
+配置教程：https://blog.csdn.net/weixin_39278265/article/details/101427644
 
 官方文档：https://github.com/GumTreeDiff/gumtree/wiki/Commands#overriding-properties
 

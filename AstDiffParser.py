@@ -17,7 +17,11 @@ def bfs_search(root, target):
         if node.value == target:
             return node
         queue.extend(node.children)
-        
+
+def get_start_end(string):
+    [start,end] = string.split(" ")[-1][1:-1].split(",")
+    return int(start), int(end)
+
 def fun(diffOps,match):
     for i in range(len(diffOps)):
         if diffOps[i].desNode != "":
@@ -34,6 +38,16 @@ def fun(diffOps,match):
                                 node.value = match[diffOps[i].desNode]
                         elif diffOps[i].op == "delete-tree" or diffOps[i].op == "delete-node":
                             exit(210)
+                        diffOps.pop(i)
+                        return diffOps,False
+                    
+    for i in range(len(diffOps)):
+        if diffOps[i].source != None and (diffOps[i].op == "delete-tree" or diffOps[i].op == "delete-node"):
+            for j in range(len(diffOps)):
+                if j != i and diffOps[j].source != None and (diffOps[j].op == "delete-tree" or diffOps[j].op == "delete-node"):
+                    s1,e1 = get_start_end(diffOps[i].source.value)
+                    s2,e2 = get_start_end(diffOps[j].source.value)
+                    if s2<=s1 and e1<=e2:
                         diffOps.pop(i)
                         return diffOps,False
     return diffOps,True

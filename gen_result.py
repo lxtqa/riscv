@@ -26,7 +26,10 @@ def get_start_end(string):
     return int(start), int(end)
 
 def get_name(string):
-    return string.split(" ")[1]
+    if len(string.split(" ")) == 3:
+        return string.split(" ")[1]
+    else:
+        return None
 
 def replace(text,operations):
     #排序
@@ -61,21 +64,35 @@ def get_newname(node,match_dic12,match_dic1_1):
     # 如果能直接进行1_->1->2的映射，则采用该映射
     # 如果不能则在1_中寻找同名变量，然后再进行上一步的映射
     if node.split(" ")[0] == "name:":
-        if node in match_dic1_1:
-            if match_dic1_1[node] in match_dic12:
-                return get_name(match_dic12[match_dic1_1[node]])
+        if match_dic1_1 != None:
+            if node in match_dic1_1.keys():
+                if match_dic1_1[node] in match_dic12:
+                    return get_name(match_dic12[match_dic1_1[node]])
+            else:
+                same_names = []
+                for key in match_dic1_1.keys():
+                    if get_name(node) == get_name(key):
+                        same_names.append(match_dic1_1[key])
+                #找到了相同的变量
+                if len(same_names) > 1:
+                    #TODO:多个候选node的处理方法，目前选择找到第一个后返回
+                    for same_name in same_names:
+                        if same_name in match_dic12:
+                            mapped_node = match_dic12[same_name]
+                            return get_name(mapped_node)
         else:
-            same_names = []
-            for key in match_dic1_1.keys():
-                if get_name(node) == get_name(key):
-                    same_names.append(match_dic1_1[key])
-            #找到了相同的变量
-            if len(same_names) > 1:
-                #TODO:多个候选node的处理方法，目前选择找到第一个后返回
-                for same_name in same_names:
-                    if same_name in match_dic12:
-                        mapped_node = match_dic12[same_name]
-                        return get_name(mapped_node)
+            if node in match_dic12.keys():
+                return get_name(match_dic12[node])
+            else:
+                same_names = []
+                for key in match_dic12.keys():
+                    if get_name(node) == get_name(key):
+                        same_names.append(match_dic12[key])
+                #找到了相同的变量
+                if len(same_names) > 1:
+                    #TODO:多个候选node的处理方法，目前选择找到第一个后返回
+                    for same_name in same_names:
+                        return get_name(same_name)
         #TODO: 找不到相同的变量，进行架构关键字的映射
         mapped_node = node.lstrip()
         return get_name(mapped_node)
@@ -84,26 +101,54 @@ def get_newname(node,match_dic12,match_dic1_1):
 
 
 def simplify(cfile_name1,cfile_name1_,ast1,new_cfile_name1):
+    # 不需要ast 而是直接进行文本级别的diff
+
     diff_file_name = "./test/patch.patch"
     file1String = read_file(cfile_name1)
     os.system("diff -up {} {} > {}".format(cfile_name1,cfile_name1_,diff_file_name))
     ranks = diff2rank(diff_file_name,cfile_name1)
     tmp_string = "\n" * len(file1String)
+    # for treeNode in ast1.children:
+    #     start,end = get_start_end(treeNode.value)
+    #     flag = False
+    #     for rank in ranks:
+    #         if not start > rank["ending"] and not end < rank["begining"]:
+    #             flag = True
+    #     if flag:
+    #         tmp_string = tmp_string[:start] + file1String[start:end] + tmp_string[end:]
+
+    queue = []
     for treeNode in ast1.children:
-        start,end = get_start_end(treeNode.value)
+        queue.append(treeNode)
+    while queue:
+        node = queue.pop(0)
+        start,end = get_start_end(node.value)
         flag = False
         for rank in ranks:
             if not start > rank["ending"] and not end < rank["begining"]:
                 flag = True
         if flag:
-            tmp_string = tmp_string[:start] + file1String[start:end] + tmp_string[end:]
+            if start >= rank["begining"] and end <= rank["ending"]:
+                tmp_string = tmp_string[:start] + file1String[start:end] + tmp_string[end:]
+            else:
+                queue.extend(node.children)
                 
     f = open(new_cfile_name1,"w")
     f.write(tmp_string)
     f.close()
+
+
         
 
-def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile,use_docker,simple):
+def gen_result(cfile_name1,cfile_name2,
+               cfile_name1_,cfile_name2_,
+               rm_tempfile,
+               use_docker,
+               simple,
+               debugging,
+               MATCHER_ID,
+               TREE_GENERATOR_ID
+               ):
     '''
     cfile_name1为架构a下的文件，cfile2_name2为架构b下的文件，cfile_name1_为cfile_name1修改后的文件
     取cfile1和cfile2的match部分，取cfile1与cfile1_的diff部分
@@ -113,7 +158,7 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile,
     gumtreefile_name1 = "./test/gumtree_12.txt"
     gumtreefile_name2 = "./test/gumtree_11_.txt"
     
-    ast1 = get_ast(cfile_name1,rm_tempfile=rm_tempfile,use_docker=use_docker)
+    ast1 = get_ast(cfile_name1,rm_tempfile=rm_tempfile,use_docker=use_docker,debugging=debugging)
     '''
     选择是否使用简化
     '''
@@ -121,24 +166,31 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile,
         '''
         先对1和1_做text级别的diff, 根据diff结果删除无关的节点（目前进行的是简单删除，即删除unit节点下的无关节点）, 再进行astdiff 
         '''
-        ast1_ = get_ast(cfile_name1_,rm_tempfile=rm_tempfile,use_docker=use_docker)
+        ast1_ = get_ast(cfile_name1_,rm_tempfile=rm_tempfile,use_docker=use_docker,debugging=debugging)
 
         simplify(cfile_name1,cfile_name1_,ast1,'./test/tmp1.cc')
         simplify(cfile_name1_,cfile_name1,ast1_,'./test/tmp1_.cc')
-        cfile_name1 = './test/tmp1.cc'
-        cfile_name1_ = './test/tmp1_.cc'
 
-    ast2 = get_ast(cfile_name2,rm_tempfile=rm_tempfile,use_docker=use_docker)
-    if use_docker:
-        os.system("docker run -v {}:/left.cc -v {}:/right.cc gumtreediff/gumtree textdiff /left.cc  /right.cc -m gumtree-simple-id -g cs-srcml > {}".format(
-            cfile_name1, cfile_name1_, gumtreefile_name2))
-        os.system("docker run -v {}:/left.cc -v {}:/right.cc gumtreediff/gumtree textdiff /left.cc /right.cc -m gumtree-simple-id -g cs-srcml > {}".format(
-            cfile_name1, cfile_name2, gumtreefile_name1))
-    else:
-        os.system("./gumtree/gumtree textdiff {} {} -m gumtree-simple-id -g cs-srcml > {}".format(
-            cfile_name1, cfile_name1_, gumtreefile_name2))
-        os.system("./gumtree/gumtree textdiff {} {} -m gumtree-simple-id -g cs-srcml > {}".format(
-            cfile_name1, cfile_name2, gumtreefile_name1))
+    ast2 = get_ast(cfile_name2,rm_tempfile=rm_tempfile,use_docker=use_docker,debugging=debugging)
+    if not debugging:
+        if use_docker:
+            if simple:
+                os.system("docker run -v {}:/left.cc -v {}:/right.cc gumtreediff/gumtree textdiff /left.cc  /right.cc -m {} -g {} > {}".format(
+                    './test/tmp1.cc', './test/tmp1_.cc', MATCHER_ID, TREE_GENERATOR_ID, gumtreefile_name2))
+            else:
+                os.system("docker run -v {}:/left.cc -v {}:/right.cc gumtreediff/gumtree textdiff /left.cc /right.cc -m {} -g {} > {}".format(
+                    cfile_name1, cfile_name1_, MATCHER_ID, TREE_GENERATOR_ID, gumtreefile_name1))
+            os.system("docker run -v {}:/left.cc -v {}:/right.cc gumtreediff/gumtree textdiff /left.cc /right.cc -m {} -g {} > {}".format(
+                cfile_name1, cfile_name2, MATCHER_ID, TREE_GENERATOR_ID, gumtreefile_name1))
+        else:
+            if simple:
+                os.system("./gumtree/gumtree textdiff {} {} -m {} -g {} > {}".format(
+                    './test/tmp1.cc', './test/tmp1_.cc', MATCHER_ID, TREE_GENERATOR_ID, gumtreefile_name2))
+            else:
+                os.system("./gumtree/gumtree textdiff {} {} -m {} -g {} > {}".format(
+                    cfile_name1, cfile_name1_, MATCHER_ID, TREE_GENERATOR_ID, gumtreefile_name2))
+            os.system("./gumtree/gumtree textdiff {} {} -m {} -g {} > {}".format(
+                cfile_name1, cfile_name2, MATCHER_ID, TREE_GENERATOR_ID, gumtreefile_name1))
     
     print("生成ast及diff耗时: {}s".format(time()-start_time))
     file2String = read_file(cfile_name2)
@@ -223,7 +275,10 @@ def generate_diff(cfile_name1,cfile_name2,cfile_name1_,cfile_name2_,rm_tempfile,
             
             #内容 需要找到存在于原代码片段的位置
             #进行简单的映射:先找到1_所有同名变量，进行 1_->1 的映射，再进行 1->2 的映射
+            # if diffOp.move == False:
             content = map(diffOp,match_dic12,match_dic1_1,file1_String)
+            # else:
+            #     content = map(diffOp,match_dic12,None,file1String)
             if diffOp.op == "insert-tree" or diffOp.source.value.split(":")[0]=="comment":
                 if  diffOp.source.value.split(" ")[0] == "argument":
                     content = content + ", "
@@ -272,23 +327,15 @@ if __name__ == "__main__":
     rm_tempfile = False
     use_docker = False
     simple = False
-    if not os.path.exists("./test"):
-        os.mkdir("./test")
+    debugging = False
     
-    generate_diff("./test/test1.cc",
+    gen_result("./test/test1.cc",
                   "./test/test2.cc",
                   "./test/test1_.cc",
                   "./test/test2_.cc",
                   rm_tempfile,
                   use_docker,
                   simple,
+                  debugging
                   )
-    # generate_diff(sys.argv[1],
-    #               sys.argv[2],
-    #               sys.argv[3],
-    #               sys.argv[4],
-    #               rm_tempfile,
-    #               use_docker,
-    #               simple,
-    #               )
     

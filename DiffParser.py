@@ -44,9 +44,9 @@ def to_rank(changes, source_file_path):
             begining = 0
             ending = 0
             for i in range(len(source_file)):
-                if i < change["begining"]-1:
+                if i < change["begining"] - 1:
                     begining += len(source_file[i])
-                if i < change["ending"]-1:
+                if i < change["ending"] - 1:
                     ending += len(source_file[i])
             ranks.append({"begining":begining,"ending":ending})
     return ranks

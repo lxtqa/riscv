@@ -82,22 +82,20 @@ if __name__ == "__main__":
     #           )
     
 
-    #有问题
-    commit_id = "4a97c8c7e94b2aa4353896807079619ea8626892"
-    get_cfile(commit_id=commit_id,
-              src_file1="src/wasm/baseline/x64/liftoff-assembler-x64.h",
-              src_file2="src/wasm/baseline/riscv/liftoff-assembler-riscv64.h",
-              src_file1_="src/wasm/baseline/x64/liftoff-assembler-x64.h",
-              )
-
-    # 匹配失败
-    
-    # commit_id = "4ab70f6b218b719d9ba282a6a733c978216943d6"
+    # commit_id = "4a97c8c7e94b2aa4353896807079619ea8626892"
     # get_cfile(commit_id=commit_id,
     #           src_file1="src/wasm/baseline/x64/liftoff-assembler-x64.h",
-    #           src_file2="src/wasm/baseline/ia32/liftoff-assembler-ia32.h",
+    #           src_file2="src/wasm/baseline/riscv/liftoff-assembler-riscv64.h",
     #           src_file1_="src/wasm/baseline/x64/liftoff-assembler-x64.h",
     #           )
+
+    # ffff'ffff无法处理
+    commit_id = "4ab70f6b218b719d9ba282a6a733c978216943d6"
+    get_cfile(commit_id=commit_id,
+              src_file1="src/wasm/baseline/x64/liftoff-assembler-x64.h",
+              src_file2="src/wasm/baseline/ia32/liftoff-assembler-ia32.h",
+              src_file1_="src/wasm/baseline/x64/liftoff-assembler-x64.h",
+              )
 
     # commit_id = "0a110021d21a43a376f29a5ff1672ac6293c71cc"
     # get_cfile(commit_id=commit_id,
