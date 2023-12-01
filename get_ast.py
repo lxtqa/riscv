@@ -37,15 +37,15 @@ def print_tree(node, indent=0):
         print_tree(child, indent + 1)
 
 
-def get_ast(cpp_file_name,rm_tempfile,use_docker,debugging):
+def get_ast(cpp_file_name,rm_tempfile,use_docker,debugging,TREE_GENERATOR_ID):
     ast_file_name = cpp_file_name.replace("test","ast")
     if not os.path.exists("./ast"):
         os.mkdir("./ast")
     if not debugging:
         if use_docker:
-            os.system("docker run -v {}:/left.cc gumtreediff/gumtree parse /left.cc -g cs-srcml > {}".format(cpp_file_name,ast_file_name))
+            os.system("docker run -v {}:/left.cc gumtreediff/gumtree parse /left.cc -g {} > {}".format(cpp_file_name,TREE_GENERATOR_ID,ast_file_name))
         else:
-            os.system("./gumtree/gumtree parse {} -g cs-srcml > {}".format(cpp_file_name,ast_file_name))
+            os.system("./gumtree/gumtree parse {} -g {} > {}".format(cpp_file_name,TREE_GENERATOR_ID,ast_file_name))
     ast_file = open(ast_file_name,"r");
     tree_text = ast_file.readlines()
     root = parse_tree_from_text(tree_text)

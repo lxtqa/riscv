@@ -107,7 +107,6 @@ def simplify(cfile_name1,cfile_name1_,ast1,new_cfile_name1):
     file1String = read_file(cfile_name1)
     os.system("diff -up {} {} > {}".format(cfile_name1,cfile_name1_,diff_file_name))
     ranks = diff2rank(diff_file_name,cfile_name1)
-    tmp_string = "\n" * len(file1String)
     # for treeNode in ast1.children:
     #     start,end = get_start_end(treeNode.value)
     #     flag = False
@@ -116,25 +115,29 @@ def simplify(cfile_name1,cfile_name1_,ast1,new_cfile_name1):
     #             flag = True
     #     if flag:
     #         tmp_string = tmp_string[:start] + file1String[start:end] + tmp_string[end:]
-
-    queue = []
-    for treeNode in ast1.children:
-        queue.append(treeNode)
+    
+    '''
+        TODO:以block_content/block/unit为平行结构的判断依据
+    '''
+    queue = [ast1]
     while queue:
         node = queue.pop(0)
-        start,end = get_start_end(node.value)
-        flag = False
-        for rank in ranks:
-            if not start > rank["ending"] and not end < rank["begining"]:
-                flag = True
-        if flag:
-            if start >= rank["begining"] and end <= rank["ending"]:
-                tmp_string = tmp_string[:start] + file1String[start:end] + tmp_string[end:]
-            else:
-                queue.extend(node.children)
+        if node.value.split(" ")[0] == "unit" or node.value.split(" ")[0] == "block" or node.value.split(" ")[0] == "block_content":
+            for child in node.children:
+                start,end = get_start_end(child.value)
+                flag = False
+                for rank in ranks:
+                    if not start > rank["ending"] and not end < rank["begining"]:
+                        flag = True
+                if flag:
+                    queue.append(child)
+                else:
+                    file1String = file1String[:start] + " " * (end-start) + file1String[end:]
+        else:
+            queue.extend(node.children)
                 
     f = open(new_cfile_name1,"w")
-    f.write(tmp_string)
+    f.write(file1String)
     f.close()
 
 
@@ -158,7 +161,7 @@ def gen_result(cfile_name1,cfile_name2,
     gumtreefile_name1 = "./test/gumtree_12.txt"
     gumtreefile_name2 = "./test/gumtree_11_.txt"
     
-    ast1 = get_ast(cfile_name1,rm_tempfile=rm_tempfile,use_docker=use_docker,debugging=debugging)
+    ast1 = get_ast(cfile_name1,rm_tempfile=rm_tempfile,use_docker=use_docker,debugging=debugging,TREE_GENERATOR_ID=TREE_GENERATOR_ID)
     '''
     选择是否使用简化
     '''
@@ -166,12 +169,12 @@ def gen_result(cfile_name1,cfile_name2,
         '''
         先对1和1_做text级别的diff, 根据diff结果删除无关的节点（目前进行的是简单删除，即删除unit节点下的无关节点）, 再进行astdiff 
         '''
-        ast1_ = get_ast(cfile_name1_,rm_tempfile=rm_tempfile,use_docker=use_docker,debugging=debugging)
+        ast1_ = get_ast(cfile_name1_,rm_tempfile=rm_tempfile,use_docker=use_docker,debugging=debugging,TREE_GENERATOR_ID=TREE_GENERATOR_ID)
 
         simplify(cfile_name1,cfile_name1_,ast1,'./test/tmp1.cc')
         simplify(cfile_name1_,cfile_name1,ast1_,'./test/tmp1_.cc')
 
-    ast2 = get_ast(cfile_name2,rm_tempfile=rm_tempfile,use_docker=use_docker,debugging=debugging)
+    ast2 = get_ast(cfile_name2,rm_tempfile=rm_tempfile,use_docker=use_docker,debugging=debugging,TREE_GENERATOR_ID=TREE_GENERATOR_ID)
     if not debugging:
         if use_docker:
             if simple:
@@ -329,13 +332,15 @@ if __name__ == "__main__":
     simple = False
     debugging = False
     
-    gen_result("./test/test1.cc",
-                  "./test/test2.cc",
-                  "./test/test1_.cc",
-                  "./test/test2_.cc",
-                  rm_tempfile,
-                  use_docker,
-                  simple,
-                  debugging
+    gen_result(cfile_name1="./test/test1.cc",
+                  cfile_name2="./test/test2.cc",
+                  cfile_name1_="./test/test1_.cc",
+                  cfile_name2_="./test/test2_.cc",
+                  rm_tempfile=rm_tempfile,
+                  use_docker=use_docker,
+                  simple=simple,
+                  debugging=debugging,
+                  MATCHER_ID="gumtree-simple",
+                  TREE_GENERATOR_ID="cs-srcml"
                   )
     
