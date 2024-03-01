@@ -40,7 +40,16 @@ def fun(diffOps,match):
                             exit(210)
                         diffOps.pop(i)
                         return diffOps,False
-                    
+                    if diffOps[i].desNode in match:
+                        node = bfs_search(diffOps[j].source,match[diffOps[i].desNode])
+                        if node != None:
+                            if diffOps[i].op == "update-tree" or diffOps[i].op == "update-node":
+                                pass
+                            else:
+                                exit(220)
+                            diffOps.pop(i)
+                            return diffOps,False
+                        
     for i in range(len(diffOps)):
         if diffOps[i].source != None and (diffOps[i].op == "delete-tree" or diffOps[i].op == "delete-node"):
             for j in range(len(diffOps)):
@@ -78,7 +87,7 @@ def diff_parser(diffs,match):
         elif diff[0] == "update-node":
             diffOp = DiffOp("update-node")
             diffOp.desNode = diff[2].strip()
-            diffOp.update = diff[-1].split(" ")[-1]
+            diffOp.update = diff[-1].split(" by ")[-1]
             diffOps.append(diffOp)
         elif diff[0] == "move-node":
             diffOp2 = DiffOp("delete-node")
@@ -86,6 +95,12 @@ def diff_parser(diffs,match):
             diffOps.append(diffOp2)
             diffOp1 = DiffOp("insert-node")
             diffOp1.source = copy.deepcopy(diffOp2.source)
+            queue = [diffOp1.source]
+            while queue:
+                node = queue.pop(0)
+                if node.value in match:
+                    node.value = match[node.value]
+                queue.extend(node.children)
             diffOp1.desNode = diff[-2].strip()
             diffOp1.desRank = int(diff[-1].split(" ")[-1])
             diffOps.append(diffOp1)
@@ -95,6 +110,12 @@ def diff_parser(diffs,match):
             diffOps.append(diffOp2)
             diffOp1 = DiffOp("insert-tree")
             diffOp1.source = copy.deepcopy(diffOp2.source)
+            queue = [diffOp1.source]
+            while queue:
+                node = queue.pop(0)
+                if node.value in match:
+                    node.value = match[node.value]
+                queue.extend(node.children)
             diffOp1.desNode = diff[-2].strip()
             diffOp1.desRank = int(diff[-1].split(" ")[-1])
             diffOp1.move = True
