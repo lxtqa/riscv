@@ -1,0 +1,64 @@
+diff --git a/src/baseline/x64/baseline-assembler-x64-inl.h b/src/baseline/x64/baseline-assembler-x64-inl.h
+index cc694e673ea..28a3e503d0f 100644
+--- a/src/baseline/x64/baseline-assembler-x64-inl.h
++++ b/src/baseline/x64/baseline-assembler-x64-inl.h
+@@ -168,6 +168,23 @@ void BaselineAssembler::JumpIfObjectType(Condition cc, Register object,
+   __ CmpObjectType(object, instance_type, map);
+   __ j(AsMasmCondition(cc), target, distance);
+ }
++void BaselineAssembler::JumpIfObjectType(Condition cc, Register object,
++                                         InstanceType instance_type,
++                                         TaggedRegister map, Label* target,
++                                         Label::Distance distance) {
++  __ AssertNotSmi(object);
++  __ CmpObjectType(object, instance_type, map);
++  __ j(AsMasmCondition(cc), target, distance);
++}
++void BaselineAssembler::JumpIfObjectType(Condition cc, Register object,
++                                         InstanceType instance_type,
++                                         ScratchRegisterScope* scratch_scope,
++                                         Label* target,
++                                         Label::Distance distance) {
++  JumpIfObjectType(cc, object, instance_type,
++                   TaggedRegister(scratch_scope->AcquireScratch()), target,
++                   distance);
++}
+ void BaselineAssembler::JumpIfInstanceType(Condition cc, Register map,
+                                            InstanceType instance_type,
+                                            Label* target,
+@@ -355,6 +372,10 @@ void BaselineAssembler::LoadWord8Field(Register output, Register source,
+                                        int offset) {
+   __ movb(output, FieldOperand(source, offset));
+ }
++void BaselineAssembler::LoadWord8Field(Register output, TaggedRegister source,
++                                       int offset) {
++  __ movb(output, FieldOperand(source, offset));
++}
+ void BaselineAssembler::StoreTaggedSignedField(Register target, int offset,
+                                                Smi value) {
+   __ StoreTaggedSignedField(FieldOperand(target, offset), value);
+@@ -415,6 +436,10 @@ void BaselineAssembler::LoadFixedArrayElement(TaggedRegister output,
+                      FixedArray::kHeaderSize + index * kTaggedSize);
+ }
+ 
++void BaselineAssembler::LoadMap(TaggedRegister output, Register value) {
++  __ LoadMap(output, value);
++}
++
+ void BaselineAssembler::TryLoadOptimizedOsrCode(Register scratch_and_result,
+                                                 Register feedback_vector,
+                                                 FeedbackSlot slot,
+@@ -572,6 +597,13 @@ void BaselineAssembler::StaModuleVariable(Register context, Register value,
+   StoreTaggedFieldWithWriteBarrier(context, Cell::kValueOffset, value);
+ }
+ 
++void BaselineAssembler::LoadMapBitField(Register map_bit_field,
++                                        Register object) {
++  TaggedRegister map(map_bit_field);
++  LoadMap(map, object);
++  LoadWord8Field(map_bit_field, map, Map::kBitFieldOffset);
++}
++
+ void BaselineAssembler::AddSmi(Register lhs, Smi rhs) {
+   if (rhs.value() == 0) return;
+   if (SmiValuesAre31Bits()) {

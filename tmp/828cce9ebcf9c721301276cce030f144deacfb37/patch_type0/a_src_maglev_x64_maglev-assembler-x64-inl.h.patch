@@ -1,0 +1,31 @@
+diff --git a/src/maglev/x64/maglev-assembler-x64-inl.h b/src/maglev/x64/maglev-assembler-x64-inl.h
+index 8c37f8c8a62..1c7940a61fb 100644
+--- a/src/maglev/x64/maglev-assembler-x64-inl.h
++++ b/src/maglev/x64/maglev-assembler-x64-inl.h
+@@ -257,6 +257,23 @@ inline void MaglevAssembler::CheckInt32IsSmi(Register obj, Label* fail,
+   JumpIf(kOverflow, fail);
+ }
+ 
++inline void MaglevAssembler::SmiAddConstant(Register dst, Register src,
++                                            int value, Label* fail,
++                                            Label::Distance distance) {
++  AssertSmi(src);
++  Move(dst, src);
++  if (value != 0) {
++    if (SmiValuesAre31Bits()) {
++      addl(dst, Immediate(Smi::FromInt(value)));
++    } else {
++      DCHECK(!AreAliased(dst, kScratchRegister));
++      Move(kScratchRegister, Smi::FromInt(value));
++      addq(dst, kScratchRegister);
++    }
++    JumpIf(kOverflow, fail, distance);
++  }
++}
++
+ inline void MaglevAssembler::MoveHeapNumber(Register dst, double value) {
+   movq_heap_number(dst, value);
+ }
+diff --git a/test/mjsunit/array-push15.js b/test/mjsunit/array-push15.js
+new file mode 100644
+index 00000000000..e715d8ae052

@@ -1,0 +1,41 @@
+diff --git a/src/codegen/ia32/macro-assembler-ia32.cc b/src/codegen/ia32/macro-assembler-ia32.cc
+index 001495f8382..d8f3b61b8f5 100644
+--- a/src/codegen/ia32/macro-assembler-ia32.cc
++++ b/src/codegen/ia32/macro-assembler-ia32.cc
+@@ -1515,14 +1515,12 @@ void MacroAssembler::InvokeFunctionCode(Register function, Register new_target,
+   // We call indirectly through the code field in the function to
+   // allow recompilation to take effect without changing any of the
+   // call sites.
+-  static_assert(kJavaScriptCallCodeStartRegister == ecx, "ABI mismatch");
+-  mov(ecx, FieldOperand(function, JSFunction::kCodeOffset));
+   switch (type) {
+     case InvokeType::kCall:
+-      CallCodeObject(ecx);
++      CallJSFunction(function);
+       break;
+     case InvokeType::kJump:
+-      JumpCodeObject(ecx);
++      JumpJSFunction(function);
+       break;
+   }
+   jmp(&done, Label::kNear);
+@@ -2083,6 +2081,19 @@ void MacroAssembler::JumpCodeObject(Register code_object, JumpMode jump_mode) {
+   }
+ }
+ 
++void MacroAssembler::CallJSFunction(Register function_object) {
++  static_assert(kJavaScriptCallCodeStartRegister == ecx, "ABI mismatch");
++  mov(ecx, FieldOperand(function_object, JSFunction::kCodeOffset));
++  CallCodeObject(ecx);
++}
++
++void MacroAssembler::JumpJSFunction(Register function_object,
++                                    JumpMode jump_mode) {
++  static_assert(kJavaScriptCallCodeStartRegister == ecx, "ABI mismatch");
++  mov(ecx, FieldOperand(function_object, JSFunction::kCodeOffset));
++  JumpCodeObject(ecx, jump_mode);
++}
++
+ void MacroAssembler::Jump(const ExternalReference& reference) {
+   DCHECK(root_array_available());
+   jmp(Operand(kRootRegister, RootRegisterOffsetForExternalReferenceTableEntry(
