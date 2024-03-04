@@ -3452,7 +3452,7 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
   ExternalReference thunk_ref =
       ExternalReference::invoke_accessor_getter_callback();
 
-  __ LoadExternalPointerField( api_function_address,  FieldMemOperand(callback, AccessorInfo::kJsGetterOffset));
+  __ LoadExternalPointerField( api_function_address,  FieldMemOperand(callback, AccessorInfo::kJsGetterOffset), kAccessorInfoJsGetterTag);
   
 
   // +3 is to skip prolog, return address and name handle.
@@ -3701,7 +3701,7 @@ void Builtins::Generate_DeoptimizationEntry_Lazy(MacroAssembler* masm) {
 namespace {
 
 // Restarts execution either at the current or next (in execution order)
-// bytecode. If there is baseline code on the shared funct, kAccessorInfoJsGetterTag, ion info, converts an
+// bytecode. If there is baseline code on the shared function info, converts an
 // interpreter frame into a baseline frame and continues execution in baseline
 // code. Otherwise execution continues with bytecode.
 void Generate_BaselineOrInterpreterEntry(MacroAssembler* masm,

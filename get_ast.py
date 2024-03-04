@@ -1,4 +1,5 @@
 import os
+import re
 
 def count_starting_spaces(s):
     return len(s) - len(s.lstrip())
@@ -37,6 +38,22 @@ def print_tree(node, indent=0):
         print_tree(child, indent + 1)
 
 
+def merge_lines(lines):
+    i = 0
+    merged = []
+    tmp_line = ""
+    while i < len(lines):
+        line = lines[i]
+        pattern = re.compile(r'.+\[\d+,\d+\]\n$')
+        # 进行匹配
+        tmp_line = tmp_line + line
+        if pattern.match(line):
+            merged.append(tmp_line)
+            tmp_line = ""
+        i = i+1
+    return merged
+
+
 def get_ast(cpp_file_name,rm_tempfile,use_docker,debugging,TREE_GENERATOR_ID):
     ast_file_name = cpp_file_name.replace("test","ast")
     if not os.path.exists("./ast"):
@@ -48,7 +65,8 @@ def get_ast(cpp_file_name,rm_tempfile,use_docker,debugging,TREE_GENERATOR_ID):
             os.system("./gumtree/gumtree parse {} -g {} > {}".format(cpp_file_name,TREE_GENERATOR_ID,ast_file_name))
     ast_file = open(ast_file_name,"r");
     tree_text = ast_file.readlines()
-    root = parse_tree_from_text(tree_text)
+
+    root = parse_tree_from_text(merge_lines(tree_text))
     if rm_tempfile:
         os.remove(ast_file_name)
     return root

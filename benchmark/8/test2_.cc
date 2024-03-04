@@ -2845,8 +2845,7 @@ int32_t TurboAssembler::GetOffset(int32_t offset, Label* L, OffsetSize bits) {
   if (L) {
     offset = branch_offset_helper(L, bits);
   } else {
-    saved_offsets_for_runtime_entries_.emplace_back(pc_offset(), offset)
-;
+     saved_offsets_for_runtime_entries_.emplace_back(pc_offset(), offset) ;
   }
   return offset;
 }
@@ -3216,8 +3215,7 @@ void TurboAssembler::Jump(Handle<Code> code, RelocInfo::Mode rmode,
              target_is_isolate_independent_builtin) {
     int offset = static_cast<int>(code->builtin_id()) * kSystemPointerSize +
                  IsolateData::builtin_entry_table_offset();
-    saved_offsets_for_runtime_entries_.emplace_back(pc_offset(), offset)
-;
+     saved_offsets_for_runtime_entries_.emplace_back(pc_offset(), offset) ;
     Jump(t6, cond, rs, rt);
     return;
   } else if (options().inline_offheap_trampolines &&

@@ -1616,7 +1616,11 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   friend class RegExpMacroAssemblerRISCV;
   friend class RelocInfo;
   friend class BlockTrampolinePoolScope;
-  class EnsureSpace;friendfriend 
+  
+class EnsureSpace;
+
+friend
+friend 
    class ConstantPool;
 };
 

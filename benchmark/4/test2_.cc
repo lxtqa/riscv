@@ -34,8 +34,7 @@ class RiscvOperandGenerator final : public OperandGenerator {
   InstructionOperand UseRegisterOrImmediateZero(Node* node) {
     if ((IsIntegerConstant(node) && (GetIntegerConstantValue(node) == 0)) ||
         (IsFloatConstant(node) &&
-         (base::bit_cast<int64_t>
-(GetFloatConstantValue(node)) == 0))) {
+         ( base::bit_cast<int64_t> (GetFloatConstantValue(node)) == 0))) {
       return UseImmediate(node);
     }
     return UseRegister(node);
@@ -3065,10 +3064,10 @@ SIMD_VISIT_SPLAT(F64x2)
   void InstructionSelector::Visit##Type##ExtractLane##Sign(Node* node) { \
     VisitRRI(this, kRiscv##Type##ExtractLane##Sign, node);               \
   }
-SIMD_VISIT_EXTRACT_LANE(F64x2, )
-SIMD_VISIT_EXTRACT_LANE(F32x4, )
-SIMD_VISIT_EXTRACT_LANE(I32x4, )
-SIMD_VISIT_EXTRACT_LANE(I64x2, )
+SIMD_VISIT_EXTRACT_LANE(F64x2)
+SIMD_VISIT_EXTRACT_LANE(F32x4)
+SIMD_VISIT_EXTRACT_LANE(I32x4)
+SIMD_VISIT_EXTRACT_LANE(I64x2)
 SIMD_VISIT_EXTRACT_LANE(I16x8, U)
 SIMD_VISIT_EXTRACT_LANE(I16x8, S)
 SIMD_VISIT_EXTRACT_LANE(I8x16, U)

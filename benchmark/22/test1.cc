@@ -2424,7 +2424,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ Sshr(tmp.V4S(), src.V4S(), 31);
       // Set i-th bit of each lane i. When AND with tmp, the lanes that
       // are signed will have i-th bit set, unsigned will be 0.
-      __ Movi(mask.V2D(), 0x0000'0008'0000'0004, 0x0000'0002'0000'0001);
+      __ Movi(mask.V2D(), 0x0000000800000004, 0x0000000200000001);
       __ And(tmp.V16B(), mask.V16B(), tmp.V16B());
       __ Addv(tmp.S(), tmp.V4S());
       __ Mov(dst.W(), tmp.V4S(), 0);
@@ -2543,7 +2543,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       __ Sshr(tmp.V8H(), src.V8H(), 15);
       // Set i-th bit of each lane i. When AND with tmp, the lanes that
       // are signed will have i-th bit set, unsigned will be 0.
-      __ Movi(mask.V2D(), 0x0080'0040'0020'0010, 0x0008'0004'0002'0001);
+      __ Movi(mask.V2D(), 0x0080004000200010, 0x0008000400020001);
       __ And(tmp.V16B(), mask.V16B(), tmp.V16B());
       __ Addv(tmp.H(), tmp.V8H());
       __ Mov(dst.W(), tmp.V8H(), 0);
@@ -2649,7 +2649,7 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       // Set i-th bit of each lane i. When AND with tmp, the lanes that
       // are signed will have i-th bit set, unsigned will be 0.
       __ Sshr(tmp.V16B(), src.V16B(), 7);
-      __ Movi(mask.V2D(), 0x8040'2010'0804'0201);
+      __ Movi(mask.V2D(), 0x8040201008040201);
       __ And(tmp.V16B(), mask.V16B(), tmp.V16B());
       __ Ext(mask.V16B(), tmp.V16B(), tmp.V16B(), 8);
       __ Zip1(tmp.V16B(), tmp.V16B(), mask.V16B());

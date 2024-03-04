@@ -78,9 +78,10 @@ def main():
                 line = file.readline()
                 try:
                     name = line.split(" ")[2][2:]
+                    name_ = line.split(" ")[3][2:-1]
                 except:
                     continue
-                lst.append(name)
+                lst.append([name,name_])
             commit.content.append(lst)
         commits.append(commit)
 
@@ -94,16 +95,16 @@ def main():
             riscv64_file = None
             # 判断是否具有arm和riscv两个架构，如果没有则返回
             for file_name in type:
-                if "arm64" in file_name:
+                if "arm64" in file_name[0]:
                     arm64_file = file_name
-                elif "riscv64" in file_name:
+                elif "riscv64" in file_name[0]:
                     riscv64_file = file_name
                 
                 if arm64_file != None and riscv64_file != None:
                     num = num + 1
-                    if num > 33:
+                    if num > 80:
                         successfully_generate(commit.hash,arm64_file,riscv64_file,num)
-                    if num == 50:
+                    if num == 81:
                         return
                     break
         

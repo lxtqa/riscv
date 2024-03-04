@@ -532,7 +532,7 @@ void InstructionSelector::VisitLoad(Node* node) {
       opcode = kRiscvLd;
       break;
     case MachineRepresentation::kSimd128:
-      opcode = kArm64LdrDecodeSandboxedPointer;
+      opcode = kRiscv64LdrDecodeSandboxedPointer;
       break;
     case MachineRepresentation::kCompressedPointer:
     case MachineRepresentation::kCompressed:
@@ -612,7 +612,7 @@ void InstructionSelector::VisitStore(Node* node) {
         opcode = kRiscvSd;
         break;
       case MachineRepresentation::kSimd128:
-        opcode = kArm64StrEncodeSandboxedPointer;
+        opcode = kRiscv64StrEncodeSandboxedPointer;
         break;
       case MachineRepresentation::kCompressedPointer:  // Fall through.
       case MachineRepresentation::kCompressed:
@@ -2981,10 +2981,10 @@ SIMD_VISIT_SPLAT(F64x2)
   void InstructionSelector::Visit##Type##ExtractLane##Sign(Node* node) { \
     VisitRRI(this, kRiscv##Type##ExtractLane##Sign, node);               \
   }
-SIMD_VISIT_EXTRACT_LANE(F64x2, )
-SIMD_VISIT_EXTRACT_LANE(F32x4, )
-SIMD_VISIT_EXTRACT_LANE(I32x4, )
-SIMD_VISIT_EXTRACT_LANE(I64x2, )
+SIMD_VISIT_EXTRACT_LANE(F64x2)
+SIMD_VISIT_EXTRACT_LANE(F32x4)
+SIMD_VISIT_EXTRACT_LANE(I32x4)
+SIMD_VISIT_EXTRACT_LANE(I64x2)
 SIMD_VISIT_EXTRACT_LANE(I16x8, U)
 SIMD_VISIT_EXTRACT_LANE(I16x8, S)
 SIMD_VISIT_EXTRACT_LANE(I8x16, U)

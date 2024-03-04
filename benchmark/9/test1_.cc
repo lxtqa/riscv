@@ -2227,7 +2227,7 @@ void LiftoffAssembler::emit_i32x4_bitmask(LiftoffRegister dst,
   Sshr(tmp.V4S(), src.fp().V4S(), 31);
   // Set i-th bit of each lane i. When AND with tmp, the lanes that
   // are signed will have i-th bit set, unsigned will be 0.
-  Movi(mask.V2D(), 0x0000'0008'0000'0004, 0x0000'0002'0000'0001);
+  Movi(mask.V2D(), 0x0000000800000004, 0x0000000200000001);
   And(tmp.V16B(), mask.V16B(), tmp.V16B());
   Addv(tmp.S(), tmp.V4S());
   Mov(dst.gp().W(), tmp.V4S(), 0);
@@ -2403,7 +2403,7 @@ void LiftoffAssembler::emit_i16x8_bitmask(LiftoffRegister dst,
   Sshr(tmp.V8H(), src.fp().V8H(), 15);
   // Set i-th bit of each lane i. When AND with tmp, the lanes that
   // are signed will have i-th bit set, unsigned will be 0.
-  Movi(mask.V2D(), 0x0080'0040'0020'0010, 0x0008'0004'0002'0001);
+  Movi(mask.V2D(), 0x0080004000200010, 0x0008000400020001);
   And(tmp.V16B(), mask.V16B(), tmp.V16B());
   Addv(tmp.H(), tmp.V8H());
   Mov(dst.gp().W(), tmp.V8H(), 0);
@@ -2609,7 +2609,7 @@ void LiftoffAssembler::emit_i8x16_bitmask(LiftoffRegister dst,
   // Set i-th bit of each lane i. When AND with tmp, the lanes that
   // are signed will have i-th bit set, unsigned will be 0.
   Sshr(tmp.V16B(), src.fp().V16B(), 7);
-  Movi(mask.V2D(), 0x8040'2010'0804'0201);
+  Movi(mask.V2D(), 0x8040201008040201);
   And(tmp.V16B(), mask.V16B(), tmp.V16B());
   Ext(mask.V16B(), tmp.V16B(), tmp.V16B(), 8);
   Zip1(tmp.V16B(), tmp.V16B(), mask.V16B());

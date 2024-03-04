@@ -464,8 +464,7 @@ void BaselineAssembler::StoreTaggedFieldWithWriteBarrier(Register target,
   ScratchRegisterScope temps(this);
   Register tmp = temps.AcquireScratch();
   __ RecordWriteField(target, offset, value, tmp, kRAHasNotBeenSaved,
-                      SaveFPRegsMode::kIgnore
-);
+                       SaveFPRegsMode::kIgnore );
 }
 void BaselineAssembler::StoreTaggedFieldNoWriteBarrier(Register target,
                                                        int offset,

@@ -9,6 +9,7 @@ class DiffOp:
         self.update = ""
         self.desRank = 0
         self.move = False
+        self.id = -1
 
 def bfs_search(root, target):
     queue = [root]
@@ -63,35 +64,42 @@ def fun(diffOps,match):
 
 def diff_parser(diffs,match):
     diffOps = []
+    id = 0
     for diff in diffs:
         if diff[0] == "insert-node" :
             diffOp = DiffOp("insert-node")
             diffOp.source = parse_tree_from_text(diff[2:-3])
             diffOp.desNode = diff[-2].strip()
             diffOp.desRank = int(diff[-1].split(" ")[-1])
+            diffOp.id = id
             diffOps.append(diffOp)
         elif diff[0] == "insert-tree":
             diffOp = DiffOp("insert-tree")
             diffOp.source = parse_tree_from_text(diff[2:-3])
             diffOp.desNode = diff[-2].strip()
             diffOp.desRank = int(diff[-1].split(" ")[-1])
+            diffOp.id = id
             diffOps.append(diffOp)
         elif diff[0] == "delete-node":
             diffOp = DiffOp("delete-node")
             diffOp.source = parse_tree_from_text(diff[2:])
+            diffOp.id = id
             diffOps.append(diffOp)
         elif diff[0] == "delete-tree":
             diffOp = DiffOp("delete-tree")
             diffOp.source = parse_tree_from_text(diff[2:])
+            diffOp.id = id
             diffOps.append(diffOp)
         elif diff[0] == "update-node":
             diffOp = DiffOp("update-node")
             diffOp.desNode = diff[2].strip()
             diffOp.update = diff[-1].split(" by ")[-1]
+            diffOp.id = id
             diffOps.append(diffOp)
         elif diff[0] == "move-node":
             diffOp2 = DiffOp("delete-node")
             diffOp2.source = parse_tree_from_text(diff[2:-3])
+            diffOp2.id = id
             diffOps.append(diffOp2)
             diffOp1 = DiffOp("insert-node")
             diffOp1.source = copy.deepcopy(diffOp2.source)
@@ -103,10 +111,12 @@ def diff_parser(diffs,match):
                 queue.extend(node.children)
             diffOp1.desNode = diff[-2].strip()
             diffOp1.desRank = int(diff[-1].split(" ")[-1])
+            diffOp1.id = id
             diffOps.append(diffOp1)
         elif diff[0] == "move-tree":
             diffOp2 = DiffOp("delete-tree")
             diffOp2.source = parse_tree_from_text(diff[2:-3])
+            diffOp2.id = id
             diffOps.append(diffOp2)
             diffOp1 = DiffOp("insert-tree")
             diffOp1.source = copy.deepcopy(diffOp2.source)
@@ -119,9 +129,11 @@ def diff_parser(diffs,match):
             diffOp1.desNode = diff[-2].strip()
             diffOp1.desRank = int(diff[-1].split(" ")[-1])
             diffOp1.move = True
+            diffOp1.id = id
             diffOps.append(diffOp1)
         else:
             exit(300)
+        id = id + 1
     while(1):
         diffOps,Break = fun(diffOps,match)
         if Break:

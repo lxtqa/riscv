@@ -283,8 +283,7 @@ void InstructionSelector::VisitLoad(Node* node) {
       
       
     case MachineRepresentation::kTagged:
-      immediate_mode = kLoadStoreImm32;
-opcode = kArm64LdrDecompressTagged;
+      opcode = kRiscv64LdrDecompressTagged;
       break;
 #else
     case MachineRepresentation::kTaggedSigned:   // Fall through.
@@ -292,8 +291,7 @@ opcode = kArm64LdrDecompressTagged;
     case MachineRepresentation::kTagged:         // Fall through.
 #endif
     case MachineRepresentation::kWord64:
-      immediate_mode = kLoadStoreImm64;
-opcode = kRiscvLd;
+      opcode = kRiscvLd;
       break;
     case MachineRepresentation::kSimd128:
       opcode = kRiscvRvvLd;
@@ -307,8 +305,7 @@ opcode = kRiscvLd;
                                                  // Fall through.
 #endif
     case MachineRepresentation::kSimd256:           // Fall through.
-    immediate_mode = kLoadStoreImm64;
-case MachineRepresentation::kSandboxedPointer:  // Fall through.
+    case MachineRepresentation::kSandboxedPointer:  // Fall through.
     case MachineRepresentation::kMapWord:           // Fall through.
     case MachineRepresentation::kNone:
       UNREACHABLE();
@@ -1941,10 +1938,10 @@ void InstructionSelector::VisitWord64AtomicLoad(Node* node) {
       opcode = kRiscv64LdDecompressTaggedSigned;
       break;
     case MachineRepresentation::kTaggedPointer:
-      opcode = kArm64LdarDecompressTagged;
+      opcode = kRiscv64LdarDecompressTagged;
       break;
     case MachineRepresentation::kTagged:
-      opcode = kArm64LdarDecompressTagged;
+      opcode = kRiscv64LdarDecompressTagged;
       break;
 #else
     case MachineRepresentation::kTaggedSigned:   // Fall through.

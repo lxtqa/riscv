@@ -561,7 +561,8 @@ void InstructionSelector::VisitLoad(Node* node) {
                                                  // Fall through.
 #endif
     case MachineRepresentation::kSandboxedPointer:
-    case MachineRepresentation::kSimd256:
+    
+case MachineRepresentation::kSimd256:
 
 case MachineRepresentation::kMapWord:  // Fall through.
     case MachineRepresentation::kNone:
@@ -643,7 +644,8 @@ void InstructionSelector::VisitStore(Node* node) {
         UNREACHABLE();
 #endif
       case MachineRepresentation::kSandboxedPointer:
-      case MachineRepresentation::kSimd256:
+      
+case MachineRepresentation::kSimd256:
 
 case MachineRepresentation::kMapWord:            // Fall through.
       case MachineRepresentation::kNone:
@@ -3064,10 +3066,10 @@ SIMD_VISIT_SPLAT(F64x2)
   void InstructionSelector::Visit##Type##ExtractLane##Sign(Node* node) { \
     VisitRRI(this, kRiscv##Type##ExtractLane##Sign, node);               \
   }
-SIMD_VISIT_EXTRACT_LANE(F64x2, )
-SIMD_VISIT_EXTRACT_LANE(F32x4, )
-SIMD_VISIT_EXTRACT_LANE(I32x4, )
-SIMD_VISIT_EXTRACT_LANE(I64x2, )
+SIMD_VISIT_EXTRACT_LANE(F64x2)
+SIMD_VISIT_EXTRACT_LANE(F32x4)
+SIMD_VISIT_EXTRACT_LANE(I32x4)
+SIMD_VISIT_EXTRACT_LANE(I64x2)
 SIMD_VISIT_EXTRACT_LANE(I16x8, U)
 SIMD_VISIT_EXTRACT_LANE(I16x8, S)
 SIMD_VISIT_EXTRACT_LANE(I8x16, U)

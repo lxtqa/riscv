@@ -10851,7 +10851,7 @@ TEST(fcvtn) {
   RUN();
 
   // Ensure top half is cleared.
-  CHECK_EQUAL_128(0, 0x3f800000'3f800000, q0);
+  CHECK_EQUAL_128(0, 0x3f8000003f800000, q0);
 }
 
 TEST(fcvtns) {

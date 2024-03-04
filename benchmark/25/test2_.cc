@@ -2764,7 +2764,8 @@ void Assembler::FixOnHeapReferencesToHandles() { UNIMPLEMENTED(); }
 
 void Assembler::GrowBuffer() {
   DEBUG_PRINTF("GrowBuffer: %p -> ", buffer_start_);
-  int previous_on_heap_gc_count = OnHeapGCCount();
+  
+int previous_on_heap_gc_count = OnHeapGCCount();
 // Compute new buffer size.
   int old_size = buffer_->size();
   int new_size = std::min(2 * old_size, old_size + 1 * MB);

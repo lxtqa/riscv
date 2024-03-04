@@ -14,6 +14,7 @@ class Operation:
         self.end = end
         self.content = content
         self.rank = 0
+        self.offset = 0
 
 def read_file(file_name):
     file = open(file_name,"r")
@@ -39,7 +40,22 @@ def replace(text,operations):
     for op in operations:
         text = text[:op.start+offset] + op.content + text[op.end+offset:]
         offset += len(op.content) - op.end + op.start
+
+
+    # for i in range(len(operations)):
+    #     op = operations[i]
+    #     text = text[:op.start+op.offset] + op.content + text[op.end+op.offset:]
+    #     for j in range(i+1,len(operations)):
+    #         if operations[j].start > op.start:
+    #             operations[j].offset += len(op.content) - op.end + op.start
     return text
+
+def arch_keyword_replace(string):
+    # 定义正则表达式模式
+    pattern = re.compile(r'(arm64|Arm64|ARM64)')
+    # 使用sub()函数进行替换，保留原始字符串的大小写格式
+    replaced = pattern.sub(lambda match: match.group().replace('arm', 'riscv').replace('Arm', 'Riscv').replace('ARM', 'RISCV'), string)
+    return replaced
 
 def map(diffOp,match_dic12,match_dic1_1,fileString):
     #截取产生修改部分的补丁代码
@@ -56,6 +72,7 @@ def map(diffOp,match_dic12,match_dic1_1,fileString):
             operations.append(Operation(start_end[0]-start,  start_end[1]-start,  new_name))
         queue.extend(node.children)
     replaced = replace(temp_string,operations)
+    replaced = arch_keyword_replace(replaced)
     return replaced
 
 
@@ -119,9 +136,6 @@ def simplify(cfile_name1,cfile_name1_,ast1,new_cfile_name1):
     #             flag = True
     #     if flag:
     #         tmp_string = tmp_string[:start] + file1String[start:end] + tmp_string[end:]
-    '''
-        TODO:以block_content/block/unit为平行结构的判断依据
-    '''
     queue = [ast1]
     while queue:
         node = queue.pop(0)
@@ -171,7 +185,7 @@ def gen_result(dir,cfile_name1,cfile_name2,
     cfile_name2_ = dir + "/" + cfile_name2_
     
     ast1 = get_ast(cfile_name1,rm_tempfile=rm_tempfile,use_docker=use_docker,debugging=debugging,TREE_GENERATOR_ID=TREE_GENERATOR_ID)
-    ast1_ = get_ast(cfile_name1_,rm_tempfile=rm_tempfile,use_docker=use_docker,debugging=debugging,TREE_GENERATOR_ID=TREE_GENERATOR_ID)
+    # ast1_ = get_ast(cfile_name1_,rm_tempfile=rm_tempfile,use_docker=use_docker,debugging=debugging,TREE_GENERATOR_ID=TREE_GENERATOR_ID)
 
     # ast2 = get_ast(cfile_name2,rm_tempfile=rm_tempfile,use_docker=use_docker,debugging=debugging,TREE_GENERATOR_ID=TREE_GENERATOR_ID)
     if not debugging:
@@ -211,7 +225,10 @@ def gen_result(dir,cfile_name1,cfile_name2,
     operations = []
     #先对diff操作进行parse
     diffOps = diff_parser(diffs11_,match_dic11_)
-    for diffOp in diffOps:
+    diffOp_i = 0
+    while diffOp_i < len(diffOps):
+        diffOp = diffOps[diffOp_i]
+        diffOp_i = diffOp_i + 1
         if diffOp.op == "insert-node" or diffOp.op == "insert-tree":
             #位置
             if diffOp.desNode in match_dic12:
@@ -261,7 +278,7 @@ def gen_result(dir,cfile_name1,cfile_name2,
                 for i in range(child_rank-1,-1,-1):
                     if des1.children[i].value != "VAL":
                         if des1.children[i].value in match_dic12:
-                            _,start = get_start_end(des1.children[i].value)
+                            _,start = get_start_end(match_dic12[des1.children[i].value])
                             break
             if start ==-1:
                 start = 0
@@ -282,10 +299,12 @@ def gen_result(dir,cfile_name1,cfile_name2,
             # else:
             #     content = map(diffOp,match_dic12,None,file1String)
             if diffOp.op == "insert-tree" or diffOp.source.value.split(":")[0]=="comment":
-                if diffOp.source.value.split(" ")[0] == "argument":
+                if diffOp.source.value.split(" ")[0] == "argument" or diffOp.source.value.split(" ")[0] == "parameter":
                     content =  ", " + content + ", "
-                elif diffOp.source.value.split(" ")[0] == "block" or diffOp.source.value.split(" ")[0] == "unit":
-                    content =  content + "\n"           
+                elif diffOp.desNode.split(" ")[0] == "block" or diffOp.desNode.split(" ")[0] == "unit" or diffOp.desNode.split(" ")[0] == "block_content":
+                    content =  "\n" + content + "\n"
+                else:
+                    content =  " " + content + " "
             
             # 删除单行注释
             content = re.sub(r'//.*$', '', content, flags=re.MULTILINE)
@@ -304,18 +323,26 @@ def gen_result(dir,cfile_name1,cfile_name2,
                 operation = Operation(start,end,"")
                 operation.rank = sys.maxsize
                 operations.append(operation)
+            else:
+                if diffOp_i < len(diffOps):
+                    if diffOps[diffOp_i].id == diffOp.id:
+                        diffOp_i = diffOp_i + 1
         elif diffOp.op == "update-node":
             if diffOp.desNode in match_dic12:
                 des = match_dic12[diffOp.desNode]
                 start,end = get_start_end(des)
-                operation = Operation(start,end,diffOp.update)
+                operation = Operation(start,end,arch_keyword_replace(diffOp.update))
                 operations.append(operation)
         else:
             exit(206)
     
     file2__string = replace(file2String,operations)
+    #删除所有两个连着的逗号
     file2__string = re.sub(r',(\s*,)+', ', ', file2__string)
+    #删除所有( ,形式的逗号
     file2__string = re.sub(r'\(\s*,', '(', file2__string)
+    #删除所有, )形式的逗号
+    file2__string = re.sub(r',\s*\)(?=\s*)', ')', file2__string)
     file2_.write(file2__string)
     file2_.close()
     os.system("diff -up {} {} > {}/new_patch.patch".format(cfile_name2,cfile_name2_,dir))

@@ -1140,20 +1140,24 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
   // -------------------------------------------------------------------------
   // StatsCounter support.
 
-  void IncrementCounter(StatsCounter* counter, int value, Register scratch1,
+  
+void IncrementCounter(StatsCounter* counter, int value, Register scratch1,
                         Register scratch2) {
     if (!FLAG_native_code_counters) return;
     EmitIncrementCounter(counter, value, scratch1, scratch2);
   }
+
   void EmitIncrementCounter(StatsCounter* counter, int value, Register scratch1,
                         Register scratch2);
 
   // -------------------------------------------------------------------------
-  void DecrementCounter(StatsCounter* counter, int value, Register scratch1,
+  
+void DecrementCounter(StatsCounter* counter, int value, Register scratch1,
                         Register scratch2) {
     if (!FLAG_native_code_counters) return;
     EmitIncrementCounter(counter, -value, scratch1, scratch2);
-  }// Stack limit utilities
+  }
+// Stack limit utilities
 
   enum StackLimitKind { kInterruptStackLimit, kRealStackLimit };
   void LoadStackLimit(Register destination, StackLimitKind kind);

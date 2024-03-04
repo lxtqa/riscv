@@ -52,9 +52,9 @@ using F4 = void*(int64_t x, int64_t y, int64_t p2, int64_t p3, int64_t p4);
 using F5 = void*(void* p0, void* p1, int p2, int p3, int p4);
 
 #define MIN_VAL_IMM12 -(1 << 11)
-#define LARGE_INT_EXCEED_32_BIT 0x01C9'1075'0321'FB01LL
-#define LARGE_INT_UNDER_32_BIT 0x1234'5678
-#define LARGE_UINT_EXCEED_32_BIT 0xFDCB'1234'A034'5691ULL
+#define LARGE_INT_EXCEED_32_BIT 0x01C910750321FB01LL
+#define LARGE_INT_UNDER_32_BIT 0x12345678
+#define LARGE_UINT_EXCEED_32_BIT 0xFDCB1234A0345691ULL
 
 #define __ assm.
 
@@ -353,9 +353,9 @@ UTEST_I_FORM_WITH_OP(sltiu, uint64_t, LARGE_UINT_EXCEED_32_BIT, 0x4FB, <)
 UTEST_I_FORM_WITH_OP(xori, int64_t, LARGE_INT_EXCEED_32_BIT, MIN_VAL_IMM12, ^)
 UTEST_I_FORM_WITH_OP(ori, int64_t, LARGE_INT_EXCEED_32_BIT, MIN_VAL_IMM12, |)
 UTEST_I_FORM_WITH_OP(andi, int64_t, LARGE_INT_EXCEED_32_BIT, MIN_VAL_IMM12, &)
-UTEST_I_FORM_WITH_OP(slli, int64_t, 0x1234'5678ULL, 33, <<)
-UTEST_I_FORM_WITH_OP(srli, int64_t, 0x8234'5678'0000'0000ULL, 33, >>)
-UTEST_I_FORM_WITH_OP(srai, int64_t, -0x1234'5678'0000'0000LL, 33, >>)
+UTEST_I_FORM_WITH_OP(slli, int64_t, 0x12345678ULL, 33, <<)
+UTEST_I_FORM_WITH_OP(srli, int64_t, 0x8234567800000000ULL, 33, >>)
+UTEST_I_FORM_WITH_OP(srai, int64_t, -0x1234567800000000LL, 33, >>)
 
 // -- arithmetic --
 UTEST_R2_FORM_WITH_OP(add, int64_t, LARGE_INT_EXCEED_32_BIT, MIN_VAL_IMM12, +)
@@ -367,7 +367,7 @@ UTEST_R2_FORM_WITH_OP(or_, int64_t, LARGE_INT_EXCEED_32_BIT, MIN_VAL_IMM12, |)
 UTEST_R2_FORM_WITH_OP(and_, int64_t, LARGE_INT_EXCEED_32_BIT, MIN_VAL_IMM12, &)
 UTEST_R2_FORM_WITH_OP(sll, int64_t, 0x12345678ULL, 33, <<)
 UTEST_R2_FORM_WITH_OP(srl, int64_t, 0x8234567800000000ULL, 33, >>)
-UTEST_R2_FORM_WITH_OP(sra, int64_t, -0x1234'5678'0000'0000LL, 33, >>)
+UTEST_R2_FORM_WITH_OP(sra, int64_t, -0x1234567800000000LL, 33, >>)
 
 // -- Memory fences --
 // void fence(uint8_t pred, uint8_t succ);
@@ -402,13 +402,13 @@ UTEST_R2_FORM_WITH_OP(sraw, int32_t, -123, 12, >>)
 // -- RV32M Standard Extension --
 UTEST_R2_FORM_WITH_OP(mul, int64_t, 0x0F945001L, MIN_VAL_IMM12, *)
 UTEST_R2_FORM_WITH_RES(mulh, int64_t, 0x1234567800000000LL,
-                       -0x1234'5617'0000'0000LL, 0x12345678LL * -0x1234'5617LL)
-UTEST_R2_FORM_WITH_RES(mulhu, int64_t, 0x1234'5678'0000'0000ULL,
-                       0xF896'7021'0000'0000ULL,
-                       0x1234'5678ULL * 0xF896'7021ULL)
-UTEST_R2_FORM_WITH_RES(mulhsu, int64_t, -0x1234'56780000'0000LL,
-                       0xF234'5678'0000'0000ULL,
-                       static_cast<int64_t>(-0x1234'5678LL * 0xF234'5678ULL))
+                       -0x1234561700000000LL, 0x12345678LL * -0x12345617LL)
+UTEST_R2_FORM_WITH_RES(mulhu, int64_t, 0x1234567800000000ULL,
+                       0xF896702100000000ULL,
+                       0x12345678ULL * 0xF8967021ULL)
+UTEST_R2_FORM_WITH_RES(mulhsu, int64_t, -0x1234567800000000LL,
+                       0xF234567800000000ULL,
+                       static_cast<int64_t>(-0x12345678LL * 0xF2345678ULL))
 UTEST_R2_FORM_WITH_OP(div, int64_t, LARGE_INT_EXCEED_32_BIT, MIN_VAL_IMM12, /)
 UTEST_R2_FORM_WITH_OP(divu, uint64_t, LARGE_UINT_EXCEED_32_BIT, 100, /)
 UTEST_R2_FORM_WITH_OP(rem, int64_t, LARGE_INT_EXCEED_32_BIT, MIN_VAL_IMM12, %)
@@ -540,8 +540,8 @@ UTEST_CONV_I_FROM_F(fcvt_wu_d, double, uint32_t, RTZ,
 // -- RV64F Standard Extension (in addition to RV32F) --
 UTEST_CONV_I_FROM_F(fcvt_l_s, float, int64_t, RDN, -100.5f, -101)
 UTEST_CONV_I_FROM_F(fcvt_lu_s, float, uint64_t, RTZ, 1000001.0f, 1000001)
-UTEST_CONV_F_FROM_I(fcvt_s_l, int64_t, float, (-0x1234'5678'0000'0001LL),
-                    (float)(-0x1234'5678'0000'0001LL))
+UTEST_CONV_F_FROM_I(fcvt_s_l, int64_t, float, (-0x1234567800000001LL),
+                    (float)(-0x1234567800000001LL))
 UTEST_CONV_F_FROM_I(fcvt_s_lu, uint64_t, float,
                     std::numeric_limits<uint64_t>::max(),
                     (float)(std::numeric_limits<uint64_t>::max()))
@@ -557,8 +557,8 @@ UTEST_R2_FORM_WITH_RES_F(fsgnjx_d, double, -100.0, 200.0, -100.0)
 // -- RV64D Standard Extension (in addition to RV32D) --
 UTEST_CONV_I_FROM_F(fcvt_l_d, double, int64_t, RNE, -100.5, -100)
 UTEST_CONV_I_FROM_F(fcvt_lu_d, double, uint64_t, RTZ, 2456.5, 2456)
-UTEST_CONV_F_FROM_I(fcvt_d_l, int64_t, double, (-0x1234'5678'0000'0001LL),
-                    (double)(-0x1234'5678'0000'0001LL))
+UTEST_CONV_F_FROM_I(fcvt_d_l, int64_t, double, (-0x1234567800000001LL),
+                    (double)(-0x1234567800000001LL))
 UTEST_CONV_F_FROM_I(fcvt_d_lu, uint64_t, double,
                     std::numeric_limits<uint64_t>::max(),
                     (double)(std::numeric_limits<uint64_t>::max()))
@@ -573,7 +573,7 @@ UTEST_R1_FORM_WITH_RES(not_, int64_t, int64_t, 0, ~0)
 UTEST_R1_FORM_WITH_RES(neg, int64_t, int64_t, 0x0f5600ab123400LL,
                        -(0x0f5600ab123400LL))
 UTEST_R1_FORM_WITH_RES(negw, int32_t, int32_t, 0xab123400, -(0xab123400))
-UTEST_R1_FORM_WITH_RES(sext_w, int32_t, int64_t, 0xFA01'1234,
+UTEST_R1_FORM_WITH_RES(sext_w, int32_t, int64_t, 0xFA011234,
                        static_cast<int64_t>(0xFFFFFFFFFA011234LL))
 UTEST_R1_FORM_WITH_RES(seqz, int64_t, int64_t, 20, 20 == 0)
 UTEST_R1_FORM_WITH_RES(snez, int64_t, int64_t, 20, 20 != 0)
@@ -1258,8 +1258,8 @@ TEST(RVC_CI) {
   // Test c.slli
   {
     auto fn = [](MacroAssembler& assm) { __ c_slli(a0, 13); };
-    auto res = GenAndRunTest<int64_t>(0x1234'5678ULL, fn);
-    CHECK_EQ(0x1234'5678ULL << 13, res);
+    auto res = GenAndRunTest<int64_t>(0x12345678ULL, fn);
+    CHECK_EQ(0x12345678ULL << 13, res);
   }
 }
 
@@ -1511,15 +1511,15 @@ TEST(RVC_CB) {
   // Test c.srai
   {
     auto fn = [](MacroAssembler& assm) { __ c_srai(a0, 13); };
-    auto res = GenAndRunTest<int64_t>(0x1234'5678ULL, fn);
-    CHECK_EQ(0x1234'5678ULL >> 13, res);
+    auto res = GenAndRunTest<int64_t>(0x12345678ULL, fn);
+    CHECK_EQ(0x12345678ULL >> 13, res);
   }
 
   // Test c.srli
   {
     auto fn = [](MacroAssembler& assm) { __ c_srli(a0, 13); };
-    auto res = GenAndRunTest<int64_t>(0x1234'5678ULL, fn);
-    CHECK_EQ(0x1234'5678ULL >> 13, res);
+    auto res = GenAndRunTest<int64_t>(0x12345678ULL, fn);
+    CHECK_EQ(0x12345678ULL >> 13, res);
   }
 
   // Test c.andi

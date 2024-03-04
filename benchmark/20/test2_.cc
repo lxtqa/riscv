@@ -330,8 +330,7 @@ void Builtins::Generate_ResumeGeneratorTrampoline(MacroAssembler* masm) {
   // Store input value into generator object.
   __ Sd(a0, FieldMemOperand(a1, JSGeneratorObject::kInputOrDebugPosOffset));
   __ RecordWriteField(a1, JSGeneratorObject::kInputOrDebugPosOffset, a0, a3,
-                      kRAHasNotBeenSaved, SaveFPRegsMode::kIgnore
-);
+                      kRAHasNotBeenSaved,  SaveFPRegsMode::kIgnore );
 
   // Load suspended function and context.
   __ Ld(a4, FieldMemOperand(a1, JSGeneratorObject::kFunctionOffset));
@@ -2753,8 +2752,7 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
                       ? no_reg
                       // s3: still holds argc (callee-saved).
                       : s3;
-  __ LeaveExitFrame(save_doubles == SaveFPRegsMode::kSave
-, argc, EMIT_RETURN);
+  __ LeaveExitFrame(save_doubles ==  SaveFPRegsMode::kSave , argc, EMIT_RETURN);
 
   // Handling of exception.
   __ bind(&exception_returned);
