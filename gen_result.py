@@ -1,7 +1,7 @@
 import os
 from get_ast import get_ast, TreeNode
 from gumtree_parser import gumtree_parser
-from AstDiffParser import diff_parser,bfs_search
+from AstDiffParser import diff_parser,bfs_search,bfs_search_father
 from DiffParser import diff2rank
 from time import time
 import sys
@@ -31,6 +31,9 @@ def get_name(string):
         return string.split(" ")[1]
     else:
         return None
+
+def get_type(string):
+    return string.split(" ")[0]
 
 def replace(text,operations):
     #排序
@@ -158,14 +161,10 @@ def simplify(cfile_name1,cfile_name1_,ast1,new_cfile_name1):
     f.write(file1String)
     f.close()
 
-
-        
-
 def gen_result(dir,cfile_name1,cfile_name2,
                cfile_name1_,cfile_name2_,
                rm_tempfile,
                use_docker,
-               simple,
                debugging,
                MATCHER_ID,
                TREE_GENERATOR_ID
@@ -236,7 +235,7 @@ def gen_result(dir,cfile_name1,cfile_name2,
             else:
                 continue
             #在ast1,2中找到pos,根据其child找到位置
-            des1 = bfs_search(ast1,diffOp.desNode)
+            desNode = bfs_search(ast1,diffOp.desNode)
             # des2 = bfs_search(ast2,des)
 
             # 找到插入节点的后一个节点，进行映射，如果能映射到，则插入到后一个节点的前面
@@ -244,45 +243,22 @@ def gen_result(dir,cfile_name1,cfile_name2,
             # 全都找不到，就放在最前面
             child_rank = diffOp.desRank
             child_rank2 = -1
-            # last_node = None
-            # next_node = None
             start = -1
-            # for i in range(child_rank,len(des1.children)):
-            #     if des1.children[i].value != "VAL":
-            #         if des1.children[i].value in match_dic12:
-            #             next_node = match_dic12[des1.children[i].value]
-            #             for j in range(len(des2.children)):
-            #                 if des2.children[j].value == next_node:
-            #                     child_rank2 = j
-            #                     start,_ = get_start_end(des2.children[j].value)
-            #                     break
-            #             break
-            # if start == -1:
-            #     for i in range(child_rank-1,-1,-1):
-            #         if des1.children[i].value != "VAL":
-            #             if des1.children[i].value in match_dic12:
-            #                 last_node = match_dic12[des1.children[i].value]
-            #                 for j in range(len(des2.children)):
-            #                     if des2.children[j].value == last_node:
-            #                         child_rank2 = j + 1
-            #                         _,start = get_start_end(des2.children[j].value)
-            #                         break
-            #                 break
 
-            for i in range(child_rank,len(des1.children)):
-                if des1.children[i].value != "VAL":
-                    if des1.children[i].value in match_dic12:
-                        start,_ = get_start_end(match_dic12[des1.children[i].value])
+            for i in range(child_rank,len(desNode.children)):
+                if desNode.children[i].value != "VAL":
+                    if desNode.children[i].value in match_dic12:
+                        start,_ = get_start_end(match_dic12[desNode.children[i].value])
                         break
             if start == -1:
                 for i in range(child_rank-1,-1,-1):
-                    if des1.children[i].value != "VAL":
-                        if des1.children[i].value in match_dic12:
-                            _,start = get_start_end(match_dic12[des1.children[i].value])
+                    if desNode.children[i].value != "VAL":
+                        if desNode.children[i].value in match_dic12:
+                            _,start = get_start_end(match_dic12[desNode.children[i].value])
                             break
             if start ==-1:
                 start = 0
-            des1.children.insert(child_rank,TreeNode("VAL"));
+            desNode.children.insert(child_rank,TreeNode("VAL"));
     
             #使用映射解决问题
             # queue = [diffOp.source]
@@ -299,9 +275,13 @@ def gen_result(dir,cfile_name1,cfile_name2,
             # else:
             #     content = map(diffOp,match_dic12,None,file1String)
             if diffOp.op == "insert-tree" or diffOp.source.value.split(":")[0]=="comment":
-                if diffOp.source.value.split(" ")[0] == "argument" or diffOp.source.value.split(" ")[0] == "parameter":
-                    content =  ", " + content + ", "
-                elif diffOp.desNode.split(" ")[0] == "block" or diffOp.desNode.split(" ")[0] == "unit" or diffOp.desNode.split(" ")[0] == "block_content":
+                if get_type(diffOp.source.value) == "argument" or get_type(diffOp.source.value) == "parameter":
+                    if diffOp.desRank == len(diffOp.source.children):
+                        content =  ", " + content
+                    else :
+                        content =  content + ", "
+                    
+                elif get_type(diffOp.desNode)== "block" or get_type(diffOp.desNode) == "unit" or get_type(diffOp.desNode) == "block_content":
                     content =  "\n" + content + "\n"
                 else:
                     content =  " " + content + " "
@@ -310,19 +290,31 @@ def gen_result(dir,cfile_name1,cfile_name2,
             content = re.sub(r'//.*$', '', content, flags=re.MULTILINE)
             # 删除多行注释
             content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
-            # 删除空行
-            content = re.sub(r'\n\s*\n',r'\n',content)
+
             operation = Operation(start,start,content)
             operation.rank = child_rank2
             operations.append(operation)
         elif diffOp.op == "delete-node" or diffOp.op == "delete-tree":
             if diffOp.source.value in match_dic12:
                 #删除结点
+                desNode = bfs_search_father(ast1,diffOp.source.value)
+                
                 des = match_dic12[diffOp.source.value]
                 start,end = get_start_end(des)
+                if get_type(des) == "argument" or get_type(des) == "parameter":
+                    if diffOp.desRank == len(desNode.children):
+                        #向前找到逗号删除
+                        _,start = get_start_end(match_dic12[desNode.children[diffOp.desRank-1].value])
+                        pass
+                    else:
+                        #向后找到逗号删除
+                        end,_ = get_start_end(match_dic12[desNode.children[diffOp.desRank+1].value])
+                        pass
                 operation = Operation(start,end,"")
                 operation.rank = sys.maxsize
                 operations.append(operation)
+                # 在ast中删除节点
+                desNode.children.pop(diffOp.desRank)
             else:
                 if diffOp_i < len(diffOps):
                     if diffOps[diffOp_i].id == diffOp.id:
@@ -335,14 +327,13 @@ def gen_result(dir,cfile_name1,cfile_name2,
                 operations.append(operation)
         else:
             exit(206)
-    
     file2__string = replace(file2String,operations)
     #删除所有两个连着的逗号
     file2__string = re.sub(r',(\s*,)+', ', ', file2__string)
     #删除所有( ,形式的逗号
-    file2__string = re.sub(r'\(\s*,', '(', file2__string)
+    # file2__string = re.sub(r'\(\s*,', '(', file2__string)
     #删除所有, )形式的逗号
-    file2__string = re.sub(r',\s*\)(?=\s*)', ')', file2__string)
+    # file2__string = re.sub(r',\s*\)(?=\s*)', ')', file2__string)
     file2_.write(file2__string)
     file2_.close()
     os.system("diff -up {} {} > {}/new_patch.patch".format(cfile_name2,cfile_name2_,dir))

@@ -966,7 +966,9 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   bool MustUseReg(RelocInfo::Mode rmode);
 
   // Record reloc info for current pc_.
-  void RecordRelocInfo(RelocInfo::Mode rmode, intptr_t data = 0);
+  
+void LoopHeaderAlign() { CodeTargetAlign(); }
+void RecordRelocInfo(RelocInfo::Mode rmode, intptr_t data = 0);
 
   // Block the emission of the trampoline pool before pc_offset.
   void BlockTrampolinePoolBefore(int pc_offset) {
@@ -1063,9 +1065,7 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   // Code emission.
   inline void CheckBuffer();
   void GrowBuffer();
-  
-void LoopHeaderAlign() { CodeTargetAlign(); }
-inline void emit(Instr x);
+  inline void emit(Instr x);
   inline void emit(ShortInstr x);
   inline void emit(uint64_t x);
   template <typename T>
@@ -1260,12 +1260,12 @@ inline void emit(Instr x);
   friend class RegExpMacroAssemblerRISCV;
   friend class RelocInfo;
   friend class BlockTrampolinePoolScope;
-  
+  friend 
+   
 class EnsureSpace;
 
 friend
-friend 
-   class ConstantPool;
+class ConstantPool;
 };
 
 class EnsureSpace {

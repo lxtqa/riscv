@@ -1,7 +1,5 @@
 import os
-import sys
 import re
-import shutil
 from get_cfile import get_cfile
 from gen_result import gen_result
 
@@ -27,10 +25,10 @@ def successfully_generate(hash,file1,file2,num):
     dst_file2 = "./benchmark/"+str(num)+"/test2.cc"
     dst_file1_ = "./benchmark/"+str(num)+"/test1_.cc"
     dst_file2_ = "./benchmark/"+str(num)+"/test2__.cc" # 与下面gen_result的结果不同，输出原始结果
-    get_cfile(hash,src_file1=file1,dst_file1=dst_file1,
-              src_file2=file2,dst_file2=dst_file2,
-              dst_file1_=dst_file1_,
-              dst_file2_=dst_file2_)
+    # get_cfile(hash,src_file1=file1,dst_file1=dst_file1,
+    #           src_file2=file2,dst_file2=dst_file2,
+    #           dst_file1_=dst_file1_,
+    #           dst_file2_=dst_file2_)
     modify_hex(dst_file1)
     modify_hex(dst_file1_)
     modify_hex(dst_file2)
@@ -39,7 +37,6 @@ def successfully_generate(hash,file1,file2,num):
     os.system("diff -up {} {} > ./benchmark/{}/2_patch.patch".format(dst_file2,dst_file2_,num))
     rm_tempfile = False
     use_docker = False
-    simple = False
     debugging = False
     try:
         gen_result(
@@ -50,9 +47,8 @@ def successfully_generate(hash,file1,file2,num):
                     cfile_name2_="test2_.cc",
                     rm_tempfile=rm_tempfile,
                     use_docker=use_docker,
-                    simple=simple,
                     debugging=debugging,
-                    MATCHER_ID="gumtree-hybrid",
+                    MATCHER_ID="gumtree-simple-id",#"gumtree-hybrid",
                     TREE_GENERATOR_ID="cs-srcml"
                     )
     except:
@@ -102,9 +98,9 @@ def main():
                 
                 if arm64_file != None and riscv64_file != None:
                     num = num + 1
-                    if num > 80:
+                    if num > 55:
                         successfully_generate(commit.hash,arm64_file,riscv64_file,num)
-                    if num == 81:
+                    if num == 56:
                         return
                     break
         

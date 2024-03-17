@@ -1267,12 +1267,12 @@ void Align(int m);
   friend class RegExpMacroAssemblerRISCV;
   friend class RelocInfo;
   friend class BlockTrampolinePoolScope;
-  
+  friend 
+   
 class EnsureSpace;
 
 friend
-friend 
-   class ConstantPool;
+class ConstantPool;
 };
 
 class EnsureSpace {
