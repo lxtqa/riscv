@@ -1,12 +1,12 @@
 
-def gumtree_parser(txtfile_name):
+def gumtree_parser(txtfile):
     '''
-    对gumtree txtdiff生成的txt文件进行parse,获取match关系到一个list中，获取diff关系到另一个list
+    对gumtree txtdiff生成的txt文件进行parse,获取match关系到一个list中, 获取diff关系到另一个list
     返回这两个list
     '''
-    txtfile = open(txtfile_name,"r")
-    content=txtfile.readlines()
-    txtfile.close()
+    content=txtfile.split("\n")
+    if content[-1] == "":
+        content = content[:-1]
     line_rank = 0
     matches = []
     diffs = []
@@ -35,4 +35,4 @@ def gumtree_parser(txtfile_name):
 
 
 if __name__ == "__main__":
-    gumtree_parser("gumtree.txt")
+    pass

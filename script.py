@@ -13,7 +13,6 @@ def script():
     # 添加可选项输出文件目录和其他选项
     parser.add_argument('-D', '--debugging', action='store_true', help='启用调试模式')
     parser.add_argument('-s', '--simple', action='store_true', help='使用简单模式')
-    parser.add_argument('-r', '--rm_tempfile', action='store_true', help='删除临时文件')
     parser.add_argument('-d', '--use_docker', action='store_true', help='使用Docker')
     parser.add_argument('-o', '--output_directory', type=str, help='指定输出文件目录')
     parser.add_argument('-m', '--matcher_id', type=str, default='gumtree', help='指定MATCHER_ID，默认为gumtree')

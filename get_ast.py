@@ -1,5 +1,43 @@
-import os
 import re
+import subprocess
+
+
+def get_start_end(string):
+    try:
+        [start,end] = string.split(" ")[-1][1:-1].split(",")
+        return int(start), int(end)
+    except:
+        try:
+            string = string.value
+            [start,end] = string.split(" ")[-1][1:-1].split(",")
+            return int(start), int(end)
+        except:
+            pass
+
+def get_name(string):
+    try:
+        if len(string.split(" ")) == 3:
+            return string.split(" ")[1]
+        else:
+            return None
+    except:
+        try:
+            string = string.value
+            if len(string.split(" ")) == 3:
+                return string.split(" ")[1]
+            else:
+                return None
+        except:
+            pass
+
+def get_type(string):
+    try:
+        return string.split(" ")[0]
+    except:
+        try:
+            return string.value.split(" ")[0]
+        except:
+            pass
 
 def count_starting_spaces(s):
     return len(s) - len(s.lstrip())
@@ -44,7 +82,7 @@ def merge_lines(lines):
     tmp_line = ""
     while i < len(lines):
         line = lines[i]
-        pattern = re.compile(r'.+\[\d+,\d+\]\n$')
+        pattern = re.compile(r'.+\[\d+,\d+\]$')
         # 进行匹配
         tmp_line = tmp_line + line
         if pattern.match(line):
@@ -54,25 +92,15 @@ def merge_lines(lines):
     return merged
 
 
-def get_ast(cpp_file_name,rm_tempfile,use_docker,debugging,TREE_GENERATOR_ID):
-    ast_file_name = cpp_file_name.replace("test","ast")
-    if not os.path.exists("./ast"):
-        os.mkdir("./ast")
+def get_ast(cpp_file_name,use_docker,debugging,TREE_GENERATOR_ID):
     if not debugging:
         if use_docker:
-            os.system("docker run -v {}:/left.cc gumtreediff/gumtree parse /left.cc -g {} > {}".format(cpp_file_name,TREE_GENERATOR_ID,ast_file_name))
+            output = subprocess.run(["docker","run","-v",cpp_file_name+":/left.cc","gumtreediff/gumtree","parse","/left.cc","-g",TREE_GENERATOR_ID],capture_output=True,text = True)
         else:
-            os.system("./gumtree/gumtree parse {} -g {} > {}".format(cpp_file_name,TREE_GENERATOR_ID,ast_file_name))
-    ast_file = open(ast_file_name,"r");
-    tree_text = ast_file.readlines()
-
+            output = subprocess.run(["./gumtree/gumtree","parse",cpp_file_name,"-g",TREE_GENERATOR_ID],capture_output=True,text = True)
+    tree_text = output.stdout.split("\n")
     root = parse_tree_from_text(merge_lines(tree_text))
-    if rm_tempfile:
-        os.remove(ast_file_name)
-    return root
+    return root,len(tree_text)
 
 if __name__ == "__main__":
-    cpp_file_name = "./test1.cpp"
-    rm_tempfile = False
-    root = get_ast(cpp_file_name,rm_tempfile=rm_tempfile)
-    print_tree(root)
+    pass

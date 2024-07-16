@@ -1,7 +1,7 @@
 import os
 import re
 from get_cfile import get_cfile
-from gen_result import gen_result
+from unit_result import unit_result
 
 class Commit:
     def __init__(self,hash):
@@ -9,14 +9,20 @@ class Commit:
         self.content = []
 
 
-def modify_hex(file_path):
-    with open(file_path, 'r') as file:
-        cpp_code = file.read()
-        pattern = r'0x[0-9a-fA-F]+(\'[0-9a-fA-F]+)*'
-        replacer = lambda match: match.group().replace("'", '')
-        processed_code = re.sub(pattern, replacer, cpp_code)
-    with open(file_path, 'w') as file:
-        file.write(processed_code)
+def modify_hex(file_path,reverse = False):
+    
+    if not reverse:
+        with open(file_path, 'r') as file:
+            cpp_code = file.read()
+            pattern = r'0x[0-9a-fA-F]+(\'[0-9a-fA-F]+)*'
+            replacer = lambda match: match.group().replace("'", '')
+            processed_code = re.sub(pattern, replacer, cpp_code)
+        with open(file_path, 'w') as file:
+            file.write(processed_code)
+    else:
+        #TODO:reverse back
+        pass
+
 
 def successfully_generate(hash,file1,file2,num):
     if not os.path.exists("./benchmark/"+str(num)):
@@ -29,30 +35,34 @@ def successfully_generate(hash,file1,file2,num):
     #           src_file2=file2,dst_file2=dst_file2,
     #           dst_file1_=dst_file1_,
     #           dst_file2_=dst_file2_)
+    os.system("diff -up {} {} > ./benchmark/{}/1_patch.patch".format(dst_file1,dst_file1_,num))
+    os.system("diff -up {} {} > ./benchmark/{}/2_patch.patch".format(dst_file2,dst_file2_,num))
     modify_hex(dst_file1)
     modify_hex(dst_file1_)
     modify_hex(dst_file2)
     modify_hex(dst_file2_)
-    os.system("diff -up {} {} > ./benchmark/{}/1_patch.patch".format(dst_file1,dst_file1_,num))
-    os.system("diff -up {} {} > ./benchmark/{}/2_patch.patch".format(dst_file2,dst_file2_,num))
+    
     rm_tempfile = False
     use_docker = False
     debugging = False
     try:
-        gen_result(
-                    dir="./benchmark/"+str(num),
-                    cfile_name1="test1.cc",
-                    cfile_name2="test2.cc",
-                    cfile_name1_="test1_.cc",
-                    cfile_name2_="test2_.cc",
-                    rm_tempfile=rm_tempfile,
-                    use_docker=use_docker,
-                    debugging=debugging,
-                    MATCHER_ID="gumtree-simple-id",#"gumtree-hybrid",
-                    TREE_GENERATOR_ID="cs-srcml"
-                    )
+        unit_result(
+                dir="./benchmark/"+str(num),
+                cfile_name1="test1.cc",
+                cfile_name2="test2.cc",
+                cfile_name1_="test1_.cc",
+                cfile_name2_="test2_.cc",
+                rm_tempfile=rm_tempfile,
+                use_docker=use_docker,
+                debugging=debugging,
+                MATCHER_ID="gumtree-simple-id",#"gumtree-hybrid",
+                TREE_GENERATOR_ID="cpp-srcml"#"cs-srcml"
+                )
+        print("成功生成!")
+        os.system("diff -up {} {} > {}/new_patch.patch".format("./benchmark/"+str(num) + "/" + "test2.cc","./benchmark/"+str(num) + "/" + "test2_.cc","./benchmark/"+str(num)))
     except:
-        pass
+        print("生成失败")
+        
     
 def main():
     num = 0
@@ -98,11 +108,14 @@ def main():
                 
                 if arm64_file != None and riscv64_file != None:
                     num = num + 1
-                    if num > 55:
+                    if num > 54:
+                        print("---------------{}--------------".format(num))
                         successfully_generate(commit.hash,arm64_file,riscv64_file,num)
-                    if num == 56:
+                        print("---------------{}--------------".format(num))
+                    if num == 55:
                         return
                     break
+                    
         
 if __name__ == "__main__":
     main()

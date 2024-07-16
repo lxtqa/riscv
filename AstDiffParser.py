@@ -1,12 +1,12 @@
 from get_ast import parse_tree_from_text
 import copy
+from get_ast import get_type
 
 class DiffOp:
     def __init__(self,op):
         self.op = op
         self.source = None
         self.desNode = ""
-        self.update = ""
         self.desRank = 0
         self.move = False
         self.id = -1
@@ -43,18 +43,25 @@ def fun(diffOps,match):
                     ## 没有处理在insert中delete的情况
                     node =  bfs_search(diffOps[j].source,diffOps[i].desNode)
                     if node == None:
-                        node = bfs_search(diffOps[j].source,match[diffOps[i].desNode])
+                        if diffOps[i].desNode in match and diffOps[j].move == True:
+                            node = bfs_search(diffOps[j].source,match[diffOps[i].desNode])
                     if node != None:
                         if diffOps[i].op == "insert-tree" or diffOps[i].op == "insert-node":
                             diffOps[j].op = "insert-tree";
                             node.children.insert(diffOps[i].desRank,diffOps[i].source)
-                        elif diffOps[i].op == "update-tree" or diffOps[i].op == "update-node":
-                            if diffOps[i].desNode in match:
-                                node.value = match[diffOps[i].desNode]
-                        elif diffOps[i].op == "delete-tree" or diffOps[i].op == "delete-node":
-                            exit(210)
                         diffOps.pop(i)
                         return diffOps,False
+                    else:
+                        if diffOps[i].desNode in match:
+                            node = bfs_search(diffOps[j].source,match[diffOps[i].desNode])
+                            if node != None:
+                                if diffOps[i].op == "update-tree" or diffOps[i].op == "update-node":
+                                    diffOps.pop(i)
+                                    return diffOps,False
+                        # elif diffOps[i].op == "delete-tree" or diffOps[i].op == "delete-node":
+                        #     exit(210)
+                        # diffOps.pop(i)
+                        # return diffOps,False
                     # if diffOps[i].desNode in match:
                     #     node = bfs_search(diffOps[j].source,match[diffOps[i].desNode])
                     #     if node != None:
@@ -83,6 +90,8 @@ def diff_parser(diffs,match):
         if diff[0] == "insert-node" :
             diffOp = DiffOp("insert-node")
             diffOp.source = parse_tree_from_text(diff[2:-3])
+            if get_type(diffOp.source) == "comment:":
+                continue
             diffOp.desNode = diff[-2].strip()
             diffOp.desRank = int(diff[-1].split(" ")[-1])
             diffOp.id = id
@@ -90,6 +99,8 @@ def diff_parser(diffs,match):
         elif diff[0] == "insert-tree":
             diffOp = DiffOp("insert-tree")
             diffOp.source = parse_tree_from_text(diff[2:-3])
+            if get_type(diffOp.source) == "comment:":
+                continue
             diffOp.desNode = diff[-2].strip()
             diffOp.desRank = int(diff[-1].split(" ")[-1])
             diffOp.id = id
@@ -97,22 +108,30 @@ def diff_parser(diffs,match):
         elif diff[0] == "delete-node":
             diffOp = DiffOp("delete-node")
             diffOp.source = parse_tree_from_text(diff[2:])
+            if get_type(diffOp.source) == "comment:":
+                continue
             diffOp.id = id
             diffOps.append(diffOp)
         elif diff[0] == "delete-tree":
             diffOp = DiffOp("delete-tree")
             diffOp.source = parse_tree_from_text(diff[2:])
+            if get_type(diffOp.source) == "comment:":
+                continue
             diffOp.id = id
             diffOps.append(diffOp)
         elif diff[0] == "update-node":
             diffOp = DiffOp("update-node")
             diffOp.desNode = diff[2].strip()
-            diffOp.update = diff[-1].split(" by ")[-1]
+            diffOp.source= diff[-1].split(" by ")[-1]
+            if get_type(diffOp.source) == "comment:":
+                continue
             diffOp.id = id
             diffOps.append(diffOp)
         elif diff[0] == "move-node":
             diffOp2 = DiffOp("delete-node")
             diffOp2.source = parse_tree_from_text(diff[2:-3])
+            if get_type(diffOp2.source.value) == "comment:":
+                continue
             diffOp2.id = id
             diffOps.append(diffOp2)
             diffOp1 = DiffOp("insert-node")
@@ -131,6 +150,8 @@ def diff_parser(diffs,match):
             # move应该是1的move操作 映射到2的move操作
             diffOp2 = DiffOp("delete-tree")
             diffOp2.source = parse_tree_from_text(diff[2:-3])
+            if get_type(diffOp2.source.value) == "comment:":
+                continue
             diffOp2.id = id
             diffOps.append(diffOp2)
             diffOp1 = DiffOp("insert-tree")

@@ -1,1 +1,1 @@
-docker run -v ./test/test1.cc:/left.cc -v ./test/test1_.cc:/right.cc -p 4567:4567 gumtreediff/gumtree webdiff /left.cc /right.cc -m gumtree-simple-id
+docker run -v ./test/test1.cc:/left.cc -v ./test/test2.cc:/right.cc -p 4567:4567 gumtreediff/gumtree webdiff /left.cc /right.cc -m gumtree-simple-id

@@ -159,6 +159,10 @@ Docker使用教程：https://github.com/GumTreeDiff/gumtree/tree/main/docker
 
 下载镜像：`docker pull gumtreediff/gumtree`
 
+gumtree参数：https://github.com/GumTreeDiff/gumtree/blob/089b3d5aaddb1c31385862440e889f4b90776b85/core/src/main/java/com/github/gumtreediff/matchers/ConfigurationOptions.java#L58
+
+tree-sitter加入系统路径`export PATH="/Users/yuhaonan/Desktop/cpps/tree-sitter-parser:$PATH"`
+
 ### tree-sitter
 
 https://blog.csdn.net/qq_38808667/article/details/128052617?spm=1001.2101.3001.6650.6&utm_medium=distribute.pc_relevant.none-task-blog-2%7Edefault%7EBlogCommendFromBaidu%7ERate-6-128052617-blog-128006684.235%5Ev38%5Epc_relevant_sort&depth_1-utm_source=distribute.pc_relevant.none-task-blog-2%7Edefault%7EBlogCommendFromBaidu%7ERate-6-128052617-blog-128006684.235%5Ev38%5Epc_relevant_sort&utm_relevant_index=12
