@@ -2,6 +2,7 @@ import os
 import re
 import codecs
 from tqdm import *
+import subprocess
 def riscv():
     log_file = codecs.open("../GitLog-origin.txt","r",errors="ignore")
     log_lines = log_file.readlines()
@@ -16,18 +17,14 @@ def riscv():
             total_commit_num += 1
             hash = line_info[1]
             hash = hash.split("\n")[0]
-            os.system("git show " + hash +" > ../InfoFile-origin.txt")
-            info_file = codecs.open("../InfoFile-origin.txt","r",encoding='utf-8',errors="ignore")
-            info_lines = info_file.readlines()
+            result = subprocess.run(["git","show",hash],cwd="./v8",stdout=subprocess.PIPE)
+            info_lines = result.stdout.decode('utf-8', errors='ignore').split("\n")
             ## file name and path
             for info_line in info_lines:
                 if re.match(res,info_line):
                 #if "risc" in info_line or "Risc" in info_line or "RISC" in info_line:
                     hash_file.write(hash+'\n')
                     break
-            ## 
-            info_file.close()
-            os.system("rm ../InfoFile-origin.txt")
 
 
 def date():

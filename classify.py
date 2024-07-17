@@ -3,13 +3,7 @@ import re
 import os
 import shutil
 import codecs
-
-
-res1 = r"^\s[/a-zA-Z0-9_.\-]+\.(.+)\s+\|\s+[0-9]+\s+[+-]+\n$"
-
-res2 = r"[/a-zA-Z0-9_\-]+\.[a-zA-Z0-9]+"
-
-res3 = r".*(mips|risc|ppc|ia32|s390|x86|arm|x64|loong).*"
+from arc_utils import has_arcwords
 
 def matchdir(dir1,dir2):
     dir1 = re.split('[\n\-./_]',dir1)
@@ -21,8 +15,8 @@ def matchdir(dir1,dir2):
     if len(dir1) != len(dir2):
         return False
     for i in range(len(dir1)):
-        matched1 = re.match(res3,dir1[i])
-        matched2 = re.match(res3,dir2[i])
+        matched1 = has_arcwords(dir1[i])
+        matched2 = has_arcwords(dir2[i])
         if (matched1 != None and  matched2 == None) or (matched1 == None and  matched2 != None):
             continue
         else:
@@ -45,10 +39,9 @@ def main(patch_path):
         try:
             patch = patchfile.readlines()
             for line in patch:
-                matched = re.match(res1,line)
-                if matched != None:
-                    filename = re.findall(res2,line)[0]
-                    if re.match(res3,filename):
+                if re.match(r"^\s[/a-zA-Z0-9_.\-]+\.(.+)\s+\|\s+[0-9]+\s+[+-]+\n$",line):
+                    filename = re.findall(r"[/a-zA-Z0-9_\-]+\.[a-zA-Z0-9]+",line)[0]
+                    if has_arcwords(filename):
                         filename_list.append(filename)
             if len(filename_list) != 0:
                 flag = False

@@ -2,27 +2,19 @@ from gen_result import read_file,write_file,gen_result
 import re
 from extract_unit import extract_unit
 import subprocess
+from arc_utils import remove_arcwords
 
 def remove_whitespace(input_string):
     return re.sub(r'\s+', '', input_string)
-
-def remove_arcwords(text):
-    for keyword in ["arm64","Arm64","ARM64","arm32","Arm32","ARM32","arm","Arm","ARM", \
-                    "x64","X64", \
-                    "riscv64","Riscv64","RISCV64","riscv32","Riscv32","RISCV32","riscv","Riscv","RISCV",\
-                    "s390","S390",\
-                    "ia32","Ia32","IA32",\
-                    "ppc64","Ppc64","PPC64","ppc32","Ppc32","PPC32","ppc","Ppc","PPC",\
-                    "mips64","Mips64","MIPS64","mips32","Mips32","MIPS32","mips","Mips","MIPS",\
-                    "loong64","Loong64","LOONG64","loong32","Loong32","LOONG32","loong","Loong","LOONG"]:
-        text = text.replace(keyword, '')
-    return text
 
 def read_patch(output):
     r = r"^@@ -[0-9]+,[0-9]+ \+[0-9]+,[0-9]+ @@ .*$"
     R = r"^@@ -[0-9]+,[0-9]+ \+[0-9]+,[0-9]+ @@ (.*)$"
     changed_hunk_header = []
-    output = output.split("\n")
+    try:
+        output = output.split("\n")
+    except:
+        pass
     for line in output:
         if re.match(r,line):
             changed_hunk_header.append(re.findall(R,line)[0])
