@@ -60,10 +60,10 @@ def successfully_generate(hash,file1,file2,num):
                 MATCHER_ID="gumtree-simple-id",#"gumtree-hybrid",
                 TREE_GENERATOR_ID="cpp-srcml"#"cs-srcml"
                 )
-        print("成功生成!")
+        print("RUN SUCCESSFULLY!")
         os.system("diff -up {} {} > {}/new_patch.patch".format("./benchmark/"+str(num) + "/" + "test2.cc","./benchmark/"+str(num) + "/" + "test2_.cc","./benchmark/"+str(num)))
     except:
-        print("生成失败")
+        print("FAILED")
         
     
 def main():

@@ -23,9 +23,16 @@ def read_file(file_name):
     return file_string
 
 def write_file(file_name,content):
+    directory = os.path.dirname(file_name)
+
+    # 如果目录不存在，则创建它
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+
     file = open(file_name,"w")
     file.write(content)
     file.close()
+
 
 
 def replace(text,operations):
@@ -157,16 +164,16 @@ def gen_result(dir,cfile_name1,cfile_name2,
             
             
         else:
-            # output11_ = subprocess.run(["./gumtree/gumtree","textdiff",cfile_name1, cfile_name1_,
+            # output11_ = subprocess.run(["gumtree","textdiff",cfile_name1, cfile_name1_,
             #                             "-m",MATCHER_ID,"-g", TREE_GENERATOR_ID,"-M","bu_minsim","0.5"],
             #                            capture_output=True,text = True)
-            # output12 = subprocess.run(["./gumtree/gumtree","textdiff",cfile_name1, cfile_name2,
+            # output12 = subprocess.run(["gumtree","textdiff",cfile_name1, cfile_name2,
             #                            "-m",MATCHER_ID,"-g", TREE_GENERATOR_ID,"-M","bu_minsim","0.5"],
             #                           capture_output=True,text = True)
-            output11_ = subprocess.run(["./gumtree/gumtree","textdiff",cfile_name1, cfile_name1_,
+            output11_ = subprocess.run(["gumtree","textdiff",cfile_name1, cfile_name1_,
                                         "-m",MATCHER_ID,"-g", TREE_GENERATOR_ID],#,"-M","bu_minsim","0.5"],
                                        capture_output=True,text = True)
-            output12 = subprocess.run(["./gumtree/gumtree","textdiff",cfile_name1, cfile_name2,
+            output12 = subprocess.run(["gumtree","textdiff",cfile_name1, cfile_name2,
                                        "-m",MATCHER_ID,"-g", TREE_GENERATOR_ID],#,"-M","bu_minsim","0.5"],
                                       capture_output=True,text = True)
     

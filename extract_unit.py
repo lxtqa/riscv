@@ -1,4 +1,6 @@
+import tree_sitter_cpp as tscpp
 from tree_sitter import Language, Parser
+
  
 def bfs_search(root,type):
     queue = []
@@ -123,10 +125,9 @@ def save_tree_to_txt(root, filename):
 
 
 def extract_unit(code):
-    CPP_LANGUAGE = Language('build/my-languages.so', 'cpp')
+    CPP_LANGUAGE = Language(tscpp.language())
 
-    parser = Parser()
-    parser.set_language(CPP_LANGUAGE)
+    parser = Parser(CPP_LANGUAGE)
     
     tree = parser.parse(bytes(code,"utf-8"))
     root_node = tree.root_node

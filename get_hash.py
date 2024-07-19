@@ -1,11 +1,11 @@
-import os
+import subprocess
 import re
 import codecs
 from tqdm import *
 import subprocess
 def riscv():
-    log_file = codecs.open("../GitLog-origin.txt","r",errors="ignore")
-    log_lines = log_file.readlines()
+    result = subprocess.run(["git","log"],cwd="./v8",stdout=subprocess.PIPE)
+    log_lines = result.stdout.decode('utf-8', errors='ignore').split("\n")
     hash_file = open("../GitHash-origin.txt","w")
     #res = r"[^ ]+(/[^ ]+)* +\| +\d+ [\+\-]+"
     #riscv,RISCV or rv32,rv64

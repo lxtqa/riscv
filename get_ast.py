@@ -97,10 +97,10 @@ def get_ast(cpp_file_name,use_docker,debugging,TREE_GENERATOR_ID):
         if use_docker:
             output = subprocess.run(["docker","run","-v",cpp_file_name+":/left.cc","gumtreediff/gumtree","parse","/left.cc","-g",TREE_GENERATOR_ID],capture_output=True,text = True)
         else:
-            output = subprocess.run(["./gumtree/gumtree","parse",cpp_file_name,"-g",TREE_GENERATOR_ID],capture_output=True,text = True)
+            output = subprocess.run(["gumtree","parse",cpp_file_name,"-g",TREE_GENERATOR_ID],capture_output=True,text = True)
     tree_text = output.stdout.split("\n")
     root = parse_tree_from_text(merge_lines(tree_text))
     return root,len(tree_text)
 
 if __name__ == "__main__":
-    pass
+    ast1,ast1Nodenum = get_ast("a.cpp",use_docker=False,debugging=False,TREE_GENERATOR_ID="cpp-srcml")

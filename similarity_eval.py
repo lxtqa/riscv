@@ -53,7 +53,7 @@ def main(scope):
                             f = open("./test/tmp.cc","w")
                             f.write(function["content"])
                             f.close()
-                            os.system("./gumtree/gumtree textdiff {} {} -m {} -g {} -M bu_minsim 0.5 > {}".format(
+                            os.system("gumtree textdiff {} {} -m {} -g {} -M bu_minsim 0.5 > {}".format(
                                 "./test/target.cc", "./test/tmp.cc", MATCHER_ID, TREE_GENERATOR_ID, "./test/diff.cc"))
                             matches, _= gumtree_parser("./test/diff.cc")
                             # unit总能匹配到
@@ -96,7 +96,7 @@ def main(scope):
                             f = open("./test/tmp.cc","w")
                             f.write(function["content"])
                             f.close()
-                            os.system("./gumtree/gumtree textdiff {} {} -m {} -g {} -M bu_minsim 0.5 > {}".format(
+                            os.system("gumtree textdiff {} {} -m {} -g {} -M bu_minsim 0.5 > {}".format(
                                 "./test/target.cc", "./test/tmp.cc", MATCHER_ID, TREE_GENERATOR_ID, "./test/diff.cc"))
                             matches, _= gumtree_parser("./test/diff.cc")
                             # unit总能匹配到
@@ -118,7 +118,7 @@ def main(scope):
                     f = open("./test/tmp.cc","w")
                     f.write(function["content"])
                     f.close()
-                    os.system("./gumtree/gumtree textdiff {} {} -m {} -g {} -M bu_minsim 0.5 > {}".format(
+                    os.system("gumtree textdiff {} {} -m {} -g {} -M bu_minsim 0.5 > {}".format(
                         "./test/target.cc", "./test/tmp.cc", MATCHER_ID, TREE_GENERATOR_ID, "./test/diff.cc"))
                     matches, _= gumtree_parser("./test/diff.cc")
                     # unit总能匹配到

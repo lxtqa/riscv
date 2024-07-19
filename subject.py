@@ -55,5 +55,6 @@ with open(subject_file,"r") as f:
         for i in result:
             if len(i) >= 2:
                 for j in i:
-                    f1.write("{"+j["subject"]+ " " +j["time"][-1]+"}\t")
+                    if j["time"][-1] == "2023":
+                        f1.write("{" + j["hash"]+"  "+j["subject"]+ " " +j["time"][-1]+"}\t")
                 f1.write("\n")
