@@ -136,12 +136,12 @@ def unit_result(dir,
         matches = match_unit(new_units1,new_units1_,units2)
         for match in matches:
             #写到unit_file中
-            write_file("./test/unit1.cc",match[0]["content"])
-            write_file("./test/unit1_.cc",match[1]["content"])
-            write_file("./test/unit2.cc",match[2]["content"])
-            gen_result("./test","unit1.cc","unit2.cc","unit1_.cc","unit2_.cc",rm_tempfile,use_docker,debugging,MATCHER_ID,TREE_GENERATOR_ID)
+            write_file("../test/unit1.cc",match[0]["content"])
+            write_file("../test/unit1_.cc",match[1]["content"])
+            write_file("../test/unit2.cc",match[2]["content"])
+            gen_result("../test","unit1.cc","unit2.cc","unit1_.cc","unit2_.cc",rm_tempfile,use_docker,debugging,MATCHER_ID,TREE_GENERATOR_ID)
             #应对未发生改动的情况
-            tmp_string = read_file("./test/unit2_.cc")
+            tmp_string = read_file("../test/unit2_.cc")
             if remove_whitespace(match[2]["content"]) != remove_whitespace(tmp_string):
                 file2String = file2String.replace(match[2]["content"],tmp_string)
                 file1String = file1String.replace(match[0]["content"],match[1]["content"])

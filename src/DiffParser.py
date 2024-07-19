@@ -58,8 +58,8 @@ def diff2rank(diff_file_path, source_file_path):
     return ranks
 
 if __name__ == "__main__":
-    diff_file_path = './test/patch.patch'
-    source_file_path = './test/test1.cc'
+    diff_file_path = '../test/patch.patch'
+    source_file_path = '../test/test1.cc'
     diff2rank(diff_file_path, source_file_path)
 
 

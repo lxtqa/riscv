@@ -21,7 +21,7 @@ def split_and_filter(dir):
         hash = item.split('.')[0]
         #split
         patch_file = dir + "/" + item
-        path = "./tmp/"+hash
+        path = "../tmp/"+hash
         if not os.path.exists(path):
             os.mkdir(path)
             #os.system("mkdir " + path)
@@ -100,8 +100,8 @@ def split_and_filter(dir):
 
 if __name__ == "__main__":
     #创建tmp文件夹
-    if not os.path.exists("./tmp"):
-        os.mkdir("./tmp")
+    if not os.path.exists("../tmp"):
+        os.mkdir("../tmp")
         #os.system("mkdir ./tmp")
     #split_and_filter("./classified_patch")
     split_and_filter(sys.argv[1])

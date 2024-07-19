@@ -37,7 +37,7 @@ def matchdir(dir1,dir2):
 
 def main(patch_path):
     patchname_list = os.listdir(patch_path)
-    savepath = "./related_patch"
+    savepath = "../related_patch"
     file = open("related_patch.txt","w")
     if not os.path.exists(savepath):
         os.mkdir(savepath)
@@ -94,4 +94,4 @@ def main(patch_path):
 
 
 if __name__=="__main__":
-    main("./patches-origin/")
+    main("../patches-origin/")

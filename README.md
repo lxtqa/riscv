@@ -151,7 +151,29 @@ OPTIONS are:
 
 ### gumtree
 
-配置教程：https://blog.csdn.net/weixin_39278265/article/details/101427644
+*** 配置方法：***
+
+```shell
+git clone https://github.com/GumTreeDiff/gumtree.git
+cd gumtree
+./gradlew build -x test
+cd dist/build/distributions
+unzip gumtree-4.0.0-beta3-SNAPSHOT.zip
+```
+
+在`.bashrc`文件中加入如下内容
+
+```bash
+# add gumtree
+export gumtree=你的gumtree路径/dist/build/distributions/gumtree-4.0.0-beta3-SNAPSHOT
+export PATH=${gumtree}/bin:$PATH
+```
+
+在命令行执行
+
+```shell
+source .bashrc
+```
 
 官方文档：https://github.com/GumTreeDiff/gumtree/wiki/Commands#overriding-properties
 
@@ -161,8 +183,8 @@ Docker使用教程：https://github.com/GumTreeDiff/gumtree/tree/main/docker
 
 gumtree参数：https://github.com/GumTreeDiff/gumtree/blob/089b3d5aaddb1c31385862440e889f4b90776b85/core/src/main/java/com/github/gumtreediff/matchers/ConfigurationOptions.java#L58
 
-tree-sitter加入系统路径`export PATH="/Users/yuhaonan/Desktop/cpps/tree-sitter-parser:$PATH"`
-
 ### tree-sitter
+
+tree-sitter加入系统路径`export PATH="你的tree-sitter仓库路径/tree-sitter-parser:$PATH"`
 
 https://blog.csdn.net/qq_38808667/article/details/128052617?spm=1001.2101.3001.6650.6&utm_medium=distribute.pc_relevant.none-task-blog-2%7Edefault%7EBlogCommendFromBaidu%7ERate-6-128052617-blog-128006684.235%5Ev38%5Epc_relevant_sort&depth_1-utm_source=distribute.pc_relevant.none-task-blog-2%7Edefault%7EBlogCommendFromBaidu%7ERate-6-128052617-blog-128006684.235%5Ev38%5Epc_relevant_sort&utm_relevant_index=12

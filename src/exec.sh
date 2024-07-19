@@ -1,0 +1,1 @@
+python3 script.py ../test/test1.cc ../test/test2.cc ../test/test1_.cc -o ../test/test2_.cc
