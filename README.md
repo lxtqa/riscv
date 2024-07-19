@@ -33,25 +33,7 @@ options:
 
 本项目python部分使用到的库均为常用库，遇到未安装的库直接使用`pip install XXXX`即可。
 
-下载gumtree docker镜像：`docker pull gumtreediff/gumtree`
-
-## Javascript V8项目简介
-
-是解析javascript语言的的虚拟机
-
-V8引擎转换成字节码(bytecode)，此时是可以跨平台的，将字节码转化汇编指令，在不同环境的cpu下执行。
-
-![image-20220822140358681](./img/image-20220822140358681.png)
-
-![image-20220822140344154](./img/image-20220822140344154.png)
-
- 由于公司项目的需求,现在主要是做脱Flash的工作(历史原因用AS3.0做的)!现在全部转为C++, 并且发布PC版与Web版。其中Web的版本就是使用的Wasm（WebAssembly技术）。
- WASM ，全称：WebAssembly ，是一种可以使用非 Java 编程语言编写代码并且能在浏览器上运行的技术方案，也是自 Web 诞生以来首个 Java 原生替代方案（ 程序本质上都是脚本程序，即由程序翻译指令并执行，而不是由本地机器CPU读取指令并执行，因此效率非常低。而Java的操作相对重复繁琐，在执行过程中耗时较长。）
- 其实创建Wasm的初衷并非为了替代JavaScript，而是为了实现两者之间的补充和配合。随着WebAssembly的引入，现代web浏览器的虚拟机将同时运行JavaScript和Wasm代码。
-
-![image-20220822154219022](./img/image-20220822154219022.png)
-
-
+gumtree：见[库/gumtree](# gumtree)部分的介绍
 
 ## 程序与脚本
 
@@ -135,7 +117,19 @@ python3 split_and_filter.py ./classified_patch
 
 ### V8
 
-v8仓库 ： https://github.com/v8/v8.git
+[v8仓库]( https://github.com/v8/v8.git) 
+
+V8是解析javascript语言的的虚拟机,V8引擎转换成字节码(bytecode)，此时是可以跨平台的，将字节码转化汇编指令，在不同环境的cpu下执行。
+
+![image-20220822140358681](./img/image-20220822140358681.png)
+
+![image-20220822140344154](./img/image-20220822140344154.png)
+
+ 由于公司项目的需求,现在主要是做脱Flash的工作(历史原因用AS3.0做的)!现在全部转为C++, 并且发布PC版与Web版。其中Web的版本就是使用的Wasm（WebAssembly技术）。
+ WASM ，全称：WebAssembly ，是一种可以使用非 Java 编程语言编写代码并且能在浏览器上运行的技术方案，也是自 Web 诞生以来首个 Java 原生替代方案（ 程序本质上都是脚本程序，即由程序翻译指令并执行，而不是由本地机器CPU读取指令并执行，因此效率非常低。而Java的操作相对重复繁琐，在执行过程中耗时较长。）
+ 其实创建Wasm的初衷并非为了替代JavaScript，而是为了实现两者之间的补充和配合。随着WebAssembly的引入，现代web浏览器的虚拟机将同时运行JavaScript和Wasm代码。
+
+![image-20220822154219022](./img/image-20220822154219022.png)
 
 ### Splitdiff
 
@@ -175,16 +169,16 @@ export PATH=${gumtree}/bin:$PATH
 source .bashrc
 ```
 
-官方文档：https://github.com/GumTreeDiff/gumtree/wiki/Commands#overriding-properties
+[官方文档](https://github.com/GumTreeDiff/gumtree/wiki/Commands#overriding-properties)
 
-Docker使用教程：https://github.com/GumTreeDiff/gumtree/tree/main/docker
+[Docker使用教程](https://github.com/GumTreeDiff/gumtree/tree/main/docker)
 
 下载镜像：`docker pull gumtreediff/gumtree`
 
-gumtree参数：https://github.com/GumTreeDiff/gumtree/blob/089b3d5aaddb1c31385862440e889f4b90776b85/core/src/main/java/com/github/gumtreediff/matchers/ConfigurationOptions.java#L58
+[Gumtree参数介绍](https://github.com/GumTreeDiff/gumtree/blob/089b3d5aaddb1c31385862440e889f4b90776b85/core/src/main/java/com/github/gumtreediff/matchers/ConfigurationOptions.java#L58)
 
 ### tree-sitter
 
 tree-sitter加入系统路径`export PATH="你的tree-sitter仓库路径/tree-sitter-parser:$PATH"`
 
-https://blog.csdn.net/qq_38808667/article/details/128052617?spm=1001.2101.3001.6650.6&utm_medium=distribute.pc_relevant.none-task-blog-2%7Edefault%7EBlogCommendFromBaidu%7ERate-6-128052617-blog-128006684.235%5Ev38%5Epc_relevant_sort&depth_1-utm_source=distribute.pc_relevant.none-task-blog-2%7Edefault%7EBlogCommendFromBaidu%7ERate-6-128052617-blog-128006684.235%5Ev38%5Epc_relevant_sort&utm_relevant_index=12
+[tree-sitter使用方法](https://blog.csdn.net/qq_38808667/article/details/128052617?spm=1001.2101.3001.6650.6&utm_medium=distribute.pc_relevant.none-task-blog-2%7Edefault%7EBlogCommendFromBaidu%7ERate-6-128052617-blog-128006684.235%5Ev38%5Epc_relevant_sort&depth_1-utm_source=distribute.pc_relevant.none-task-blog-2%7Edefault%7EBlogCommendFromBaidu%7ERate-6-128052617-blog-128006684.235%5Ev38%5Epc_relevant_sort&utm_relevant_index=12)
