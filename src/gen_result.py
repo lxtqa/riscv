@@ -1,5 +1,5 @@
 import os
-from get_ast import get_ast, TreeNode, get_start_end, get_name, get_type
+from ast_utils import get_ast, TreeNode, get_start_end, get_name, get_type
 from gumtree_parser import gumtree_parser
 from ast_diff_parser import diff_parser,bfs_search,bfs_search_father
 from time import time
