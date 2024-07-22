@@ -1,6 +1,6 @@
 import argparse
 import sys
-from gen_result import gen_result
+from unit_result import unit_result
 
 def script():
     parser = argparse.ArgumentParser(description='命令行参数处理程序')
@@ -12,7 +12,6 @@ def script():
 
     # 添加可选项输出文件目录和其他选项
     parser.add_argument('-D', '--debugging', action='store_true', help='启用调试模式')
-    parser.add_argument('-s', '--simple', action='store_true', help='使用简单模式')
     parser.add_argument('-d', '--use_docker', action='store_true', help='使用Docker')
     parser.add_argument('-o', '--output_directory', type=str, help='指定输出文件目录')
     parser.add_argument('-m', '--matcher_id', type=str, default='gumtree', help='指定MATCHER_ID，默认为gumtree')
@@ -43,13 +42,12 @@ def script():
     print('输入文件目录1:', args.input_directory1)
     print('输入文件目录2:', args.input_directory2)
     print('输入文件目录1_:', args.input_directory1_)
-    gen_result(cfile_name1 = args.input_directory1,
+    unit_result(dir = "",cfile_name1 = args.input_directory1,
                cfile_name2 = args.input_directory2,
                cfile_name1_ = args.input_directory1_,
                cfile_name2_ = args.output_directory,
                rm_tempfile = args.rm_tempfile,
                use_docker = args.use_docker,
-               simple = args.simple,
                debugging = args.debugging,
                MATCHER_ID = args.matcher_id,
                TREE_GENERATOR_ID=args.tree_generator_id
