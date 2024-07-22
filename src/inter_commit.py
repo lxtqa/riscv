@@ -11,7 +11,6 @@ def riscv():
     log_lines = log_file.readlines()
     #res = r"[^ ]+(/[^ ]+)* +\| +\d+ [\+\-]+"
     #riscv,RISCV or rv32,rv64
-    res = r"^diff --git a/(.+) b/(.+)$"
     total_commit_num = 0
     f = open("arch_related_commit_id.json","w")
     content = []
@@ -28,7 +27,7 @@ def riscv():
             
             file_names = []
             for info_line in info_lines:
-                file_name = re.findall(res,info_line)
+                file_name = re.findall(r"^diff --git a/(.+) b/(.+)$",info_line)
                 if file_name!=[]:
                     file_name = file_name[0]
                     if file_name[0] == file_name[1]:

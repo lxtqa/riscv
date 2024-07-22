@@ -3,10 +3,15 @@ import re
 import codecs
 from tqdm import *
 import subprocess
+import os
+
+HASH_PATH = "./GitHash-origin.txt"
+
+
 def riscv():
     result = subprocess.run(["git","log"],cwd="./v8",stdout=subprocess.PIPE)
     log_lines = result.stdout.decode('utf-8', errors='ignore').split("\n")
-    hash_file = open("../GitHash-origin.txt","w")
+    hash_file = open(HASH_PATH,"w")
     #res = r"[^ ]+(/[^ ]+)* +\| +\d+ [\+\-]+"
     #riscv,RISCV or rv32,rv64
     res = r".*(RISC|Risc|risc|RV64|RV32|rv64|rv32|Rv64|Rv32).*"
@@ -28,9 +33,9 @@ def riscv():
 
 
 def date():
-    log_file = codecs.open("../GitLog-origin.txt","r",errors="ignore")
-    log_lines = log_file.readlines()
-    hash_file = open("../GitHash-origin.txt","w")
+    result = subprocess.run(["git","log"],cwd="./v8",stdout=subprocess.PIPE)
+    log_lines = result.stdout.decode('utf-8', errors='ignore').split("\n")
+    hash_file = open(HASH_PATH,"w")
     total_commit_num = 0
     qualified_commit_num = 0
     for i in tqdm(range(len(log_lines))) :
@@ -51,6 +56,20 @@ def date():
     print("qualified commit number = {}".format(qualified_commit_num))
     hash_file.close()
 
+
+#git format-patch -1 [commit id]
+def gen_patches():
+    hash_file = codecs.open(HASH_PATH,"r",errors="ignore")
+    hash_lines = hash_file.readlines()
+    os.system("mkdir ./patches-origin")
+    for hash_line in tqdm(hash_lines):
+        hash = hash_line.split("\n")[0]
+        os.system("git format-patch -1 " + hash + " --stdout > ./patches-origin/" + hash + ".patch")
+
+
 if __name__ == "__main__":
-    riscv()
+    if not os.path.exists(HASH_PATH):
+        riscv()
+    gen_patches()
     # date()
+    

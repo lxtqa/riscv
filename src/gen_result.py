@@ -1,7 +1,7 @@
 import os
 from get_ast import get_ast, TreeNode, get_start_end, get_name, get_type
 from gumtree_parser import gumtree_parser
-from AstDiffParser import diff_parser,bfs_search,bfs_search_father
+from ast_diff_parser import diff_parser,bfs_search,bfs_search_father
 from time import time
 import sys
 import re
@@ -340,10 +340,10 @@ if __name__ == "__main__":
     use_docker = False
     debugging = False
     
-    # gen_result(cfile_name1="../test/test1.cc",
-    #               cfile_name2="../test/test2.cc",
-    #               cfile_name1_="../test/test1_.cc",
-    #               cfile_name2_="../test/test2_.cc",
+    # gen_result(cfile_name1="./test/test1.cc",
+    #               cfile_name2="./test/test2.cc",
+    #               cfile_name1_="./test/test1_.cc",
+    #               cfile_name2_="./test/test2_.cc",
     #               rm_tempfile=rm_tempfile,
     #               use_docker=use_docker,
     #               debugging=debugging,

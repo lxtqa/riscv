@@ -194,12 +194,3 @@ def extract_unit(code):
     
     return units
     
-if __name__ == "__main__":
-    #中括号内的是clone下来的文件夹地址
-    Language.build_library(
-        'build/my-languages.so',
-        [
-            'vendor/tree-sitter-cpp'
-        ]
-    )
-    extract_unit("test.cc")

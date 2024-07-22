@@ -9,7 +9,7 @@ res1 = r"^\s[/a-zA-Z0-9_.\-]+\.(.+)\s+\|\s+[0-9]+\s+[+-]+$"
 res2 = r"[/a-zA-Z0-9_\-]+\.[a-zA-Z0-9]+"
 
 def riscv():
-    log_file = codecs.open("../log.txt","r",errors="ignore")
+    log_file = codecs.open("./log.txt","r",errors="ignore")
     log_lines = log_file.readlines()
     #res = r"[^ ]+(/[^ ]+)* +\| +\d+ [\+\-]+"
     #riscv,RISCV or rv32,rv64
@@ -37,9 +37,9 @@ def riscv():
 
 
 def date():
-    log_file = codecs.open("../GitLog-origin.txt","r",errors="ignore")
+    log_file = codecs.open("./GitLog-origin.txt","r",errors="ignore")
     log_lines = log_file.readlines()
-    hash_file = open("../GitHash-origin.txt","w")
+    hash_file = open("./GitHash-origin.txt","w")
     total_commit_num = 0
     qualified_commit_num = 0
     for i in tqdm(range(len(log_lines))) :

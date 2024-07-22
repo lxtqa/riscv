@@ -34,7 +34,7 @@ if not os.path.exists(subject_file):
                     break
 
             commit["subject"] = subject
-            commit["hunks"] = read_patch(output)
+            commit["units"] = read_patch(output)
             
         f = open(subject_file,"w")
         f.write(json.dumps(commits))
@@ -46,7 +46,7 @@ with open(subject_file,"r") as f:
     def same_subject(a,b):
         if fuzz.ratio(remove_arcwords(a["subject"]),remove_arcwords(b["subject"]))>95:#subject相似度
             if fuzz.token_sort_ratio((remove_arcwords(x) for x in a["file_names"]),(remove_arcwords(x) for x in b["file_names"])) > 95:#修改文件相似度
-                if fuzz.token_sort_ratio((remove_arcwords(x) for x in a["hunks"]),(remove_arcwords(x) for x in b["hunks"])) > 95:#修改hunk相似度
+                if fuzz.token_sort_ratio((remove_arcwords(x) for x in a["units"]),(remove_arcwords(x) for x in b["units"])) > 95:#修改unit相似度
                     return True
         else:
             return False

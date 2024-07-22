@@ -1,6 +1,6 @@
 import os
 from tqdm import tqdm
-from get_ast import get_ast, get_type
+from ast_utils import get_type
 import json
 from extract_unit import extract_unit
 import re

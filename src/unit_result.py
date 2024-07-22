@@ -10,16 +10,16 @@ def remove_whitespace(input_string):
 def read_patch(output):
     r = r"^@@ -[0-9]+,[0-9]+ \+[0-9]+,[0-9]+ @@ .*$"
     R = r"^@@ -[0-9]+,[0-9]+ \+[0-9]+,[0-9]+ @@ (.*)$"
-    changed_hunk_header = []
+    changed_unit_header = []
     try:
         output = output.split("\n")
     except:
         pass
     for line in output:
         if re.match(r,line):
-            changed_hunk_header.append(re.findall(R,line)[0])
+            changed_unit_header.append(re.findall(R,line)[0])
 
-    return changed_hunk_header
+    return changed_unit_header
 
 
 #三元组, unit1, unit1_, unit2
@@ -96,7 +96,7 @@ def unit_result(dir,
 
     diff = subprocess.run(["diff","-up",dir + "/" + cfile_name1,dir + "/" + cfile_name1_],capture_output=True,text = True)
 
-    changed_hunk_headers = read_patch(diff.stdout)
+    changed_unit_headers = read_patch(diff.stdout)
 
     units1 = extract_unit(file1String)
     units1_ = extract_unit(file1_String)
@@ -107,10 +107,10 @@ def unit_result(dir,
     new_units1 = []
     new_units1_ = []
 
-    for changed_hunk_header in changed_hunk_headers:
+    for changed_unit_header in changed_unit_headers:
         flag = False
         for unit in units1:
-            if changed_hunk_header in unit["content"].split("\n")[0]:
+            if changed_unit_header in unit["content"].split("\n")[0]:
                 if unit not in new_units1:
                     new_units1.append(unit)
                 flag = True
@@ -119,10 +119,10 @@ def unit_result(dir,
             USE_ORIGIN = True
             break
 
-    for changed_hunk_header in changed_hunk_headers:
+    for changed_unit_header in changed_unit_headers:
         flag = False
         for unit in units1_:
-            if changed_hunk_header in unit["content"].split("\n")[0]:
+            if changed_unit_header in unit["content"].split("\n")[0]:
                 if unit not in new_units1_:
                     new_units1_.append(unit)
                 flag = True
@@ -136,12 +136,12 @@ def unit_result(dir,
         matches = match_unit(new_units1,new_units1_,units2)
         for match in matches:
             #写到unit_file中
-            write_file("../test/unit1.cc",match[0]["content"])
-            write_file("../test/unit1_.cc",match[1]["content"])
-            write_file("../test/unit2.cc",match[2]["content"])
-            gen_result("../test","unit1.cc","unit2.cc","unit1_.cc","unit2_.cc",rm_tempfile,use_docker,debugging,MATCHER_ID,TREE_GENERATOR_ID)
+            write_file("./test/unit1.cc",match[0]["content"])
+            write_file("./test/unit1_.cc",match[1]["content"])
+            write_file("./test/unit2.cc",match[2]["content"])
+            gen_result("./test","unit1.cc","unit2.cc","unit1_.cc","unit2_.cc",rm_tempfile,use_docker,debugging,MATCHER_ID,TREE_GENERATOR_ID)
             #应对未发生改动的情况
-            tmp_string = read_file("../test/unit2_.cc")
+            tmp_string = read_file("./test/unit2_.cc")
             if remove_whitespace(match[2]["content"]) != remove_whitespace(tmp_string):
                 file2String = file2String.replace(match[2]["content"],tmp_string)
                 file1String = file1String.replace(match[0]["content"],match[1]["content"])

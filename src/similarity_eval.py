@@ -5,8 +5,8 @@ from tqdm import tqdm
 from arc_utils import remove_arcwords,has_arcwords
 
 def main(scope):
-    if not os.path.exists("../similarity/"):
-        os.mkdir("../similarity/")
+    if not os.path.exists("./similarity/"):
+        os.mkdir("./similarity/")
 
     MATCHER_ID="gumtree-simple-id"
     TREE_GENERATOR_ID="cs-srcml"
@@ -45,17 +45,17 @@ def main(scope):
                     total_r = 0
                     for i in range(len(function_set)):
                         target = function_set[i]
-                        f = open("../test/target.cc","w")
+                        f = open("./test/target.cc","w")
                         f.write(target["content"])
                         f.close()
                         for j in range(i+1,len(function_set)):
                             function = function_set[j]
-                            f = open("../test/tmp.cc","w")
+                            f = open("./test/tmp.cc","w")
                             f.write(function["content"])
                             f.close()
                             os.system("gumtree textdiff {} {} -m {} -g {} -M bu_minsim 0.5 > {}".format(
-                                "../test/target.cc", "../test/tmp.cc", MATCHER_ID, TREE_GENERATOR_ID, "../test/diff.cc"))
-                            matches, _= gumtree_parser("../test/diff.cc")
+                                "./test/target.cc", "./test/tmp.cc", MATCHER_ID, TREE_GENERATOR_ID, "./test/diff.cc"))
+                            matches, _= gumtree_parser("./test/diff.cc")
                             # unit总能匹配到
                             r = (len(matches) - 1) / ( target["astnode_num"] - (len(matches) - 1) + function["astnode_num"] )
                             if r > 1: 
@@ -65,7 +65,7 @@ def main(scope):
             
             
                     sorted_list = sorted(lst, key=lambda x: x[0],reverse=True)
-                    f = open("../self_similarity/result{}.txt".format(rank),"w")
+                    f = open("./self_similarity/result{}.txt".format(rank),"w")
                     if len(function_set) != 1:
                         f.write("average_similarity = {}\n".format( total_r * 2 /  ( len(function_set) * (len(function_set) - 1 ) ) ) )
                     else:
@@ -82,7 +82,7 @@ def main(scope):
             i = 0
             for target in arc_related_functions:
                 
-                f = open("../test/target.cc","w")
+                f = open("./test/target.cc","w")
                 f.write(target["content"])
                 f.close()
                 lst = []
@@ -93,12 +93,12 @@ def main(scope):
                         #需要去除架构关键词然后评判
                         if remove_arcwords(function["name"]) == remove_arcwords(target["name"]):
                             found = True
-                            f = open("../test/tmp.cc","w")
+                            f = open("./test/tmp.cc","w")
                             f.write(function["content"])
                             f.close()
                             os.system("gumtree textdiff {} {} -m {} -g {} -M bu_minsim 0.5 > {}".format(
-                                "../test/target.cc", "../test/tmp.cc", MATCHER_ID, TREE_GENERATOR_ID, "../test/diff.cc"))
-                            matches, _= gumtree_parser("../test/diff.cc")
+                                "./test/target.cc", "./test/tmp.cc", MATCHER_ID, TREE_GENERATOR_ID, "./test/diff.cc"))
+                            matches, _= gumtree_parser("./test/diff.cc")
                             # unit总能匹配到
                             r = (len(matches) - 1) / ( target["astnode_num"] - (len(matches) - 1) + function["astnode_num"] )
                             if r < min_r:
@@ -115,18 +115,18 @@ def main(scope):
                     else:
                         if function["astnode_num"] / target["astnode_num"] < min_r:
                             continue
-                    f = open("../test/tmp.cc","w")
+                    f = open("./test/tmp.cc","w")
                     f.write(function["content"])
                     f.close()
                     os.system("gumtree textdiff {} {} -m {} -g {} -M bu_minsim 0.5 > {}".format(
-                        "../test/target.cc", "../test/tmp.cc", MATCHER_ID, TREE_GENERATOR_ID, "../test/diff.cc"))
-                    matches, _= gumtree_parser("../test/diff.cc")
+                        "./test/target.cc", "./test/tmp.cc", MATCHER_ID, TREE_GENERATOR_ID, "./test/diff.cc"))
+                    matches, _= gumtree_parser("./test/diff.cc")
                     # unit总能匹配到
                     r = (len(matches) - 1) / ( target["astnode_num"] - (len(matches) - 1) + function["astnode_num"] )
                     lst.append([r,function["file_name"],function["content"]])
                 
                 sorted_list = sorted(lst, key=lambda x: x[0],reverse=True)
-                f = open("../similarity/result{}.txt".format(i),"w")
+                f = open("./similarity/result{}.txt".format(i),"w")
                 f.write("{} {}\n".format(target["file_name"],target["content"].replace("\n"," ")))
                 for item in sorted_list:
                     f.write("{} {} {}\n".format(item[0],item[1],item[2].replace("\n"," ")))

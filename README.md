@@ -39,21 +39,13 @@ gumtree：见[库/gumtree](# gumtree)部分的介绍
 
 ### 获取历史commit部分代码
 
-#### git_log.py
+#### get_patch.py
 
-将v8仓库中main分支的git信息读取到`GitLog-origin.txt`中
-
-#### get_hash.py
-
-获取所有commit的哈希值到`GitHash-origin.txt`中
-
-#### gen_patch.py
-
-将每一个commit的结果输出到`patches-origin`文件夹下
+读取v8仓库中`git log`的输出，获取所有出现过riscv关键词/某个日期前的commit的哈希值到`GitHash-origin.txt`中，将每一个commit的结果输出到`patches-origin`文件夹下
 
 #### classify.py
 
-读取`patches-origin`文件夹下的内容，自动对含有riscv关键字的文件进行分类，分离出多个架构下进行了相似改动的文件，这个检测主要依赖于文件名相似性的检测，输出到`classified_patch`中
+读取`patches-origin`文件夹下的内容，分离出多个架构下进行了相似改动的文件，这个检测主要依赖于文件名相似性的检测，输出到`classified_patch`中
 
 #### split_and_filter.py 
 
@@ -61,19 +53,17 @@ gumtree：见[库/gumtree](# gumtree)部分的介绍
 
 #### get_history_patch.sh
 
-```bash
-cd v8
-git log > ../GitLog-origin.txt
-python3 ../get_hash.py > ../GitHash-origin.txt
-python3 ../gen_patch.py
-rm ../GitLog-origin.txt
-rm ../GitHash-origin.txt
-cd ..
+```shell
+python3 get_patch.py
 python3 classify.py
 python3 split_and_filter.py ./classified_patch
 ```
 
 运行以上代码
+
+#### gen_statistics.py
+
+生成历史中的统计信息，统计各个代码文件被修改了多少次
 
 #### get_cfile.py
 
@@ -85,21 +75,33 @@ python3 split_and_filter.py ./classified_patch
 
 输入`gumtree diff`生成的txt文件名，将文件中的matches和diffs分别返回
 
-#### get_ast.py
+#### ast_utils.py
 
-利用`gumtree parse`命令生成ast到txt文件，并返回一个经过parse的抽象语法树
+利用`gumtree parse`命令生成ast到txt文件，并返回一个经过parse的抽象语法树，以及其他的ast相关工具
 
-#### AstDiffParser.py
+#### arc_utils.py
+
+包括has_arcwords和remove_arcwords两个函数
+
+#### disjoint_sets.py
+
+并查集
+
+#### ast_diff_parser.py
 
 处理diff操作，将原始diff进行合并处理
-
-#### DiffParser.py
-
-对text级别的diff文件进行parse
 
 #### gen_result.py
 
 将【架构1下代码，架构2下代码，架构1下修改后代码，指定架构2下修改后代码输出目录】作为参数，使用docker镜像中的gumtree textdiff命令，获取match和diff，基于ast方法生成代码文件，直接生成架构2下修改后的代码文件。
+
+#### extract_unit.py
+
+从代码中分离出不同的unit
+
+#### unit_result.py
+
+代码单元为粒度的结果生成
 
 #### exec.sh
 
