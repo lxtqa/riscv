@@ -114,26 +114,26 @@ def get_newname(node,match_dic12,match_dic1_1):
         return get_name(mapped_node)
     else:
         return None
-    
+
 
 
 
 
 
 def gen_result(dir,cfile_name1,cfile_name2,
-               cfile_name1_,cfile_name2_,
-               rm_tempfile,
-               use_docker,
-               debugging,
-               MATCHER_ID,
-               TREE_GENERATOR_ID
-               ):
+                cfile_name1_,cfile_name2_,
+                rm_tempfile,
+                use_docker,
+                debugging,
+                MATCHER_ID,
+                TREE_GENERATOR_ID
+                ):
     '''
     cfile_name1为架构a下的文件，cfile2_name2为架构b下的文件，cfile_name1_为cfile_name1修改后的文件
     取cfile1和cfile2的match部分，取cfile1与cfile1_的diff部分
     '''
     start_time = time()
-    
+
     gumtreefile_name1 = dir + "/" + "gumtree_12.txt"
     gumtreefile_name2 = dir + "/" + "gumtree_11_.txt"
 
@@ -155,10 +155,10 @@ def gen_result(dir,cfile_name1,cfile_name2,
         if use_docker:
             output11_ = subprocess.run(["docker","run","-v",cfile_name1+":/left.cc","-v",cfile_name1_+":/right.cc","gumtreediff/gumtree","textdiff","/left.cc", "/right.cc",
                                         "-m",MATCHER_ID,"-g", TREE_GENERATOR_ID,"-M","bu_minsim","0.5"],
-                                       capture_output=True,text = True)
+                                        capture_output=True,text = True)
             output12 = subprocess.run(["docker","run","-v",cfile_name1+":/left.cc","-v",cfile_name2+":/right.cc","gumtreediff/gumtree","textdiff","/left.cc", "/right.cc",
                                         "-m",MATCHER_ID,"-g", TREE_GENERATOR_ID,"-M","bu_minsim","0.5"],
-                                       capture_output=True,text = True)
+                                        capture_output=True,text = True)
             # os.system("docker run -v {}:/left.cc -v {}:/right.cc gumtreediff/gumtree textdiff /left.cc /right.cc -m {} -g {} -M bu_minsim 0.5 > {}".format(
             #     cfile_name1, cfile_name2, MATCHER_ID, TREE_GENERATOR_ID, gumtreefile_name1))
             

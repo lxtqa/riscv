@@ -71,7 +71,7 @@ def fun(diffOps,match):
                     #             exit(220)
                     #         diffOps.pop(i)
                     #         return diffOps,False
-                        
+
     for i in range(len(diffOps)):
         if diffOps[i].source != None and (diffOps[i].op == "delete-tree" or diffOps[i].op == "delete-node"):
             for j in range(len(diffOps)):

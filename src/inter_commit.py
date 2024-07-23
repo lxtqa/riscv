@@ -19,12 +19,12 @@ def riscv():
         if line_info[0] == "commit" :
             total_commit_num += 1
             hash = line_info[1]
-            hash = hash.split("\n")[0] 
+            hash = hash.split("\n")[0]
             result = subprocess.run(["git","show",hash],cwd="./v8", stdout=subprocess.PIPE)
             output = result.stdout.decode('utf-8', errors='ignore')
             info_lines = output.split("\n")
             ## file name and path
-            
+
             file_names = []
             for info_line in info_lines:
                 file_name = re.findall(r"^diff --git a/(.+) b/(.+)$",info_line)
@@ -33,7 +33,7 @@ def riscv():
                     if file_name[0] == file_name[1]:
                         if has_arcwords(file_name[0]):
                             file_names.append(file_name[0])
-            if file_names != []:   
+            if file_names != []:
                 dic = {"hash":hash,"file_names":file_names}
                 content.append(dic)
     f.write(json.dumps(content))

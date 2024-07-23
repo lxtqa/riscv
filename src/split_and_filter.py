@@ -96,7 +96,7 @@ def split_and_filter(dir):
                 shutil.move(path+"/"+item,path+"/patch_type"+str(rank))
                 rank = rank+1
     #shutil.rmtree(dir)
-            
+
 
 if __name__ == "__main__":
     #创建tmp文件夹

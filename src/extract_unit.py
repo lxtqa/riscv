@@ -1,7 +1,7 @@
 import tree_sitter_cpp as tscpp
 from tree_sitter import Language, Parser
 
- 
+
 def bfs_search(root,type):
     queue = []
     queue.extend(root.children)
@@ -48,14 +48,14 @@ def identifier(node):
     for child in node.children:
         if child.type == "identifier":
             return byte2txt(child.text)
-        
+
 def operator_name(node):
     if node == None:
         return None
     for child in node.children:
         if child.type == "operator_name":
             return byte2txt(child.text)
-        
+
 def operator_cast(node):
     if node == None:
         return None
@@ -83,32 +83,31 @@ def function_declarator(node):
     for child in node.children:
         if child.type == "function_declarator":
             return child
-        
+
 def destructor_name(node):
     if node == None:
         return None
     for child in node.children:
         if child.type == "destructor_name":
             return child
-        
+
 def pointer_declarator(node):
     if node == None:
         return None
     for child in node.children:
         if child.type == "pointer_declarator":
             return child
-        
+
 def reference_declarator(node):
     if node == None:
         return None
     for child in node.children:
         if child.type == "reference_declarator":
             return child
-        
+
 def print_tree(node, depth, file):
     if node is None:
         return
-    
     if node.children == []:
         file.write("  " * depth + str(node.type) + " " + byte2txt(node.text) + "\n")
     else:
@@ -128,7 +127,6 @@ def extract_unit(code):
     CPP_LANGUAGE = Language(tscpp.language())
 
     parser = Parser(CPP_LANGUAGE)
-    
     tree = parser.parse(bytes(code,"utf-8"))
     root_node = tree.root_node
 
@@ -172,7 +170,7 @@ def extract_unit(code):
                 units.append({"name":name,"content":content,"name_and_para":""})
             except:
                 exit(100)
-        
+
         elif node.type == "enum_specifier":
             try:
                 name = byte2txt(node.children[1].text)
@@ -187,10 +185,8 @@ def extract_unit(code):
         #         content = byte2txt(node.text)
         #         units.append({"type":"struct","name":content,"content":content,"name_and_para":content})
         #     except:
-        #         exit(100)        
-                
+        #         exit(100)
+
         else:
             queue.extend(node.children)
-    
     return units
-    

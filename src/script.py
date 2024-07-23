@@ -43,15 +43,15 @@ def script():
     print('输入文件目录2:', args.input_directory2)
     print('输入文件目录1_:', args.input_directory1_)
     unit_result(dir = "",cfile_name1 = args.input_directory1,
-               cfile_name2 = args.input_directory2,
-               cfile_name1_ = args.input_directory1_,
-               cfile_name2_ = args.output_directory,
-               rm_tempfile = args.rm_tempfile,
-               use_docker = args.use_docker,
-               debugging = args.debugging,
-               MATCHER_ID = args.matcher_id,
-               TREE_GENERATOR_ID=args.tree_generator_id
-               )
+                cfile_name2 = args.input_directory2,
+                cfile_name1_ = args.input_directory1_,
+                cfile_name2_ = args.output_directory,
+                rm_tempfile = args.rm_tempfile,
+                use_docker = args.use_docker,
+                debugging = args.debugging,
+                MATCHER_ID = args.matcher_id,
+                TREE_GENERATOR_ID=args.tree_generator_id
+                )
 
 if __name__ == '__main__':
     script()

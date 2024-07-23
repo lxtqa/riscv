@@ -54,7 +54,7 @@ def match_unit(units1, units1_, units2):
         assert(len(matchlist)==1)
         tmp = matchlist[0]
         matchlist = []
-        
+
         for unit2 in units2:
             if remove_arcwords(remove_whitespace(unit1["name"])) == remove_arcwords(remove_whitespace(unit2["name"])):
                 matchlist.append(unit2)
@@ -70,8 +70,7 @@ def match_unit(units1, units1_, units2):
                 continue
         assert(len(matchlist)==1)
         match.append([unit1,tmp,matchlist[0]])
-        
-                
+
     return match
 
 def unit_result(dir,
@@ -130,7 +129,7 @@ def unit_result(dir,
         if flag == False:
             USE_ORIGIN = True
             break
-    
+
 
     if not USE_ORIGIN:
         matches = match_unit(new_units1,new_units1_,units2)

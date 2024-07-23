@@ -10,7 +10,6 @@ class Commit:
 
 
 def modify_hex(file_path,reverse = False):
-    
     if not reverse:
         with open(file_path, 'r') as file:
             cpp_code = file.read()
@@ -34,16 +33,16 @@ def successfully_generate(hash,file1,file2,num):
     dst_file1_ = "./benchmark/"+str(num)+"/test1_.cc"
     dst_file2_ = "./benchmark/"+str(num)+"/test2__.cc" # 与下面gen_result的结果不同，输出原始结果
     get_cfile(hash,src_file1="src/codegen/arm/macro-assembler-arm.h",dst_file1=dst_file1,
-              src_file2="src/codegen/riscv/macro-assembler-riscv.h",dst_file2=dst_file2,
-              dst_file1_=dst_file1_,
-              dst_file2_=dst_file2_)
+                src_file2="src/codegen/riscv/macro-assembler-riscv.h",dst_file2=dst_file2,
+                dst_file1_=dst_file1_,
+                dst_file2_=dst_file2_)
     os.system("diff -up {} {} > ./benchmark/{}/1_patch.patch".format(dst_file1,dst_file1_,num))
     os.system("diff -up {} {} > ./benchmark/{}/2_patch.patch".format(dst_file2,dst_file2_,num))
     modify_hex(dst_file1)
     modify_hex(dst_file1_)
     modify_hex(dst_file2)
     modify_hex(dst_file2_)
-    
+
     rm_tempfile = False
     use_docker = False
     debugging = False
@@ -64,8 +63,8 @@ def successfully_generate(hash,file1,file2,num):
         os.system("diff -up {} {} > {}/new_patch.patch".format("./benchmark/"+str(num) + "/" + "test2.cc","./benchmark/"+str(num) + "/" + "test2_.cc","./benchmark/"+str(num)))
     except:
         print("FAILED")
-        
-    
+
+
 def main():
     num = 0
     tmp_path = "./tmp"
@@ -98,7 +97,6 @@ def main():
             os.mkdir("./benchmark")
 
     for commit in commits:
-        
         for type in commit.content:
             arm64_file = None
             riscv64_file = None
@@ -108,7 +106,6 @@ def main():
                     arm64_file = file_name
                 elif "riscv64" in file_name[0]:
                     riscv64_file = file_name
-                
                 if arm64_file != None and riscv64_file != None:
                     num = num + 1
                     if num > 54:
@@ -118,7 +115,6 @@ def main():
                     if num == 55:
                         return
                     break
-                    
-        
+
 if __name__ == "__main__":
     main()

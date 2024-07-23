@@ -72,4 +72,3 @@ if __name__ == "__main__":
         riscv()
     gen_patches()
     # date()
-    

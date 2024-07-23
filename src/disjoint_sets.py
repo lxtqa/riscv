@@ -23,7 +23,7 @@ def find_disjoint_sets(lst, function , max_range = -1):
         for j in range(i + 1, ending):
             if function(lst[i],lst[j]):
                 union(i, j)
-                
+
 
     # Collect sets
     sets = {}

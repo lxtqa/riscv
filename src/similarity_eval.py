@@ -21,8 +21,7 @@ def main(scope):
             else:
                 arc_not_related_functions.append(function)
 
-        
-        
+
         if scope == "self_check":
             function_dic = {}
             for function in arc_related_functions:
@@ -36,7 +35,7 @@ def main(scope):
                 else:
                     function_dic[file_name_template] = {function_name_template:[function]}
 
-            
+
             rank = 0
             for file_name_template in tqdm(function_dic.keys()):
                 for function_name_template in tqdm(function_dic[file_name_template].keys()):
@@ -62,8 +61,8 @@ def main(scope):
                                 continue
                             total_r += r
                             lst.append([r,i,j])
-            
-            
+
+
                     sorted_list = sorted(lst, key=lambda x: x[0],reverse=True)
                     f = open("./self_similarity/result{}.txt".format(rank),"w")
                     if len(function_set) != 1:
@@ -77,11 +76,10 @@ def main(scope):
                     f.close()
                     rank = rank+1
 
-        
+
         else:
             i = 0
             for target in arc_related_functions:
-                
                 f = open("./test/target.cc","w")
                 f.write(target["content"])
                 f.close()
@@ -107,7 +105,7 @@ def main(scope):
                 if not found:
                     continue
                 print(target["file_name"])
-                    
+
                 for function in tqdm(functions):
                     if function["astnode_num"] > target["astnode_num"]:
                         if target["astnode_num"] / function["astnode_num"] < min_r:
@@ -124,7 +122,7 @@ def main(scope):
                     # unit总能匹配到
                     r = (len(matches) - 1) / ( target["astnode_num"] - (len(matches) - 1) + function["astnode_num"] )
                     lst.append([r,function["file_name"],function["content"]])
-                
+
                 sorted_list = sorted(lst, key=lambda x: x[0],reverse=True)
                 f = open("./similarity/result{}.txt".format(i),"w")
                 f.write("{} {}\n".format(target["file_name"],target["content"].replace("\n"," ")))
@@ -132,11 +130,9 @@ def main(scope):
                     f.write("{} {} {}\n".format(item[0],item[1],item[2].replace("\n"," ")))
                 f.close()
                 i= i+1
-        
-        
+
 if __name__ == "__main__":
-    
     main("check")
-                
+
 
 
