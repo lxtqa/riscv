@@ -35,7 +35,7 @@ if not os.path.exists(subject_file):
 
             commit["subject"] = subject
             commit["units"] = read_patch(output)
-            
+
         f = open(subject_file,"w")
         f.write(json.dumps(commits))
         f.close()

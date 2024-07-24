@@ -17,8 +17,9 @@ def main(patch_path):
             patch = patchfile.readlines()
             for line in patch:
                 filename = re.findall(r"^diff --git a/(.+) b/(.+)$",line)
-                if has_arcwords(filename[0]):
-                    filename_list.append(filename[0])
+                if filename!=[]:
+                    if has_arcwords(filename[0][0]):
+                        filename_list.append(filename[0][0])
             if len(filename_list) != 0:
                 flag = False
                 for i in range(len(filename_list)):
