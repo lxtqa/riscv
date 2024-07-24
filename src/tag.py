@@ -26,22 +26,13 @@ def get_tags(tag_path):
             json_file.write(json.dumps(tags))
         return tags
 
-def get_commits(adjacent_tags,commits_between_tags_path):
-    # try:
-    #     commits_between_tags = json.load(open(commits_between_tags_path,"r"))
-    #     return commits_between_tags
-    # except:
-        commits_between_tags = []
-        for adjacent_tag in tqdm(adjacent_tags):
-            result = subprocess.run(["git","log","--format=%H","--decorate" ,adjacent_tag[0]+".."+adjacent_tag[1]],cwd="./v8", stdout=subprocess.PIPE)
-            output = result.stdout.decode('utf-8', errors='ignore')
-            commits = output.split("\n")
-            while "" in commits_between_tags:
-                commits.remove("")
-            commits_between_tags.append([adjacent_tag[0],adjacent_tag[1],commits])
-        with open(commits_between_tags_path,'w') as json_file:
-            json_file.write(json.dumps(commits_between_tags))
-        return commits_between_tags
+def get_commits(adjacent_tag):
+    result = subprocess.run(["git","log","--format=%H","--decorate" ,adjacent_tag[0]+".."+adjacent_tag[1]],cwd="./v8", stdout=subprocess.PIPE)
+    output = result.stdout.decode('utf-8', errors='ignore')
+    commits = output.split("\n")
+    while "" in commits:
+        commits.remove("")
+    return commits
 
 
 def parse_version(version):
@@ -85,14 +76,14 @@ if __name__ == "__main__":
         result = subprocess.run(["git","diff",adjacent_tag[0],adjacent_tag[1]],cwd="./v8", stdout=subprocess.PIPE)
         output = result.stdout.decode('utf-8', errors='ignore')
         patch = output.split("\n")
-        filtered_patchs ={}
+        filtered_patchs ={"commits":[],"contents":[]}
         filtered_patch = []
         tmp_filename = None
         for line in patch:
             filename = re.findall(r"^diff --git a/(.+) b/(.+)$",line)
             if filename != []:
                 if filtered_patch != []:
-                    filtered_patchs[tmp_filename] = filtered_patch
+                    filtered_patchs["contents"].append([tmp_filename,filtered_patch])
                     filtered_patch = []
                 if has_arcwords(filename[0][0]):
                     tmp_filename = filename[0][0]
@@ -101,7 +92,8 @@ if __name__ == "__main__":
                     tmp_filename = None
             if tmp_filename:
                 filtered_patch.append(line)
-        if filtered_patchs != {}:
+        if filtered_patchs["contents"] != []:
+            filtered_patchs["commits"] = get_commits(adjacent_tag)
             with open("./tags_diff/"+adjacent_tag[0]+"_"+adjacent_tag[1]+".json","w") as f:
                 f.write(json.dumps(filtered_patchs,indent=2))
-    get_commits(target_tags,"./commits_between_tags.json")
+    # TODO: 对照subject的结果，看看文件修改有没有缺失
