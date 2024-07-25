@@ -37,8 +37,8 @@ if not os.path.exists(subject_file):
             commit["units"] = read_patch(output)
 
         f = open(subject_file,"w")
-        f.write(json.dumps(commits))
-        f.close()
+        json.dumps(commits,f,indent=4)
+
 
 
 with open(subject_file,"r") as f:
@@ -51,10 +51,14 @@ with open(subject_file,"r") as f:
         else:
             return False
     result = sorted(find_disjoint_sets(subjects,same_subject,50),key=len,reverse = True)
-    with open("inter_commit.txt","w") as f1:
+    with open("inter_commit.json","w") as f1:
+        inter_commit = []
         for i in result:
+            tmp = []
             if len(i) >= 2:
                 for j in i:
-                    if j["time"][-1] == "2023":
-                        f1.write("{" + j["hash"]+"  "+j["subject"]+ " " +j["time"][-1]+"}\t")
-                f1.write("\n")
+                    if j["time"][-1] == "2023" or j["time"][-1] == "2022":
+                        tmp.append([j["hash"],j["subject"]])
+                if tmp != []:
+                    inter_commit.append(tmp)
+        json.dump(inter_commit,f1,indent=4)

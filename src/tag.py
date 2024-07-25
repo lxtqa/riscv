@@ -95,5 +95,5 @@ if __name__ == "__main__":
         if filtered_patchs["contents"] != []:
             filtered_patchs["commits"] = get_commits(adjacent_tag)
             with open("./tags_diff/"+adjacent_tag[0]+"_"+adjacent_tag[1]+".json","w") as f:
-                f.write(json.dumps(filtered_patchs,indent=2))
+                json.dumps(filtered_patchs,f,indent=4)
     # TODO: 对照subject的结果，看看文件修改有没有缺失
