@@ -37,7 +37,7 @@ if not os.path.exists(subject_file):
             commit["units"] = read_patch(output)
 
         f = open(subject_file,"w")
-        json.dumps(commits,f,indent=4)
+        json.dump(commits,f,indent=4)
 
 
 
@@ -59,6 +59,6 @@ with open(subject_file,"r") as f:
                 for j in i:
                     if j["time"][-1] == "2023" or j["time"][-1] == "2022":
                         tmp.append([j["hash"],j["subject"]])
-                if tmp != []:
+                if len(tmp) > 1:
                     inter_commit.append(tmp)
         json.dump(inter_commit,f1,indent=4)

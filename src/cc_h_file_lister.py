@@ -155,6 +155,6 @@ if __name__ == "__main__":
             text_rate2 = l22/l2
         print("| {} | {} | {} | {} | {} | {} | {} |".format(disjoint_set[0],rate1,rate2,text_rate1,text_rate2,len1,len2))
         result.append([disjoint_set,rate1,rate2,match])
-    json_string = json.dumps(result)
+
     with open('match.json', 'w') as json_file:
-        json_file.write(json_string)
+        json.dump(result,json_file,indent=4)

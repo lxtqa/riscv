@@ -32,7 +32,7 @@ def riscv():
             if file_names != []:
                 dic = {"hash":hash,"file_names":file_names}
                 content.append(dic)
-    json.dumps(content,f,indent=4)
+    json.dump(content,f,indent=4)
     f.close()
 
 if __name__ == "__main__":

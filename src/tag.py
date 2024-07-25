@@ -23,7 +23,7 @@ def get_tags(tag_path):
                     num_tags.append(tag)
         tags = sorted(num_tags, key=lambda x: tuple(map(int, x.split('.'))))
         with open(tag_path,'w') as json_file:
-            json_file.write(json.dumps(tags))
+            json.dump(tags,json_file)
         return tags
 
 def get_commits(adjacent_tag):
@@ -69,14 +69,12 @@ def find_adjacent_tags(tag_list):
 if __name__ == "__main__":
     tags = get_tags("./tags.json")
     adjacent_tags = find_adjacent_tags(tags)
-    target_tags = []
-    if not os.path.exists("./tags_diff"):
-        os.mkdir("./tags_diff")
+    tags_diff = []
     for adjacent_tag in tqdm(adjacent_tags):
         result = subprocess.run(["git","diff",adjacent_tag[0],adjacent_tag[1]],cwd="./v8", stdout=subprocess.PIPE)
         output = result.stdout.decode('utf-8', errors='ignore')
         patch = output.split("\n")
-        filtered_patchs ={"commits":[],"contents":[]}
+        filtered_patchs ={"tags":adjacent_tag,"commits":[],"contents":[]}
         filtered_patch = []
         tmp_filename = None
         for line in patch:
@@ -87,13 +85,12 @@ if __name__ == "__main__":
                     filtered_patch = []
                 if has_arcwords(filename[0][0]):
                     tmp_filename = filename[0][0]
-                    target_tags.append(adjacent_tag)
                 else:
                     tmp_filename = None
             if tmp_filename:
                 filtered_patch.append(line)
         if filtered_patchs["contents"] != []:
             filtered_patchs["commits"] = get_commits(adjacent_tag)
-            with open("./tags_diff/"+adjacent_tag[0]+"_"+adjacent_tag[1]+".json","w") as f:
-                json.dumps(filtered_patchs,f,indent=4)
-    # TODO: 对照subject的结果，看看文件修改有没有缺失
+            tags_diff.append(filtered_patchs)
+    with open("./tags_diff.json","w") as f:
+        json.dump(tags_diff,f,indent=4)
