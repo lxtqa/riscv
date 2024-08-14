@@ -1,11 +1,11 @@
 import subprocess
 import re
-import os
+import tempfile
 from tqdm import tqdm
 import json
 from arc_utils import has_arcwords,remove_arcwords
 import json
-from unit_result import remove_whitespace,read_patch,start_line
+from unit_result import remove_whitespace,start_line
 
 INF = 2**31
 
@@ -51,7 +51,6 @@ def split_diff_lines_to_json(lines,file_lines):
     for i,line in enumerate(file_lines):
         if re.match(header_re,line):
             hunk_header_indices.append(i)
-
     hunk_header_indices.append(INF)
 
     hunk_start_indices = []
@@ -59,21 +58,23 @@ def split_diff_lines_to_json(lines,file_lines):
     for i, line in enumerate(lines):
         if line.startswith('@@'):
             new_start, _ = start_line(line)
-            if new_start > hunk_header_indices[current_pointer]:
-                hunk_start_indices.append(i)
+            flag = 0
             while new_start > hunk_header_indices[current_pointer]:
                 current_pointer = current_pointer + 1
+                flag = 1
+            if flag:
+                hunk_start_indices.append([i,hunk_header_indices[current_pointer-1]])
 
     if not hunk_start_indices:
         print("No hunks found in the diff file.")
         return []
-
-    hunk_start_indices.append(len(lines))  # Add end index for the last hunk
+    hunk_start_indices.append([len(lines),""])  # Add end index for the last hunk
 
     hunks = []
     for i in range(len(hunk_start_indices) - 1):
-        hunk_lines = lines[hunk_start_indices[i]:hunk_start_indices[i + 1]]
+        hunk_lines = lines[hunk_start_indices[i][0]:hunk_start_indices[i + 1][0]]
         hunks.append({
+                    "header": file_lines[hunk_start_indices[i][1]],
                     'patch': hunk_lines
                 })
 
@@ -92,10 +93,6 @@ def ishunkpara(hunk1, hunk2):
     if hunk1 == "" or hunk2 == "":
         return hunk1 == hunk2
     if hunk1 == hunk2:
-        return True
-    if hunk1 in hunk2:
-        return True
-    if hunk2 in hunk1:
         return True
     return False
 
@@ -122,16 +119,27 @@ def collect_parallel_hunks(commit_diffs):
         parallel_group = [all_hunks[i]]
         visited[i] = True
         for j in range(i + 1, len(all_hunks)):
-            hunk_header1 = read_patch(all_hunks[i]['patch'])
-            if hunk_header1 == []: hunk_header1 = [""]
-            hunk_header2 = read_patch(all_hunks[j]['patch'])
-            if hunk_header2 == []: hunk_header2 = [""]
-            read_patch(all_hunks[j]['patch'])
-            if isfilepara(all_hunks[i]['file'], all_hunks[j]['file']) and ishunkpara(hunk_header1[0], hunk_header2[0]):
+            hunk_header1 = all_hunks[i]['header']
+            hunk_header2 = all_hunks[j]['header']
+            if isfilepara(all_hunks[i]['file'], all_hunks[j]['file']) and ishunkpara(hunk_header1, hunk_header2):
                 parallel_group.append(all_hunks[j])
                 visited[j] = True
+        #判断parallel_group中是否存在相同的，如果相同，则合并
         if len(parallel_group) > 1:
-            parallel_hunks_groups.append(parallel_group)
+            merged_dict = {}
+
+            for item in parallel_group:
+                key = (item['header'], item['file'])
+
+                if key in merged_dict:
+                    # 假设 'value' 字段是一个列表，进行合并
+                    merged_dict[key]['patch'].extend(item['patch'])
+                else:
+                    # 如果这个键不存在，直接添加到合并字典中
+                    merged_dict[key] = item
+            # 将合并结果转换回列表格式
+            if len(list(merged_dict.values())) > 1:
+                parallel_hunks_groups.append(list(merged_dict.values()))
 
     return parallel_hunks_groups
 
@@ -147,6 +155,27 @@ def get_commits(adjacent_version):
         commits.remove("")
     return commits
 
+def format(code):
+    code = subprocess.run(["clang-format"],input=code.encode(),stdout=subprocess.PIPE)
+    return code.stdout.decode()
+
+
+
+def get_file(commit_hash,file_path):
+    try:
+        subprocess.run(
+            ["git", "cat-file", "-e", f"{commit_hash}:{file_path}"],
+            check=True,
+            cwd="./v8",
+            stderr=subprocess.DEVNULL
+        )
+        code = subprocess.run(["git","show",commit_hash+":"+file_path],cwd="./v8", stdout=subprocess.PIPE)
+        code = format(code.stdout.decode('utf-8', errors='ignore'))
+        return code
+    except subprocess.CalledProcessError:
+        return None
+
+
 if __name__ == "__main__":
     versions_diff = []
     for i in tqdm(range(len(versions)-1)):
@@ -156,23 +185,34 @@ if __name__ == "__main__":
         filtered_patchs ={"versions":[versions[i],versions[i+1]],"commits":[],"contents":[]}
         contents = []
         filtered_patch = []
-        tmp_filename = None
+        ###
         for line in patch:
             filename = re.findall(r"^diff --git a/(.+) b/(.+)$",line)
             if filename != []:
-                if filtered_patch != []:
-                    if filtered_patch[1][0:17] != "deleted file mode" and filtered_patch[1][0:13] != "new file mode":
-                        result = subprocess.run(["git","show",versions[i]+":"+tmp_filename],cwd="./v8", stdout=subprocess.PIPE)
-                        output = result.stdout.decode('utf-8', errors='ignore')
-                        hunks = split_diff_lines_to_json(filtered_patch,output.split("\n"))
-                        contents.append([tmp_filename,hunks])
-                    filtered_patch = []
-                if has_arcwords(filename[0][0]):
                     tmp_filename = filename[0][0]
-                else:
-                    tmp_filename = None
-            if tmp_filename:
-                filtered_patch.append(line)
+                    if has_arcwords(tmp_filename):
+                            old_code = get_file(versions[i],tmp_filename)
+                            new_code = get_file(versions[i+1],tmp_filename)
+                            if old_code == None or new_code == None:
+                                continue
+                            with tempfile.NamedTemporaryFile(delete=False, mode='w', suffix='.cpp') as old_temp, \
+                                    tempfile.NamedTemporaryFile(delete=False, mode='w', suffix='.cpp') as new_temp:
+
+                                    old_temp.write(old_code)
+                                    new_temp.write(new_code)
+                                    old_temp_name = old_temp.name
+                                    new_temp_name = new_temp.name
+
+                            # 使用 git diff 比较两个临时文件
+                            result = subprocess.run(
+                                ["git", "diff","--no-index", "-U0", old_temp_name, new_temp_name],
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE
+                            )
+                            hunks = split_diff_lines_to_json(result.stdout.decode().split("\n"),old_code.split("\n"))
+                            contents.append([tmp_filename,hunks])
+
+        ###
         if contents != []:
             filtered_patchs["commits"] = get_commits([versions[i],versions[i+1]])
             filtered_patchs["contents"] = collect_parallel_hunks(contents)
