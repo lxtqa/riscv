@@ -86,15 +86,26 @@ def isfilepara(file1, file2):
     # 实现文件是否平行的逻辑
     return remove_whitespace(remove_arcwords(file1)) == remove_whitespace(remove_arcwords(file2))
 
+def extract_name(header):
+    name = re.findall(r"^.+\s+(\w*:?:?\w+)\(.*\).*{$",header)
+    if name != []:
+        return name[0]
+    else:
+        return None
+#class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
+
 def ishunkpara(hunk1, hunk2):
-    # 实现hunk是否平行的逻辑
-    hunk1 = remove_whitespace(remove_arcwords(hunk1))
-    hunk2 = remove_whitespace(remove_arcwords(hunk2))
     if hunk1 == "" or hunk2 == "":
         return hunk1 == hunk2
-    if hunk1 == hunk2:
-        return True
+    # 实现hunk是否平行的逻辑
+    arc1 = has_arcwords(hunk1)
+    arc2 = has_arcwords(hunk2)
+    if arc1 and arc2:
+        return remove_whitespace(remove_arcwords(hunk1)) == remove_whitespace(remove_arcwords(hunk2))
+    elif not arc1 and not arc2:
+        return remove_whitespace(hunk1) == remove_whitespace(hunk2)
     return False
+
 
 def collect_parallel_hunks(commit_diffs):
     """
@@ -111,19 +122,57 @@ def collect_parallel_hunks(commit_diffs):
 
     parallel_hunks_groups = []
 
+    #首先过一遍纯name的检查，然后再进行header的检查
+    #先检查同文件内是否有相同name的函数，如果没有，则直接认为name相同即为para
+    #如果有则比较hunk
+    # 判断平行的条件：file平行且不同，
+
     # 找到所有平行的hunks
+
+    same_named = [False] * len(all_hunks)
+    for i in range(len(all_hunks)):
+        if same_named[i]:
+            continue
+        name1 = extract_name(all_hunks[i]['header'])
+        if name1 == None:
+            continue
+        for j in range(i+1,len(all_hunks)):
+            if all_hunks[i]['file'] != all_hunks[j]['file']:
+                continue
+            name2 = extract_name(all_hunks[j]['header'])
+            if name2 == None:
+                continue
+            if remove_whitespace(name1) == remove_whitespace(name2) \
+                and remove_whitespace(all_hunks[i]['header']) != remove_whitespace(all_hunks[j]['header']):
+                same_named[i],same_named[j] = True, True
+
     visited = [False] * len(all_hunks)
     for i in range(len(all_hunks)):
         if visited[i]:
             continue
         parallel_group = [all_hunks[i]]
         visited[i] = True
-        for j in range(i + 1, len(all_hunks)):
+        if same_named[i]:
             hunk_header1 = all_hunks[i]['header']
-            hunk_header2 = all_hunks[j]['header']
-            if isfilepara(all_hunks[i]['file'], all_hunks[j]['file']) and ishunkpara(hunk_header1, hunk_header2):
-                parallel_group.append(all_hunks[j])
-                visited[j] = True
+            for j in range(i + 1, len(all_hunks)):
+                hunk_header2 = all_hunks[j]['header']
+                if isfilepara(all_hunks[i]['file'], all_hunks[j]['file']) and ishunkpara(hunk_header1, hunk_header2):
+                    parallel_group.append(all_hunks[j])
+                    visited[j] = True
+        else:
+            hunk_name1 = extract_name(all_hunks[i]['header'])
+            hunk_header1 = all_hunks[i]['header']
+            for j in range(i + 1, len(all_hunks)):
+                hunk_name2 = extract_name(all_hunks[j]['header'])
+                if hunk_name1 != None and hunk_name2 != None and not same_named[j]:
+                    if isfilepara(all_hunks[i]['file'], all_hunks[j]['file']) and ishunkpara(hunk_name1, hunk_name2):
+                        parallel_group.append(all_hunks[j])
+                        visited[j] = True
+                else:
+                    hunk_header2 = all_hunks[j]['header']
+                    if isfilepara(all_hunks[i]['file'], all_hunks[j]['file']) and ishunkpara(hunk_header1, hunk_header2):
+                        parallel_group.append(all_hunks[j])
+                        visited[j] = True
         #判断parallel_group中是否存在相同的，如果相同，则合并
         if len(parallel_group) > 1:
             merged_dict = {}

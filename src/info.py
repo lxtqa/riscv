@@ -10,14 +10,25 @@ import pandas as pd
 value = np.array([0,0,0,0,0,0,0,0,0,0,0])
 
 
+
 with open('./versions_diff_hunk.json', 'r') as json_file:
     functions = json.load(json_file)
     for version in functions:
         for type in version["contents"]:
-            if len(type) == 2:
+            if len(type) == 9:
                 a = 0
             value[len(type)] = value[len(type)] + 1
 
+#[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+#修改前
+#[0, 0, 1521, 512, 248, 230, 162, 202, 146, 301, 114]
+
+#修改后
+#[0, 0, 1506, 502, 261, 227, 170, 205, 147, 314, 127]
+#[0, 0, 1514, 523, 254, 223, 149, 196, 157, 391, 138]
+
+#= [0, 0, 3012, 1506, 1044, 1135, 1020, 1435, 1176, 2826, 1270]
+#= [0, 0, 3028, 1569, 1016, 1115, 894, 1372 ,1256, 3519, 1380]
 data = pd.DataFrame({
     'Category': ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10'],
     'Values': value
