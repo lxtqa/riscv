@@ -92,7 +92,6 @@ def extract_name(header):
         return name[0]
     else:
         return None
-#class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
 
 def ishunkpara(hunk1, hunk2):
     if hunk1 == "" or hunk2 == "":

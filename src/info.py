@@ -15,20 +15,25 @@ with open('./versions_diff_hunk.json', 'r') as json_file:
     functions = json.load(json_file)
     for version in functions:
         for type in version["contents"]:
-            if len(type) == 9:
-                a = 0
-            value[len(type)] = value[len(type)] + 1
+            flag = False
+            for arc in type:
+                if "riscv" in arc["file"] or "Riscv" in arc["file"] or "RISCV" in arc["file"]:
+                    flag = True
+                    break
+            if flag:
+                if len(type) == 2:
+                    a = 0
+                value[len(type)] = value[len(type)] + 1
 
 #[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-#修改前
-#[0, 0, 1521, 512, 248, 230, 162, 202, 146, 301, 114]
-
-#修改后
-#[0, 0, 1506, 502, 261, 227, 170, 205, 147, 314, 127]
+#所有
 #[0, 0, 1514, 523, 254, 223, 149, 196, 157, 391, 138]
+#包含riscv
+#[  0,   0, 262, 213, 151, 126,  98, 154,  74, 384, 138]
 
-#= [0, 0, 3012, 1506, 1044, 1135, 1020, 1435, 1176, 2826, 1270]
 #= [0, 0, 3028, 1569, 1016, 1115, 894, 1372 ,1256, 3519, 1380]
+
+#= [0, 0, 524，639, 604, 630, 588, 1078, 592, 3456, 1380]
 data = pd.DataFrame({
     'Category': ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10'],
     'Values': value

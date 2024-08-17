@@ -2,6 +2,7 @@ import os
 import re
 from get_cfile import get_cfile
 from unit_result import unit_result
+import json
 
 class Commit:
     def __init__(self,hash):
@@ -64,52 +65,57 @@ def successfully_generate(hash,file1,file2,num):
 def main():
     num = 0
     tmp_path = "./tmp"
-    hashs = os.listdir(tmp_path)
-    commits = []
-    for hash in hashs:
-        commit = Commit(hash)
-        if hash == ".DS_Store":
-            continue
-        types = os.listdir(tmp_path+"/"+hash)
-        for type in types:
-            if type == ".DS_Store":
-                continue
-            files = os.listdir(tmp_path+"/"+hash+"/"+type)
-            lst = []
-            for file_name in files:
-                file = open(tmp_path+"/"+hash+"/"+type+"/"+file_name)
-                line = file.readline()
-                try:
-                    name = line.split(" ")[2][2:]
-                    name_ = line.split(" ")[3][2:-1]
-                except:
-                    continue
-                lst.append([name,name_])
-            commit.content.append(lst)
-        commits.append(commit)
+    with open("versions_diff_hunk.json") as jsonFile:
+        versions_diff_hunk = json.load(jsonFile)
+        for version in versions_diff_hunk:
+            for type in version["contents"]:
+                a 
 
-    if not os.path.exists("./benchmark"):
-            os.mkdir("./benchmark")
+    # commits = []
+    # for hash in hashs:
+    #     commit = Commit(hash)
+    #     if hash == ".DS_Store":
+    #         continue
+    #     types = os.listdir(tmp_path+"/"+hash)
+    #     for type in types:
+    #         if type == ".DS_Store":
+    #             continue
+    #         files = os.listdir(tmp_path+"/"+hash+"/"+type)
+    #         lst = []
+    #         for file_name in files:
+    #             file = open(tmp_path+"/"+hash+"/"+type+"/"+file_name)
+    #             line = file.readline()
+    #             try:
+    #                 name = line.split(" ")[2][2:]
+    #                 name_ = line.split(" ")[3][2:-1]
+    #             except:
+    #                 continue
+    #             lst.append([name,name_])
+    #         commit.content.append(lst)
+    #     commits.append(commit)
 
-    for commit in commits:
-        for type in commit.content:
-            arm64_file = None
-            riscv64_file = None
-            # 判断是否具有arm和riscv两个架构，如果没有则返回
-            for file_name in type:
-                if "arm64" in file_name[0]:
-                    arm64_file = file_name
-                elif "riscv64" in file_name[0]:
-                    riscv64_file = file_name
-                if arm64_file != None and riscv64_file != None:
-                    num = num + 1
-                    if num > 54:
-                        print("---------------{}--------------".format(num))
-                        successfully_generate(commit.hash,arm64_file,riscv64_file,num)
-                        print("---------------{}--------------".format(num))
-                    if num == 55:
-                        return
-                    break
+    # if not os.path.exists("./benchmark"):
+    #         os.mkdir("./benchmark")
+
+    # for commit in commits:
+    #     for type in commit.content:
+    #         arm64_file = None
+    #         riscv64_file = None
+    #         # 判断是否具有arm和riscv两个架构，如果没有则返回
+    #         for file_name in type:
+    #             if "arm64" in file_name[0]:
+    #                 arm64_file = file_name
+    #             elif "riscv64" in file_name[0]:
+    #                 riscv64_file = file_name
+    #             if arm64_file != None and riscv64_file != None:
+    #                 num = num + 1
+    #                 if num > 54:
+    #                     print("---------------{}--------------".format(num))
+    #                     successfully_generate(commit.hash,arm64_file,riscv64_file,num)
+    #                     print("---------------{}--------------".format(num))
+    #                 if num == 55:
+    #                     return
+    #                 break
 
 if __name__ == "__main__":
     main()
