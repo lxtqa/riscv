@@ -2,7 +2,7 @@ import json
 import os
 from gumtree_parser import gumtree_parser
 from tqdm import tqdm
-from arc_utils import remove_arcwords,has_arcwords
+from utils.arc_utils import remove_arcwords,has_arcwords
 
 def main():
     if not os.path.exists("./similarity/"):

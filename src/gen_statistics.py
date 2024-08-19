@@ -2,7 +2,7 @@
 import re
 import os
 import codecs
-from arc_utils import has_arcwords,remove_arcwords
+from utils.arc_utils import has_arcwords,remove_arcwords
 
 def main(patch_path):
     patchname_list = os.listdir(patch_path)

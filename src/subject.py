@@ -4,7 +4,7 @@ from tqdm import tqdm
 import re
 import os
 from fuzzywuzzy import fuzz
-from arc_utils import remove_arcwords
+from utils.arc_utils import remove_arcwords
 from disjoint_sets import find_disjoint_sets
 from unit_result import read_patch
 

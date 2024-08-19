@@ -4,7 +4,7 @@ import codecs
 from tqdm import *
 import subprocess
 import json
-from arc_utils import has_arcwords
+from utils.arc_utils import has_arcwords
 
 def riscv():
     log_file = codecs.open("./GitLog-origin.txt","r",errors="ignore")

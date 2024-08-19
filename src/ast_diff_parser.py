@@ -1,6 +1,6 @@
-from ast_utils import parse_tree_from_text
+from utils.ast_utils import parse_tree_from_text
 import copy
-from ast_utils import get_type
+from utils.ast_utils import get_type
 
 class DiffOp:
     def __init__(self,op):

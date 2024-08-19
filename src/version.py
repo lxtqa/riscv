@@ -3,11 +3,8 @@ import re
 import tempfile
 from tqdm import tqdm
 import json
-from arc_utils import has_arcwords,remove_arcwords
-import json
-from unit_result import remove_whitespace,start_line
-
-INF = 2**31
+from utils.arc_utils import *
+from utils.patch_utils import *
 
 versions = ["519ee9d66cd", # 9.10.0
         "dc97b450587", # 10.0
@@ -80,30 +77,6 @@ def split_diff_lines_to_json(lines,file_lines):
 
     return hunks
 
-
-# 假设isfilepara和ishunkpara函数已经实现
-def isfilepara(file1, file2):
-    # 实现文件是否平行的逻辑
-    return remove_whitespace(remove_arcwords(file1)) == remove_whitespace(remove_arcwords(file2))
-
-def extract_name(header):
-    name = re.findall(r"^.+\s+(\w*:?:?\w+)\(.*\).*{$",header)
-    if name != []:
-        return name[0]
-    else:
-        return None
-
-def ishunkpara(hunk1, hunk2):
-    if hunk1 == "" or hunk2 == "":
-        return hunk1 == hunk2
-    # 实现hunk是否平行的逻辑
-    arc1 = has_arcwords(hunk1)
-    arc2 = has_arcwords(hunk2)
-    if arc1 and arc2:
-        return remove_whitespace(remove_arcwords(hunk1)) == remove_whitespace(remove_arcwords(hunk2))
-    elif not arc1 and not arc2:
-        return remove_whitespace(hunk1) == remove_whitespace(hunk2)
-    return False
 
 
 def collect_parallel_hunks(commit_diffs):
@@ -202,10 +175,6 @@ def get_commits(adjacent_version):
     while "" in commits:
         commits.remove("")
     return commits
-
-def format(code):
-    code = subprocess.run(["clang-format"],input=code.encode(),stdout=subprocess.PIPE)
-    return code.stdout.decode()
 
 
 

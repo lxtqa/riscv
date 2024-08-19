@@ -69,7 +69,7 @@ def main():
         versions_diff_hunk = json.load(jsonFile)
         for version in versions_diff_hunk:
             for type in version["contents"]:
-                a 
+                pass
 
     # commits = []
     # for hash in hashs:
