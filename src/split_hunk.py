@@ -7,26 +7,6 @@ from disjoint_sets import find_disjoint_sets
 from utils.arc_utils import *
 from utils.patch_utils import *
 
-def bfs_search_function(root):
-    queue = [root]
-    results = []
-    while queue:
-        node = queue.pop(0)
-        if get_type(node.value) == "function":
-            results.append(node)
-        else:
-            queue.extend(node.children)
-    return results
-
-def bfs_get_num(root):
-    queue = [root]
-    num = 0
-    while queue:
-        node = queue.pop(0)
-        queue.extend(node.children)
-        num = num + 1
-    return num
-
 def list_files(directory):
     files = []
     for root, _, filenames in os.walk(directory):
@@ -71,8 +51,6 @@ if __name__ == "__main__":
     for disjoint_set in disjoint_sets:
         if len(disjoint_set) > 1:
             _.append(disjoint_set)
-        else:
-            a= 0
     disjoint_sets = _
 
     result = []

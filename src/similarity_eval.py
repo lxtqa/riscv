@@ -4,6 +4,15 @@ from gumtree_parser import gumtree_parser
 from tqdm import tqdm
 from utils.arc_utils import remove_arcwords,has_arcwords
 
+def bfs_get_num(root):
+    queue = [root]
+    num = 0
+    while queue:
+        node = queue.pop(0)
+        queue.extend(node.children)
+        num = num + 1
+    return num
+
 def main():
     if not os.path.exists("./similarity/"):
         os.mkdir("./similarity/")
