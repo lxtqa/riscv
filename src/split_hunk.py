@@ -2,7 +2,7 @@ import os
 from tqdm import tqdm
 from utils.ast_utils import get_type
 import json
-import re
+from extract_hunk import extract_hunk
 from disjoint_sets import find_disjoint_sets
 from utils.arc_utils import *
 from utils.patch_utils import *
@@ -15,29 +15,14 @@ def list_files(directory):
                 files.append(os.path.join(root, filename))
     return files
 
-def split_hunk(file_lines,file_name):
-    hunk_header_indices = [0]
-    header_re = r"^((::[[:space:]]*)?[A-Za-z_].*)$"
-    for i,line in enumerate(file_lines):
-        if re.match(header_re,line):
-            hunk_header_indices.append(i)
-    hunk_header_indices.append(INF)
-
-    hunks = []
-    for i in range(len(hunk_header_indices) - 1):
-        hunk_lines = file_lines[hunk_header_indices[i]:hunk_header_indices[i + 1]]
-        hunks.append({
-                    "header": file_lines[hunk_header_indices[i]],
-                    "content": hunk_lines,
-                    "file": file_name
-                })
-    return hunks
-
-
 
 if __name__ == "__main__":
-    current_directory = "./v8/src"
+    dir = "./v8"
+    os.chdir(dir)
+    current_directory = "./src"
+    os.system("git -c advice.detachedHead=false  checkout 70ccb6965dd")#12.9.0
     cc_h_files = list_files(current_directory)
+    os.system("git -c advice.detachedHead=false  checkout main")
     file_list = []
 
     for file in cc_h_files:
@@ -60,7 +45,7 @@ if __name__ == "__main__":
         for file_name in disjoint_set:
             with open(file_name,"r") as f:
                 content = f.read()
-                all_hunks += split_hunk(format(content).split("\n"),file_name)
+                all_hunks += extract_hunk(format(content).split("\n"),file_name)
 
         visited = [False] * len(all_hunks)
 
@@ -125,6 +110,6 @@ if __name__ == "__main__":
                     parallel_hunks_groups.append(list(merged_dict.values()))
 
         result.append([disjoint_set,parallel_hunks_groups])
-
+    os.chdir("..")
     with open('match.json', 'w') as json_file:
         json.dump(result,json_file,indent=4)

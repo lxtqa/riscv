@@ -212,22 +212,22 @@ if __name__ == "__main__":
                             new_code = get_file(versions[i+1],tmp_filename)
                             if old_code == None or new_code == None:
                                 continue
-                            with tempfile.NamedTemporaryFile(delete=False, mode='w', suffix='.cpp') as old_temp, \
-                                    tempfile.NamedTemporaryFile(delete=False, mode='w', suffix='.cpp') as new_temp:
+                            with tempfile.NamedTemporaryFile(delete=True, mode='w', suffix='.cpp') as old_temp, \
+                                    tempfile.NamedTemporaryFile(delete=True, mode='w', suffix='.cpp') as new_temp:
 
                                     old_temp.write(old_code)
+                                    old_temp.flush()
                                     new_temp.write(new_code)
-                                    old_temp_name = old_temp.name
-                                    new_temp_name = new_temp.name
+                                    new_temp.flush()
 
                             # 使用 git diff 比较两个临时文件
-                            result = subprocess.run(
-                                ["git", "diff","--no-index", "-U0", old_temp_name, new_temp_name],
-                                stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE
-                            )
-                            hunks = split_diff_lines_to_json(result.stdout.decode().split("\n"),old_code.split("\n"))
-                            contents.append([tmp_filename,hunks])
+                                    result = subprocess.run(
+                                        ["git", "diff","--no-index", "-U0", old_temp.name, new_temp.name],
+                                        stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE
+                                    )
+                                    hunks = split_diff_lines_to_json(result.stdout.decode().split("\n"),old_code.split("\n"))
+                                    contents.append([tmp_filename,hunks])
 
         ###
         if contents != []:

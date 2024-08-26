@@ -6,6 +6,7 @@ from time import time
 import sys
 import re
 import subprocess
+import tempfile
 
 
 class Operation:
@@ -120,11 +121,9 @@ def get_newname(node,match_dic12,match_dic1_1):
 
 
 
-def gen_result(dir,cfile_name1,cfile_name2,
-                cfile_name1_,cfile_name2_,
-                rm_tempfile,
+def gen_result(file1String,file2String,
+                file1_String,
                 use_docker,
-                debugging,
                 MATCHER_ID,
                 TREE_GENERATOR_ID
                 ):
@@ -134,220 +133,182 @@ def gen_result(dir,cfile_name1,cfile_name2,
     '''
     start_time = time()
 
-    gumtreefile_name1 = dir + "/" + "gumtree_12.txt"
-    gumtreefile_name2 = dir + "/" + "gumtree_11_.txt"
+    with tempfile.NamedTemporaryFile(delete=True, mode='w', suffix='.cpp') as cfile1, \
+        tempfile.NamedTemporaryFile(delete=True, mode='w', suffix='.cpp') as cfile1_, \
+        tempfile.NamedTemporaryFile(delete=True, mode='w', suffix='.cpp') as cfile2:
 
-    cfile_name1 = dir + "/" + cfile_name1
-    cfile_name1_ = dir + "/" + cfile_name1_
-    cfile_name2 = dir + "/" + cfile_name2
-    cfile_name2_ = dir + "/" + cfile_name2_
+        cfile1.write(file1String)
+        cfile1.flush()
+        cfile1_.write(file1String)
+        cfile1_.flush()
+        cfile2.write(file1String)
+        cfile2.flush()
 
-    file2String = read_file(cfile_name2)
-    file1_String = read_file(cfile_name1_)
-    file1String = read_file(cfile_name1)
-    file2_ = open(cfile_name2_,"w")
+        ast1,ast1Nodenum = get_ast(cfile1.name(),use_docker=use_docker,TREE_GENERATOR_ID=TREE_GENERATOR_ID)
+        ast1_,ast1_Nodenum  = get_ast(cfile1_.name(),use_docker=use_docker,TREE_GENERATOR_ID=TREE_GENERATOR_ID)
 
-    ast1,ast1Nodenum = get_ast(cfile_name1,use_docker=use_docker,debugging=debugging,TREE_GENERATOR_ID=TREE_GENERATOR_ID)
-    ast1_,ast1_Nodenum  = get_ast(cfile_name1_,use_docker=use_docker,debugging=debugging,TREE_GENERATOR_ID=TREE_GENERATOR_ID)
+        # ast2 = get_ast(cfile_name2,rm_tempfile=rm_tempfile,use_docker=use_docker,debugging=debugging,TREE_GENERATOR_ID=TREE_GENERATOR_ID)
 
-    # ast2 = get_ast(cfile_name2,rm_tempfile=rm_tempfile,use_docker=use_docker,debugging=debugging,TREE_GENERATOR_ID=TREE_GENERATOR_ID)
-    if not debugging:
         if use_docker:
-            output11_ = subprocess.run(["docker","run","-v",cfile_name1+":/left.cc","-v",cfile_name1_+":/right.cc","gumtreediff/gumtree","textdiff","/left.cc", "/right.cc",
+            output11_ = subprocess.run(["docker","run","--rm","-v",cfile1.name()+":/left.cc","-v",cfile1_.name()+":/right.cc","gumtreediff/gumtree","textdiff","/left.cc", "/right.cc",
                                         "-m",MATCHER_ID,"-g", TREE_GENERATOR_ID,"-M","bu_minsim","0.5"],
                                         capture_output=True,text = True)
-            output12 = subprocess.run(["docker","run","-v",cfile_name1+":/left.cc","-v",cfile_name2+":/right.cc","gumtreediff/gumtree","textdiff","/left.cc", "/right.cc",
+            output12 = subprocess.run(["docker","run","--rm","-v",cfile1.name()+":/left.cc","-v",cfile2.name()+":/right.cc","gumtreediff/gumtree","textdiff","/left.cc", "/right.cc",
                                         "-m",MATCHER_ID,"-g", TREE_GENERATOR_ID,"-M","bu_minsim","0.5"],
                                         capture_output=True,text = True)
-            # os.system("docker run -v {}:/left.cc -v {}:/right.cc gumtreediff/gumtree textdiff /left.cc /right.cc -m {} -g {} -M bu_minsim 0.5 > {}".format(
-            #     cfile_name1, cfile_name2, MATCHER_ID, TREE_GENERATOR_ID, gumtreefile_name1))
-            
-            
         else:
-            # output11_ = subprocess.run(["gumtree","textdiff",cfile_name1, cfile_name1_,
-            #                             "-m",MATCHER_ID,"-g", TREE_GENERATOR_ID,"-M","bu_minsim","0.5"],
-            #                            capture_output=True,text = True)
-            # output12 = subprocess.run(["gumtree","textdiff",cfile_name1, cfile_name2,
-            #                            "-m",MATCHER_ID,"-g", TREE_GENERATOR_ID,"-M","bu_minsim","0.5"],
-            #                           capture_output=True,text = True)
-            output11_ = subprocess.run(["gumtree","textdiff",cfile_name1, cfile_name1_,
+            output11_ = subprocess.run(["gumtree","textdiff",cfile1.name(), cfile1_.name(),
                                         "-m",MATCHER_ID,"-g", TREE_GENERATOR_ID],#,"-M","bu_minsim","0.5"],
-                                       capture_output=True,text = True)
-            output12 = subprocess.run(["gumtree","textdiff",cfile_name1, cfile_name2,
-                                       "-m",MATCHER_ID,"-g", TREE_GENERATOR_ID],#,"-M","bu_minsim","0.5"],
-                                      capture_output=True,text = True)
-    
-    print("生成ast及diff耗时: {}s".format(time()-start_time))
-    with open("a.txt","w") as f:
-        f.writelines(output11_.stdout)
-    matches11_, diffs11_ = gumtree_parser(output11_.stdout)
-    matches12, _= gumtree_parser(output12.stdout)
-    
+                                        capture_output=True,text = True)
+            output12 = subprocess.run(["gumtree","textdiff",cfile1.name(), cfile2.name(),
+                                        "-m",MATCHER_ID,"-g", TREE_GENERATOR_ID],#,"-M","bu_minsim","0.5"],
+                                        capture_output=True,text = True)
 
-    #parse match
-    match_dic12 = {}
-    match_dic1_1 = {}
-    match_dic11_ = {}
-    for match in matches12:
-        if match[1]!="---":
-            exit(201)
-        match_dic12[match[2]] = match[3]
-    for match in matches11_:
-        if match[1]!="---":
-            exit(201)
-        match_dic1_1[match[3]] = match[2]
-        match_dic11_[match[2]] = match[3]
+        print("生成ast及diff耗时: {}s".format(time()-start_time))
+        matches11_, diffs11_ = gumtree_parser(output11_.stdout)
+        matches12, _= gumtree_parser(output12.stdout)
+
+        #parse match
+        match_dic12 = {}
+        match_dic1_1 = {}
+        match_dic11_ = {}
+        for match in matches12:
+            if match[1]!="---":
+                exit(201)
+            match_dic12[match[2]] = match[3]
+        for match in matches11_:
+            if match[1]!="---":
+                exit(201)
+            match_dic1_1[match[3]] = match[2]
+            match_dic11_[match[2]] = match[3]
 
 
-    operations = []
-    #如果相似度低于某个阈值，则直接替换：
-    similarity = len(match_dic11_)/(ast1Nodenum + ast1_Nodenum - len(match_dic11_))
-    if similarity < 0.2:
-        print("Similary too low!")
-        file2_.write(arch_keyword_replace(file1_String))
-        file2_.close()
-        return
-    
-    #先对diff操作进行parse
-    diffOps = diff_parser(diffs11_,match_dic11_)
+        operations = []
+        #如果相似度低于某个阈值，则直接替换：
+        similarity = len(match_dic11_)/(ast1Nodenum + ast1_Nodenum - len(match_dic11_))
+        if similarity < 0.2:
+            print("Similary too low!")
+            return arch_keyword_replace(file1_String)
 
-    diffOp_i = 0
-    while diffOp_i < len(diffOps):
-        diffOp = diffOps[diffOp_i]
-        diffOp_i = diffOp_i + 1
-        if diffOp.op == "insert-node" or diffOp.op == "insert-tree":
-            #位置
-            if diffOp.desNode in match_dic12:
-                des = match_dic12[diffOp.desNode]
-            else:
-                continue
-            #在ast1,2中找到pos,根据其child找到位置
-            desNode = bfs_search(ast1,diffOp.desNode)
+        #先对diff操作进行parse
+        diffOps = diff_parser(diffs11_,match_dic11_)
 
-            # 找到插入节点的后一个节点，进行映射，如果能映射到，则插入到后一个节点的前面
-            # 找不到，则找到插入节点的前一个节点，进行映射，如果能映射到，则插入到前一个节点的后面
-            # 全都找不到，就放在最前面
-            child_rank = diffOp.desRank
-            child_rank2 = -1
-            start = -1
-            for i in range(child_rank-1,-1,-1):
-                if desNode.children[i].value != "VAL":
-                    if desNode.children[i].value in match_dic12:
-                        _,start = get_start_end(match_dic12[desNode.children[i].value])
-                        break
-            if start == -1:
-                for i in range(child_rank,len(desNode.children)):
+        diffOp_i = 0
+        while diffOp_i < len(diffOps):
+            diffOp = diffOps[diffOp_i]
+            diffOp_i = diffOp_i + 1
+            if diffOp.op == "insert-node" or diffOp.op == "insert-tree":
+                #位置
+                if diffOp.desNode in match_dic12:
+                    des = match_dic12[diffOp.desNode]
+                else:
+                    continue
+                #在ast1,2中找到pos,根据其child找到位置
+                desNode = bfs_search(ast1,diffOp.desNode)
+
+                # 找到插入节点的后一个节点，进行映射，如果能映射到，则插入到后一个节点的前面
+                # 找不到，则找到插入节点的前一个节点，进行映射，如果能映射到，则插入到前一个节点的后面
+                # 全都找不到，就放在最前面
+                child_rank = diffOp.desRank
+                child_rank2 = -1
+                start = -1
+                for i in range(child_rank-1,-1,-1):
                     if desNode.children[i].value != "VAL":
                         if desNode.children[i].value in match_dic12:
-                            start,_ = get_start_end(match_dic12[desNode.children[i].value])
+                            _,start = get_start_end(match_dic12[desNode.children[i].value])
                             break
-            if start ==-1:
-                start,_ = get_start_end(des)
-                if get_type(des) == "parameter_list":
-                    start = start+1
-            
-            #内容 需要找到存在于原代码片段的位置
-            #进行简单的映射:先找到1_所有同名变量，进行 1_->1 的映射，再进行 1->2 的映射
-            # if diffOp.move == False:
-            content = map(bfs_search(ast1_,diffOp.source.value),match_dic12,match_dic1_1,file1_String)
-            # else:
-            #     content = map(diffOp,match_dic12,None,file1String)
-            if diffOp.op == "insert-tree" or diffOp.source.value.split(":")[0]=="comment":
-                if get_type(diffOp.source.value) == "argument" or get_type(diffOp.source.value) == "parameter":
-                    if len(desNode.children) != 0: 
-                        if diffOp.desRank == len(desNode.children):
-                            content =  ", " + content
-                        elif diffOp.desRank == 0:
-                            content =  content + ", "
-                        else:
-                            content =  ", " + content + ", "
-                    
-                elif get_type(diffOp.desNode)== "block" or get_type(diffOp.desNode) == "unit" or get_type(diffOp.desNode) == "block_content":
-                    content =  "\n" + content + "\n"
+                if start == -1:
+                    for i in range(child_rank,len(desNode.children)):
+                        if desNode.children[i].value != "VAL":
+                            if desNode.children[i].value in match_dic12:
+                                start,_ = get_start_end(match_dic12[desNode.children[i].value])
+                                break
+                if start ==-1:
+                    start,_ = get_start_end(des)
+                    if get_type(des) == "parameter_list":
+                        start = start+1
+
+                #内容 需要找到存在于原代码片段的位置
+                #进行简单的映射:先找到1_所有同名变量，进行 1_->1 的映射，再进行 1->2 的映射
+                # if diffOp.move == False:
+                content = map(bfs_search(ast1_,diffOp.source.value),match_dic12,match_dic1_1,file1_String)
+                # else:
+                #     content = map(diffOp,match_dic12,None,file1String)
+                if diffOp.op == "insert-tree" or diffOp.source.value.split(":")[0]=="comment":
+                    if get_type(diffOp.source.value) == "argument" or get_type(diffOp.source.value) == "parameter":
+                        if len(desNode.children) != 0:
+                            if diffOp.desRank == len(desNode.children):
+                                content =  ", " + content
+                            elif diffOp.desRank == 0:
+                                content =  content + ", "
+                            else:
+                                content =  ", " + content + ", "
+
+                    elif get_type(diffOp.desNode)== "block" or get_type(diffOp.desNode) == "unit" or get_type(diffOp.desNode) == "block_content":
+                        content =  "\n" + content + "\n"
+                    else:
+                        content =  " " + content + " "
+
+                desNode.children.insert(child_rank,TreeNode("VAL"))
+
+                # 删除单行注释
+                content = re.sub(r'//.*$', '', content, flags=re.MULTILINE)
+                # 删除多行注释
+                content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
+
+                operation = Operation(start,start,content)
+                operation.rank = child_rank2
+                operations.append(operation)
+            elif diffOp.op == "delete-node" or diffOp.op == "delete-tree":
+                if diffOp.source.value in match_dic12:
+                    #删除结点
+                    desNode = bfs_search_father(ast1,diffOp.source.value)
+                    r = 0
+                    des = match_dic12[diffOp.source.value]
+                    for i in range(len(desNode.children)):
+                        if desNode.children[i].value == diffOp.source.value:
+                            r = i
+
+                    start,end = get_start_end(des)
+                    try:
+                        if get_type(des) == "argument" or get_type(des) == "parameter":
+                            if r == len(desNode.children)-1:
+                                #向前找到逗号删除
+                                while r-1>0 and desNode.children[r-1].value == "VAL":
+                                    r = r-1
+                                _,start = get_start_end(match_dic12[desNode.children[r-1].value])
+                            else:
+                                #向后找到逗号删除
+                                while r+1 < len(desNode.children) and desNode.children[r+1].value == "VAL":
+                                    r = r+1
+                                end,_ = get_start_end(match_dic12[desNode.children[r+1].value])
+                    except:
+                        pass
+                    operation = Operation(start,end,"")
+                    operation.rank = sys.maxsize
+                    operations.append(operation)
+                    # 在ast中删除节点
+                    desNode.children.pop(r)
                 else:
-                    content =  " " + content + " "
-            
-            desNode.children.insert(child_rank,TreeNode("VAL"));
-            
-            # 删除单行注释
-            content = re.sub(r'//.*$', '', content, flags=re.MULTILINE)
-            # 删除多行注释
-            content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
-
-            operation = Operation(start,start,content)
-            operation.rank = child_rank2
-            operations.append(operation)
-        elif diffOp.op == "delete-node" or diffOp.op == "delete-tree":
-            if diffOp.source.value in match_dic12:
-                #删除结点
-                desNode = bfs_search_father(ast1,diffOp.source.value)
-                r = 0
-                des = match_dic12[diffOp.source.value]
-                for i in range(len(desNode.children)):
-                    if desNode.children[i].value == diffOp.source.value:
-                        r = i
-                
-                start,end = get_start_end(des)
-                try:
-                    if get_type(des) == "argument" or get_type(des) == "parameter":
-                        if r == len(desNode.children)-1:
-                            #向前找到逗号删除
-                            while r-1>0 and desNode.children[r-1].value == "VAL":
-                                r = r-1
-                            _,start = get_start_end(match_dic12[desNode.children[r-1].value])
-                        else:
-                            #向后找到逗号删除
-                            while r+1 < len(desNode.children) and desNode.children[r+1].value == "VAL":
-                                r = r+1
-                            end,_ = get_start_end(match_dic12[desNode.children[r+1].value])
-                except:
-                    pass
-                operation = Operation(start,end,"")
-                operation.rank = sys.maxsize
-                operations.append(operation)
-                # 在ast中删除节点
-                desNode.children.pop(r)
+                    if diffOp_i < len(diffOps):
+                        if diffOps[diffOp_i].id == diffOp.id:
+                            diffOp_i = diffOp_i + 1
+            elif diffOp.op == "update-node":
+                if diffOp.desNode in match_dic12:
+                    des = match_dic12[diffOp.desNode]
+                    start,end = get_start_end(des)
+                    operation = Operation(start,end,arch_keyword_replace(diffOp.source))
+                    operations.append(operation)
             else:
-                if diffOp_i < len(diffOps):
-                    if diffOps[diffOp_i].id == diffOp.id:
-                        diffOp_i = diffOp_i + 1
-        elif diffOp.op == "update-node":
-            if diffOp.desNode in match_dic12:
-                des = match_dic12[diffOp.desNode]
-                start,end = get_start_end(des)
-                operation = Operation(start,end,arch_keyword_replace(diffOp.source))
-                operations.append(operation)
-        else:
-            exit(206)
-    file2_String = replace(file2String,operations)
-    #删除所有两个连着的逗号
-    file2_String = re.sub(r',(\s*,)+', ', ', file2_String)
-    
-    #删除所有以 “\”结尾的空行
-    file2_String = re.sub(r'^\s*\\\s*$', '', file2_String,flags=re.MULTILINE)
+                exit(206)
+        file2_String = replace(file2String,operations)
+        #删除所有两个连着的逗号
+        file2_String = re.sub(r',(\s*,)+', ', ', file2_String)
 
-    file2_.write(file2_String)
-    file2_.close()
+        #删除所有以 “\”结尾的空行
+        file2_String = re.sub(r'^\s*\\\s*$', '', file2_String,flags=re.MULTILINE)
 
-    if rm_tempfile:
-        os.system("rm " + gumtreefile_name1)
-        os.system("rm " + gumtreefile_name2)
-    end_time = time()
-    print("生成修改后代码总耗时: {}s".format(end_time-start_time))
-    
-if __name__ == "__main__":
-    rm_tempfile = False
-    use_docker = False
-    debugging = False
-    
-    # gen_result(cfile_name1="./test/test1.cc",
-    #               cfile_name2="./test/test2.cc",
-    #               cfile_name1_="./test/test1_.cc",
-    #               cfile_name2_="./test/test2_.cc",
-    #               rm_tempfile=rm_tempfile,
-    #               use_docker=use_docker,
-    #               debugging=debugging,
-    #               MATCHER_ID="gumtree-hybrid",
-    #               TREE_GENERATOR_ID="cs-srcml"
-    #               )
-    
+        end_time = time()
+        print("生成修改后代码总耗时: {}s".format(end_time-start_time))
+
+        return file2_String
