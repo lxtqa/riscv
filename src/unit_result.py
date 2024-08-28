@@ -2,7 +2,7 @@ from gen_result import read_file,write_file,gen_result
 import re
 from extract_unit import extract_unit
 import subprocess
-from utils.arc_utils import *
+from utils.arch_utils import *
 from utils.patch_utils import *
 
 
@@ -40,7 +40,7 @@ def match_unit(units1, units1_, units2):
         matchlist = []
 
         for unit2 in units2:
-            if remove_arcwords(remove_whitespace(unit1["name"])) == remove_arcwords(remove_whitespace(unit2["name"])):
+            if remove_archwords(remove_whitespace(unit1["name"])) == remove_archwords(remove_whitespace(unit2["name"])):
                 matchlist.append(unit2)
         if matchlist == []:
             continue
@@ -48,7 +48,7 @@ def match_unit(units1, units1_, units2):
             matchlist = []
             #在匹配到多个函数名的情况下比较除了函数体之外的部分
             for unit2 in units2:
-                if remove_arcwords(remove_whitespace(unit1["name_and_para"])) == remove_arcwords(remove_whitespace(unit2["name_and_para"])):
+                if remove_archwords(remove_whitespace(unit1["name_and_para"])) == remove_archwords(remove_whitespace(unit2["name_and_para"])):
                     matchlist.append(unit2)
             if matchlist == [] or len(matchlist)>1:
                 continue

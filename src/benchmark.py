@@ -1,8 +1,10 @@
 import os
 import re
-from get_cfile import get_cfile
-from unit_result import unit_result
+from utils.arch_utils import *
+from utils.patch_utils import *
+from hunk_result import hunk_result
 import json
+import tempfile
 
 class Commit:
     def __init__(self,hash):
@@ -10,112 +12,78 @@ class Commit:
         self.content = []
 
 
-def modify_hex(file_path,reverse = False):
+def modify_hex(cpp_code,reverse = False):
     if not reverse:
-        with open(file_path, 'r') as file:
-            cpp_code = file.read()
-            pattern = r'0x[0-9a-fA-F]+(\'[0-9a-fA-F]+)*'
-            replacer = lambda match: match.group().replace("'", '')
-            processed_code = re.sub(pattern, replacer, cpp_code)
-        with open(file_path, 'w') as file:
-            file.write(processed_code)
+        pattern = r'0x[0-9a-fA-F]+(\'[0-9a-fA-F]+)*'
+        replacer = lambda match: match.group().replace("'", '')
+        processed_code = re.sub(pattern, replacer, cpp_code)
+        return processed_code
     else:
         #TODO:reverse back
         pass
 
+def remove_cpp_comments(file_content):
+    # 正则表达式匹配 C++ 的注释
+    pattern = r'//.*?$|/\*.*?\*/'
 
-def successfully_generate(hash,file1,file2,num):
-    if not os.path.exists("./benchmark/"+str(num)):
-        os.mkdir("./benchmark/"+str(num))
-    dst_file1 = "./benchmark/"+str(num)+"/test1.cc"
-    dst_file2 = "./benchmark/"+str(num)+"/test2.cc"
-    dst_file1_ = "./benchmark/"+str(num)+"/test1_.cc"
-    dst_file2_ = "./benchmark/"+str(num)+"/test2__.cc" # 与下面gen_result的结果不同，输出原始结果
-    # get_cfile(hash,src_file1=file1,dst_file1=dst_file1,
-    #           src_file2=file2,dst_file2=dst_file2,
-    #           dst_file1_=dst_file1_,
-    #           dst_file2_=dst_file2_)
-    os.system("diff -up {} {} > ./benchmark/{}/1_patch.patch".format(dst_file1,dst_file1_,num))
-    os.system("diff -up {} {} > ./benchmark/{}/2_patch.patch".format(dst_file2,dst_file2_,num))
-    modify_hex(dst_file1)
-    modify_hex(dst_file1_)
-    modify_hex(dst_file2)
-    modify_hex(dst_file2_)
-    rm_tempfile = False
-    use_docker = False
-    debugging = False
-    try:
-        unit_result(
-                dir="./benchmark/"+str(num),
-                cfile_name1="test1.cc",
-                cfile_name2="test2.cc",
-                cfile_name1_="test1_.cc",
-                cfile_name2_="test2_.cc",
-                rm_tempfile=rm_tempfile,
-                use_docker=use_docker,
-                debugging=debugging,
-                MATCHER_ID="gumtree-simple-id",#"gumtree-hybrid",
-                TREE_GENERATOR_ID="cpp-srcml"#"cs-srcml"
-                )
-        print("成功生成!")
-        os.system("diff -up {} {} > {}/new_patch.patch".format("./benchmark/"+str(num) + "/" + "test2.cc","./benchmark/"+str(num) + "/" + "test2_.cc","./benchmark/"+str(num)))
-    except:
+    # 使用 re.sub 替换掉匹配的注释内容，re.DOTALL 让 . 能匹配换行符，re.MULTILINE 处理多行注释
+    cleaned_content = re.sub(pattern, '', file_content, flags=re.DOTALL | re.MULTILINE)
+
+    return cleaned_content
+
+
+def successfully_generate(file1,patch1,file2,patch2):
+
+    modify_hex(file1)
+    modify_hex(file2)
+
+    with tempfile.NamedTemporaryFile(delete=True, mode='w', suffix='.cc') as cfile2, \
+        tempfile.NamedTemporaryFile(delete=True, mode='w', suffix='.patch') as patchfile2:
+            cfile2.write(file2)
+            cfile2.flush()
+            patch2 = ["diff --git a/a.cc b/b.cc","--- a/a.cc","+++ b/b.cc"] + patch2
+            patchfile2.write("\n".join(patch2)+"\n")
+            patchfile2.flush()
+            output22_ = subprocess.run(["patch",cfile2.name,patchfile2.name,"--output=-"],capture_output=True,text = True)
+            file2_String_std = output22_.stdout
+    use_docker = True
+    file2_String = hunk_result(file1,patch1,file2,use_docker=use_docker,MATCHER_ID="gumtree-simple-id",TREE_GENERATOR_ID="cpp-srcml")
+
+    #除去所有的注释和空字符
+    if remove_whitespace(remove_cpp_comments(file2_String_std)) == remove_whitespace(remove_cpp_comments(file2_String)):
+        print("生成成功!")
+    else:
         print("生成失败")
 
 def main():
-    num = 0
-    tmp_path = "./tmp"
     with open("versions_diff_hunk.json") as jsonFile:
         versions_diff_hunk = json.load(jsonFile)
         for version in versions_diff_hunk:
+            dir = "v8"
+            os.chdir(dir)
+            os.system("git -c advice.detachedHead=false  checkout {}".format(version["versions"][0]))
+            print()
             for type in version["contents"]:
-                pass
-
-    # commits = []
-    # for hash in hashs:
-    #     commit = Commit(hash)
-    #     if hash == ".DS_Store":
-    #         continue
-    #     types = os.listdir(tmp_path+"/"+hash)
-    #     for type in types:
-    #         if type == ".DS_Store":
-    #             continue
-    #         files = os.listdir(tmp_path+"/"+hash+"/"+type)
-    #         lst = []
-    #         for file_name in files:
-    #             file = open(tmp_path+"/"+hash+"/"+type+"/"+file_name)
-    #             line = file.readline()
-    #             try:
-    #                 name = line.split(" ")[2][2:]
-    #                 name_ = line.split(" ")[3][2:-1]
-    #             except:
-    #                 continue
-    #             lst.append([name,name_])
-    #         commit.content.append(lst)
-    #     commits.append(commit)
-
-    # if not os.path.exists("./benchmark"):
-    #         os.mkdir("./benchmark")
-
-    # for commit in commits:
-    #     for type in commit.content:
-    #         arm64_file = None
-    #         riscv64_file = None
-    #         # 判断是否具有arm和riscv两个架构，如果没有则返回
-    #         for file_name in type:
-    #             if "arm64" in file_name[0]:
-    #                 arm64_file = file_name
-    #             elif "riscv64" in file_name[0]:
-    #                 riscv64_file = file_name
-    #             if arm64_file != None and riscv64_file != None:
-    #                 num = num + 1
-    #                 if num > 54:
-    #                     print("---------------{}--------------".format(num))
-    #                     successfully_generate(commit.hash,arm64_file,riscv64_file,num)
-    #                     print("---------------{}--------------".format(num))
-    #                 if num == 55:
-    #                     return
-    #                 break
+                flag = False
+                for i,file in enumerate(type):
+                    arch = has_archwords(file["file"])
+                    if arch == "riscv" or arch == "riscv64":
+                        flag = True
+                        with open(file["file"],"r") as f:
+                            content2 = format(f.read(),"..")
+                            patch2 = file["patch"]
+                        break
+                if not flag:
+                    continue
+                for j,file in enumerate(type):
+                    if j != i:
+                        with open(file["file"],"r") as f:
+                            content1 = format(f.read(),"..")
+                            patch1 = file["patch"]
+                            successfully_generate(content1,patch1,content2,patch2)
+            os.system("git -c advice.detachedHead=false  checkout main")
+            print()
+            os.chdir("..")
 
 if __name__ == "__main__":
     main()

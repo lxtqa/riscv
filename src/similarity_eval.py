@@ -1,8 +1,7 @@
 import json
-from gumtree_parser import gumtree_parser
-from utils.ast_utils import get_ast
+from utils.ast_utils import *
 from tqdm import tqdm
-from utils.arc_utils import remove_arcwords,has_arcwords
+from utils.arch_utils import remove_archwords,has_archwords
 import tempfile
 import subprocess
 import os
@@ -27,16 +26,16 @@ def main():
         chart = []
 
         for hunk_set in hunk_sets:
-            file_type = remove_arcwords(hunk_set[0][0])
+            file_type = remove_archwords(hunk_set[0][0])
             content = []
             for hunks in hunk_set[1]:
                 lst = [[] for _ in range(10)]
                 for hunk in hunks:
-                    if has_arcwords(hunk["file"]) == "riscv":
+                    if has_archwords(hunk["file"]) == "riscv":
                         lst[2]=hunk["content"]
                         lst[3]=hunk["content"]
                     else:
-                        lst[arch_dic[has_arcwords(hunk["file"])]]=hunk["content"]
+                        lst[arch_dic[has_archwords(hunk["file"])]]=hunk["content"]
                 content.append(lst)
             chart.append([file_type,content])
 
@@ -76,11 +75,11 @@ def main():
                             simi.append(1.0)
                 similar.append([ast1_nodenum,simi])
             similarity.append([file_type,similar])
-            # with open("./similarity/"+str(j)+".json","w") as simFile:
-            #     json.dump(similar,simFile,indent=4)
+            with open("./similarity/"+str(j)+".json","w") as simFile:
+                json.dump(similar,simFile,indent=4)
             j = j+1
-    # with open("similarity.json","w") as simFile:
-    #     json.dump(similarity,simFile,indent=4)
+    with open("similarity.json","w") as simFile:
+        json.dump(similarity,simFile,indent=4)
 
 
 

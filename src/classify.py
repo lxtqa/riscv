@@ -2,7 +2,7 @@
 import re
 import os
 import codecs
-from utils.arc_utils import remove_arcwords,has_arcwords
+from utils.arch_utils import remove_archwords,has_archwords
 
 def main(patch_path):
     patchname_list = os.listdir(patch_path)
@@ -18,7 +18,7 @@ def main(patch_path):
             for line in patch:
                 filename = re.findall(r"^diff --git a/(.+) b/(.+)$",line)
                 if filename!=[]:
-                    if has_arcwords(filename[0][0]):
+                    if has_archwords(filename[0][0]):
                         filename_list.append(filename[0][0])
             if len(filename_list) != 0:
                 flag = False
@@ -28,7 +28,7 @@ def main(patch_path):
                     for j in range(i+1,len(filename_list)):
                         if flag:
                             break
-                        if remove_arcwords(filename_list[i]) == remove_arcwords(filename_list[j]):
+                        if remove_archwords(filename_list[i]) == remove_archwords(filename_list[j]):
                             flag = True
                 if flag:
                     os.system("cp "+patch_path + patchname+" "+savepath)

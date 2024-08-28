@@ -4,7 +4,7 @@ from utils.ast_utils import get_type
 import json
 from extract_hunk import extract_hunk
 from disjoint_sets import find_disjoint_sets
-from utils.arc_utils import *
+from utils.arch_utils import *
 from utils.patch_utils import *
 
 def list_files(directory):
@@ -26,7 +26,7 @@ if __name__ == "__main__":
     file_list = []
 
     for file in cc_h_files:
-        if has_arcwords(file):
+        if has_archwords(file):
             file_list.append(file)
 
 

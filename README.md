@@ -71,17 +71,13 @@ python3 split_and_filter.py ./classified_patch
 
 ### 生成新patch部分代码
 
-#### gumtree_parser.py
-
-输入`gumtree diff`生成的txt文件名，将文件中的matches和diffs分别返回
-
 #### ast_utils.py
 
 利用`gumtree parse`命令生成ast到txt文件，并返回一个经过parse的抽象语法树，以及其他的ast相关工具
 
 #### arc_utils.py
 
-包括has_arcwords和remove_arcwords两个函数
+包括has_archwords和remove_archwords两个函数
 
 #### disjoint_sets.py
 

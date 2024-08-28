@@ -1,6 +1,5 @@
 import os
-from utils.ast_utils import get_ast, TreeNode, get_start_end, get_name, get_type
-from gumtree_parser import gumtree_parser
+from utils.ast_utils import *
 from ast_diff_parser import diff_parser,bfs_search,bfs_search_father
 from time import time
 import sys
@@ -47,11 +46,12 @@ def replace(text,operations):
     return text
 
 def arch_keyword_replace(string):
-    # 定义正则表达式模式
-    pattern = re.compile(r'(arm64|Arm64|ARM64)')
-    # 使用sub()函数进行替换，保留原始字符串的大小写格式
-    replaced = pattern.sub(lambda match: match.group().replace('arm', 'riscv').replace('Arm', 'Riscv').replace('ARM', 'RISCV'), string)
-    return replaced
+    # # 定义正则表达式模式
+    # pattern = re.compile(r'(arm64|Arm64|ARM64)')
+    # # 使用sub()函数进行替换，保留原始字符串的大小写格式
+    # replaced = pattern.sub(lambda match: match.group().replace('arm', 'riscv').replace('Arm', 'Riscv').replace('ARM', 'RISCV'), string)
+    # return replaced
+    return string
 
 def map(node,match_dic12,match_dic1_1,fileString):
     #截取产生修改部分的补丁代码
@@ -121,7 +121,8 @@ def get_newname(node,match_dic12,match_dic1_1):
 
 
 
-def gen_result(file1String,file2String,
+def gen_result(file1String,
+                file2String,
                 file1_String,
                 use_docker,
                 MATCHER_ID,
@@ -139,28 +140,28 @@ def gen_result(file1String,file2String,
 
         cfile1.write(file1String)
         cfile1.flush()
-        cfile1_.write(file1String)
+        cfile1_.write(file1_String)
         cfile1_.flush()
-        cfile2.write(file1String)
+        cfile2.write(file2String)
         cfile2.flush()
 
-        ast1,ast1Nodenum = get_ast(cfile1.name(),use_docker=use_docker,TREE_GENERATOR_ID=TREE_GENERATOR_ID)
-        ast1_,ast1_Nodenum  = get_ast(cfile1_.name(),use_docker=use_docker,TREE_GENERATOR_ID=TREE_GENERATOR_ID)
+        ast1,ast1Nodenum = get_ast(cfile1.name,use_docker=use_docker,TREE_GENERATOR_ID=TREE_GENERATOR_ID)
+        ast1_,ast1_Nodenum  = get_ast(cfile1_.name,use_docker=use_docker,TREE_GENERATOR_ID=TREE_GENERATOR_ID)
 
         # ast2 = get_ast(cfile_name2,rm_tempfile=rm_tempfile,use_docker=use_docker,debugging=debugging,TREE_GENERATOR_ID=TREE_GENERATOR_ID)
 
         if use_docker:
-            output11_ = subprocess.run(["docker","run","--rm","-v",cfile1.name()+":/left.cc","-v",cfile1_.name()+":/right.cc","gumtreediff/gumtree","textdiff","/left.cc", "/right.cc",
-                                        "-m",MATCHER_ID,"-g", TREE_GENERATOR_ID,"-M","bu_minsim","0.5"],
-                                        capture_output=True,text = True)
-            output12 = subprocess.run(["docker","run","--rm","-v",cfile1.name()+":/left.cc","-v",cfile2.name()+":/right.cc","gumtreediff/gumtree","textdiff","/left.cc", "/right.cc",
-                                        "-m",MATCHER_ID,"-g", TREE_GENERATOR_ID,"-M","bu_minsim","0.5"],
-                                        capture_output=True,text = True)
-        else:
-            output11_ = subprocess.run(["gumtree","textdiff",cfile1.name(), cfile1_.name(),
+            output11_ = subprocess.run(["docker","run","--rm","-v",cfile1.name+":/left.cc","-v",cfile1_.name+":/right.cc","gumtreediff/gumtree","textdiff","/left.cc", "/right.cc",
                                         "-m",MATCHER_ID,"-g", TREE_GENERATOR_ID],#,"-M","bu_minsim","0.5"],
                                         capture_output=True,text = True)
-            output12 = subprocess.run(["gumtree","textdiff",cfile1.name(), cfile2.name(),
+            output12 = subprocess.run(["docker","run","--rm","-v",cfile1.name+":/left.cc","-v",cfile2.name+":/right.cc","gumtreediff/gumtree","textdiff","/left.cc", "/right.cc",
+                                        "-m",MATCHER_ID,"-g", TREE_GENERATOR_ID],#,"-M","bu_minsim","0.5"],
+                                        capture_output=True,text = True)
+        else:
+            output11_ = subprocess.run(["gumtree","textdiff",cfile1.name, cfile1_.name,
+                                        "-m",MATCHER_ID,"-g", TREE_GENERATOR_ID],#,"-M","bu_minsim","0.5"],
+                                        capture_output=True,text = True)
+            output12 = subprocess.run(["gumtree","textdiff",cfile1.name, cfile2.name,
                                         "-m",MATCHER_ID,"-g", TREE_GENERATOR_ID],#,"-M","bu_minsim","0.5"],
                                         capture_output=True,text = True)
 
@@ -295,6 +296,8 @@ def gen_result(file1String,file2String,
                             diffOp_i = diffOp_i + 1
             elif diffOp.op == "update-node":
                 if diffOp.desNode in match_dic12:
+                    if re.match(r'//.*$',diffOp.source) or re.match(r'/\*.*?\*/',diffOp.source):
+                        continue
                     des = match_dic12[diffOp.desNode]
                     start,end = get_start_end(des)
                     operation = Operation(start,end,arch_keyword_replace(diffOp.source))

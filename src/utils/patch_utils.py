@@ -4,18 +4,20 @@ import subprocess
 INF = 2**31
 
 
+
+
 def read_patch(output):
     R = r"^@@ -\d+,?\d* \+\d+,?\d* @@ (.*)$"
-    changed_unit_header = []
+    changed_hunk_header = []
     try:
         output = output.split("\n")
     except:
         pass
     for line in output:
         if re.match(R,line):
-            changed_unit_header.append(re.findall(R,line)[0])
+            changed_hunk_header.append(re.findall(R,line)[0])
 
-    return changed_unit_header
+    return changed_hunk_header
 
 def start_line(output):
     R = r"@@ -(\d+),?\d* \+(\d+),?\d* @@"
@@ -31,9 +33,9 @@ def start_line(output):
         return None, None
 
 
-def format(code):
+def format(code,cwd="."):
     """
         string
     """
-    code = subprocess.run(["clang-format"],input=code.encode(),stdout=subprocess.PIPE)
+    code = subprocess.run(["clang-format"],cwd=cwd,input=code.encode(),stdout=subprocess.PIPE)
     return code.stdout.decode()

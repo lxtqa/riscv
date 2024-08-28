@@ -3,7 +3,7 @@ import re
 import tempfile
 from tqdm import tqdm
 import json
-from utils.arc_utils import *
+from utils.arch_utils import *
 from utils.patch_utils import *
 
 versions = ["519ee9d66cd", # 9.10.0
@@ -43,6 +43,7 @@ versions = ["519ee9d66cd", # 9.10.0
 
 def split_diff_lines_to_json(lines,file_lines):
 
+
     hunk_header_indices = [0]
     header_re = r"^((::[[:space:]]*)?[A-Za-z_].*)$"
     for i,line in enumerate(file_lines):
@@ -70,8 +71,12 @@ def split_diff_lines_to_json(lines,file_lines):
     hunks = []
     for i in range(len(hunk_start_indices) - 1):
         hunk_lines = lines[hunk_start_indices[i][0]:hunk_start_indices[i + 1][0]]
+        if re.match(header_re,hunk_lines[1][1:]):
+            header = hunk_lines[1][1:]
+        else:
+            header  = file_lines[hunk_start_indices[i][1]]
         hunks.append({
-                    "header": file_lines[hunk_start_indices[i][1]],
+                    "header": header,
                     'patch': hunk_lines
                 })
 
@@ -207,7 +212,7 @@ if __name__ == "__main__":
             filename = re.findall(r"^diff --git a/(.+) b/(.+)$",line)
             if filename != []:
                     tmp_filename = filename[0][0]
-                    if has_arcwords(tmp_filename):
+                    if has_archwords(tmp_filename) and (tmp_filename.endswith(".cc") or tmp_filename.endswith(".h")):
                             old_code = get_file(versions[i],tmp_filename)
                             new_code = get_file(versions[i+1],tmp_filename)
                             if old_code == None or new_code == None:

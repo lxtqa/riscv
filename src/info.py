@@ -7,7 +7,7 @@ import pandas as pd
 
 # 创建一些示例数据
 
-value = np.array([0,0,0,0,0,0,0,0,0,0,0])
+value = np.array([0,0,0,0,0,0,0,0,0,0,0,0])
 
 
 
@@ -21,7 +21,7 @@ with open('./versions_diff_hunk.json', 'r') as json_file:
                     flag = True
                     break
             if flag:
-                if len(type) == 2:
+                if len(type) == 11:
                     a = 0
                 value[len(type)] = value[len(type)] + 1
 
@@ -35,7 +35,7 @@ with open('./versions_diff_hunk.json', 'r') as json_file:
 
 #= [0, 0, 524，639, 604, 630, 588, 1078, 592, 3456, 1380]
 data = pd.DataFrame({
-    'Category': ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10'],
+    'Category': ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10','11'],
     'Values': value
 })
 
