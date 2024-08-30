@@ -12,8 +12,8 @@ value = np.array([0,0,0,0,0,0,0,0,0,0,0,0])
 
 
 with open('./versions_diff_hunk.json', 'r') as json_file:
-    functions = json.load(json_file)
-    for version in functions:
+    versions = json.load(json_file)
+    for version in versions:
         for type in version["contents"]:
             flag = False
             for arc in type:
@@ -21,8 +21,6 @@ with open('./versions_diff_hunk.json', 'r') as json_file:
                     flag = True
                     break
             if flag:
-                if len(type) == 11:
-                    a = 0
                 value[len(type)] = value[len(type)] + 1
 
 #[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]

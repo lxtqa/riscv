@@ -45,7 +45,7 @@ def split_diff_lines_to_json(lines,file_lines):
 
 
     hunk_header_indices = [0]
-    header_re = r"^((::[[:space:]]*)?[A-Za-z_].*)$"
+    header_re = r"^((::[\[:space:]]*)?[A-Za-z_].*)$"
     for i,line in enumerate(file_lines):
         if re.match(header_re,line):
             hunk_header_indices.append(i)
@@ -200,7 +200,7 @@ def get_file(commit_hash,file_path):
 
 if __name__ == "__main__":
     versions_diff = []
-    for i in tqdm(range(len(versions)-1)):
+    for i in range(len(versions)-1):
         result = subprocess.run(["git","diff","-U0",versions[i],versions[i+1]],cwd="./v8", stdout=subprocess.PIPE)
         output = result.stdout.decode('utf-8', errors='ignore')
         patch = output.split("\n")

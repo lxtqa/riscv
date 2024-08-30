@@ -21,12 +21,12 @@ def has_archwords(text,arch = ""):
                         return "arm"
                 if keyword in  ["x64","X64"] :
                     return "x64"
-                if keyword in ["riscv","Riscv","RISCV"] :
-                    return "riscv"
                 if keyword in ["riscv32", "Riscv32", "RISCV32"]:
                     return "riscv32"
                 if keyword in ["riscv64", "Riscv64", "RISCV64"]:
                     return "riscv64"
+                if keyword in ["riscv","Riscv","RISCV"] :
+                    return "riscv"
                 if keyword in ["s390","S390"]:
                     return "s390"
                 if keyword in ["ia32","Ia32","IA32"] :

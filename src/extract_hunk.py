@@ -2,7 +2,7 @@ import re
 from utils.patch_utils import *
 def extract_hunk(file_lines,file_name=""):
     hunk_header_indices = [0]
-    header_re = r"^((::[[:space:]]*)?[A-Za-z_].*)$"
+    header_re = r"^((::[\[:space:]]*)?[A-Za-z_].*)$"
     for i,line in enumerate(file_lines):
         if re.match(header_re,line):
             hunk_header_indices.append(i)

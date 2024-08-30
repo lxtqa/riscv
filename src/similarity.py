@@ -1,5 +1,12 @@
 import json
 #arch_dic = {"arm":0,"arm64":1,"riscv32":2,"riscv64":3,"mips":4,"ia32":5,"x64":6,"loong":7,"s390":8,"ppc":9}
+# num = 0
+# with open('match.json', 'r') as json_file:
+#     hunk_sets = json.load(json_file)
+#     for hunk_set in hunk_sets:
+#         num = num + len(hunk_set[1])
+# print(num)
+
 with open('similarity.json', 'r') as json_file:
     similarity = json.load(json_file)
     #riscv64

@@ -146,7 +146,9 @@ def gen_result(file1String,
         cfile2.flush()
 
         ast1,ast1Nodenum = get_ast(cfile1.name,use_docker=use_docker,TREE_GENERATOR_ID=TREE_GENERATOR_ID)
+
         ast1_,ast1_Nodenum  = get_ast(cfile1_.name,use_docker=use_docker,TREE_GENERATOR_ID=TREE_GENERATOR_ID)
+
 
         # ast2 = get_ast(cfile_name2,rm_tempfile=rm_tempfile,use_docker=use_docker,debugging=debugging,TREE_GENERATOR_ID=TREE_GENERATOR_ID)
 
@@ -165,7 +167,7 @@ def gen_result(file1String,
                                         "-m",MATCHER_ID,"-g", TREE_GENERATOR_ID],#,"-M","bu_minsim","0.5"],
                                         capture_output=True,text = True)
 
-        print("生成ast及diff耗时: {}s".format(time()-start_time))
+        # print("生成ast及diff耗时: {}s".format(time()-start_time))
         matches11_, diffs11_ = gumtree_parser(output11_.stdout)
         matches12, _= gumtree_parser(output12.stdout)
 
@@ -312,6 +314,6 @@ def gen_result(file1String,
         file2_String = re.sub(r'^\s*\\\s*$', '', file2_String,flags=re.MULTILINE)
 
         end_time = time()
-        print("生成修改后代码总耗时: {}s".format(end_time-start_time))
+        # print("生成修改后代码总耗时: {}s".format(end_time-start_time))
 
         return file2_String

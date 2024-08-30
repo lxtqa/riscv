@@ -102,14 +102,18 @@ def hunk_result(cfile1,
         tempfile.NamedTemporaryFile(delete=True, mode='w', suffix='.patch') as patchfile1:
             file1.write(file1String)
             file1.flush()
-            patch1 = ["diff --git a/a.cc b/b.cc","--- a/a.cc","+++ b/b.cc"] + patch1
-            patchfile1.write("\n".join(patch1)+"\n")
+            patch1["patch"] = ["diff --git a/a.cc b/b.cc","--- a/a.cc","+++ b/b.cc"] + patch1["patch"]
+            patchfile1.write("\n".join(patch1["patch"])+"\n")
             patchfile1.flush()
             output11_ = subprocess.run(["patch",file1.name,patchfile1.name,"--output=-"],capture_output=True,text = True)
             file1_String = output11_.stdout
     file2String = cfile2
 
-    changed_hunk_headers = read_patch(patch1)
+    changed_hunk_headers = [patch1["header"]]
+
+    for line in patch1["patch"]:
+        if re.match(r"^[+-]((::[\[:space:]]*)?[A-Za-z_].*)$",line):
+            changed_hunk_headers.append(line[1:])
 
     hunks1 = extract_hunk(file1String.split("\n"),file_name="1")
     hunks1_ = extract_hunk(file1_String.split("\n"),file_name="1_")
@@ -132,7 +136,7 @@ def hunk_result(cfile1,
                 break
         if flag == False:
             USE_ORIGIN = True
-            break
+
 
     for changed_hunk_header in changed_hunk_headers:
         flag = False
@@ -145,7 +149,7 @@ def hunk_result(cfile1,
                 break
         if flag == False:
             USE_ORIGIN = True
-            break
+
 
 
     if not USE_ORIGIN:
@@ -167,7 +171,7 @@ def hunk_result(cfile1,
         if remove_whitespace(file1_String) != remove_whitespace(file1String):
             file2String = gen_result(file1String,file2String,file1_String,use_docker,MATCHER_ID,TREE_GENERATOR_ID)
     else:
-        print("USING ORIGIN METHOD")
+        # print("USING ORIGIN METHOD")
         file2String = gen_result(file1String,file2String,file1_String,use_docker,MATCHER_ID,TREE_GENERATOR_ID)
 
     return file2String

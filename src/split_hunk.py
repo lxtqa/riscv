@@ -1,6 +1,5 @@
 import os
 from tqdm import tqdm
-from utils.ast_utils import get_type
 import json
 from extract_hunk import extract_hunk
 from disjoint_sets import find_disjoint_sets
