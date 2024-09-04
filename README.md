@@ -5,7 +5,7 @@
 命令行执行`python script.py`
 
 ```
-usage: script.py [-h] [-D] [-s] [-r] [-d] [-o OUTPUT_DIRECTORY] [-m MATCHER_ID] [-g TREE_GENERATOR_ID]
+usage: script.py [-h] [-d] [-o OUTPUT_DIRECTORY] [-m MATCHER_ID] [-g TREE_GENERATOR_ID]
                  input_directory1 input_directory2 input_directory1_
 
 命令行参数处理程序
@@ -17,16 +17,13 @@ positional arguments:
 
 options:
   -h, --help            show this help message and exit
-  -D, --debugging       启用调试模式
-  -s, --simple          使用简单模式
-  -r, --rm_tempfile     删除临时文件
   -d, --use_docker      使用Docker
   -o OUTPUT_DIRECTORY, --output_directory OUTPUT_DIRECTORY
                         指定输出文件目录
   -m MATCHER_ID, --matcher_id MATCHER_ID
-                        指定MATCHER_ID，默认为gumtree
+                        指定MATCHER_ID，默认为gumtree-hybrid
   -g TREE_GENERATOR_ID, --tree_generator_id TREE_GENERATOR_ID
-                        指定TREE_GENERATOR_ID，默认为cs-srcml
+                        指定TREE_GENERATOR_ID，默认为cpp-srcml
 ```
 
 ## 环境部署
@@ -47,7 +44,7 @@ gumtree：见[库/gumtree](# gumtree)部分的介绍
 
 读取`patches-origin`文件夹下的内容，分离出多个架构下进行了相似改动的文件，这个检测主要依赖于文件名相似性的检测，输出到`classified_patch`中
 
-#### split_and_filter.py 
+#### split_and_filter.py
 
 读取`/classified_patch`中的内容，使用splitdiff，将分割并组织好的patch输出到`/tmp`
 
@@ -115,7 +112,7 @@ python3 split_and_filter.py ./classified_patch
 
 ### V8
 
-[v8仓库]( https://github.com/v8/v8.git) 
+[v8仓库]( https://github.com/v8/v8.git)
 
 V8是解析javascript语言的的虚拟机,V8引擎转换成字节码(bytecode)，此时是可以跨平台的，将字节码转化汇编指令，在不同环境的cpu下执行。
 
@@ -123,7 +120,6 @@ V8是解析javascript语言的的虚拟机,V8引擎转换成字节码(bytecode)�
 
 ![image-20220822140344154](./img/image-20220822140344154.png)
 
- 由于公司项目的需求,现在主要是做脱Flash的工作(历史原因用AS3.0做的)!现在全部转为C++, 并且发布PC版与Web版。其中Web的版本就是使用的Wasm（WebAssembly技术）。
  WASM ，全称：WebAssembly ，是一种可以使用非 Java 编程语言编写代码并且能在浏览器上运行的技术方案，也是自 Web 诞生以来首个 Java 原生替代方案（ 程序本质上都是脚本程序，即由程序翻译指令并执行，而不是由本地机器CPU读取指令并执行，因此效率非常低。而Java的操作相对重复繁琐，在执行过程中耗时较长。）
  其实创建Wasm的初衷并非为了替代JavaScript，而是为了实现两者之间的补充和配合。随着WebAssembly的引入，现代web浏览器的虚拟机将同时运行JavaScript和Wasm代码。
 

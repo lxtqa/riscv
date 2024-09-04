@@ -111,16 +111,17 @@ def hunk_result(cfile1,
 
     changed_hunk_headers = [patch1["header"]]
 
-    for line in patch1["patch"]:
-        if re.match(r"^[+-]((::[\[:space:]]*)?[A-Za-z_].*)$",line):
-            changed_hunk_headers.append(line[1:])
 
-    hunks1 = extract_hunk(file1String.split("\n"),file_name="1")
-    hunks1_ = extract_hunk(file1_String.split("\n"),file_name="1_")
-    hunks2 = extract_hunk(file2String.split("\n"),file_name="2")
+    # hunks1 = extract_hunk(file1String.split("\n"),file_name="1")
+    # hunks1_ = extract_hunk(file1_String.split("\n"),file_name="1_")
+    # hunks2 = extract_hunk(file2String.split("\n"),file_name="2")
+
+    file2String = gen_result(file1String,file2String,file1_String,use_docker,MATCHER_ID,TREE_GENERATOR_ID)
+    return file2String
 
     #处理增加函数的情况
     USE_ORIGIN = False
+
 
     new_hunks1 = []
     new_hunks1_ = []

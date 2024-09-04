@@ -50,7 +50,7 @@ def successfully_generate(file1,patch1,file2,patch2):
             file2_String_std = output22_.stdout
     use_docker = True
     try:
-        file2_String = hunk_result(file1,patch1,file2,use_docker=use_docker,MATCHER_ID="gumtree-simple",TREE_GENERATOR_ID="cpp-srcml")
+        file2_String = hunk_result(file1,patch1,file2,use_docker=use_docker,MATCHER_ID="gumtree-hybrid",TREE_GENERATOR_ID="cpp-srcml")
 
         #除去所有的注释和空字符
         if remove_whitespace(remove_cpp_comments(file2_String_std)) == remove_whitespace(remove_cpp_comments(file2_String)):
@@ -67,14 +67,13 @@ def main():
     with open("versions_diff_hunk.json") as jsonFile:
         versions_diff_hunk = json.load(jsonFile)
         for v,version in enumerate(versions_diff_hunk):
-            if v<12:
-                continue
             vResult = []
             dir = "v8"
             os.chdir(dir)
             os.system("git -c advice.detachedHead=false  checkout {} > /dev/null 2>&1".format(version["versions"][0]))
             print()
             for t,type in enumerate(version["contents"]):
+
                 print(str(t)+"/"+str(len(version["contents"])),end=" ",flush=True)
                 Result = [0 for _ in range(10)]
                 flag = False
@@ -90,6 +89,7 @@ def main():
                 if not flag:
                     continue
                 for j,file in enumerate(type):
+
                     if j != i:
                         with open(file["file"],"r") as f:
                             content1 = format(f.read(),"..")
@@ -105,7 +105,7 @@ def main():
             os.system("git -c advice.detachedHead=false checkout main > /dev/null 2>&1")
             print()
             os.chdir("..")
-            with open("result/result"+str(v)+".json","w") as f:
+            with open("result/result"+str(v)+"_.json","w") as f:
                 json.dump(vResult,f,indent=4)
 
 if __name__ == "__main__":
