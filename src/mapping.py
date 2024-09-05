@@ -55,11 +55,13 @@ for version in versions:
             similar = []
             for set in tqdm(content):
                 with tempfile.NamedTemporaryFile(delete=True, mode='w', suffix='.cpp') as riscv_block:
+                    if set[3] == []:
+                        continue
                     riscv_block.write("\n".join(set[3]))
                     riscv_block.flush()
-                    _, ast1_nodenum = get_ast(riscv_block.name,use_docker=True,TREE_GENERATOR_ID=TREE_GENERATOR_ID)
-                    if ast1_nodenum == 1:
-                        a = 0
+                    # _, ast1_nodenum = get_ast(riscv_block.name,use_docker=True,TREE_GENERATOR_ID=TREE_GENERATOR_ID)
+                    # if ast1_nodenum == 1:
+                    #     a = 0
                     simi = [[] for _ in range(10)]
                     for i,block in enumerate(set):
                         if i != 2 and i != 3:
@@ -68,7 +70,7 @@ for version in versions:
                                 other_block.write("\n".join(block))
                                 other_block.flush()
 
-                                _, ast2_nodenum = get_ast(other_block.name,use_docker=True,TREE_GENERATOR_ID=TREE_GENERATOR_ID)
+                                # _, ast2_nodenum = get_ast(other_block.name,use_docker=True,TREE_GENERATOR_ID=TREE_GENERATOR_ID)
                                 result = subprocess.run(["docker","run","--rm","-v",riscv_block.name+":/left.cc","-v",other_block.name+":/right.cc","gumtreediff/gumtree","textdiff","/left.cc","/right.cc","-m",MATCHER_ID,"-g",TREE_GENERATOR_ID,"-M","bu_minsim","0.5"],
                                     stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE)
@@ -81,7 +83,7 @@ for version in versions:
                                 simi[i] = match_dic
                         else:
                             simi.append({})
-                similar.append([ast1_nodenum,simi])
+                similar.append(simi)
             similarity.append([file_type,similar])
         with open('mapping/mapping_'+version+'.json', 'w') as json_file:
             json.dump(similarity,json_file,indent=4)
