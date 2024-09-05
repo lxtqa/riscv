@@ -75,14 +75,14 @@ def extract_name(header):
     else:
         return None
 
-def ishunkpara(hunk1, hunk2):
-    if hunk1 == "" or hunk2 == "":
-        return hunk1 == hunk2
-    # 实现hunk是否平行的逻辑
-    arc1 = has_archwords(hunk1)
-    arc2 = has_archwords(hunk2)
+def isblockpara(block1, block2):
+    if block1 == "" or block2 == "":
+        return block1 == block2
+    # 实现block是否平行的逻辑
+    arc1 = has_archwords(block1)
+    arc2 = has_archwords(block2)
     if arc1 and arc2:
-        return remove_whitespace(remove_archwords(hunk1)) == remove_whitespace(remove_archwords(hunk2))
+        return remove_whitespace(remove_archwords(block1)) == remove_whitespace(remove_archwords(block2))
     elif not arc1 and not arc2:
-        return remove_whitespace(hunk1) == remove_whitespace(hunk2)
+        return remove_whitespace(block1) == remove_whitespace(block2)
     return False

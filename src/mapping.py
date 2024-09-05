@@ -45,31 +45,31 @@ if not os.path.exists("mapping"):
     os.mkdir("mapping")
 for version in versions:
     with open('match/match_' + version + '.json', 'r') as json_file:
-        hunk_sets = json.load(json_file)
+        block_sets = json.load(json_file)
         arch_dic = {"arm":0,"arm64":1,"riscv32":2,"riscv64":3,"mips":4,"ia32":5,"x64":6,"loong":7,"s390":8,"ppc":9}
 
         similarity = []
         #riscv64
         j = 0
-        for [file_type,content] in tqdm(hunk_sets):
+        for [file_type,content] in tqdm(block_sets):
             similar = []
             for set in tqdm(content):
-                with tempfile.NamedTemporaryFile(delete=True, mode='w', suffix='.cpp') as riscv_hunk:
-                    riscv_hunk.write("\n".join(set[3]))
-                    riscv_hunk.flush()
-                    _, ast1_nodenum = get_ast(riscv_hunk.name,use_docker=True,TREE_GENERATOR_ID=TREE_GENERATOR_ID)
+                with tempfile.NamedTemporaryFile(delete=True, mode='w', suffix='.cpp') as riscv_block:
+                    riscv_block.write("\n".join(set[3]))
+                    riscv_block.flush()
+                    _, ast1_nodenum = get_ast(riscv_block.name,use_docker=True,TREE_GENERATOR_ID=TREE_GENERATOR_ID)
                     if ast1_nodenum == 1:
                         a = 0
                     simi = [[] for _ in range(10)]
-                    for i,hunk in enumerate(set):
+                    for i,block in enumerate(set):
                         if i != 2 and i != 3:
-                            with tempfile.NamedTemporaryFile(delete=True, mode='w', suffix='.cpp') as other_hunk:
+                            with tempfile.NamedTemporaryFile(delete=True, mode='w', suffix='.cpp') as other_block:
 
-                                other_hunk.write("\n".join(hunk))
-                                other_hunk.flush()
+                                other_block.write("\n".join(block))
+                                other_block.flush()
 
-                                _, ast2_nodenum = get_ast(other_hunk.name,use_docker=True,TREE_GENERATOR_ID=TREE_GENERATOR_ID)
-                                result = subprocess.run(["docker","run","--rm","-v",riscv_hunk.name+":/left.cc","-v",other_hunk.name+":/right.cc","gumtreediff/gumtree","textdiff","/left.cc","/right.cc","-m",MATCHER_ID,"-g",TREE_GENERATOR_ID,"-M","bu_minsim","0.5"],
+                                _, ast2_nodenum = get_ast(other_block.name,use_docker=True,TREE_GENERATOR_ID=TREE_GENERATOR_ID)
+                                result = subprocess.run(["docker","run","--rm","-v",riscv_block.name+":/left.cc","-v",other_block.name+":/right.cc","gumtreediff/gumtree","textdiff","/left.cc","/right.cc","-m",MATCHER_ID,"-g",TREE_GENERATOR_ID,"-M","bu_minsim","0.5"],
                                     stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE)
                                 matches, _ = gumtree_parser(result.stdout.decode())

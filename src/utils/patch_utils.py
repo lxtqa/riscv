@@ -8,16 +8,16 @@ INF = 2**31
 
 def read_patch(output):
     R = r"^@@ -\d+,?\d* \+\d+,?\d* @@ (.*)$"
-    changed_hunk_header = []
+    changed_block_header = []
     try:
         output = output.split("\n")
     except:
         pass
     for line in output:
         if re.match(R,line):
-            changed_hunk_header.append(re.findall(R,line)[0])
+            changed_block_header.append(re.findall(R,line)[0])
 
-    return changed_hunk_header
+    return changed_block_header
 
 def start_line(output):
     R = r"@@ -(\d+),?\d* \+(\d+),?\d* @@"

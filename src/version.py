@@ -44,111 +44,111 @@ versions = ["519ee9d66cd", # 9.10.0
 def split_diff_lines_to_json(lines,file_lines):
 
 
-    hunk_header_indices = [0]
+    block_header_indices = [0]
     header_re = r"^((::[\[:space:]]*)?[A-Za-z_].*)$"
     for i,line in enumerate(file_lines):
         if re.match(header_re,line):
-            hunk_header_indices.append(i)
-    hunk_header_indices.append(INF)
+            block_header_indices.append(i)
+    block_header_indices.append(INF)
 
-    hunk_start_indices = []
+    block_start_indices = []
     current_pointer = 0
     for i, line in enumerate(lines):
         if line.startswith('@@'):
             new_start, _ = start_line(line)
             flag = 0
-            while new_start > hunk_header_indices[current_pointer]:
+            while new_start > block_header_indices[current_pointer]:
                 current_pointer = current_pointer + 1
                 flag = 1
             if flag:
-                hunk_start_indices.append([i,hunk_header_indices[current_pointer-1]])
+                block_start_indices.append([i,block_header_indices[current_pointer-1]])
 
-    if not hunk_start_indices:
-        print("No hunks found in the diff file.")
+    if not block_start_indices:
+        print("No blocks found in the diff file.")
         return []
-    hunk_start_indices.append([len(lines),""])  # Add end index for the last hunk
+    block_start_indices.append([len(lines),""])  # Add end index for the last block
 
-    hunks = []
-    for i in range(len(hunk_start_indices) - 1):
-        hunk_lines = lines[hunk_start_indices[i][0]:hunk_start_indices[i + 1][0]]
-        if re.match(header_re,hunk_lines[1][1:]):
-            header = hunk_lines[1][1:]
+    blocks = []
+    for i in range(len(block_start_indices) - 1):
+        block_lines = lines[block_start_indices[i][0]:block_start_indices[i + 1][0]]
+        if re.match(header_re,block_lines[1][1:]):
+            header = block_lines[1][1:]
         else:
-            header  = file_lines[hunk_start_indices[i][1]]
-        hunks.append({
+            header  = file_lines[block_start_indices[i][1]]
+        blocks.append({
                     "header": header,
-                    'patch': hunk_lines
+                    'patch': block_lines
                 })
 
-    return hunks
+    return blocks
 
 
 
-def collect_parallel_hunks(commit_diffs):
+def collect_parallel_blocks(commit_diffs):
     """
-    整合commit下多个文件的所有hunks, 找到所有平行的hunks并返回一个JSON对象。
+    整合commit下多个文件的所有blocks, 找到所有平行的blocks并返回一个JSON对象。
     :param commit_diffs: 字典, 键为文件路径, 值为文件的diff内容列表。
-    :return: JSON对象, 包含所有平行的hunks信息。
+    :return: JSON对象, 包含所有平行的blocks信息。
     """
-    all_hunks = []
-    # 收集所有文件的hunks
-    for file_path, hunks in commit_diffs:
-        for hunk in hunks:
-            hunk['file'] = file_path
-        all_hunks.extend(hunks)
+    all_blocks = []
+    # 收集所有文件的blocks
+    for file_path, blocks in commit_diffs:
+        for block in blocks:
+            block['file'] = file_path
+        all_blocks.extend(blocks)
 
-    parallel_hunks_groups = []
+    parallel_blocks_groups = []
 
     #首先过一遍纯name的检查，然后再进行header的检查
     #先检查同文件内是否有相同name的函数，如果没有，则直接认为name相同即为para
-    #如果有则比较hunk
+    #如果有则比较block
     # 判断平行的条件：file平行且不同，
 
-    # 找到所有平行的hunks
+    # 找到所有平行的blocks
 
-    same_named = [False] * len(all_hunks)
-    for i in range(len(all_hunks)):
+    same_named = [False] * len(all_blocks)
+    for i in range(len(all_blocks)):
         if same_named[i]:
             continue
-        name1 = extract_name(all_hunks[i]['header'])
+        name1 = extract_name(all_blocks[i]['header'])
         if name1 == None:
             continue
-        for j in range(i+1,len(all_hunks)):
-            if all_hunks[i]['file'] != all_hunks[j]['file']:
+        for j in range(i+1,len(all_blocks)):
+            if all_blocks[i]['file'] != all_blocks[j]['file']:
                 continue
-            name2 = extract_name(all_hunks[j]['header'])
+            name2 = extract_name(all_blocks[j]['header'])
             if name2 == None:
                 continue
             if remove_whitespace(name1) == remove_whitespace(name2) \
-                and remove_whitespace(all_hunks[i]['header']) != remove_whitespace(all_hunks[j]['header']):
+                and remove_whitespace(all_blocks[i]['header']) != remove_whitespace(all_blocks[j]['header']):
                 same_named[i],same_named[j] = True, True
 
-    visited = [False] * len(all_hunks)
-    for i in range(len(all_hunks)):
+    visited = [False] * len(all_blocks)
+    for i in range(len(all_blocks)):
         if visited[i]:
             continue
-        parallel_group = [all_hunks[i]]
+        parallel_group = [all_blocks[i]]
         visited[i] = True
         if same_named[i]:
-            hunk_header1 = all_hunks[i]['header']
-            for j in range(i + 1, len(all_hunks)):
-                hunk_header2 = all_hunks[j]['header']
-                if isfilepara(all_hunks[i]['file'], all_hunks[j]['file']) and ishunkpara(hunk_header1, hunk_header2):
-                    parallel_group.append(all_hunks[j])
+            block_header1 = all_blocks[i]['header']
+            for j in range(i + 1, len(all_blocks)):
+                block_header2 = all_blocks[j]['header']
+                if isfilepara(all_blocks[i]['file'], all_blocks[j]['file']) and isblockpara(block_header1, block_header2):
+                    parallel_group.append(all_blocks[j])
                     visited[j] = True
         else:
-            hunk_name1 = extract_name(all_hunks[i]['header'])
-            hunk_header1 = all_hunks[i]['header']
-            for j in range(i + 1, len(all_hunks)):
-                hunk_name2 = extract_name(all_hunks[j]['header'])
-                if hunk_name1 != None and hunk_name2 != None and not same_named[j]:
-                    if isfilepara(all_hunks[i]['file'], all_hunks[j]['file']) and ishunkpara(hunk_name1, hunk_name2):
-                        parallel_group.append(all_hunks[j])
+            block_name1 = extract_name(all_blocks[i]['header'])
+            block_header1 = all_blocks[i]['header']
+            for j in range(i + 1, len(all_blocks)):
+                block_name2 = extract_name(all_blocks[j]['header'])
+                if block_name1 != None and block_name2 != None and not same_named[j]:
+                    if isfilepara(all_blocks[i]['file'], all_blocks[j]['file']) and isblockpara(block_name1, block_name2):
+                        parallel_group.append(all_blocks[j])
                         visited[j] = True
                 else:
-                    hunk_header2 = all_hunks[j]['header']
-                    if isfilepara(all_hunks[i]['file'], all_hunks[j]['file']) and ishunkpara(hunk_header1, hunk_header2):
-                        parallel_group.append(all_hunks[j])
+                    block_header2 = all_blocks[j]['header']
+                    if isfilepara(all_blocks[i]['file'], all_blocks[j]['file']) and isblockpara(block_header1, block_header2):
+                        parallel_group.append(all_blocks[j])
                         visited[j] = True
         #判断parallel_group中是否存在相同的，如果相同，则合并
         if len(parallel_group) > 1:
@@ -165,9 +165,9 @@ def collect_parallel_hunks(commit_diffs):
                     merged_dict[key] = item
             # 将合并结果转换回列表格式
             if len(list(merged_dict.values())) > 1:
-                parallel_hunks_groups.append(list(merged_dict.values()))
+                parallel_blocks_groups.append(list(merged_dict.values()))
 
-    return parallel_hunks_groups
+    return parallel_blocks_groups
 
 
 
@@ -231,13 +231,13 @@ if __name__ == "__main__":
                                         stdout=subprocess.PIPE,
                                         stderr=subprocess.PIPE
                                     )
-                                    hunks = split_diff_lines_to_json(result.stdout.decode().split("\n"),old_code.split("\n"))
-                                    contents.append([tmp_filename,hunks])
+                                    blocks = split_diff_lines_to_json(result.stdout.decode().split("\n"),old_code.split("\n"))
+                                    contents.append([tmp_filename,blocks])
 
         ###
         if contents != []:
             filtered_patchs["commits"] = get_commits([versions[i],versions[i+1]])
-            filtered_patchs["contents"] = collect_parallel_hunks(contents)
+            filtered_patchs["contents"] = collect_parallel_blocks(contents)
             versions_diff.append(filtered_patchs)
-    with open("./versions_diff_hunk.json","w") as f:
+    with open("./versions_diff_block.json","w") as f:
         json.dump(versions_diff,f,indent=4)

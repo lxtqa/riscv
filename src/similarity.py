@@ -2,9 +2,9 @@ import json
 #arch_dic = {"arm":0,"arm64":1,"riscv32":2,"riscv64":3,"mips":4,"ia32":5,"x64":6,"loong":7,"s390":8,"ppc":9}
 # num = 0
 # with open('match.json', 'r') as json_file:
-#     hunk_sets = json.load(json_file)
-#     for hunk_set in hunk_sets:
-#         num = num + len(hunk_set[1])
+#     block_sets = json.load(json_file)
+#     for block_set in block_sets:
+#         num = num + len(block_set[1])
 # print(num)
 
 with open('similarity.json', 'r') as json_file:
@@ -16,14 +16,14 @@ with open('similarity.json', 'r') as json_file:
     for file in similarity:
         # lst = [[0,0] for _ in range(10)]
         file_name = file[0]
-        for hunk_sets in file[1]:
+        for block_sets in file[1]:
             j = j+1
-            astnodenum = hunk_sets[0] - 1
+            astnodenum = block_sets[0] - 1
             if astnodenum == 0:
                 continue
-            if hunk_sets[1][4] < 0.5:
+            if block_sets[1][4] < 0.5:
                 c = 0
-            for i,sim in enumerate(hunk_sets[1]):
+            for i,sim in enumerate(block_sets[1]):
                 if i != 2 and i != 3:
                     lst[i][1] = (lst[i][1] * lst[i][0] + sim * astnodenum) / (lst[i][0] + astnodenum)
                     lst[i][0] = lst[i][0] + astnodenum

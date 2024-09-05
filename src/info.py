@@ -11,7 +11,7 @@ value = np.array([0,0,0,0,0,0,0,0,0,0,0,0])
 
 
 
-with open('./versions_diff_hunk.json', 'r') as json_file:
+with open('./versions_diff_block.json', 'r') as json_file:
     versions = json.load(json_file)
     for version in versions:
         for type in version["contents"]:

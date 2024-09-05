@@ -3,7 +3,7 @@ import re
 from utils.arch_utils import *
 from utils.ast_utils import *
 from utils.patch_utils import *
-from hunk_result import hunk_result
+from block_result import block_result
 import json
 from tqdm import tqdm
 import tempfile
@@ -51,7 +51,7 @@ def successfully_generate(file1,patch1,file2,patch2):
             file2_String_std = output22_.stdout
     use_docker = True
     try:
-        file2_String = hunk_result(file1,patch1,file2,use_docker=use_docker,MATCHER_ID="gumtree-hybrid",TREE_GENERATOR_ID="cpp-srcml")
+        file2_String = block_result(file1,patch1,file2,use_docker=use_docker,MATCHER_ID="gumtree-hybrid",TREE_GENERATOR_ID="cpp-srcml")
 
         #除去所有的注释和空字符
         if remove_whitespace(remove_cpp_comments(file2_String_std)) == remove_whitespace(remove_cpp_comments(file2_String)):
@@ -122,9 +122,9 @@ def main():
         with open('match/match_' + version + '.json', 'r') as json_file:
             mapping[version] = json.load(json_file)
 
-    with open("versions_diff_hunk.json") as jsonFile:
-        versions_diff_hunk = json.load(jsonFile)
-        for v,version in enumerate(versions_diff_hunk):
+    with open("versions_diff_block.json") as jsonFile:
+        versions_diff_block = json.load(jsonFile)
+        for v,version in enumerate(versions_diff_block):
 
             # if v < sb1:
             #     continue
