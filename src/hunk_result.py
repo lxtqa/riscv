@@ -7,13 +7,12 @@ from utils.arch_utils import *
 from utils.patch_utils import *
 
 
-def collect_parallel_hunks(commit_diffs):
+def collect_parallel_hunks(all_hunks):
     """
     整合commit下多个文件的所有hunks, 找到所有平行的hunks并返回一个JSON对象。
-    :param commit_diffs: 字典, 键为文件路径, 值为文件的diff内容列表。
+    :param all_hunks: 字典, 键为文件路径, 值为文件的hunks内容列表。
     :return: JSON对象, 包含所有平行的hunks信息。
     """
-    all_hunks = commit_diffs
 
     parallel_hunks_groups = []
 
@@ -88,6 +87,21 @@ def collect_parallel_hunks(commit_diffs):
     return parallel_hunks_groups
 
 
+def clear(file1String,changed_header):
+    tmp_file1String = file1String.split("\n")
+    header_re = r"^((::[\[:space:]]*)?[A-Za-z_].*)$"
+    for i,line in enumerate(tmp_file1String):
+        if line != changed_header:
+            tmp_file1String[i] = " "*len(line)
+        else:
+            for j,line in enumerate(tmp_file1String):
+                if j <= i :  continue
+                if re.match(header_re,line):
+                    for k,line in enumerate(tmp_file1String):
+                        if k < j :  continue
+                        tmp_file1String[k] = " "*len(line)
+                    return tmp_file1String
+
 
 def hunk_result(cfile1,
                 patch1,
@@ -96,8 +110,9 @@ def hunk_result(cfile1,
                 MATCHER_ID,
                 TREE_GENERATOR_ID):
 
+    changed_header = patch1["header"]
+    file1String = "\n".join(clear(cfile1,changed_header))
 
-    file1String = cfile1
     with tempfile.NamedTemporaryFile(delete=True, mode='w', suffix='.cc') as file1, \
         tempfile.NamedTemporaryFile(delete=True, mode='w', suffix='.patch') as patchfile1:
             file1.write(file1String)
@@ -109,52 +124,21 @@ def hunk_result(cfile1,
             file1_String = output11_.stdout
     file2String = cfile2
 
-    changed_hunk_headers = [patch1["header"]]
 
 
-    # hunks1 = extract_hunk(file1String.split("\n"),file_name="1")
-    # hunks1_ = extract_hunk(file1_String.split("\n"),file_name="1_")
-    # hunks2 = extract_hunk(file2String.split("\n"),file_name="2")
-
-    file2String = gen_result(file1String,file2String,file1_String,use_docker,MATCHER_ID,TREE_GENERATOR_ID)
-    return file2String
+    hunks1  = {"header":changed_header,"content":file1String.strip().split("\n"), "file":"1" }
+    hunks1_ = {"header":changed_header,"content":file1_String.strip().split("\n"),"file":"1_"}
+    hunks2 = extract_hunk(file2String.split("\n"),file_name="2")
 
     #处理增加函数的情况
     USE_ORIGIN = False
 
 
-    new_hunks1 = []
-    new_hunks1_ = []
-
-    for changed_hunk_header in changed_hunk_headers:
-        flag = False
-        for hunk in hunks1:
-            if remove_whitespace(changed_hunk_header) in remove_whitespace(hunk["header"]) \
-                or remove_whitespace(hunk["header"]) in remove_whitespace(changed_hunk_header):
-                if hunk not in new_hunks1:
-                    new_hunks1.append(hunk)
-                flag = True
-                break
-        if flag == False:
-            USE_ORIGIN = True
-
-
-    for changed_hunk_header in changed_hunk_headers:
-        flag = False
-        for hunk in hunks1_:
-            if remove_whitespace(changed_hunk_header) in remove_whitespace(hunk["header"]) \
-                or remove_whitespace(hunk["header"]) in remove_whitespace(changed_hunk_header):
-                if hunk not in new_hunks1_:
-                    new_hunks1_.append(hunk)
-                flag = True
-                break
-        if flag == False:
-            USE_ORIGIN = True
-
-
-
-    if not USE_ORIGIN:
-        matches = collect_parallel_hunks(new_hunks1+new_hunks1_+hunks2)
+    if USE_ORIGIN:
+        # print("USING ORIGIN METHOD")
+        file2String = gen_result(file1String,file2String,file1_String,use_docker,MATCHER_ID,TREE_GENERATOR_ID)
+    else:
+        matches = collect_parallel_hunks([hunks1]+[hunks1_]+hunks2)
         for i in range(len(matches)):
             for j in range(len(matches[i])):
                 matches[i][j]["content"] = "\n".join(matches[i][j]["content"])
@@ -171,8 +155,5 @@ def hunk_result(cfile1,
                 file1String = file1String.replace(match[0]["content"],match[1]["content"])
         if remove_whitespace(file1_String) != remove_whitespace(file1String):
             file2String = gen_result(file1String,file2String,file1_String,use_docker,MATCHER_ID,TREE_GENERATOR_ID)
-    else:
-        # print("USING ORIGIN METHOD")
-        file2String = gen_result(file1String,file2String,file1_String,use_docker,MATCHER_ID,TREE_GENERATOR_ID)
 
     return file2String

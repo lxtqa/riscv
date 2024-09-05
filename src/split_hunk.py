@@ -15,13 +15,12 @@ def list_files(directory):
     return files
 
 
-if __name__ == "__main__":
+def split_hunk(version_hash):
     dir = "./v8"
     os.chdir(dir)
     current_directory = "./src"
-    os.system("git -c advice.detachedHead=false  checkout 70ccb6965dd")#12.9.0
+    os.system("git -c advice.detachedHead=false  checkout "+version_hash)
     cc_h_files = list_files(current_directory)
-    os.system("git -c advice.detachedHead=false  checkout main")
     file_list = []
 
     for file in cc_h_files:
@@ -109,6 +108,66 @@ if __name__ == "__main__":
                     parallel_hunks_groups.append(list(merged_dict.values()))
 
         result.append([disjoint_set,parallel_hunks_groups])
+
+    arch_dic = {"arm":0,"arm64":1,"riscv32":2,"riscv64":3,"mips":4,"ia32":5,"x64":6,"loong":7,"s390":8,"ppc":9}
+    chart = []
+
+    for hunk_set in result:
+        file_type = remove_archwords(hunk_set[0][0])
+        content = []
+        for hunks in hunk_set[1]:
+            lst = [[] for _ in range(10)]
+            for hunk in hunks:
+                if has_archwords(hunk["file"]) == "riscv":
+                    lst[2]=hunk["content"]
+                    lst[3]=hunk["content"]
+                else:
+                    lst[arch_dic[has_archwords(hunk["file"])]]=hunk["content"]
+            content.append(lst)
+        chart.append([file_type,content])
+
+
+    os.system("git -c advice.detachedHead=false  checkout main")
     os.chdir("..")
-    with open('match.json', 'w') as json_file:
-        json.dump(result,json_file,indent=4)
+    return chart
+
+
+if __name__ == "__main__":
+    versions = ["519ee9d66cd", # 9.10.0
+        "dc97b450587", # 10.0
+        "d571cf7c2f4", # 10.1.0
+        "a0204ff9aea", # 10.2.0
+        "01af3a6529a", # 10.3.0.1
+        "24226735269", #10.4.0.1
+        "e9d54c53d14", #10.5.0.2
+        "6df7f9e416d", # 10.6.0
+        "cfe9945828d", # 10.7.0
+        "78dc1fc670f", #10.8.0
+        "5be28a22d10", #10.9.0
+        "d7f28a43690", # 11.0.0
+        "5b84df0b994", # 11.1.0
+        "d60b62b0afb", # 11.2.0
+        "49a080e6ff5", # 11.3.0
+        "6038c5bb8a8", # 11.4.0
+        "ae4d3975ab0", # 11.5.0
+        "6dcdb718b6d", # 11.6.0
+        "2dcf2bc02cc", # 11.7.0
+        "78017dccc38", # 11.8.0
+        "8997fd159a8", # 11.9.0
+        "ef0e120e97a", # 12.0.0
+        "811b7e772fa", # 12.1.0
+        "3130a66a9d9", # 12.2.0
+        "40d669e1505", # 12.3.0
+        "8ddb5aeb866", # 12.4.0
+        "6c1c3de6422", # 12.5.0
+        "a56fcee3ed5", # 12.6.0
+        "ca4889a4ab8", # 12.7.0
+        "4699435f7bb", # 12.8.0
+        "70ccb6965dd", # 12.9.0
+        ]
+    for version_hash in versions:
+        result = split_hunk(version_hash)
+        if not os.path.exists("match"):
+            os.mkdir("match")
+        with open('match/match_'+version_hash+'.json', 'w') as json_file:
+            json.dump(result,json_file,indent=4)

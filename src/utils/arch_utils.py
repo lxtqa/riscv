@@ -1,42 +1,51 @@
 import re
 
 
-def has_archwords(text,arch = ""):
-    if arch == "":
-        for keyword in ["arm64","Arm64","ARM64","arm32","Arm32","ARM32","arm","Arm","ARM", \
-                        "x64","X64", \
-                        "riscv64","Riscv64","RISCV64","riscv32","Riscv32","RISCV32","riscv","Riscv","RISCV",\
-                        "s390","S390",\
-                        "ia32","Ia32","IA32",\
-                        "ppc64","Ppc64","PPC64","ppc32","Ppc32","PPC32","ppc","Ppc","PPC",\
-                        "mips64","Mips64","MIPS64","mips32","Mips32","MIPS32","mips","Mips","MIPS",\
-                        "loong64","Loong64","LOONG64","loong32","Loong32","LOONG32","loong","Loong","LOONG"]:
+def has_archwords(text):
+        # for keyword in ["arm64","Arm64","ARM64","arm32","Arm32","ARM32","arm","Arm","ARM", \
+        #                 "x64","X64", \
+        #                 "riscv64","Riscv64","RISCV64","riscv32","Riscv32","RISCV32","riscv","Riscv","RISCV",\
+        #                 "s390","S390",\
+        #                 "ia32","Ia32","IA32",\
+        #                 "ppc64","Ppc64","PPC64","ppc32","Ppc32","PPC32","ppc","Ppc","PPC",\
+        #                 "mips64","Mips64","MIPS64","mips32","Mips32","MIPS32","mips","Mips","MIPS",\
+        #                 "loong64","Loong64","LOONG64","loong32","Loong32","LOONG32","loong","Loong","LOONG"]:
+        for keyword in ["arm64","Arm64","ARM64"]:
             if keyword in text:
-                if keyword in ["arm64","Arm64","ARM64"] :
-                    return "arm64"
-                if keyword in  ["arm","Arm","ARM"] :
-                    if keyword == "arm" and "harmony" in text:
-                        pass
-                    else:
-                        return "arm"
-                if keyword in  ["x64","X64"] :
-                    return "x64"
-                if keyword in ["riscv32", "Riscv32", "RISCV32"]:
-                    return "riscv32"
-                if keyword in ["riscv64", "Riscv64", "RISCV64"]:
-                    return "riscv64"
-                if keyword in ["riscv","Riscv","RISCV"] :
-                    return "riscv"
-                if keyword in ["s390","S390"]:
-                    return "s390"
-                if keyword in ["ia32","Ia32","IA32"] :
-                    return "ia32"
-                if keyword in ["ppc","Ppc","PPC"] :
-                    return "ppc"
-                if keyword in ["mips","Mips","MIPS"] :
-                    return "mips"
-                if keyword in ["loong","Loong","LOONG"] :
-                    return "loong"
+                return "arm64"
+        for keyword in ["arm","Arm","ARM"]:
+            if keyword in text:
+                if keyword == "arm" and "harmony" in text:
+                    pass
+                else:
+                    return "arm"
+        for keyword in ["x64","X64"]:
+            if keyword in text:
+                return "x64"
+        for keyword in ["riscv32", "Riscv32", "RISCV32"]:
+            if keyword in text:
+                return "riscv32"
+        for keyword in ["riscv64", "Riscv64", "RISCV64"]:
+            if keyword in text:
+                return "riscv64"
+        for keyword in ["riscv","Riscv","RISCV"] :
+            if keyword in text:
+                return "riscv"
+        for keyword in ["s390","S390"]:
+            if keyword in text:
+                return "s390"
+        for keyword in ["ia32","Ia32","IA32"] :
+            if keyword in text:
+                return "ia32"
+        for keyword in ["ppc","Ppc","PPC"] :
+            if keyword in text:
+                return "ppc"
+        for keyword in ["mips","Mips","MIPS"] :
+            if keyword in text:
+                return "mips"
+        for keyword in ["loong","Loong","LOONG"] :
+            if keyword in text:
+                return "loong"
         return None
 
 

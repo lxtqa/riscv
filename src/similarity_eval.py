@@ -16,7 +16,7 @@ def bfs_get_num(root):
     return num
 
 def main():
-    MATCHER_ID="gumtree-simple-id"
+    MATCHER_ID="gumtree-hybrid"
     TREE_GENERATOR_ID="cs-srcml"
     if not os.path.exists("./similarity"):
         os.mkdir("./similarity")

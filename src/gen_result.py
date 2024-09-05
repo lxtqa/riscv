@@ -98,20 +98,20 @@ def get_newname(node,mapping_dict):
     matches = process.extract(node_name, candidate)
     return matches[0][0]
 
-def construct_mapping_dict(mapping):
-    mapping_dict = {}
-    for key in mapping.keys():
-        value = mapping[key]
-        if key.split(" ")[0] == "name:" and value.split(" ")[0] == "name:":
-            a,b = get_name(key),get_name(value)
-            if a not in mapping_dict.keys():
-                mapping_dict[a] = {b:1}
-            else:
-                if b not in mapping_dict[a].keys():
-                    mapping_dict[a][b] = 1
-                else:
-                    mapping_dict[a][b] = mapping_dict[a][b] + 1
-    return mapping_dict
+# def construct_mapping_dict(mapping):
+#     mapping_dict = {}
+#     for key in mapping.keys():
+#         value = mapping[key]
+#         if key.split(" ")[0] == "name:" and value.split(" ")[0] == "name:":
+#             a,b = get_name(key),get_name(value)
+#             if a not in mapping_dict.keys():
+#                 mapping_dict[a] = {b:1}
+#             else:
+#                 if b not in mapping_dict[a].keys():
+#                     mapping_dict[a][b] = 1
+#                 else:
+#                     mapping_dict[a][b] = mapping_dict[a][b] + 1
+#     return mapping_dict
 
 
 
@@ -119,6 +119,7 @@ def construct_mapping_dict(mapping):
 def gen_result(file1String,
                 file2String,
                 file1_String,
+                mapping_dict,
                 use_docker,
                 MATCHER_ID,
                 TREE_GENERATOR_ID
@@ -183,9 +184,6 @@ def gen_result(file1String,
             match_dic1_1[match[3]] = match[2]
             match_dic11_[match[2]] = match[3]
 
-
-
-        mapping_dict = construct_mapping_dict(match_dic12)
 
 
         operations = []
