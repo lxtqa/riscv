@@ -2,6 +2,7 @@ import json
 from utils.ast_utils import *
 from tqdm import tqdm
 from utils.arch_utils import remove_archwords,has_archwords
+from utils.ast_utils import MATCHER_ID,TREE_GENERATOR_ID
 import tempfile
 import subprocess
 import os
@@ -16,8 +17,6 @@ def bfs_get_num(root):
     return num
 
 def main():
-    MATCHER_ID="gumtree-hybrid"
-    TREE_GENERATOR_ID="cs-srcml"
     if not os.path.exists("./similarity"):
         os.mkdir("./similarity")
     with open('match.json', 'r') as json_file:

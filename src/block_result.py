@@ -101,6 +101,7 @@ def clear(file1String,changed_header):
                         if k < j :  continue
                         tmp_file1String[k] = " "*len(line)
                     return tmp_file1String
+    return None
 
 
 def block_result(cfile1,
@@ -108,11 +109,15 @@ def block_result(cfile1,
                 cfile2,
                 use_docker,
                 MATCHER_ID,
-                TREE_GENERATOR_ID):
+                TREE_GENERATOR_ID,
+                mapping_dict):
 
     changed_header = patch1["header"]
-    file1String = "\n".join(clear(cfile1,changed_header))
-
+    file1String = clear(cfile1,changed_header)
+    if file1String == None:
+        changed_header = read_patch(patch1["patch"])[0]
+        file1String = clear(cfile1,changed_header)
+    file1String = "\n".join(file1String)
     with tempfile.NamedTemporaryFile(delete=True, mode='w', suffix='.cc') as file1, \
         tempfile.NamedTemporaryFile(delete=True, mode='w', suffix='.patch') as patchfile1:
             file1.write(file1String)
@@ -120,8 +125,10 @@ def block_result(cfile1,
             patch1["patch"] = ["diff --git a/a.cc b/b.cc","--- a/a.cc","+++ b/b.cc"] + patch1["patch"]
             patchfile1.write("\n".join(patch1["patch"])+"\n")
             patchfile1.flush()
-            output11_ = subprocess.run(["patch",file1.name,patchfile1.name,"--output=-"],capture_output=True,text = True)
-            file1_String = output11_.stdout
+            output11_ = subprocess.run(["patch",file1.name,patchfile1.name,"--output=-"],
+                                        stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE)
+            file1_String = output11_.stdout.decode()
     file2String = cfile2
 
 
@@ -136,7 +143,7 @@ def block_result(cfile1,
 
     if USE_ORIGIN:
         # print("USING ORIGIN METHOD")
-        file2String = gen_result(file1String,file2String,file1_String,use_docker,MATCHER_ID,TREE_GENERATOR_ID)
+        file2String = gen_result(file1String,file2String,file1_String,mapping_dict,use_docker,MATCHER_ID,TREE_GENERATOR_ID)
     else:
         matches = collect_parallel_blocks([blocks1]+[blocks1_]+blocks2)
         for i in range(len(matches)):
@@ -144,7 +151,7 @@ def block_result(cfile1,
                 matches[i][j]["content"] = "\n".join(matches[i][j]["content"])
         for match in matches:
             #写到block_file中
-            block2_ = gen_result(match[0]["content"],match[2]["content"],match[1]["content"],use_docker,MATCHER_ID,TREE_GENERATOR_ID)
+            block2_ = gen_result(match[0]["content"],match[2]["content"],match[1]["content"],mapping_dict,use_docker,MATCHER_ID,TREE_GENERATOR_ID)
             #应对未发生改动的情况
             if remove_whitespace(match[2]["content"]) != remove_whitespace(block2_):
                 if match[2]["content"] not in file2String:

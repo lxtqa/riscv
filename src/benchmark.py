@@ -3,12 +3,13 @@ import re
 from utils.arch_utils import *
 from utils.ast_utils import *
 from utils.patch_utils import *
+from utils.version_hash import versions
 from block_result import block_result
 import json
 from tqdm import tqdm
 import tempfile
 
-arch_dic = {"arm":0,"arm64":1,"riscv32":2,"riscv64":3,"mips":4,"ia32":5,"x64":6,"loong":7,"s390":8,"ppc":9}
+
 
 class Commit:
     def __init__(self,hash):
@@ -36,7 +37,7 @@ def remove_cpp_comments(file_content):
     return cleaned_content
 
 
-def successfully_generate(file1,patch1,file2,patch2):
+def successfully_generate(file1,patch1,file2,patch2,mapping_dict):
 
     modify_hex(file1)
     modify_hex(file2)
@@ -50,18 +51,18 @@ def successfully_generate(file1,patch1,file2,patch2):
             output22_ = subprocess.run(["patch",cfile2.name,patchfile2.name,"--output=-"],capture_output=True,text = True)
             file2_String_std = output22_.stdout
     use_docker = True
-    try:
-        file2_String = block_result(file1,patch1,file2,use_docker=use_docker,MATCHER_ID="gumtree-hybrid",TREE_GENERATOR_ID="cpp-srcml")
+    # try:
+    file2_String = block_result(file1,patch1,file2,use_docker=use_docker,MATCHER_ID=MATCHER_ID,TREE_GENERATOR_ID=TREE_GENERATOR_ID,mapping_dict = mapping_dict)
 
-        #除去所有的注释和空字符
-        if remove_whitespace(remove_cpp_comments(file2_String_std)) == remove_whitespace(remove_cpp_comments(file2_String)):
-            # print("生成成功!")
-            return True
-        else:
-            # print("生成失败")
-            return False
-    except:
+    #除去所有的注释和空字符
+    if remove_whitespace(remove_cpp_comments(file2_String_std)) == remove_whitespace(remove_cpp_comments(file2_String)):
+        # print("生成成功!")
+        return True
+    else:
+        # print("生成失败")
         return False
+    # except:
+    #     return False
 
 
 def construct_mapping_dict(mapping):
@@ -69,58 +70,22 @@ def construct_mapping_dict(mapping):
     for key in mapping.keys():
         value = mapping[key]
         if key.split(" ")[0] == "name:" and value.split(" ")[0] == "name:":
-            a,b = get_name(key),get_name(value)
-            if a not in mapping_dict.keys():
-                mapping_dict[a] = {b:1}
+            k,v = get_name(key),get_name(value)
+            if k not in mapping_dict.keys():
+                mapping_dict[k] = {v:1}
             else:
-                if b not in mapping_dict[a].keys():
-                    mapping_dict[a][b] = 1
+                if v not in mapping_dict[k].keys():
+                    mapping_dict[k][v] = 1
                 else:
-                    mapping_dict[a][b] = mapping_dict[a][b] + 1
+                    mapping_dict[k][v] = mapping_dict[k][v] + 1
     return mapping_dict
 
 
-sb1 = 1
-sb2 = 17
+sb1 = 0
+sb2 = 2
 sb3 = 0
 
 def main():
-    versions = ["519ee9d66cd", # 9.10.0
-        "dc97b450587", # 10.0
-        "d571cf7c2f4", # 10.1.0
-        "a0204ff9aea", # 10.2.0
-        "01af3a6529a", # 10.3.0.1
-        "24226735269", #10.4.0.1
-        "e9d54c53d14", #10.5.0.2
-        "6df7f9e416d", # 10.6.0
-        "cfe9945828d", # 10.7.0
-        "78dc1fc670f", #10.8.0
-        "5be28a22d10", #10.9.0
-        "d7f28a43690", # 11.0.0
-        "5b84df0b994", # 11.1.0
-        "d60b62b0afb", # 11.2.0
-        "49a080e6ff5", # 11.3.0
-        "6038c5bb8a8", # 11.4.0
-        "ae4d3975ab0", # 11.5.0
-        "6dcdb718b6d", # 11.6.0
-        "2dcf2bc02cc", # 11.7.0
-        "78017dccc38", # 11.8.0
-        "8997fd159a8", # 11.9.0
-        "ef0e120e97a", # 12.0.0
-        "811b7e772fa", # 12.1.0
-        "3130a66a9d9", # 12.2.0
-        "40d669e1505", # 12.3.0
-        "8ddb5aeb866", # 12.4.0
-        "6c1c3de6422", # 12.5.0
-        "a56fcee3ed5", # 12.6.0
-        "ca4889a4ab8", # 12.7.0
-        "4699435f7bb", # 12.8.0
-        "70ccb6965dd", # 12.9.0
-        ]
-    mapping = {}
-    for version in versions:
-        with open('match/match_' + version + '.json', 'r') as json_file:
-            mapping[version] = json.load(json_file)
 
     with open("versions_diff_block.json") as jsonFile:
         versions_diff_block = json.load(jsonFile)
@@ -129,16 +94,28 @@ def main():
             # if v < sb1:
             #     continue
 
-            vResult = []
+            with open('mapping/mapping_' + version["versions"][0] + '.json', 'r') as json_file:
+                jsonObject = json.load(json_file)
+                mapping_dict = {}
+                for [file_name,content] in jsonObject:
+                    dic = [{} for _ in range(10)]
+                    for block_dics in content:
+                        for i,block_dic in enumerate(block_dics):
+                            dic[i].update(block_dic)
+                    mapping_dict[file_name] = dic
+            for file_name in mapping_dict.keys():
+                for i,item in enumerate(mapping_dict[file_name]):
+                    mapping_dict[file_name][i] = construct_mapping_dict(item)
+
+            vresult = []
             dir = "v8"
             os.chdir(dir)
             os.system("git -c advice.detachedHead=false  checkout "+version["versions"][0]+" > /dev/null 2>&1")
             print()
             m = -1
-            mapping_dict = construct_mapping_dict(match_dic12)
             for t,type in enumerate(version["contents"]):
                 print(str(t)+"/"+str(len(version["contents"])),end=" ",flush=True)
-                Result = [0 for _ in range(10)]
+                result = [0 for _ in range(10)]
                 flag = False
                 for i,file in enumerate(type):
                     arch = has_archwords(file["file"])
@@ -153,7 +130,7 @@ def main():
                     continue
 
                 # m = m + 1
-                # if m < 17:
+                # if m < sb2:
                 #     continue
 
 
@@ -166,19 +143,22 @@ def main():
                         with open(file["file"],"r") as f:
                             content1 = format(f.read(),"..")
                             patch1 = {"header":file["header"],"patch":file["patch"]}
-                            succeed = successfully_generate(content1,patch1,content2,patch2)
+                            file_name = "./" + remove_archwords(file['file'])
+                            if file_name not in mapping_dict:
+                                a = 0
+                            succeed = successfully_generate(content1,patch1,content2,patch2,mapping_dict[file_name][arch_dic[arch]])
                             arch = has_archwords(file["file"])
                             if succeed:
-                                Result[arch_dic[arch]] =  1
+                                result[arch_dic[arch]] =  1
                             else:
-                                Result[arch_dic[arch]] =  -1
-                vResult.append(Result)
+                                result[arch_dic[arch]] =  -1
+                vresult.append(result)
             print("")
             os.system("git -c advice.detachedHead=false checkout main > /dev/null 2>&1")
             print()
             os.chdir("..")
-            # with open("result/result"+str(v)+"_.json","w") as f:
-            #     json.dump(vResult,f,indent=4)
+            with open("result/result"+str(v)+"__.json","w") as f:
+                json.dump(vresult,f,indent=4)
 
 if __name__ == "__main__":
     main()

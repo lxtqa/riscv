@@ -1,6 +1,8 @@
 import re
 
 
+arch_dic = {"arm":0,"arm64":1,"riscv32":2,"riscv64":3,"mips":4,"ia32":5,"x64":6,"loong":7,"s390":8,"ppc":9}
+
 def has_archwords(text):
         # for keyword in ["arm64","Arm64","ARM64","arm32","Arm32","ARM32","arm","Arm","ARM", \
         #                 "x64","X64", \

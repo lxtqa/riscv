@@ -1,6 +1,8 @@
 import re
 import subprocess
 
+MATCHER_ID="gumtree-hybrid"
+TREE_GENERATOR_ID="cpp-srcml"
 
 def get_start_end(string):
     try:

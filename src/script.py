@@ -13,8 +13,8 @@ def script():
     # 添加可选项输出文件目录和其他选项
     parser.add_argument('-d', '--use_docker', action='store_true', help='使用Docker')
     parser.add_argument('-o', '--output_directory', type=str, help='指定输出文件目录')
-    parser.add_argument('-m', '--matcher_id', type=str, default='gumtree', help='指定MATCHER_ID，默认为gumtree')
-    parser.add_argument('-g', '--tree_generator_id', type=str, default='cs-srcml', help='指定TREE_GENERATOR_ID，默认为cs-srcml')
+    parser.add_argument('-m', '--matcher_id', type=str, default='gumtree-hybrid', help='指定MATCHER_ID，默认为gumtree')
+    parser.add_argument('-g', '--tree_generator_id', type=str, default='cpp-srcml', help='指定TREE_GENERATOR_ID，默认为cpp-srcml')
 
     # 解析命令行参数
     args = parser.parse_args()

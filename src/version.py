@@ -5,40 +5,7 @@ from tqdm import tqdm
 import json
 from utils.arch_utils import *
 from utils.patch_utils import *
-
-versions = ["519ee9d66cd", # 9.10.0
-        "dc97b450587", # 10.0
-        "d571cf7c2f4", # 10.1.0
-        "a0204ff9aea", # 10.2.0
-        "01af3a6529a", # 10.3.0.1
-        "24226735269", #10.4.0.1
-        "e9d54c53d14", #10.5.0.2
-        "6df7f9e416d", # 10.6.0
-        "cfe9945828d", # 10.7.0
-        "78dc1fc670f", #10.8.0
-        "5be28a22d10", #10.9.0
-        "d7f28a43690", # 11.0.0
-        "5b84df0b994", # 11.1.0
-        "d60b62b0afb", # 11.2.0
-        "49a080e6ff5", # 11.3.0
-        "6038c5bb8a8", # 11.4.0
-        "ae4d3975ab0", # 11.5.0
-        "6dcdb718b6d", # 11.6.0
-        "2dcf2bc02cc", # 11.7.0
-        "78017dccc38", # 11.8.0
-        "8997fd159a8", # 11.9.0
-        "ef0e120e97a", # 12.0.0
-        "811b7e772fa", # 12.1.0
-        "3130a66a9d9", # 12.2.0
-        "40d669e1505", # 12.3.0
-        "8ddb5aeb866", # 12.4.0
-        "6c1c3de6422", # 12.5.0
-        "a56fcee3ed5", # 12.6.0
-        "ca4889a4ab8", # 12.7.0
-        "4699435f7bb", # 12.8.0
-        "70ccb6965dd", # 12.9.0
-        ]
-
+from utils.version_hash import versions
 
 
 def split_diff_lines_to_json(lines,file_lines):
@@ -75,6 +42,8 @@ def split_diff_lines_to_json(lines,file_lines):
             header = block_lines[1][1:]
         else:
             header  = file_lines[block_start_indices[i][1]]
+        #补全hunk中header的信息
+        block_lines[0] = replace_header(block_lines[0],file_lines[block_start_indices[i][1]])
         blocks.append({
                     "header": header,
                     'patch': block_lines

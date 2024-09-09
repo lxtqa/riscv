@@ -3,6 +3,7 @@ import re
 from extract_unit import extract_unit
 import subprocess
 from utils.arch_utils import *
+from utils.ast_utils import *
 from utils.patch_utils import *
 
 
@@ -140,8 +141,8 @@ def unit_result(dir,
                 rm_tempfile=rm_tempfile,
                 use_docker=use_docker,
                 debugging=debugging,
-                MATCHER_ID="gumtree-simple-id",#"gumtree-hybrid",
-                TREE_GENERATOR_ID="cpp-srcml"#"cs-srcml"
+                MATCHER_ID=MATCHER_ID,
+                TREE_GENERATOR_ID=TREE_GENERATOR_ID
                 )
         else:
             write_file(dir + "/" + cfile_name2_,file2String)
@@ -156,6 +157,6 @@ def unit_result(dir,
                 rm_tempfile=rm_tempfile,
                 use_docker=use_docker,
                 debugging=debugging,
-                MATCHER_ID="gumtree-simple-id",#"gumtree-hybrid",
-                TREE_GENERATOR_ID="cpp-srcml"#"cs-srcml"
+                MATCHER_ID=MATCHER_ID,
+                TREE_GENERATOR_ID=TREE_GENERATOR_ID
                 )
