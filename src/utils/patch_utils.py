@@ -1,6 +1,8 @@
 import re
 import subprocess
 
+header_re = r"^((::[\[:space:]]*)?[A-Za-z_].*)$"
+
 INF = 2**31
 
 def replace_header(old_string,new_header):

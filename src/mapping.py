@@ -5,6 +5,7 @@ from utils.arch_utils import remove_archwords,has_archwords
 import tempfile
 import subprocess
 import os
+from utils.ast_utils import TREE_GENERATOR_ID,MATCHER_ID
 
 versions = ["519ee9d66cd", # 9.10.0
         "dc97b450587", # 10.0
@@ -38,8 +39,6 @@ versions = ["519ee9d66cd", # 9.10.0
         "4699435f7bb", # 12.8.0
         "70ccb6965dd", # 12.9.0
         ]
-MATCHER_ID="gumtree-hybrid"
-TREE_GENERATOR_ID="cpp-srcml"
 mapping = {}
 if not os.path.exists("mapping"):
     os.mkdir("mapping")
@@ -51,7 +50,7 @@ for version in versions:
         similarity = []
         #riscv64
         j = 0
-        for [file_type,content] in tqdm(block_sets):
+        for [file_type,file,content] in tqdm(block_sets):
             similar = []
             for set in tqdm(content):
                 with tempfile.NamedTemporaryFile(delete=True, mode='w', suffix='.cpp') as riscv_block:

@@ -1,11 +1,4 @@
 import json
-#arch_dic = {"arm":0,"arm64":1,"riscv32":2,"riscv64":3,"mips":4,"ia32":5,"x64":6,"loong":7,"s390":8,"ppc":9}
-# num = 0
-# with open('match.json', 'r') as json_file:
-#     block_sets = json.load(json_file)
-#     for block_set in block_sets:
-#         num = num + len(block_set[1])
-# print(num)
 
 with open('similarity.json', 'r') as json_file:
     similarity = json.load(json_file)
@@ -14,10 +7,9 @@ with open('similarity.json', 'r') as json_file:
     lst = [[0,0] for _ in range(10)]
     j = 0
     for file in similarity:
-        # lst = [[0,0] for _ in range(10)]
         file_name = file[0]
-        for block_sets in file[1]:
-            j = j+1
+        for block_sets in file[2]:
+            j = j + 1
             astnodenum = block_sets[0] - 1
             if astnodenum == 0:
                 continue

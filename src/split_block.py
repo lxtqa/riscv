@@ -19,7 +19,7 @@ def list_files(directory):
 def split_block(version_hash):
     dir = "./v8"
     os.chdir(dir)
-    current_directory = "./src"
+    current_directory = "."
     os.system("git -c advice.detachedHead=false  checkout "+version_hash)
     cc_h_files = list_files(current_directory)
     file_list = []
@@ -115,6 +115,17 @@ def split_block(version_hash):
     for block_set in result:
         file_type = remove_archwords(block_set[0][0])
         content = []
+        files = ["" for _ in range(10)]
+
+        for file in block_set[0]:
+            if has_archwords(file) == "riscv":
+                with open(file,"r") as f:
+                    files[2] = f.read()
+                    files[3] = files[2]
+            else:
+                with open(file,"r") as f:
+                    files[arch_dic[has_archwords(file)]] = f.read()
+
         for blocks in block_set[1]:
             lst = [[] for _ in range(10)]
             for block in blocks:
@@ -124,10 +135,10 @@ def split_block(version_hash):
                 else:
                     lst[arch_dic[has_archwords(block["file"])]]=block["content"]
             content.append(lst)
-        chart.append([file_type,content])
+        chart.append([file_type,files,content])
 
 
-    os.system("git -c advice.detachedHead=false  checkout main")
+    os.system("git -c advice.detachedHead=false checkout main")
     os.chdir("..")
     return chart
 

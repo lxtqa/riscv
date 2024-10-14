@@ -12,7 +12,6 @@ def split_diff_lines_to_json(lines,file_lines):
 
 
     block_header_indices = [0]
-    header_re = r"^((::[\[:space:]]*)?[A-Za-z_].*)$"
     for i,line in enumerate(file_lines):
         if re.match(header_re,line):
             block_header_indices.append(i)

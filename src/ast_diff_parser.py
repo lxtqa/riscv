@@ -2,6 +2,7 @@ from utils.ast_utils import parse_tree_from_text
 import copy
 from utils.ast_utils import get_type
 
+
 class DiffOp:
     def __init__(self,op):
         self.op = op
@@ -43,7 +44,7 @@ def fun(diffOps,match):
                     ## 没有处理在insert中delete的情况
                     node =  bfs_search(diffOps[j].source,diffOps[i].desNode)
                     if node == None:
-                        if diffOps[i].desNode in match and diffOps[j].move == True:
+                        if diffOps[i].desNode in match: #and diffOps[j].move == True:
                             node = bfs_search(diffOps[j].source,match[diffOps[i].desNode])
                     if node != None:
                         if diffOps[i].op == "insert-tree" or diffOps[i].op == "insert-node":
@@ -83,7 +84,7 @@ def fun(diffOps,match):
                         return diffOps,False
     return diffOps,True
 
-def diff_parser(diffs,match):
+def diff_parser(diffs,match,ast1_):
     diffOps = []
     id = 0
     for diff in diffs:
@@ -121,6 +122,8 @@ def diff_parser(diffs,match):
             diffOps.append(diffOp)
         elif diff[0] == "update-node":
             diffOp = DiffOp("update-node")
+            if diff[2].strip().startswith("comment:"):
+                continue
             diffOp.desNode = diff[2].strip()
             diffOp.source= diff[-1].split(" by ")[-1]
             # if get_type(diffOp.source) == "comment:":
@@ -132,6 +135,7 @@ def diff_parser(diffs,match):
             diffOp2.source = parse_tree_from_text(diff[2:-3])
             # if get_type(diffOp2.source.value) == "comment:":
             #     continue
+            #todo:直接取被映射到的节点作为结果
             diffOp2.id = id
             diffOps.append(diffOp2)
             diffOp1 = DiffOp("insert-node")
@@ -155,13 +159,14 @@ def diff_parser(diffs,match):
             diffOp2.id = id
             diffOps.append(diffOp2)
             diffOp1 = DiffOp("insert-tree")
-            diffOp1.source = copy.deepcopy(diffOp2.source)
-            queue = [diffOp1.source]
-            while queue:
-                node = queue.pop(0)
-                if node.value in match:
-                    node.value = match[node.value]
-                queue.extend(node.children)
+            # diffOp1.source = copy.deepcopy(diffOp2.source)
+            # queue = [diffOp1.source]
+            # while queue:
+            #     node = queue.pop(0)
+            #     if node.value in match:
+            #         node.value = match[node.value]
+            #     queue.extend(node.children)
+            diffOp1.source = bfs_search(ast1_,match[diffOp2.source.value])
             diffOp1.desNode = diff[-2].strip()
             diffOp1.desRank = int(diff[-1].split(" ")[-1])
             diffOp1.move = True

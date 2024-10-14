@@ -1,7 +1,9 @@
 import re
 import subprocess
+import json
 
-MATCHER_ID="gumtree-hybrid"
+MATCHER_ID="gumtree-simple"
+# MATCHER_ID="gumtree-simple-id-theta"
 TREE_GENERATOR_ID="cpp-srcml"
 
 def get_start_end(string):
@@ -48,6 +50,7 @@ class TreeNode:
     def __init__(self, value):
         self.value = value
         self.children = []
+        self.xml = None
 
 def parse_tree_from_text(text_lines):
     def build_tree_helper(lines, level):

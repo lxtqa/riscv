@@ -68,13 +68,23 @@ python3 split_and_filter.py ./classified_patch
 
 ### 生成新patch部分代码
 
-#### ast_utils.py
+#### utils
+
+##### ast_utils.py
 
 利用`gumtree parse`命令生成ast到txt文件，并返回一个经过parse的抽象语法树，以及其他的ast相关工具
 
-#### arc_utils.py
+##### arc_utils.py
 
 包括has_archwords和remove_archwords两个函数
+
+##### patch_utils.py
+
+
+
+##### version_hash.py
+
+
 
 #### disjoint_sets.py
 
@@ -88,13 +98,13 @@ python3 split_and_filter.py ./classified_patch
 
 将【架构1下代码，架构2下代码，架构1下修改后代码，指定架构2下修改后代码输出目录】作为参数，使用docker镜像中的gumtree textdiff命令，获取match和diff，基于ast方法生成代码文件，直接生成架构2下修改后的代码文件。
 
-#### extract_unit.py
+#### extract_block.py
 
-从代码中分离出不同的unit
+从代码中分离出不同的block
 
-#### unit_result.py
+#### block_result.py
 
-代码单元为粒度的结果生成
+代码块为粒度的结果生成
 
 #### exec.sh
 

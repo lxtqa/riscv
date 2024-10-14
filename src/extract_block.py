@@ -2,12 +2,9 @@ import re
 from utils.patch_utils import *
 def extract_block(file_lines,file_name=""):
     block_header_indices = []
-    header_re = r"^((::[\[:space:]]*)?[A-Za-z_].*)$"
     for i,line in enumerate(file_lines):
         if re.match(header_re,line):
             block_header_indices.append(i)
-    # if block_header_indices == []:??????????????
-    #     a = 0
     if block_header_indices == [] or block_header_indices[0] != 0:
         block_header_indices = [0]+block_header_indices
     block_header_indices.append(INF)
