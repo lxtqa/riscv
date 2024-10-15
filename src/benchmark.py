@@ -6,7 +6,6 @@ from utils.patch_utils import *
 from block_result import block_result
 import json
 import tempfile
-import signal
 from gen_result import construct_mapping_dict
 
 class Commit:
@@ -57,9 +56,9 @@ def successfully_generate(file1,patch1,file2,patch2,mapping_dict):
 
     file2_string_std = remove_whitespace(remove_cpp_comments(file2_string_std))
     file2_string = remove_whitespace(remove_cpp_comments(file2_string))
-    for i in range(len(file2_string_std)):
-        if file2_string_std[i] != file2_string[i]:
-            a = 0
+    # for i in range(len(file2_string_std)):
+    #     if file2_string_std[i] != file2_string[i]:
+    #         a = 0
     #除去所有的注释和空字符
     if file2_string_std == file2_string:
         # print("生成成功!")
@@ -69,13 +68,10 @@ def successfully_generate(file1,patch1,file2,patch2,mapping_dict):
         return False
 
 
-#3,6,4 Sh sh
-#4,1,7
-#缺分号
-sb1 = 4
-sb2 = 26
-sb3 = 1
-F = True
+sb1 = 12
+sb2 = 246
+sb3 = 0
+F = False
 
 def main():
 
@@ -83,11 +79,10 @@ def main():
         versions_diff_block = json.load(jsonFile)
         for v,version in enumerate(versions_diff_block):
 
-
             if F:
                 pass
-            if v != sb1:
-                continue
+                if v < 12:
+                    continue
 
             with open('mapping/mapping_' + version["versions"][0] + '.json', 'r') as json_file:
                 jsonObject = json.load(json_file)
@@ -133,13 +128,11 @@ def main():
 
 
                 for j,file in enumerate(type):
-                    
-                    if F:
-                        pass
-                        if arch_dic[has_archwords(file["file"])] != sb3:
-                            continue
-
                     if j != i:
+                        if F:
+                            pass
+                            if arch_dic[has_archwords(file["file"])] != sb3:
+                                continue
                         with open(file["file"],"r") as f:
                             content1 = format(f.read(),"..")
                             patch1 = {"header":file["header"],"patch":file["patch"]}
@@ -158,7 +151,7 @@ def main():
             os.system("git -c advice.detachedHead=false checkout main > /dev/null 2>&1")
             print()
             os.chdir("..")
-            with open("result/result"+str(v)+"__2.json","w") as f:
+            with open("result/result"+str(v)+".json","w") as f:
                 json.dump(vresult,f,indent=4)
 
 if __name__ == "__main__":

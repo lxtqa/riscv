@@ -1,9 +1,6 @@
 from utils.ast_utils import *
-from ast_diff_parser import diff_parser,bfs_search,bfs_search_father,get_start_end
 from time import time
 import sys
-import re
-import regex
 import subprocess
 import tempfile
 from fuzzywuzzy import process
@@ -84,24 +81,6 @@ def init_ast(ast_root,xml_root):
         xml_nodes.extend(xml_node)
 
 
-
-# def clean_parameter_list_in_file(file_content):
-#     # 定义一个函数来处理括号内的参数列表
-#     def clean_inside_parentheses(match):
-#         inside = match[0]
-#         # 删除连续的逗号（允许中间有空白字符）
-#         inside = re.sub(r',(\s*,)+', ',', inside)
-#         # 删除末尾逗号（允许逗号后有空白字符）
-#         inside = re.sub(r',\s*\)', ')', inside)
-#         # 删除开头逗号（允许逗号前有空白字符）
-#         inside = re.sub(r'\(\s*,', '(', inside)
-#         return f'{inside}'
-    
-#     # 匹配所有括号内的内容，并逐个进行处理
-#     cleaned_content = regex.sub(r'\((?:[^()]*|(?R))*\)', clean_inside_parentheses, file_content, flags=re.DOTALL)
-    
-#     return cleaned_content
-
 def construct_mapping_dict(mapping):
     mapping_dict = {}
     for key in mapping.keys():
@@ -118,52 +97,13 @@ def construct_mapping_dict(mapping):
     return mapping_dict
 
 
-# class Operation:
-#     def __init__(self, start, end, content):
-#         self.start = start
-#         self.end = end
-#         self.content = content
-#         self.rank = 0
-#         self.offset = 0
-
-
-# def replace(text,operations):
-#     #排序
-#     operations = sorted(operations, key=lambda x:  (x.start, x.rank))
-#     # 排序先插入再删除
-#     offset = 0
-#     for op in operations:
-#         text = text[:op.start+offset] + op.content + text[op.end+offset:]
-#         offset += len(op.content) - op.end + op.start
-#     return text
-
-# def map_(node,mapping_dict,mapping_dic12,file_string):
-#     #截取产生修改部分的补丁代码
-#     start,end = get_start_end(node.value)
-#     temp_string = file_string[start:end]
-#     #获取产生修改部分的补丁代码中需要进行映射的操作
-
-#     operations = []
-#     queue = [node]
-#     while queue:
-#         node = queue.pop()
-#         if node.value.split(" ")[0] == "name:":
-#             new_name = get_newname(node.value,mapping_dict,mapping_dic12)
-#             if new_name:
-#                 start_end = get_start_end(node.value)
-#                 operations.append(Operation(start_end[0]-start,  start_end[1]-start,  new_name))
-#         queue.extend(node.children)
-#     replaced = replace(temp_string,operations)
-#     return replaced
-
-
-def map(root,mapping_dict,mapping_dic12):
+def map(root,mapping_dict):
     #获取产生修改部分的补丁代码中需要进行映射的操作
     queue = [root]
     while queue:
         xml = queue.pop()
         if xml.tag.endswith("name") and xml.text !=  None:
-            new_name = get_newname(xml.text,mapping_dict,mapping_dic12)
+            new_name = get_newname(xml.text,mapping_dict)
             if new_name:
                 xml.text =  new_name
         queue.extend(xml)
@@ -171,7 +111,7 @@ def map(root,mapping_dict,mapping_dic12):
 
 
 
-def get_newname(node_name,mapping_dict,mapping_dic12):
+def get_newname(node_name,mapping_dict):
     """
         对name节点进行映射
     """
@@ -179,25 +119,14 @@ def get_newname(node_name,mapping_dict,mapping_dic12):
         return node_name
     candidate = []
     current_max = 0
-    if mapping_dic12 != {}:
-        if node_name in mapping_dic12.keys():
-            for item in mapping_dic12[node_name].keys():
-                if item == node_name:
-                    return item
-                if mapping_dic12[node_name][item] > current_max:
-                    current_max = mapping_dic12[node_name][item]
-                    candidate = [item]
-                elif mapping_dic12[node_name][item] == current_max:
-                    candidate.append(item)
-    if mapping_dic12 == {} or candidate == []:
-        for item in mapping_dict[node_name].keys():
-            if item == node_name:
-                return item
-            if mapping_dict[node_name][item] > current_max:
-                current_max = mapping_dict[node_name][item]
-                candidate = [item]
-            elif mapping_dict[node_name][item] == current_max:
-                candidate.append(item)
+    for item in mapping_dict[node_name].keys():
+        if item == node_name:
+            return item
+        if mapping_dict[node_name][item] > current_max:
+            current_max = mapping_dict[node_name][item]
+            candidate = [item]
+        elif mapping_dict[node_name][item] == current_max:
+            candidate.append(item)
 
     matches = process.extract(node_name, candidate)
     return matches[0][0]
@@ -227,8 +156,6 @@ def parse_diff(diff,ast1,ast1_,ast2,match_dic11_,match_dic12,mapping_dict):
 
             #不在father中找,而是直接找前后关系
 
-            #father2 = bfs_search(ast2,match_dic12[des_node.value])
-
             new_source = copy.deepcopy(source)
 
             for i in range(desRank-1,-1,-1):
@@ -241,7 +168,7 @@ def parse_diff(diff,ast1,ast1_,ast2,match_dic11_,match_dic12,mapping_dict):
                                 node = queue.pop()
                                 match_dic12[node.value] = node.value
                                 queue.extend(node.children)
-                            father2.xml.insert(j+1,map(new_source.xml,mapping_dict,{}))
+                            father2.xml.insert(j+1,map(new_source.xml,mapping_dict))
                             father2.children.insert(j+1,new_source)
                             return
             for i in range(desRank+1,len(father1.children)):
@@ -254,7 +181,7 @@ def parse_diff(diff,ast1,ast1_,ast2,match_dic11_,match_dic12,mapping_dict):
                                 node = queue.pop()
                                 match_dic12[node.value] = node.value
                                 queue.extend(node.children)
-                            father2.xml.insert(j,map(new_source.xml,mapping_dict,{}))
+                            father2.xml.insert(j,map(new_source.xml,mapping_dict))
                             father2.children.insert(j,new_source)
                             return
             father2 = bfs_search(ast2,match_dic12[des_node.value])
@@ -263,7 +190,7 @@ def parse_diff(diff,ast1,ast1_,ast2,match_dic11_,match_dic12,mapping_dict):
                 node = queue.pop()
                 match_dic12[node.value] = node.value
                 queue.extend(node.children)
-            father2.xml.insert(0,map(new_source.xml,mapping_dict,{}))
+            father2.xml.insert(0,map(new_source.xml,mapping_dict))
             father2.children.insert(0,new_source)
             return
     elif diff[0] == "delete-node" or diff[0] == "delete-tree":
@@ -281,17 +208,16 @@ def parse_diff(diff,ast1,ast1_,ast2,match_dic11_,match_dic12,mapping_dict):
             father2.xml.remove(des2.xml)
             return
     elif diff[0] == "update-node":
-        des_node = diff[2].strip()
-        source = diff[-1].split(" by ")[-1]
-        if des_node in match_dic12.keys():
+        node = re.search(r"(.*: (.*) \[\d+,\d+\])\nreplace \2 by (.*)","\n".join(diff[2:]),re.DOTALL)
+        if node[1] in match_dic12.keys():
             # find des_node in ast1
-            des1 = bfs_search(ast1,des_node)
+            des1 = bfs_search(ast1,node[1])
             # find parral node in ast2
-            des2 = bfs_search(ast2,match_dic12[des_node])
+            des2 = bfs_search(ast2,match_dic12[node[1]])
             # update text in ast1
-            des1.xml.text = source
+            des1.xml.text = node[3]
             # update text in ast2
-            des2.xml.text = get_newname(source,mapping_dict,{})
+            des2.xml.text = get_newname(node[3],mapping_dict)
             return
     elif diff[0] == "move-node" or diff[0] == "move-tree":
         source = parse_tree_from_text(diff[2:-3])
@@ -411,25 +337,17 @@ def gen_result(file_string1,
             matches12, _= gumtree_parser(output12)
             #parse match
             match_dic12 = {}
-            match_dic1_1 = {}
             match_dic11_ = {}
             for match in matches12:
-                if match[1]!="---":
-                    exit(201)
-                match_dic12[match[2]] = match[3]
+                node = re.search(r"(.* \[\d+,\d+\])\n(.* \[\d+,\d+\])","\n".join(match[2:]),re.DOTALL)
+                match_dic12[node[1]] = node[2]
             for match in matches11_:
-                if match[1]!="---":
-                    exit(201)
-                match_dic1_1[match[3]] = match[2]
-                match_dic11_[match[2]] = match[3]
-            #TODO：通过2—>1->1_的过程来补充能够映射到的节点的tail
-            # mapping_dict12 = construct_mapping_dict(match_dic12)
+                node = re.search(r"(.* \[\d+,\d+\])\n(.* \[\d+,\d+\])","\n".join(match[2:]),re.DOTALL)
+                match_dic11_[node[1]] = node[2]
             for diff in diffs11_:
                 parse_diff(diff,ast1,ast1_,ast2,match_dic11_,match_dic12,mapping_dict)
 
-
             modify_comma(ast2.xml)
-
 
             with tempfile.NamedTemporaryFile(delete=True, mode='w', suffix='.xml') as xmlfile2_:
                 ET.ElementTree(ast2.xml).write(xmlfile2_.name, encoding="utf-8", xml_declaration=True)
@@ -440,122 +358,3 @@ def gen_result(file_string1,
 
                 return subprocess.run(["srcml",xmlfile2_.name], capture_output=True,text = True).stdout
 
-
-
-
-        # operations = []
-        # #先对diff操作进行parse
-        # diffOps = diff_parser(diffs11_,match_dic11_,ast1_)
-
-
-        # diffOp_i = 0
-        # while diffOp_i < len(diffOps):
-        #     diffOp = diffOps[diffOp_i]
-        #     diffOp_i = diffOp_i + 1
-        #     if op == "insert-node" or op == "insert-tree":
-        #         #位置
-        #         if des_node in match_dic12:
-        #             des = match_dic12[des_node]
-        #         else:
-        #             continue
-        #         #在ast1,2中找到pos,根据其child找到位置
-        #         des_node = bfs_search(ast1,des_node)
-
-        #         # 找到插入节点的后一个节点, 进行映射, 如果能映射到, 则插入到后一个节点的前面
-        #         # 找不到, 则找到插入节点的前一个节点, 进行映射, 如果能映射到, 则插入到前一个节点的后面
-        #         # 全都找不到, 就放在最前面
-        #         child_rank = desRank
-        #         child_rank2 = -1
-        #         start = -1
-        #         for i in range(child_rank-1,-1,-1):
-        #             if des_node.children[i].value != "VAL":
-        #                 if des_node.children[i].value in match_dic12:
-        #                     _,start = get_start_end(match_dic12[des_node.children[i].value])
-        #                     break
-        #         if start == -1:
-        #             for i in range(child_rank,len(des_node.children)):
-        #                 if des_node.children[i].value != "VAL":
-        #                     if des_node.children[i].value in match_dic12:
-        #                         start,_ = get_start_end(match_dic12[des_node.children[i].value])
-        #                         break
-        #         if start ==-1:
-        #             start,_ = get_start_end(des)
-
-        #         #处理向空参数列表中插入会插入在括号外的情况
-        #         if des_node.children == [] and (get_type(des) == "parameter_list" or get_type(des) == "argument_list"):
-        #             start = start + 1
-
-        #         if move == False:
-        #             #内容 需要找到存在于原代码片段的位置
-        #             #进行简单的映射:先找到1_的同名变量, 进行 1->2 的映射
-        #             content = map(bfs_search(ast1_,source.value),mapping_dict,{},file_string1_)
-        #         else:
-        #             # move本来的操作应该是copy file2中的内容到这里, 但是由于可能会对被move的内容进行操作, 所以不能简单地复制粘贴
-        #             content = map(source,mapping_dict,mapping_dict12,file_string1_)
-        #         if op == "insert-tree" or source.value.split(":")[0]=="comment":
-        #             if get_type(source.value) == "argument" or get_type(source.value) == "parameter":
-        #                     content =  ", " + content + ", "
-
-        #             elif get_type(des_node)== "block" or get_type(des_node) == "unit" or get_type(des_node) == "block_content":
-        #                 content =  "\n" + content + "\n"
-        #             else:
-        #                 content =  " " + content + " "
-
-        #         des_node.children.insert(child_rank,TreeNode("VAL"))
-
-        #         # 删除单行注释
-        #         content = re.sub(r'//.*$', '', content, flags=re.MULTILINE)
-        #         # 删除多行注释
-        #         content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
-
-        #         operation = Operation(start,start,content)
-        #         operation.rank = child_rank2
-        #         operations.append(operation)
-        #     elif op == "delete-node" or op == "delete-tree":
-        #         if source.value in match_dic12:
-        #             #删除结点
-        #             des_node = bfs_search_father(ast1,source.value)
-        #             r = 0
-        #             des = match_dic12[source.value]
-        #             for i in range(len(des_node.children)):
-        #                 if des_node.children[i].value == source.value:
-        #                     r = i
-
-        #             start,end = get_start_end(des)
-        #             operation = Operation(start,end,"")
-        #             operation.rank = sys.maxsize
-        #             operations.append(operation)
-        #             # 在ast中删除节点
-        #             des_node.children.pop(r)
-        #         else:
-        #             if diffOp_i < len(diffOps):
-        #                 if diffOps[diffOp_i].id == id:
-        #                     diffOp_i = diffOp_i + 1
-        #     elif op == "update-node":
-        #         if des_node in match_dic12:
-        #             if re.match(r'//.*$',source) or re.match(r'/\*.*?\*/',source):
-        #                 continue
-        #             des = match_dic12[des_node]
-        #             start,end = get_start_end(des)
-        #             new_name = get_newname("name: "+source+" []",mapping_dict,mapping_dict12)
-        #             if new_name != None:
-        #                 operation = Operation(start,end,new_name)
-        #             else:
-        #                 operation = Operation(start,end,source)
-        #             operations.append(operation)
-        #     else:
-        #         exit(206)
-        # file_string2_ = replace(file_string2,operations)
-
-        # # 处理整个文件中的 "," 相关的内容
-        # file_string2_  = clean_parameter_list_in_file(file_string2_)
-
-
-        # #删除所有以 “\”结尾的空行
-        # file_string2_ = re.sub(r'^\s*\\\s*$', '', file_string2_,flags=re.MULTILINE)
-
-        # end_time = time()
-        # print("耗时: {}s".format(int(end_time-start_time)),end=" ")
-        # sys.stdout.flush()
-
-        # return file_string2_

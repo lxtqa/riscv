@@ -6,11 +6,11 @@ import numpy as np
 current = 29
 
 for k in range(current):
-    print('result'+str(k)+'__.json')
+    print('result'+str(k)+'.json')
     value = np.array([0,0,0,0,0,0,0,0,0,0])
     num = np.array([0,0,0,0,0,0,0,0,0,0])
     try:
-        with open('result/result'+str(k)+'__.json', 'r') as json_file:
+        with open('result/result'+str(k)+'.json', 'r') as json_file:
             results = json.load(json_file)
             for result in results:
                 for i,v in enumerate(result):
@@ -30,7 +30,7 @@ for k in range(current):
             print()
         value = np.array([0,0,0,0,0,0,0,0,0,0])
         num = np.array([0,0,0,0,0,0,0,0,0,0])
-        with open('result/result'+str(k)+'__2.json', 'r') as json_file:
+        with open('result/result'+str(k)+'__.json', 'r') as json_file:
             results = json.load(json_file)
             for result in results:
                 for i,v in enumerate(result):
@@ -52,7 +52,7 @@ for k in range(current):
 # value = np.array([0,0,0,0,0,0,0,0,0,0])
 # num = np.array([0,0,0,0,0,0,0,0,0,0])
 # for i in range(current):
-#     with open('result/result'+str(i)+'_.json', 'r') as json_file:
+#     with open('result/result'+str(i)+'.json', 'r') as json_file:
 #         results = json.load(json_file)
 #         for result in results:
 #             for i,v in enumerate(result):
@@ -93,9 +93,9 @@ for k in range(current):
 
 
 for k in range(current):
-    with open('result/result'+str(k)+'__.json', 'r') as json_file:
+    with open('result/result'+str(k)+'.json', 'r') as json_file:
         results = json.load(json_file)
-        with open('result/result'+str(k)+'__2.json', 'r') as json_file:
+        with open('result/result'+str(k)+'_.json', 'r') as json_file:
             results_ = json.load(json_file)
             for i,v in enumerate(results):
                 for j,w in enumerate(v):
@@ -104,7 +104,7 @@ for k in range(current):
 
 
 # for k in range(current):
-#         with open('result/result'+str(k)+'__.json', 'r') as json_file:
+#         with open('result/result'+str(k)+'.json', 'r') as json_file:
 #             results_ = json.load(json_file)
 #             for i,v in enumerate(results_):
 #                 for j,w in enumerate(v):

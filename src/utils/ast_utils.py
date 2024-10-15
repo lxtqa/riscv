@@ -89,7 +89,10 @@ def merge_lines(lines):
         line = lines[i]
         pattern = re.compile(r'.+\[\d+,\d+\]$')
         # 进行匹配
-        tmp_line = tmp_line + line
+        if tmp_line == "":
+            tmp_line = tmp_line + line
+        else:
+            tmp_line = tmp_line + "\n" + line
         if pattern.match(line):
             merged.append(tmp_line)
             tmp_line = ""
@@ -140,3 +143,26 @@ def gumtree_parser(txtfile):
         line_rank = line_rank+1
     return matches,diffs
 
+def bfs_search(root, target):
+    queue = [root]
+    while queue:
+        node = queue.pop(0)
+        if node.value == target:
+            return node
+        queue.extend(node.children)
+
+
+def bfs_search_father(root, target):
+    queue = [[root,root]]
+    while queue:
+        father_child = queue.pop(0)
+        father = father_child[0]
+        node = father_child[1]
+        if node.value == target:
+            return father
+        for child in node.children:
+            queue.append([node,child])
+
+def get_start_end(string):
+    [start,end] = string.split(" ")[-1][1:-1].split(",")
+    return int(start), int(end)
