@@ -93,9 +93,9 @@ for k in range(current):
 
 
 for k in range(current):
-    with open('result/result'+str(k)+'.json', 'r') as json_file:
+    with open('result/result'+str(k)+'__.json', 'r') as json_file:
         results = json.load(json_file)
-        with open('result/result'+str(k)+'_.json', 'r') as json_file:
+        with open('result/result'+str(k)+'.json', 'r') as json_file:
             results_ = json.load(json_file)
             for i,v in enumerate(results):
                 for j,w in enumerate(v):

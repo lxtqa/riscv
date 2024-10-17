@@ -68,10 +68,10 @@ def successfully_generate(file1,patch1,file2,patch2,mapping_dict):
         return False
 
 
-sb1 = 12
-sb2 = 246
-sb3 = 0
-F = False
+sb1 = 21
+sb2 = 10
+sb3 = 8
+F = True
 
 def main():
 
@@ -81,7 +81,7 @@ def main():
 
             if F:
                 pass
-                if v < 12:
+                if v != sb1:
                     continue
 
             with open('mapping/mapping_' + version["versions"][0] + '.json', 'r') as json_file:

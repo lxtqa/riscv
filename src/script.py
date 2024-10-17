@@ -1,6 +1,5 @@
 import argparse
 import sys
-from unit_result import unit_result
 
 def script():
     parser = argparse.ArgumentParser(description='命令行参数处理程序')

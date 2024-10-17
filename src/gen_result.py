@@ -209,6 +209,8 @@ def parse_diff(diff,ast1,ast1_,ast2,match_dic11_,match_dic12,mapping_dict):
             return
     elif diff[0] == "update-node":
         node = re.search(r"(.*: (.*) \[\d+,\d+\])\nreplace \2 by (.*)","\n".join(diff[2:]),re.DOTALL)
+        if node == None:
+            node = re.search(r"(.* \[\d+,\d+\])\nreplace (.*) by (.*)","\n".join(diff[2:]),re.DOTALL)
         if node[1] in match_dic12.keys():
             # find des_node in ast1
             des1 = bfs_search(ast1,node[1])
